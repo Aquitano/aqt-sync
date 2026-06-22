@@ -341,6 +341,36 @@ func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
 	}
 }
 
+func TestPublicPutKeepsOwnerWrappedKey(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("pubowner@example.com", "a passphrase")
+
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("public with owner key"), ck)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+
+	var put api.PutResourceResponse
+	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+	}, &put); code != http.StatusCreated {
+		t.Fatalf("public put with wrapped key: %d", code)
+	}
+
+	// The owner keeps the wrapped key (so they can later share/private it)...
+	var owner api.GetResourceResponse
+	h.do(http.MethodGet, "/v1/resources/"+put.ID, token, nil, &owner)
+	if owner.WrappedKey == nil {
+		t.Fatal("owner should receive the wrapped key")
+	}
+	// ...but an anonymous reader never does.
+	var anon api.GetResourceResponse
+	h.do(http.MethodGet, "/v1/resources/"+put.ID, "", nil, &anon)
+	if anon.WrappedKey != nil {
+		t.Fatal("anonymous reader must not receive the wrapped key")
+	}
+}
+
 func mustSalt(h *harness, email string) crypto.KdfParams {
 	h.t.Helper()
 	var salt api.SaltResponse

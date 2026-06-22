@@ -186,19 +186,22 @@ requires a confirm prompt and an explicit "this cannot be reset" warning.
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI (cobra): login, whoami, push, pull, ls          [implemented]
-cmd/aqt-server/     server entrypoint                                   [implemented]
-internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)  [implemented + tested]
-internal/api/       shared wire types                                   [implemented]
-internal/server/    Gin handlers + SQLite/FS store                      [implemented + tested]
-internal/identity/  local profile / keystore                           [implemented]
-internal/client/    HTTP API client                                     [implemented]
-internal/syncengine/  tracked-folder snapshot/diff                      [TODO]
+cmd/aqt/            CLI: login/logout, whoami, push, pull, ls, share, private  [implemented]
+cmd/aqt-server/     server entrypoint                                          [implemented]
+internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
+internal/api/       shared wire types                                          [implemented]
+internal/server/    Gin handlers + SQLite/FS store                             [implemented + tested]
+internal/identity/  local profile, keystore, session cache                     [implemented + tested]
+internal/client/    HTTP API client                                            [implemented]
+internal/syncengine/  tracked-folder snapshot/diff                             [TODO]
 ```
 
-Working end-to-end today: signup/device-attach, private push/pull, public push/pull
-(key-in-fragment), password-gated links, `ls`. Verified by `go test ./...` plus a
-manual login→push→pull cycle. Not yet built: `share`/`private` lifecycle commands,
+Working end-to-end today: signup/device-attach (Ed25519 challenge/response),
+private + public push/pull (key-in-fragment), password-gated links, `share`,
+`private` (key rotation), `ls`, and a `login`-cached session key so the passphrase
+is entered once per session (`logout` clears it). Every push wraps the content key
+under the owner's master key, so even public resources can later be shared/rotated.
+Verified by `go test ./...` plus live multi-machine cycles. Not yet built:
 tracked-folder `init`/`sync`/`status`, the `watch` daemon, and the `/x/<id>` web view.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
@@ -353,10 +356,12 @@ function currentSession(): Session | null;                                 // fo
 - **Argon2id tuning** (`time`/`memory`) per machine.
 - **Account-enumeration oracle** — `GET /account/salt` confirms which emails are registered, and auth endpoints have no rate limiting.
 - **Defense-in-depth crypto** — AEAD additional-data domain separation across blob/wrap/gated-wrap; complete key wiping (`ContentKey` has no `Wipe`).
+- **Session cache at rest** — the cached master key is a plaintext 0600 file (bounded by `--ttl`, cleared by `logout`). An OS-keychain backend or an in-memory agent would remove the on-disk plaintext.
 - **Conflict copies** — write `name.conflict-<device>` like Dropbox, or just report and block?
 
 Resolved since the first draft: device attach is now an Ed25519 challenge/response
-(no secret sent); resources support owner-checked in-place update + versioning.
+(no secret sent); resources support owner-checked in-place update + versioning; the
+passphrase is cached per session so it is entered once, not per command.
 
 These are deliberately left to implementation; the interfaces above don't change
 based on how they're answered.

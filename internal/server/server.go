@@ -200,10 +200,9 @@ func (s *Server) putResource(c *gin.Context) {
 			return
 		}
 	case api.Public:
-		if req.WrappedKey != nil {
-			abort(c, http.StatusBadRequest, "public resource must not carry a wrapped key")
-			return
-		}
+		// A wrapped key is optional and welcome: it is the owner's recovery path
+		// (so they can later share/rotate), and GetResource strips it from
+		// non-owner reads.
 	default:
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return

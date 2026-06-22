@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -75,33 +74,25 @@ func runPush(path string, opts pushOptions) error {
 	}
 
 	req := api.PutResourceRequest{Blob: blob, EncryptedMeta: metaBlob}
-	public := opts.public || opts.password != ""
-	if public {
+	if opts.public || opts.password != "" {
 		req.Visibility = api.Public
 	} else {
-		// Private: the content key is wrapped under the master key, so only this
-		// account can recover it. That requires unlocking with the passphrase.
 		req.Visibility = api.Private
-		pass, err := promptPassphrase("Passphrase: ")
-		if err != nil {
-			return err
-		}
-		if pass == "" {
-			// Guards the `push -` case: reading content from stdin drains it, so
-			// the prompt hits EOF and would otherwise wrap the key under "".
-			return errors.New("refusing to encrypt under an empty passphrase (a private `push -` cannot read both content and passphrase from stdin; use a file, or --public)")
-		}
-		mk, err := prof.Unlock(pass)
-		if err != nil {
-			return err
-		}
-		wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
-		if err != nil {
-			return err
-		}
-		mk.Wipe()
-		req.WrappedKey = &wrapped
 	}
+
+	// Always wrap the content key under the master key so the owner can manage
+	// the resource later (share/private). For public resources the server strips
+	// this wrapped key from non-owner reads.
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	mk.Wipe()
+	if err != nil {
+		return err
+	}
+	req.WrappedKey = &wrapped
 
 	resp, err := cl.PutResource(req)
 	if err != nil {
