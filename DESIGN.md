@@ -1,0 +1,353 @@
+# aqt — Design & Interface Spec
+
+Zero-knowledge, end-to-end-encrypted file/folder sync for developers. A private
+encrypted pastebin (`aqt push`) plus a git-style tracked folder (`aqt sync`) plus
+an auto-watch daemon (`aqt watch`). The server only ever stores ciphertext and
+opaque metadata; it can never read filenames, contents, or keys.
+
+This document defines the **interfaces** (CLI surface + module contracts). It is
+deliberately implementation-free — types and behavior, not code.
+
+---
+
+## 1. Locked decisions
+
+| Decision | Choice |
+| --- | --- |
+| Encryption | Full E2E. Server is zero-knowledge. |
+| Key derivation | Passphrase → Argon2id(+stored salt) → master key. Re-derivable on any machine. |
+| Public sharing | Content key travels in the URL **fragment** (`#…`), never sent to the server. |
+| Make private again | Rotate the content key, re-encrypt, old links die. |
+| Default visibility | **Private.** `--public` opts into a shareable link. |
+| CLI shape | One-liner spine (`aqt push`) + explicit verbs + share/private model. |
+| Extras in v1 | `-P` password gate, clipboard auto-copy. |
+| Out of v1 | standalone `rotate`, `--expire`, `--burn`, `--max-reads`, FUSE `mount`. |
+| Runtime | Go. CLI on cobra; server on Gin; SQLite (modernc, pure-Go) + filesystem blobs. |
+| Crypto | Argon2id (KDF), XChaCha20-Poly1305 (AEAD), HKDF-SHA256 (auth key). |
+
+---
+
+## 2. Trust & crypto model
+
+```
+passphrase ──Argon2id(salt)──▶ masterKey            (never leaves the device)
+                                  │
+                                  ├─ wraps ─▶ contentKey   (random, one per resource)
+                                  │
+file ──encrypt(contentKey)──▶ ciphertext + nonce + AEAD tag  ──▶ server (opaque blob)
+metadata (real name, size…) ──encrypt(contentKey)──▶ encrypted manifest ──▶ server
+```
+
+**What the server stores per resource:** `id`, opaque `ownerHandle`, ciphertext
+blob(s), encrypted-metadata blob, a `visibility` flag, a wrapped-key record *only
+for private resources owned by an account*, version counter, timestamps. Nothing
+plaintext, ever.
+
+**Three reference forms a user can hold:**
+
+| Form | Looks like | Who can decrypt | Used for |
+| --- | --- | --- | --- |
+| Private ref | `aqt://<id>` | only the owning account (master key unwraps the stored wrapped key) | `.env`-to-your-other-machine |
+| Public link | `https://aqt.sh/x/<id>#k.<key>` | anyone with the link (key in fragment) | sharing |
+| Gated link | `https://aqt.sh/x/<id>#p.<wrappedKey>` | anyone with the link **and** the password | sharing a secret semi-publicly |
+
+The `k.` / `p.` prefix in the fragment is how the client knows whether to use the
+key directly or prompt for a password to unwrap it. The server sees only `<id>`.
+
+---
+
+## 3. CLI surface
+
+`aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>`.
+
+Global flags (all commands): `--server <url>` (self-host; default `https://aqt.sh`),
+`--profile <name>`, `--json`, `-q/--quiet`, `-v/--verbose`, `-h/--help`, `-V/--version`.
+
+Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network.
+
+### 3.1 Push — the hero command
+
+```
+aqt push <path>           Encrypt one file, upload ciphertext. PRIVATE by default.
+aqt <path>                Sugar for `aqt push <path>`.
+aqt push -                Read plaintext from stdin.
+
+  --public            Mint a shareable fragment link instead of a private ref.
+  -P, --password      Password-gate a public link (prompts unless value given).
+                      Implies --public. Recipient needs link AND password.
+  -n, --name <label>  Human label shown in `aqt ls` (encrypted; not in the URL).
+      --no-clip       Do not copy the resulting ref/URL to the clipboard.
+```
+
+Output (human default): the ref/URL (and `(copied to clipboard)` when applicable),
+then a metadata line. With `-q`: only the ref/URL on stdout (pipe-friendly). With
+`--json`: `{ id, ref, url?, name?, bytes, visibility }`.
+
+```console
+$ aqt .env
+aqt://7yQ2pe        (copied to clipboard)
+.env · 1.2 KB · private
+
+$ aqt push deploy.log --public
+https://aqt.sh/x/9fK2qd#k.Hs7nT4pQ2v…   (copied to clipboard)
+deploy.log · 84 KB · public
+
+$ aqt push .env --public -P
+Share password: ********
+https://aqt.sh/x/Qz81mn#p.R4t…         (copied to clipboard)
+.env · 1.2 KB · public · password-gated
+```
+
+### 3.2 Pull / receive
+
+```
+aqt pull <url|id|ref>     Decrypt to disk (original name in CWD by default).
+aqt cat  <url|id|ref>     Decrypt to stdout, never touches disk.
+
+  -o, --out <path>        Write to a specific path.
+      --force             Overwrite an existing file.
+  -P, --password          Supply a gated link's password non-interactively.
+```
+
+```console
+$ aqt pull https://aqt.sh/x/9fK2qd#k.Hs7…
+wrote ./deploy.log (84 KB)
+
+$ aqt pull aqt://7yQ2pe          # private ref; uses your unlocked master key
+wrote ./.env (1.2 KB)
+```
+
+### 3.3 Visibility / lifecycle
+
+```
+aqt share   <id>          Make a private resource public; print the fragment link.
+aqt private <id>          Make public again private: ROTATES the content key,
+                          re-encrypts, old links die. Prints the new aqt:// ref.
+aqt ls      [--json]      List your resources: id, name, size, visibility, version.
+aqt info    <id|url>      Metadata for one resource (no decrypt needed for your own).
+aqt rm      <id>...       Delete server-side ciphertext + metadata.
+```
+
+```console
+$ aqt private 9fK2qd
+rotated content key — previous link no longer decrypts
+aqt://9fK2qd
+```
+
+### 3.4 Tracked folder (git-style)
+
+```
+aqt init   [<dir>]        Mark a folder tracked. Writes .aqt/ and a starter .aqtignore.
+aqt status [<dir>]        Changed / new / deleted / conflicted since last sync.
+aqt sync   [<dir>]        Two-way reconcile: encrypt+push local changes, pull remote.
+      --push-only / --pull-only / --dry-run / --force
+aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
+```
+
+`.aqtignore` uses gitignore syntax. Conflicts (changed both sides) are left
+untouched and reported; `--force` resolves in favor of local.
+
+```console
+$ aqt init && aqt sync
+tracking ~/secrets → aqt://fold_K9p2
+↑ 3 files encrypted and pushed · ↓ 0 · 0 conflicts
+```
+
+### 3.5 Watch daemon
+
+```
+aqt watch <dir>           Foreground watcher; syncs on change (debounced).
+      -d, --daemon        Detach and run in background under the agent.
+          --interval <d>  Debounce floor (default 2s).
+          --once          Sync now and exit (cron-friendly).
+aqt agent status|stop|logs [<dir>]   Manage background watchers.
+```
+
+### 3.6 Identity
+
+```
+aqt login   [--email <e>]   Prompt passphrase → derive master key → attach device.
+aqt logout  [--all-devices] Drop local key material (optionally revoke others).
+aqt whoami                  Account, device, key fingerprint, server.
+aqt devices [ls | rm <id>]  List / revoke attached devices.
+aqt passphrase change       Re-wrap master key under a new passphrase (no re-encrypt).
+```
+
+First-run auth is lazy: a push on a fresh machine prompts to create the account.
+Because a typo'd first passphrase is **unrecoverable** (zero-knowledge), first run
+requires a confirm prompt and an explicit "this cannot be reset" warning.
+
+---
+
+## 3a. Project layout & status
+
+```
+cmd/aqt/            CLI (cobra): login, whoami, push, pull, ls          [implemented]
+cmd/aqt-server/     server entrypoint                                   [implemented]
+internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)  [implemented + tested]
+internal/api/       shared wire types                                   [implemented]
+internal/server/    Gin handlers + SQLite/FS store                      [implemented + tested]
+internal/identity/  local profile / keystore                           [implemented]
+internal/client/    HTTP API client                                     [implemented]
+internal/syncengine/  tracked-folder snapshot/diff                      [TODO]
+```
+
+Working end-to-end today: signup/device-attach, private push/pull, public push/pull
+(key-in-fragment), password-gated links, `ls`. Verified by `go test ./...` plus a
+manual login→push→pull cycle. Not yet built: `share`/`private` lifecycle commands,
+tracked-folder `init`/`sync`/`status`, the `watch` daemon, and the `/x/<id>` web view.
+
+Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
+to override), then `aqt --server http://localhost:8080 login`.
+
+## 4. Module interfaces (Go packages)
+
+Four modules sit under the CLI. The canonical, authoritative interfaces are the Go
+package signatures in `internal/`; the sketches below are the original design intent
+(written pre-Go) and are kept for context. Keys are always fixed-size byte arrays,
+never strings, and never logged.
+
+### 4.1 Crypto (`@aqt/crypto`)
+
+```ts
+type MasterKey   = Uint8Array & { readonly __brand: "MasterKey" };
+type ContentKey  = Uint8Array & { readonly __brand: "ContentKey" };
+
+interface KdfParams {
+  algo: "argon2id";
+  salt: Uint8Array;
+  opsLimit: number;
+  memLimit: number;       // bytes
+}
+
+interface WrappedKey {
+  ciphertext: Uint8Array; // contentKey encrypted under a wrapping key
+  nonce: Uint8Array;
+}
+
+interface SealedBlob {
+  ciphertext: Uint8Array; // AEAD, chunked stream for large files
+  nonce: Uint8Array;
+  tag: Uint8Array;
+}
+
+// Identity / key hierarchy
+function newKdfParams(): KdfParams;                                   // fresh salt + sane defaults
+function deriveMasterKey(passphrase: string, p: KdfParams): Promise<MasterKey>;
+function generateContentKey(): ContentKey;
+function wrapKey(ck: ContentKey, wrappingKey: MasterKey | ContentKey): WrappedKey;
+function unwrapKey(w: WrappedKey, wrappingKey: MasterKey | ContentKey): ContentKey;
+
+// Blob sealing
+function seal(plaintext: Uint8Array, ck: ContentKey): SealedBlob;
+function open(blob: SealedBlob, ck: ContentKey): Uint8Array;          // verifies tag, throws on mismatch
+
+// Share-link fragment encoding (the # part — never reaches the server)
+//   public:        "k." + base64url(contentKey)
+//   password-gated: "p." + base64url(wrapKey(contentKey, deriveFromPassword(pw)))
+function encodeFragment(ck: ContentKey, password?: string): string;
+function decodeFragment(fragment: string, password?: string): ContentKey; // throws if pw needed/wrong
+```
+
+### 4.2 Sync engine (`@aqt/sync`)
+
+```ts
+interface ManifestEntry {
+  path: string;        // POSIX relative path (plaintext locally; encrypted on the wire)
+  size: number;
+  mtimeMs: number;
+  contentHash: string; // hash of plaintext, for change detection
+  blobId: string;      // server id of the sealed blob
+}
+
+interface Manifest {
+  version: number;
+  entries: ManifestEntry[];
+}
+
+type SyncAction =
+  | { kind: "upload";   path: string }
+  | { kind: "download"; path: string }
+  | { kind: "delete-local";  path: string }
+  | { kind: "delete-remote"; path: string }
+  | { kind: "conflict"; path: string };  // changed both sides since base
+
+interface SyncPlan { actions: SyncAction[]; }
+
+interface IgnoreMatcher { ignores(relPath: string): boolean; }
+
+function loadIgnore(dir: string): IgnoreMatcher;                 // reads .aqtignore (gitignore syntax)
+function snapshot(dir: string, ignore: IgnoreMatcher): Promise<Manifest>;
+function plan(local: Manifest, base: Manifest, remote: Manifest): SyncPlan;  // three-way diff
+```
+
+`base` is the last-synced manifest cached in `.aqt/`. A `conflict` action is never
+auto-resolved unless `--force` is passed.
+
+### 4.3 Server HTTP API (`@aqt/server`)
+
+Zero-knowledge REST over HTTPS. Auth is a bearer device token (`Authorization:
+Bearer <token>`); the server authenticates *accounts*, never sees keys. All bodies
+are opaque bytes or opaque metadata.
+
+```
+POST   /v1/account                  Create account. Body: { email, kdfParams, wrappedRecoveryKey? }
+                                     → { ownerHandle }   (server stores salt/kdfParams to serve on login)
+GET    /v1/account/salt?email=…      → { kdfParams }     (needed to re-derive on a new machine)
+POST   /v1/devices                   Attach device. v1: client sends the auth key (TLS-protected); server stores only its hash. Challenge/response that avoids sending the key is deferred (section 5). → { deviceId, token }
+DELETE /v1/devices/:id               Revoke a device.
+
+PUT    /v1/resources                 Create/replace a resource.
+                                     Body: { ciphertext, encryptedMeta, visibility,
+                                             wrappedKey? }   // wrappedKey only for private
+                                     → { id, version }
+GET    /v1/resources/:id             → { ciphertext, encryptedMeta, visibility, wrappedKey?, version }
+                                     Public ids are fetchable without auth; private require the owner token.
+POST   /v1/resources/:id/visibility  Body: { visibility, ciphertext, encryptedMeta, wrappedKey? }
+                                     Used by `share`/`private`; rotation just replaces the blob.
+DELETE /v1/resources/:id
+GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility).
+
+# Tracked folders are resources whose blob is an encrypted manifest + child blobs.
+GET    /v1/resources/:id/manifest    → sealed manifest blob (client decrypts).
+```
+
+The server enforces: ownership, visibility (a private id returns 404 to anyone but
+the owner), and integrity at the storage layer. It performs **no** decryption,
+merge, or filename inspection.
+
+### 4.4 Identity / local keystore (`@aqt/identity`)
+
+```ts
+interface Profile {
+  name: string;            // default "default"
+  server: string;
+  email: string;
+  ownerHandle: string;
+  deviceId: string;
+}
+
+interface Session {
+  profile: Profile;
+  masterKey: MasterKey;    // held only while unlocked
+}
+
+// Persisted under ~/.config/aqt/ (config + encrypted device token in OS keychain).
+function loadProfile(name?: string): Profile | null;
+function unlock(profile: Profile, passphrase: string): Promise<Session>;   // derives masterKey
+function lock(session: Session): void;                                      // wipes key from memory
+function currentSession(): Session | null;                                 // for the watch agent
+```
+
+---
+
+## 5. Open implementation questions (not blocking the interface)
+
+- **AEAD primitive & chunk size** for `seal/open` (e.g. XChaCha20-Poly1305, 1 MiB chunks).
+- **Content-defined chunking / dedup** for large tracked files vs. whole-file blobs in v1.
+- **Argon2id defaults** (`opsLimit`/`memLimit`) and how to tune per machine.
+- **Device attach proof** — exact challenge/response so a device proves key possession without sending it.
+- **Conflict copies** — write `name.conflict-<device>` like Dropbox, or just report and block?
+
+These are deliberately left to implementation; the interfaces above don't change
+based on how they're answered.
