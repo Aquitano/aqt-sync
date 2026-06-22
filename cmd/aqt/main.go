@@ -122,8 +122,20 @@ func promptPassphrase(label string) (string, error) {
 	return strings.TrimRight(line, "\r\n"), nil
 }
 
-// sharedStdin is a single buffered reader so multiple piped prompts (e.g. the
-// signup passphrase + confirmation) don't lose lines to per-call buffering.
+// promptLine reads one echoed line (e.g. an email) from the shared stdin reader.
+// All interactive input goes through this single reader so a later prompt never
+// loses bytes a different reader buffered ahead.
+func promptLine(label string) (string, error) {
+	fmt.Fprint(os.Stderr, label)
+	line, err := stdinReader().ReadString('\n')
+	if err != nil && err != io.EOF {
+		return "", err
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// sharedStdin is a single buffered reader so multiple prompts (the email, plus
+// the signup passphrase + confirmation) don't lose lines to per-call buffering.
 var sharedStdin *bufio.Reader
 
 func stdinReader() *bufio.Reader {

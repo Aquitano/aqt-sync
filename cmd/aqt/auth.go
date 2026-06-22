@@ -25,10 +25,11 @@ func loginCmd() *cobra.Command {
 		Short: "Create an account or attach this device, caching the unlocked key",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if email == "" {
-				fmt.Fprint(os.Stderr, "email: ")
-				if _, err := fmt.Scanln(&email); err != nil {
+				entered, err := promptLine("email: ")
+				if err != nil {
 					return fmt.Errorf("read email: %w", err)
 				}
+				email = entered
 			}
 			server := serverURL()
 			cl := client.New(server, "")
