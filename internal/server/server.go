@@ -43,6 +43,7 @@ func (s *Server) Router() *gin.Engine {
 		{
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
+			authed.POST("/resources/:id/visibility", s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
 		}
 	}
@@ -254,6 +255,28 @@ func (s *Server) listResources(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.ListResourcesResponse{Resources: items})
+}
+
+func (s *Server) setVisibility(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.SetVisibilityRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Visibility != api.Private && req.Visibility != api.Public {
+		abort(c, http.StatusBadRequest, "visibility must be private or public")
+		return
+	}
+	version, err := s.store.SetVisibility(owner, c.Param("id"), req.Visibility)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "update failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.PutResourceResponse{ID: c.Param("id"), Version: version})
 }
 
 func (s *Server) deleteResource(c *gin.Context) {

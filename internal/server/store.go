@@ -351,7 +351,10 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	if err := json.Unmarshal([]byte(metaJSON), &out.EncryptedMeta); err != nil {
 		return out, err
 	}
-	if wrappedJSON.Valid {
+	// The wrapped key is the owner's recovery path and is meaningless to anyone
+	// else (it is ciphertext under the owner's master key). Only return it to the
+	// owner; a public resource read by anyone else carries no wrapped key.
+	if wrappedJSON.Valid && requireOwner == owner {
 		var wk crypto.WrappedKey
 		if err := json.Unmarshal([]byte(wrappedJSON.String), &wk); err != nil {
 			return out, err
@@ -359,6 +362,26 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		out.WrappedKey = &wk
 	}
 	return out, nil
+}
+
+// SetVisibility flips a resource public/private in place (owner-checked, version
+// bumped) without touching the blob or its wrapped key.
+func (s *Store) SetVisibility(owner, id string, vis api.Visibility) (int, error) {
+	res, err := s.db.Exec(
+		`UPDATE resources SET visibility = ?, version = version + 1 WHERE id = ? AND owner_handle = ?`,
+		string(vis), id, owner,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return 0, ErrNotFound
+	}
+	var version int
+	if err := s.db.QueryRow(`SELECT version FROM resources WHERE id = ?`, id).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
 }
 
 func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {

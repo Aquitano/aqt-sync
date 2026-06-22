@@ -3,6 +3,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -48,7 +50,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagServer, "server", "", "server URL override")
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 
-	root.AddCommand(loginCmd(), whoamiCmd(), pushCmd(), pullCmd(), lsCmd())
+	root.AddCommand(loginCmd(), whoamiCmd(), pushCmd(), pullCmd(), lsCmd(), shareCmd(), privateCmd())
 	return root
 }
 
@@ -130,4 +132,17 @@ func stdinReader() *bufio.Reader {
 // never fatal.
 func copyToClipboard(s string) bool {
 	return clipboard.WriteAll(s) == nil
+}
+
+// unlockMaster prompts for the passphrase and derives the master key, refusing
+// an empty one.
+func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
+	pass, err := promptPassphrase("Passphrase: ")
+	if err != nil {
+		return crypto.MasterKey{}, err
+	}
+	if pass == "" {
+		return crypto.MasterKey{}, errors.New("empty passphrase")
+	}
+	return prof.Unlock(pass)
 }

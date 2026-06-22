@@ -84,6 +84,13 @@ type PutResourceResponse struct {
 	Version int    `json:"version"`
 }
 
+// SetVisibilityRequest flips a resource public/private without re-uploading its
+// blob. Used by `share` (private → public); making private again instead rotates
+// the content key via a full PutResource.
+type SetVisibilityRequest struct {
+	Visibility Visibility `json:"visibility"`
+}
+
 type GetResourceResponse struct {
 	ID            string             `json:"id"`
 	Visibility    Visibility         `json:"visibility"`

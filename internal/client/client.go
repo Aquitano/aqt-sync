@@ -79,6 +79,13 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 	return r, err
 }
 
+// SetVisibility flips a resource public/private without re-uploading its blob.
+func (c *Client) SetVisibility(id string, vis api.Visibility) (api.PutResourceResponse, error) {
+	var r api.PutResourceResponse
+	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility", api.SetVisibilityRequest{Visibility: vis}, &r)
+	return r, err
+}
+
 func (c *Client) ListResources() ([]api.ResourceListItem, error) {
 	var r api.ListResourcesResponse
 	err := c.do(http.MethodGet, "/v1/resources", nil, &r)

@@ -295,6 +295,52 @@ func TestUpdateResourceReplacesInPlace(t *testing.T) {
 	}
 }
 
+func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("share@example.com", "passphrase here")
+
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("shared body"), ck)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+
+	var put api.PutResourceResponse
+	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+	}, &put); code != http.StatusCreated {
+		t.Fatalf("create: %d", code)
+	}
+
+	if code := h.do(http.MethodPost, "/v1/resources/"+put.ID+"/visibility", token,
+		api.SetVisibilityRequest{Visibility: api.Public}, nil); code != http.StatusOK {
+		t.Fatalf("set visibility: %d", code)
+	}
+
+	// Anonymous read: public and decryptable via the content key, but no wrapped key.
+	var anon api.GetResourceResponse
+	if code := h.do(http.MethodGet, "/v1/resources/"+put.ID, "", nil, &anon); code != http.StatusOK {
+		t.Fatalf("anon get: %d", code)
+	}
+	if anon.Visibility != api.Public {
+		t.Fatalf("visibility = %s, want public", anon.Visibility)
+	}
+	if anon.WrappedKey != nil {
+		t.Fatal("anonymous reader must not receive the wrapped key")
+	}
+	if got, err := crypto.Open(anon.Blob, ck); err != nil || string(got) != "shared body" {
+		t.Fatalf("anon decrypt: %q err=%v", got, err)
+	}
+
+	// The owner still gets the wrapped key (their recovery path for `private`).
+	var owner api.GetResourceResponse
+	if code := h.do(http.MethodGet, "/v1/resources/"+put.ID, token, nil, &owner); code != http.StatusOK {
+		t.Fatalf("owner get: %d", code)
+	}
+	if owner.WrappedKey == nil {
+		t.Fatal("owner must still receive the wrapped key")
+	}
+}
+
 func mustSalt(h *harness, email string) crypto.KdfParams {
 	h.t.Helper()
 	var salt api.SaltResponse
