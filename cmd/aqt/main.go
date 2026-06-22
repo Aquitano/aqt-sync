@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/spf13/cobra"
@@ -19,6 +20,10 @@ import (
 )
 
 const defaultServer = "http://localhost:8080"
+
+// defaultSessionTTL bounds how long the unlocked master key stays cached after a
+// passphrase prompt. `aqt login --ttl` overrides it; `aqt logout` clears it.
+const defaultSessionTTL = 8 * time.Hour
 
 var (
 	flagServer  string
@@ -50,7 +55,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagServer, "server", "", "server URL override")
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 
-	root.AddCommand(loginCmd(), whoamiCmd(), pushCmd(), pullCmd(), lsCmd(), shareCmd(), privateCmd())
+	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), pushCmd(), pullCmd(), lsCmd(), shareCmd(), privateCmd())
 	return root
 }
 
@@ -134,9 +139,12 @@ func copyToClipboard(s string) bool {
 	return clipboard.WriteAll(s) == nil
 }
 
-// unlockMaster prompts for the passphrase and derives the master key, refusing
-// an empty one.
+// unlockMaster returns the master key from the session cache, or prompts for the
+// passphrase (refusing an empty one), derives the key, and caches it.
 func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
+	if mk, ok := identity.LoadSession(prof.Name); ok {
+		return mk, nil
+	}
 	pass, err := promptPassphrase("Passphrase: ")
 	if err != nil {
 		return crypto.MasterKey{}, err
@@ -144,5 +152,12 @@ func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
 	if pass == "" {
 		return crypto.MasterKey{}, errors.New("empty passphrase")
 	}
-	return prof.Unlock(pass)
+	mk, err := prof.Unlock(pass)
+	if err != nil {
+		return crypto.MasterKey{}, err
+	}
+	if err := identity.SaveSession(prof.Name, mk, defaultSessionTTL); err != nil {
+		fmt.Fprintln(os.Stderr, "warning: could not cache session:", err)
+	}
+	return mk, nil
 }

@@ -90,11 +90,7 @@ func contentKey(res api.GetResourceResponse, fragment, password string, prof *id
 	if prof == nil {
 		return crypto.ContentKey{}, errors.New("private resource: run `aqt login` to decrypt it")
 	}
-	pass, err := promptPassphrase("Passphrase: ")
-	if err != nil {
-		return crypto.ContentKey{}, err
-	}
-	mk, err := prof.Unlock(pass)
+	mk, err := unlockMaster(prof)
 	if err != nil {
 		return crypto.ContentKey{}, err
 	}

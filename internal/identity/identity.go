@@ -12,6 +12,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
@@ -85,4 +86,89 @@ func Save(p *Profile) error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(dir, p.Name+".json"), b, 0o600)
+}
+
+// --- session cache ---
+//
+// The session cache holds the derived master key so a working session does not
+// re-prompt for the passphrase on every command. SECURITY TRADE-OFF: the master
+// key is written to a 0600 file, so anyone who can read that file can decrypt
+// your data. Exposure is bounded by the TTL and cleared by `aqt logout`.
+
+type session struct {
+	MasterKey []byte `json:"masterKey"`
+	ExpiresAt int64  `json:"expiresAt"` // unix seconds; 0 means no expiry
+}
+
+func sessionPath(name string) (string, error) {
+	if name == "" {
+		name = DefaultProfile
+	}
+	dir, err := configDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, name+".session"), nil
+}
+
+// SaveSession caches the master key for ttl. A non-positive ttl caches it with
+// no expiry (until logout).
+func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	var exp int64
+	if ttl > 0 {
+		exp = time.Now().Add(ttl).Unix()
+	}
+	b, err := json.Marshal(session{MasterKey: mk[:], ExpiresAt: exp})
+	if err != nil {
+		return err
+	}
+	path, err := sessionPath(name)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, b, 0o600)
+}
+
+// LoadSession returns the cached master key if present and unexpired. An expired
+// or malformed cache is removed and reported as a miss.
+func LoadSession(name string) (crypto.MasterKey, bool) {
+	var mk crypto.MasterKey
+	path, err := sessionPath(name)
+	if err != nil {
+		return mk, false
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return mk, false
+	}
+	var s session
+	if err := json.Unmarshal(b, &s); err != nil || len(s.MasterKey) != crypto.KeySize {
+		os.Remove(path)
+		return mk, false
+	}
+	if s.ExpiresAt != 0 && time.Now().Unix() > s.ExpiresAt {
+		os.Remove(path)
+		return mk, false
+	}
+	copy(mk[:], s.MasterKey)
+	return mk, true
+}
+
+// ClearSession removes any cached master key.
+func ClearSession(name string) error {
+	path, err := sessionPath(name)
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
 }

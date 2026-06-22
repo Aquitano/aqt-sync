@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -15,10 +16,13 @@ import (
 )
 
 func loginCmd() *cobra.Command {
-	var email string
+	var (
+		email string
+		ttl   time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:   "login",
-		Short: "Create an account or attach this device",
+		Short: "Create an account or attach this device, caching the unlocked key",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if email == "" {
 				fmt.Fprint(os.Stderr, "email: ")
@@ -34,18 +38,34 @@ func loginCmd() *cobra.Command {
 				return err
 			}
 			if exists {
-				return attachDevice(cl, server, email, kdf)
+				return attachDevice(cl, server, email, kdf, ttl)
 			}
-			return createAccount(cl, server, email)
+			return createAccount(cl, server, email, ttl)
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "account email")
+	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until logout)")
 	return cmd
+}
+
+func logoutCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logout",
+		Short: "Clear the cached session key (the passphrase is needed again next time)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := firstNonEmpty(flagProfile, identity.DefaultProfile)
+			if err := identity.ClearSession(name); err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "session cleared")
+			return nil
+		},
+	}
 }
 
 // createAccount runs first-run signup. A typo'd passphrase becomes the account
 // passphrase with no recovery path, so we confirm it and warn explicitly.
-func createAccount(cl *client.Client, server, email string) error {
+func createAccount(cl *client.Client, server, email string, ttl time.Duration) error {
 	fmt.Fprintln(os.Stderr, "No account found for", email+". Creating one.")
 	fmt.Fprintln(os.Stderr, "Your passphrase derives your encryption key. We never see it and it CANNOT be reset.")
 
@@ -79,10 +99,13 @@ func createAccount(cl *client.Client, server, email string) error {
 	if err != nil {
 		return err
 	}
-	return saveProfile(server, email, kdf, resp)
+	if err := saveProfile(server, email, kdf, resp); err != nil {
+		return err
+	}
+	return cacheSession(mk, ttl)
 }
 
-func attachDevice(cl *client.Client, server, email string, kdf crypto.KdfParams) error {
+func attachDevice(cl *client.Client, server, email string, kdf crypto.KdfParams, ttl time.Duration) error {
 	pass, err := promptPassphrase("Passphrase: ")
 	if err != nil {
 		return err
@@ -108,7 +131,15 @@ func attachDevice(cl *client.Client, server, email string, kdf crypto.KdfParams)
 	if err != nil {
 		return err
 	}
-	return saveProfile(server, email, kdf, resp)
+	if err := saveProfile(server, email, kdf, resp); err != nil {
+		return err
+	}
+	return cacheSession(mk, ttl)
+}
+
+// cacheSession stores the freshly derived master key for the active profile.
+func cacheSession(mk crypto.MasterKey, ttl time.Duration) error {
+	return identity.SaveSession(firstNonEmpty(flagProfile, identity.DefaultProfile), mk, ttl)
 }
 
 func saveProfile(server, email string, kdf crypto.KdfParams, resp api.AuthResponse) error {
