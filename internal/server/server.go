@@ -3,6 +3,7 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"net/http"
 	"strings"
@@ -18,15 +19,20 @@ type Server struct {
 
 func New(store *Store) *Server { return &Server{store: store} }
 
+// maxBodyBytes caps a single request body. It bounds the per-resource size in
+// v1 (chunked uploads for large files are deferred) and limits memory blowup.
+const maxBodyBytes = 32 << 20 // 32 MiB
+
 // Router builds the Gin engine with all routes mounted.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(gin.Recovery(), limitBody)
 
 	v1 := r.Group("/v1")
 	{
 		v1.POST("/account", s.createAccount)
 		v1.GET("/account/salt", s.accountSalt)
+		v1.POST("/auth/challenge", s.authChallenge)
 		v1.POST("/devices", s.attachDevice)
 
 		// Public resource reads need no auth; the id is unguessable and the
@@ -41,6 +47,11 @@ func (s *Server) Router() *gin.Engine {
 		}
 	}
 	return r
+}
+
+func limitBody(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
+	c.Next()
 }
 
 // --- auth ---
@@ -82,11 +93,11 @@ func (s *Server) createAccount(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if req.Email == "" || len(req.AuthKey) == 0 {
-		abort(c, http.StatusBadRequest, "email and authKey are required")
+	if req.Email == "" || len(req.PublicKey) != ed25519.PublicKeySize {
+		abort(c, http.StatusBadRequest, "email and a valid public key are required")
 		return
 	}
-	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.AuthKey)
+	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey)
 	if errors.Is(err, ErrConflict) {
 		abort(c, http.StatusConflict, "account already exists")
 		return
@@ -123,28 +134,54 @@ func (s *Server) accountSalt(c *gin.Context) {
 	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf})
 }
 
+func (s *Server) authChallenge(c *gin.Context) {
+	var req api.ChallengeRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Email == "" {
+		abort(c, http.StatusBadRequest, "email required")
+		return
+	}
+	id, nonce, err := s.store.CreateChallenge(req.Email)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "challenge failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ChallengeResponse{ChallengeID: id, Nonce: nonce})
+}
+
 func (s *Server) attachDevice(c *gin.Context) {
 	var req api.AttachDeviceRequest
 	if !bindJSON(c, &req) {
 		return
 	}
-	acc, ok, err := s.store.VerifyAuthKey(req.Email, req.AuthKey)
+	// Consume the challenge first so a bad attempt can't be replayed against it.
+	nonce, err := s.store.ConsumeChallenge(req.ChallengeID, req.Email)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusUnauthorized, "invalid or expired challenge")
+		return
+	}
 	if err != nil {
-		abort(c, http.StatusInternalServerError, "verify failed")
+		abort(c, http.StatusInternalServerError, "challenge lookup failed")
 		return
 	}
-	if !ok {
-		abort(c, http.StatusUnauthorized, "invalid credentials")
+	owner, pub, err := s.store.AccountForAuth(req.Email)
+	// A missing account and a bad signature return the same 401: no oracle.
+	if err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature) {
+		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName))
+		if err != nil {
+			abort(c, http.StatusInternalServerError, "create device failed")
+			return
+		}
+		c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token})
 		return
 	}
-	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName))
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "create device failed")
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	c.JSON(http.StatusCreated, api.AuthResponse{
-		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token,
-	})
+	abort(c, http.StatusUnauthorized, "invalid credentials")
 }
 
 // --- resource handlers ---
@@ -171,11 +208,20 @@ func (s *Server) putResource(c *gin.Context) {
 		return
 	}
 	id, version, err := s.store.PutResource(owner, req)
+	if errors.Is(err, ErrNotFound) {
+		// Update targeting an id the caller doesn't own (or that doesn't exist).
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "store failed")
 		return
 	}
-	c.JSON(http.StatusCreated, api.PutResourceResponse{ID: id, Version: version})
+	status := http.StatusCreated
+	if req.ID != "" {
+		status = http.StatusOK
+	}
+	c.JSON(status, api.PutResourceResponse{ID: id, Version: version})
 }
 
 func (s *Server) getResource(c *gin.Context) {

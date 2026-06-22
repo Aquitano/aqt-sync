@@ -7,6 +7,7 @@
 package crypto
 
 import (
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -96,19 +97,18 @@ func DeriveMasterKey(passphrase string, p KdfParams) (MasterKey, error) {
 	return mk, nil
 }
 
-// DeriveAuthKey derives a server-facing authentication key from the master key.
-// It is what a device sends to prove account ownership: the server stores only a
-// hash of it. Because it is a one-way HKDF of the master key, possession of the
-// auth key (or the server's stored hash) never yields the encryption master key,
-// so a server compromise still cannot decrypt data — only mount the same offline
-// passphrase-guessing attack that Argon2id already makes expensive.
-func DeriveAuthKey(mk MasterKey) []byte {
-	r := hkdf.New(sha256.New, mk[:], nil, []byte("aqt-auth-v1"))
-	out := make([]byte, KeySize)
-	if _, err := io.ReadFull(r, out); err != nil {
-		panic("hkdf expand failed: " + err.Error()) // only fails on impossible reader errors
+// DeriveSigningKey derives the account's Ed25519 signing key from the master key
+// via HKDF. The public half is registered with the server at signup; a device
+// then proves ownership by signing a server-issued challenge. No secret is ever
+// sent to the server, and a server breach leaks only public keys — it can never
+// yield the master key (one-way HKDF) nor impersonate the account.
+func DeriveSigningKey(mk MasterKey) ed25519.PrivateKey {
+	r := hkdf.New(sha256.New, mk[:], nil, []byte("aqt-auth-ed25519-v1"))
+	seed := make([]byte, ed25519.SeedSize)
+	if _, err := io.ReadFull(r, seed); err != nil {
+		panic("hkdf expand failed: " + err.Error()) // unreachable for an in-memory reader
 	}
-	return out
+	return ed25519.NewKeyFromSeed(seed)
 }
 
 // GenerateContentKey returns a fresh random content key.

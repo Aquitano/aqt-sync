@@ -3,7 +3,9 @@ package main
 
 import (
 	"log"
+	"net/http"
 	"os"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -24,8 +26,16 @@ func main() {
 	}
 	defer store.Close()
 
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           server.New(store).Router(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
 	log.Printf("aqt-server listening on %s (data dir: %s)", addr, dataDir)
-	if err := server.New(store).Router().Run(addr); err != nil {
+	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server exited: %v", err)
 	}
 }

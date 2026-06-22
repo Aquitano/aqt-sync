@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -72,7 +73,7 @@ func (h *harness) signup(email, passphrase string) (token string, mk crypto.Mast
 	code := h.do(http.MethodPost, "/v1/account", "", api.CreateAccountRequest{
 		Email:      email,
 		Kdf:        kdf,
-		AuthKey:    crypto.DeriveAuthKey(mk),
+		PublicKey:  crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
 		DeviceName: "test-device",
 	}, &resp)
 	if code != http.StatusCreated {
@@ -178,34 +179,127 @@ func TestPublicResourceReadableWithoutAuth(t *testing.T) {
 	}
 }
 
-func TestDeviceAttachVerifiesAuthKey(t *testing.T) {
+// attachWith fetches a challenge and attaches a device by signing the nonce with
+// the signing key derived from passphrase. Returns the HTTP status.
+func (h *harness) attachWith(email, passphrase string, kdf crypto.KdfParams, out *api.AuthResponse) int {
+	h.t.Helper()
+	mk, err := crypto.DeriveMasterKey(passphrase, kdf)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	var ch api.ChallengeResponse
+	if code := h.do(http.MethodPost, "/v1/auth/challenge", "", api.ChallengeRequest{Email: email}, &ch); code != http.StatusOK {
+		h.t.Fatalf("challenge: status %d", code)
+	}
+	var target any // avoid handing do() a typed-nil *AuthResponse to decode into
+	if out != nil {
+		target = out
+	}
+	return h.do(http.MethodPost, "/v1/devices", "", api.AttachDeviceRequest{
+		Email:       email,
+		ChallengeID: ch.ChallengeID,
+		Signature:   ed25519.Sign(crypto.DeriveSigningKey(mk), ch.Nonce),
+		DeviceName:  "device-2",
+	}, target)
+}
+
+func TestDeviceAttachVerifiesSignature(t *testing.T) {
 	h := newHarness(t)
 	const email, pass = "multi@example.com", "shared passphrase"
 	h.signup(email, pass)
 
-	// New machine: fetch salt, re-derive, attach with the correct auth key.
 	var salt api.SaltResponse
 	if code := h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, &salt); code != http.StatusOK {
 		t.Fatalf("salt: status %d", code)
 	}
-	mk, err := crypto.DeriveMasterKey(pass, salt.Kdf)
-	if err != nil {
-		t.Fatal(err)
-	}
+
 	var resp api.AuthResponse
-	code := h.do(http.MethodPost, "/v1/devices", "", api.AttachDeviceRequest{
-		Email: email, AuthKey: crypto.DeriveAuthKey(mk), DeviceName: "laptop-2",
-	}, &resp)
-	if code != http.StatusCreated || resp.Token == "" {
+	if code := h.attachWith(email, pass, salt.Kdf, &resp); code != http.StatusCreated || resp.Token == "" {
 		t.Fatalf("attach with correct passphrase: status %d, token=%q", code, resp.Token)
 	}
 
-	// Wrong passphrase derives a different auth key and must be rejected.
-	wrongMk, _ := crypto.DeriveMasterKey("not the passphrase", salt.Kdf)
-	code = h.do(http.MethodPost, "/v1/devices", "", api.AttachDeviceRequest{
-		Email: email, AuthKey: crypto.DeriveAuthKey(wrongMk), DeviceName: "attacker",
-	}, nil)
-	if code != http.StatusUnauthorized {
+	// Wrong passphrase derives a different signing key, so the signature fails.
+	if code := h.attachWith(email, "not the passphrase", salt.Kdf, nil); code != http.StatusUnauthorized {
 		t.Fatalf("attach with wrong passphrase: got %d, want 401", code)
 	}
+}
+
+func TestChallengeIsSingleUse(t *testing.T) {
+	h := newHarness(t)
+	const email, pass = "replay@example.com", "a passphrase"
+	h.signup(email, pass)
+	mk, _ := crypto.DeriveMasterKey(pass, mustSalt(h, email))
+
+	var ch api.ChallengeResponse
+	if code := h.do(http.MethodPost, "/v1/auth/challenge", "", api.ChallengeRequest{Email: email}, &ch); code != http.StatusOK {
+		t.Fatalf("challenge: status %d", code)
+	}
+	sig := ed25519.Sign(crypto.DeriveSigningKey(mk), ch.Nonce)
+	attach := func(out any) int {
+		return h.do(http.MethodPost, "/v1/devices", "", api.AttachDeviceRequest{
+			Email: email, ChallengeID: ch.ChallengeID, Signature: sig, DeviceName: "d",
+		}, out)
+	}
+	var resp api.AuthResponse
+	if code := attach(&resp); code != http.StatusCreated {
+		t.Fatalf("first attach: status %d", code)
+	}
+	// Replaying the same challenge + signature must be rejected.
+	if code := attach(nil); code != http.StatusUnauthorized {
+		t.Fatalf("challenge replay: got %d, want 401", code)
+	}
+}
+
+func TestUpdateResourceReplacesInPlace(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("upd@example.com", "passphrase for updates")
+
+	put := func(id string, body []byte) api.PutResourceResponse {
+		ck, _ := crypto.GenerateContentKey()
+		blob, _ := crypto.Seal(body, ck)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+		var resp api.PutResourceResponse
+		code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+		}, &resp)
+		if id == "" && code != http.StatusCreated {
+			t.Fatalf("create: status %d", code)
+		}
+		if id != "" && code != http.StatusOK {
+			t.Fatalf("update: status %d", code)
+		}
+		return resp
+	}
+
+	created := put("", []byte("v1"))
+	if created.Version != 1 {
+		t.Fatalf("create version = %d, want 1", created.Version)
+	}
+	updated := put(created.ID, []byte("v2-bigger-content"))
+	if updated.ID != created.ID || updated.Version != 2 {
+		t.Fatalf("update id/version = %s/%d, want %s/2", updated.ID, updated.Version, created.ID)
+	}
+
+	// A different owner cannot update this resource.
+	otherToken, _ := h.signup("other@example.com", "another passphrase")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("hijack"), ck)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	code := h.do(http.MethodPut, "/v1/resources", otherToken, api.PutResourceRequest{
+		ID: created.ID, Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+	}, nil)
+	if code != http.StatusNotFound {
+		t.Fatalf("cross-owner update: got %d, want 404", code)
+	}
+}
+
+func mustSalt(h *harness, email string) crypto.KdfParams {
+	h.t.Helper()
+	var salt api.SaltResponse
+	if code := h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, &salt); code != http.StatusOK {
+		h.t.Fatalf("salt: status %d", code)
+	}
+	return salt.Kdf
 }

@@ -23,20 +23,35 @@ type Metadata struct {
 }
 
 // CreateAccountRequest registers a new account and attaches the first device.
-// AuthKey is the server-facing key (crypto.DeriveAuthKey); the server persists
-// only a hash of it and never sees the passphrase or master key.
+// PublicKey is the Ed25519 public half of the account's signing key (derived
+// client-side from the master key); the server stores it and never sees the
+// passphrase, master key, or private key.
 type CreateAccountRequest struct {
 	Email      string           `json:"email"`
 	Kdf        crypto.KdfParams `json:"kdf"`
-	AuthKey    []byte           `json:"authKey"`
+	PublicKey  []byte           `json:"publicKey"`
 	DeviceName string           `json:"deviceName"`
 }
 
-// AttachDeviceRequest logs in an additional device for an existing account.
+// ChallengeRequest asks the server for a fresh nonce to sign when attaching a
+// device to an existing account.
+type ChallengeRequest struct {
+	Email string `json:"email"`
+}
+
+// ChallengeResponse carries a one-time, short-lived nonce and its id.
+type ChallengeResponse struct {
+	ChallengeID string `json:"challengeId"`
+	Nonce       []byte `json:"nonce"`
+}
+
+// AttachDeviceRequest logs in an additional device by returning a signature over
+// the challenge nonce, proving possession of the account's signing key.
 type AttachDeviceRequest struct {
-	Email      string `json:"email"`
-	AuthKey    []byte `json:"authKey"`
-	DeviceName string `json:"deviceName"`
+	Email       string `json:"email"`
+	ChallengeID string `json:"challengeId"`
+	Signature   []byte `json:"signature"`
+	DeviceName  string `json:"deviceName"`
 }
 
 // AuthResponse is returned by account creation and device attach.
@@ -52,10 +67,12 @@ type SaltResponse struct {
 	Kdf crypto.KdfParams `json:"kdf"`
 }
 
-// PutResourceRequest creates a resource. WrappedKey is present only for private
-// resources (the content key wrapped under the owner's master key); for public
-// resources the content key lives in the share-link fragment instead.
+// PutResourceRequest creates a resource (ID empty) or replaces an existing one
+// in place (ID set, must be owned by the caller). WrappedKey is present only for
+// private resources (the content key wrapped under the owner's master key); for
+// public resources the content key lives in the share-link fragment instead.
 type PutResourceRequest struct {
+	ID            string             `json:"id,omitempty"`
 	Visibility    Visibility         `json:"visibility"`
 	Blob          crypto.SealedBlob  `json:"blob"`
 	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`

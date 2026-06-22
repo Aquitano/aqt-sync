@@ -40,6 +40,13 @@ func (c *Client) CreateAccount(req api.CreateAccountRequest) (api.AuthResponse, 
 	return r, err
 }
 
+// Challenge requests a one-time nonce to sign when attaching a device.
+func (c *Client) Challenge(email string) (api.ChallengeResponse, error) {
+	var r api.ChallengeResponse
+	err := c.do(http.MethodPost, "/v1/auth/challenge", api.ChallengeRequest{Email: email}, &r)
+	return r, err
+}
+
 func (c *Client) AttachDevice(req api.AttachDeviceRequest) (api.AuthResponse, error) {
 	var r api.AuthResponse
 	err := c.do(http.MethodPost, "/v1/devices", req, &r)

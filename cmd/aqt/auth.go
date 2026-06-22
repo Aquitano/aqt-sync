@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -68,10 +69,11 @@ func createAccount(cl *client.Client, server, email string) error {
 	if err != nil {
 		return err
 	}
+	signing := crypto.DeriveSigningKey(mk)
 	resp, err := cl.CreateAccount(api.CreateAccountRequest{
 		Email:      email,
 		Kdf:        kdf,
-		AuthKey:    crypto.DeriveAuthKey(mk),
+		PublicKey:  signing.Public().(ed25519.PublicKey),
 		DeviceName: deviceName(),
 	})
 	if err != nil {
@@ -89,10 +91,19 @@ func attachDevice(cl *client.Client, server, email string, kdf crypto.KdfParams)
 	if err != nil {
 		return err
 	}
+	signing := crypto.DeriveSigningKey(mk)
+
+	// Prove possession of the signing key by signing a server challenge; the
+	// key itself never leaves this machine.
+	ch, err := cl.Challenge(email)
+	if err != nil {
+		return err
+	}
 	resp, err := cl.AttachDevice(api.AttachDeviceRequest{
-		Email:      email,
-		AuthKey:    crypto.DeriveAuthKey(mk),
-		DeviceName: deviceName(),
+		Email:       email,
+		ChallengeID: ch.ChallengeID,
+		Signature:   ed25519.Sign(signing, ch.Nonce),
+		DeviceName:  deviceName(),
 	})
 	if err != nil {
 		return err

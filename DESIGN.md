@@ -23,7 +23,7 @@ deliberately implementation-free — types and behavior, not code.
 | Extras in v1 | `-P` password gate, clipboard auto-copy. |
 | Out of v1 | standalone `rotate`, `--expire`, `--burn`, `--max-reads`, FUSE `mount`. |
 | Runtime | Go. CLI on cobra; server on Gin; SQLite (modernc, pure-Go) + filesystem blobs. |
-| Crypto | Argon2id (KDF), XChaCha20-Poly1305 (AEAD), HKDF-SHA256 (auth key). |
+| Crypto | Argon2id (KDF), XChaCha20-Poly1305 (AEAD), HKDF-SHA256 → Ed25519 auth signing key. |
 
 ---
 
@@ -34,6 +34,10 @@ passphrase ──Argon2id(salt)──▶ masterKey            (never leaves the 
                                   │
                                   ├─ wraps ─▶ contentKey   (random, one per resource)
                                   │
+                                  └─ HKDF ─▶ Ed25519 signing key
+                                              (public half registered with server;
+                                               logins sign a server challenge — no
+                                               secret is ever sent)
 file ──encrypt(contentKey)──▶ ciphertext + nonce + AEAD tag  ──▶ server (opaque blob)
 metadata (real name, size…) ──encrypt(contentKey)──▶ encrypted manifest ──▶ server
 ```
@@ -291,13 +295,15 @@ Bearer <token>`); the server authenticates *accounts*, never sees keys. All bodi
 are opaque bytes or opaque metadata.
 
 ```
-POST   /v1/account                  Create account. Body: { email, kdfParams, wrappedRecoveryKey? }
-                                     → { ownerHandle }   (server stores salt/kdfParams to serve on login)
-GET    /v1/account/salt?email=…      → { kdfParams }     (needed to re-derive on a new machine)
-POST   /v1/devices                   Attach device. v1: client sends the auth key (TLS-protected); server stores only its hash. Challenge/response that avoids sending the key is deferred (section 5). → { deviceId, token }
+POST   /v1/account                  Create account. Body: { email, kdf, publicKey, deviceName }
+                                     → { ownerHandle, deviceId, token }  (stores kdf + Ed25519 public key)
+GET    /v1/account/salt?email=…      → { kdf }           (needed to re-derive on a new machine)
+POST   /v1/auth/challenge            Body: { email } → { challengeId, nonce }  (one-time, short-lived)
+POST   /v1/devices                   Attach device. Body: { email, challengeId, signature, deviceName }.
+                                     Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
 DELETE /v1/devices/:id               Revoke a device.
 
-PUT    /v1/resources                 Create/replace a resource.
+PUT    /v1/resources                 Create (id omitted) or replace in place (id set, owner-checked, version++).
                                      Body: { ciphertext, encryptedMeta, visibility,
                                              wrappedKey? }   // wrappedKey only for private
                                      → { id, version }
@@ -343,11 +349,14 @@ function currentSession(): Session | null;                                 // fo
 
 ## 5. Open implementation questions (not blocking the interface)
 
-- **AEAD primitive & chunk size** for `seal/open` (e.g. XChaCha20-Poly1305, 1 MiB chunks).
-- **Content-defined chunking / dedup** for large tracked files vs. whole-file blobs in v1.
-- **Argon2id defaults** (`opsLimit`/`memLimit`) and how to tune per machine.
-- **Device attach proof** — exact challenge/response so a device proves key possession without sending it.
+- **Chunked streaming for large files** — `seal/open` currently seals the whole payload in memory; the server caps a body at 32 MiB. Content-defined chunking + dedup is deferred.
+- **Argon2id tuning** (`time`/`memory`) per machine.
+- **Account-enumeration oracle** — `GET /account/salt` confirms which emails are registered, and auth endpoints have no rate limiting.
+- **Defense-in-depth crypto** — AEAD additional-data domain separation across blob/wrap/gated-wrap; complete key wiping (`ContentKey` has no `Wipe`).
 - **Conflict copies** — write `name.conflict-<device>` like Dropbox, or just report and block?
+
+Resolved since the first draft: device attach is now an Ed25519 challenge/response
+(no secret sent); resources support owner-checked in-place update + versioning.
 
 These are deliberately left to implementation; the interfaces above don't change
 based on how they're answered.

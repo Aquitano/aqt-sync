@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -85,6 +86,11 @@ func runPush(path string, opts pushOptions) error {
 		if err != nil {
 			return err
 		}
+		if pass == "" {
+			// Guards the `push -` case: reading content from stdin drains it, so
+			// the prompt hits EOF and would otherwise wrap the key under "".
+			return errors.New("refusing to encrypt under an empty passphrase (a private `push -` cannot read both content and passphrase from stdin; use a file, or --public)")
+		}
 		mk, err := prof.Unlock(pass)
 		if err != nil {
 			return err
@@ -104,7 +110,9 @@ func runPush(path string, opts pushOptions) error {
 
 	ref, err := buildRef(prof.Server, resp.ID, req.Visibility, ck, opts.password)
 	if err != nil {
-		return err
+		// The blob is already uploaded; surface the id so it is recoverable
+		// (and, for public pushes, deletable — its key lived only in the link).
+		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
 	printResult(ref, name, len(data), req.Visibility, opts)
 	return nil

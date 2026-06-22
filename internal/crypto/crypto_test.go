@@ -2,8 +2,47 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"testing"
 )
+
+func TestDeriveSigningKeyDeterministicAndVerifiable(t *testing.T) {
+	params, err := NewKdfParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := DeriveMasterKey("passphrase for signing", params)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	priv := DeriveSigningKey(mk)
+	again := DeriveSigningKey(mk)
+	if !priv.Equal(again) {
+		t.Fatal("same master key must derive the same signing key")
+	}
+
+	msg := []byte("server challenge nonce")
+	sig := ed25519.Sign(priv, msg)
+	pub := priv.Public().(ed25519.PublicKey)
+	if !ed25519.Verify(pub, msg, sig) {
+		t.Fatal("signature must verify under the derived public key")
+	}
+
+	other := DeriveSigningKey(mustDerive(t, "different passphrase", params))
+	if ed25519.Verify(other.Public().(ed25519.PublicKey), msg, sig) {
+		t.Fatal("signature must not verify under a different key")
+	}
+}
+
+func mustDerive(t *testing.T, pass string, p KdfParams) MasterKey {
+	t.Helper()
+	mk, err := DeriveMasterKey(pass, p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return mk
+}
 
 func TestDeriveMasterKeyDeterministic(t *testing.T) {
 	params, err := NewKdfParams()

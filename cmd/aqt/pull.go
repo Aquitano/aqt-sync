@@ -20,22 +20,24 @@ func pullCmd() *cobra.Command {
 		out      string
 		password string
 		toStdout bool
+		force    bool
 	)
 	cmd := &cobra.Command{
 		Use:   "pull <url|id|aqt://ref>",
 		Short: "Fetch and decrypt a resource",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPull(args[0], out, password, toStdout)
+			return runPull(args[0], out, password, toStdout, force)
 		},
 	}
 	cmd.Flags().StringVarP(&out, "out", "o", "", "write to this path")
 	cmd.Flags().StringVarP(&password, "password", "P", "", "password for a gated link")
 	cmd.Flags().BoolVar(&toStdout, "stdout", false, "write decrypted content to stdout")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite the destination if it exists")
 	return cmd
 }
 
-func runPull(ref, out, password string, toStdout bool) error {
+func runPull(ref, out, password string, toStdout, force bool) error {
 	id, fragment := parseRef(ref)
 
 	// A public link decrypts from its fragment and needs no profile; a private
@@ -66,7 +68,7 @@ func runPull(ref, out, password string, toStdout bool) error {
 	}
 	meta := decodeMeta(res.EncryptedMeta, ck)
 
-	return writeOutput(plaintext, out, meta, toStdout)
+	return writeOutput(plaintext, out, meta, toStdout, force)
 }
 
 // contentKey recovers the content key either from the share fragment (public/
@@ -100,7 +102,7 @@ func contentKey(res api.GetResourceResponse, fragment, password string, prof *id
 	return crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
 }
 
-func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout bool) error {
+func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, force bool) error {
 	if toStdout {
 		_, err := os.Stdout.Write(plaintext)
 		return err
@@ -109,6 +111,11 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout bool)
 		out = meta.Name
 		if out == "" || out == "stdin" {
 			out = "aqt-download"
+		}
+	}
+	if !force {
+		if _, err := os.Stat(out); err == nil {
+			return fmt.Errorf("%s already exists (use --force to overwrite)", out)
 		}
 	}
 	if err := os.WriteFile(out, plaintext, 0o600); err != nil {
