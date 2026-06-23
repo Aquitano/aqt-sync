@@ -69,6 +69,7 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.pullOnly, "pull-only", false, "only download remote changes")
 	f.BoolVar(&opts.dryRun, "dry-run", false, "print the plan without making changes")
 	f.BoolVar(&opts.force, "force", false, "resolve conflicts in favor of local")
+	f.BoolVar(&opts.reconcile, "reconcile", false, "reconcile without a base (.aqt/base.json missing): one-sided differences become conflicts to review")
 	return cmd
 }
 
@@ -179,11 +180,19 @@ func runStatus(dir string) error {
 // --- sync ---
 
 type syncOptions struct {
-	pushOnly bool
-	pullOnly bool
-	dryRun   bool
-	force    bool
+	pushOnly  bool
+	pullOnly  bool
+	dryRun    bool
+	force     bool
+	reconcile bool
 }
+
+// errSyncNoBase signals that a sync has no last-synced state to reconcile against
+// (.aqt/base.json missing or corrupt). Syncing with an empty base would resurrect
+// deletions, so it is refused unless --reconcile is given.
+var errSyncNoBase = errors.New("no last-synced state found (.aqt/base.json missing or corrupt); " +
+	"syncing now could resurrect deleted files. Re-run with --reconcile to reconcile local and remote " +
+	"(one-sided differences become conflicts to review), or `aqt clone` into a fresh directory")
 
 func runSync(dir string, opts syncOptions) error {
 	if opts.pushOnly && opts.pullOnly {
@@ -209,9 +218,12 @@ func runSync(dir string, opts syncOptions) error {
 	if err != nil {
 		return err
 	}
-	base, err := loadBase(root)
+	base, baseExists, err := loadBaseForSync(root)
 	if err != nil {
 		return err
+	}
+	if !baseExists && !opts.reconcile {
+		return errSyncNoBase
 	}
 	cl, prof, err := authedClient()
 	if err != nil {
@@ -254,7 +266,14 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return fmt.Errorf("decrypt remote manifest: %w", err)
 		}
-		actions := syncengine.Plan(local, base, remote)
+		// With no trusted base, reconcile from scratch: one-sided differences are
+		// ambiguous and become conflicts to review rather than silent adds/deletes.
+		var actions []syncengine.Action
+		if baseExists {
+			actions = syncengine.Plan(local, base, remote)
+		} else {
+			actions = syncengine.PlanReconcile(local, remote)
+		}
 		if opts.dryRun {
 			return printPlan(actions)
 		}
@@ -654,7 +673,29 @@ func saveBase(root string, m syncengine.Manifest) error {
 	return os.WriteFile(controlPath(root, baseFile), b, 0o600)
 }
 
+// loadBaseForSync returns the last-synced manifest and whether a usable base
+// exists. A missing or corrupt base reports exists=false so the caller can refuse
+// the sync — reconciling against an empty base silently resurrects deletions —
+// unless the user opts into --reconcile.
+func loadBaseForSync(root string) (syncengine.Manifest, bool, error) {
+	var m syncengine.Manifest
+	b, err := os.ReadFile(controlPath(root, baseFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return m, false, nil
+	}
+	if err != nil {
+		return m, false, err
+	}
+	if err := json.Unmarshal(b, &m); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: .aqt/base.json is corrupt (%v)\n", err)
+		return syncengine.Manifest{}, false, nil
+	}
+	return m, true, nil
+}
+
 // loadBase returns the last-synced manifest, or an empty one if none exists yet.
+// Used by the offline `status`, which tolerates a missing base (it shows every
+// file as new). `sync` uses loadBaseForSync, which refuses an absent base.
 func loadBase(root string) (syncengine.Manifest, error) {
 	var m syncengine.Manifest
 	b, err := os.ReadFile(controlPath(root, baseFile))

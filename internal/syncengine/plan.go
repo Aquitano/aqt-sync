@@ -71,6 +71,36 @@ func Plan(local, base, remote Manifest) []Action {
 	return actions
 }
 
+// PlanReconcile reconciles local against remote with no trusted base (e.g.
+// base.json is missing or corrupt). Without a base a one-sided difference is
+// ambiguous — it could be an add or a delete — so every difference is reported as
+// a Conflict for the caller to resolve (review, or --force = local wins) rather
+// than silently treated as an add, which would resurrect deletions. Paths that
+// already match on both sides need no action.
+func PlanReconcile(local, remote Manifest) []Action {
+	lp, rp := local.byPath(), remote.byPath()
+
+	paths := map[string]struct{}{}
+	for p := range lp {
+		paths[p] = struct{}{}
+	}
+	for p := range rp {
+		paths[p] = struct{}{}
+	}
+
+	var actions []Action
+	for p := range paths {
+		l, lok := lp[p]
+		r, rok := rp[p]
+		if lok && rok && l.Hash == r.Hash {
+			continue // identical on both sides; nothing to reconcile
+		}
+		actions = append(actions, Action{p, Conflict})
+	}
+	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
+	return actions
+}
+
 // changed reports whether an entry differs from its base (added, removed, or
 // content-changed).
 func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
