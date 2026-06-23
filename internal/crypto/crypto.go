@@ -66,6 +66,27 @@ const (
 	defaultThreads = 4
 )
 
+// Gated-link Argon2id profile. A gated link is semi-public — anyone holding it
+// has the salt, costs, and wrapped key and can brute-force offline — and link
+// passwords are typically weaker than account passphrases, so the gate is tuned
+// deliberately higher than the interactive account-unlock profile.
+const (
+	gatedTime    = 4
+	gatedMemory  = 256 * 1024 // 256 MiB
+	gatedThreads = 4
+)
+
+// Upper bounds on KDF parameters accepted by DeriveMasterKey. They cap the work
+// (and memory) a fragment- or server-supplied set of params can force on a
+// client, so a crafted link or a hostile server cannot OOM/hang it on password
+// entry. The bounds sit comfortably above every profile this package mints.
+const (
+	maxKdfMemory  = 1 << 20 // 1 GiB, in KiB
+	maxKdfTime    = 16
+	maxKdfThreads = 16
+	maxKdfSalt    = 1024
+)
+
 // NewKdfParams returns fresh parameters with a random salt and default costs.
 func NewKdfParams() (KdfParams, error) {
 	salt := make([]byte, saltSize)
@@ -81,16 +102,47 @@ func NewKdfParams() (KdfParams, error) {
 	}, nil
 }
 
+// NewGatedKdfParams returns fresh parameters at the higher gated-link cost.
+func NewGatedKdfParams() (KdfParams, error) {
+	p, err := NewKdfParams()
+	if err != nil {
+		return KdfParams{}, err
+	}
+	p.Time = gatedTime
+	p.Memory = gatedMemory
+	p.Threads = gatedThreads
+	return p, nil
+}
+
+// validate rejects unsupported or out-of-range KDF params before they reach the
+// (expensive, attacker-influenced) derivation.
+func (p KdfParams) validate() error {
+	switch {
+	case p.Algo != "argon2id":
+		return fmt.Errorf("unsupported kdf algo %q", p.Algo)
+	case len(p.Salt) == 0:
+		return errors.New("kdf params missing salt")
+	case len(p.Salt) > maxKdfSalt:
+		return fmt.Errorf("kdf salt too long: %d bytes", len(p.Salt))
+	case p.Memory == 0 || p.Memory > maxKdfMemory:
+		return fmt.Errorf("kdf memory out of range: %d KiB", p.Memory)
+	case p.Time == 0 || p.Time > maxKdfTime:
+		return fmt.Errorf("kdf time out of range: %d", p.Time)
+	case p.Threads == 0 || p.Threads > maxKdfThreads:
+		return fmt.Errorf("kdf threads out of range: %d", p.Threads)
+	}
+	return nil
+}
+
 // DeriveMasterKey derives the master key from a passphrase and KDF parameters.
 // Given the same passphrase and params it is deterministic, which is what lets a
 // new machine reconstruct the key after fetching the account's stored params.
+// The params are clamped first: they may come from a hostile server (account
+// salt) or a crafted share link (gated fragment).
 func DeriveMasterKey(passphrase string, p KdfParams) (MasterKey, error) {
 	var mk MasterKey
-	if p.Algo != "argon2id" {
-		return mk, fmt.Errorf("unsupported kdf algo %q", p.Algo)
-	}
-	if len(p.Salt) == 0 {
-		return mk, errors.New("kdf params missing salt")
+	if err := p.validate(); err != nil {
+		return mk, err
 	}
 	out := argon2.IDKey([]byte(passphrase), p.Salt, p.Time, p.Memory, p.Threads, KeySize)
 	copy(mk[:], out)
@@ -134,9 +186,25 @@ type WrappedKey struct {
 	Ciphertext []byte `json:"ciphertext"`
 }
 
-// Seal encrypts plaintext under a content key. v1 seals the whole payload in one
-// shot; chunked streaming for large files is deferred (DESIGN.md section 5).
-func Seal(plaintext []byte, ck ContentKey) (SealedBlob, error) {
+// AEAD additional-authenticated-data tags bind a ciphertext to its role. They are
+// authenticated but not encrypted; passing a different tag to Open fails the tag
+// check. This domain-separates the structurally-identical SealedBlob/WrappedKey so
+// a hostile server cannot reinterpret one field as another — e.g. move a resource
+// blob into the wrappedKey slot, or swap a body blob for its metadata blob (both
+// sealed under the same content key). Binding the resource id as well is a future
+// step: the id is server-assigned and unknown when the client seals on create.
+var (
+	AADBlob    = []byte("aqt-blob-v1")    // resource body (file bytes or folder manifest)
+	AADMeta    = []byte("aqt-meta-v1")    // resource metadata
+	aadKeyWrap = []byte("aqt-keywrap-v1") // content key wrapped under the master key
+	aadGated   = []byte("aqt-gated-v1")   // content key wrapped under a link password
+)
+
+// Seal encrypts plaintext under a content key, binding aad as additional
+// authenticated data (the ciphertext's role; see the AAD tags above). v1 seals the
+// whole payload in one shot; chunked streaming for large files is deferred
+// (DESIGN.md section 5).
+func Seal(plaintext []byte, ck ContentKey, aad []byte) (SealedBlob, error) {
 	aead, err := chacha20poly1305.NewX(ck[:])
 	if err != nil {
 		return SealedBlob{}, err
@@ -145,12 +213,13 @@ func Seal(plaintext []byte, ck ContentKey) (SealedBlob, error) {
 	if err != nil {
 		return SealedBlob{}, err
 	}
-	return SealedBlob{Nonce: nonce, Ciphertext: aead.Seal(nil, nonce, plaintext, nil)}, nil
+	return SealedBlob{Nonce: nonce, Ciphertext: aead.Seal(nil, nonce, plaintext, aad)}, nil
 }
 
-// Open decrypts a sealed blob, verifying the authentication tag. It returns an
-// error if the key is wrong or the ciphertext was tampered with.
-func Open(blob SealedBlob, ck ContentKey) ([]byte, error) {
+// Open decrypts a sealed blob, verifying the authentication tag over the
+// ciphertext and aad. It returns an error if the key is wrong, the aad does not
+// match the one used to seal, or the ciphertext was tampered with.
+func Open(blob SealedBlob, ck ContentKey, aad []byte) ([]byte, error) {
 	aead, err := chacha20poly1305.NewX(ck[:])
 	if err != nil {
 		return nil, err
@@ -158,22 +227,31 @@ func Open(blob SealedBlob, ck ContentKey) ([]byte, error) {
 	if len(blob.Nonce) != NonceSize {
 		return nil, errors.New("invalid nonce length")
 	}
-	return aead.Open(nil, blob.Nonce, blob.Ciphertext, nil)
+	return aead.Open(nil, blob.Nonce, blob.Ciphertext, aad)
 }
 
-// WrapKey encrypts a content key under a 32-byte wrapping key.
+// WrapKey encrypts a content key under a 32-byte wrapping key (the master key),
+// bound to the key-wrap role.
 func WrapKey(ck ContentKey, wrappingKey [KeySize]byte) (WrappedKey, error) {
-	blob, err := Seal(ck[:], ContentKey(wrappingKey))
+	return wrapKeyAAD(ck, wrappingKey, aadKeyWrap)
+}
+
+// UnwrapKey reverses WrapKey, returning the original content key.
+func UnwrapKey(w WrappedKey, wrappingKey [KeySize]byte) (ContentKey, error) {
+	return unwrapKeyAAD(w, wrappingKey, aadKeyWrap)
+}
+
+func wrapKeyAAD(ck ContentKey, wrappingKey [KeySize]byte, aad []byte) (WrappedKey, error) {
+	blob, err := Seal(ck[:], ContentKey(wrappingKey), aad)
 	if err != nil {
 		return WrappedKey{}, err
 	}
 	return WrappedKey(blob), nil
 }
 
-// UnwrapKey reverses WrapKey, returning the original content key.
-func UnwrapKey(w WrappedKey, wrappingKey [KeySize]byte) (ContentKey, error) {
+func unwrapKeyAAD(w WrappedKey, wrappingKey [KeySize]byte, aad []byte) (ContentKey, error) {
 	var ck ContentKey
-	plain, err := Open(SealedBlob(w), ContentKey(wrappingKey))
+	plain, err := Open(SealedBlob(w), ContentKey(wrappingKey), aad)
 	if err != nil {
 		return ck, err
 	}
@@ -212,7 +290,7 @@ func EncodeFragment(ck ContentKey, password string) (string, error) {
 	if password == "" {
 		return fragPublic + b64.EncodeToString(ck[:]), nil
 	}
-	params, err := NewKdfParams()
+	params, err := NewGatedKdfParams()
 	if err != nil {
 		return "", err
 	}
@@ -220,7 +298,7 @@ func EncodeFragment(ck ContentKey, password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	wrapped, err := WrapKey(ck, [KeySize]byte(pwKey))
+	wrapped, err := wrapKeyAAD(ck, [KeySize]byte(pwKey), aadGated)
 	if err != nil {
 		return "", err
 	}
@@ -263,7 +341,7 @@ func DecodeFragment(fragment, password string) (ContentKey, error) {
 		if err != nil {
 			return ck, err
 		}
-		return UnwrapKey(gk.Wrapped, [KeySize]byte(pwKey))
+		return unwrapKeyAAD(gk.Wrapped, [KeySize]byte(pwKey), aadGated)
 	default:
 		return ck, errors.New("unrecognized fragment format")
 	}

@@ -1,3 +1,10 @@
 /bin/
 *.exe
 /aqt-data/
+
+# Per-folder sync state (resource id + last-synced manifest with chunk keys);
+# never belongs in a repo.
+.aqt/
+
+# Local scratch for manually exercising the CLI.
+/test/

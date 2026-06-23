@@ -71,12 +71,60 @@ type SaltResponse struct {
 // in place (ID set, must be owned by the caller). WrappedKey is present only for
 // private resources (the content key wrapped under the owner's master key); for
 // public resources the content key lives in the share-link fragment instead.
+//
+// ChunkRefs lists the chunk ids the blob (a folder's sealed manifest) references.
+// The server stores them as the resource's GC roots; it never inspects them.
+//
+// ExpectedVersion, when > 0, is the version the client based this update on. The
+// server rejects the write (409) if the stored version differs, so a concurrent
+// write is never silently lost — the client re-fetches and retries. Omit it (0)
+// for a create or an unconditional replace.
 type PutResourceRequest struct {
-	ID            string             `json:"id,omitempty"`
-	Visibility    Visibility         `json:"visibility"`
-	Blob          crypto.SealedBlob  `json:"blob"`
-	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
-	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	ID              string             `json:"id,omitempty"`
+	Visibility      Visibility         `json:"visibility"`
+	Blob            crypto.SealedBlob  `json:"blob"`
+	EncryptedMeta   crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
+	ExpectedVersion int                `json:"expectedVersion,omitempty"`
+}
+
+// ChunkData is one opaque, content-addressed chunk on the wire. ID is the hex
+// sha256 of Data; the server verifies the binding on upload.
+type ChunkData struct {
+	ID   string `json:"id"`
+	Data []byte `json:"data"`
+}
+
+// ChunkCheckRequest asks which of the given chunk ids the owner does not yet have
+// (the have/want negotiation before an upload).
+type ChunkCheckRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type ChunkCheckResponse struct {
+	Missing []string `json:"missing"`
+}
+
+type ChunkUploadRequest struct {
+	Chunks []ChunkData `json:"chunks"`
+}
+
+type ChunkUploadResponse struct {
+	Stored int `json:"stored"`
+}
+
+type ChunkFetchRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type ChunkFetchResponse struct {
+	Chunks []ChunkData `json:"chunks"`
+}
+
+// GCResponse reports how many unreferenced chunks a sweep deleted.
+type GCResponse struct {
+	Deleted int `json:"deleted"`
 }
 
 type PutResourceResponse struct {

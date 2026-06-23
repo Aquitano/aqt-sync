@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -33,8 +35,36 @@ var (
 func main() {
 	if err := rootCmd().Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		os.Exit(exitCode(err))
 	}
+}
+
+// exitCode maps an error to the documented CLI contract (DESIGN.md §3):
+// 0 ok · 1 generic · 3 auth/locked · 4 sync conflict · 5 network. Scripts and
+// cron (`--once`) use it to tell a retryable network blip from re-login from a
+// conflict needing resolution.
+func exitCode(err error) int {
+	switch {
+	case err == nil:
+		return 0
+	case errors.Is(err, identity.ErrNoProfile):
+		return 3
+	case errors.Is(err, errConflictsRemain), errors.Is(err, errSyncRace), errors.Is(err, client.ErrConflict):
+		return 4
+	case isNetworkError(err):
+		return 5
+	default:
+		return 1
+	}
+}
+
+func isNetworkError(err error) bool {
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
 }
 
 func rootCmd() *cobra.Command {
@@ -56,6 +86,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), pushCmd(), pullCmd(), lsCmd(), shareCmd(), privateCmd())
+	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd())
 	return root
 }
 

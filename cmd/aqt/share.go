@@ -114,11 +114,11 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
-	plaintext, err := crypto.Open(res.Blob, oldCK)
+	plaintext, err := crypto.Open(res.Blob, oldCK, crypto.AADBlob)
 	if err != nil {
 		return fmt.Errorf("decrypt: %w", err)
 	}
-	metaPlain, err := crypto.Open(res.EncryptedMeta, oldCK)
+	metaPlain, err := crypto.Open(res.EncryptedMeta, oldCK, crypto.AADMeta)
 	if err != nil {
 		return fmt.Errorf("decrypt metadata: %w", err)
 	}
@@ -129,11 +129,11 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
-	blob, err := crypto.Seal(plaintext, newCK)
+	blob, err := crypto.Seal(plaintext, newCK, crypto.AADBlob)
 	if err != nil {
 		return err
 	}
-	metaBlob, err := crypto.Seal(metaPlain, newCK)
+	metaBlob, err := crypto.Seal(metaPlain, newCK, crypto.AADMeta)
 	if err != nil {
 		return err
 	}
@@ -141,13 +141,20 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
+	// Optimistic concurrency: the rotate is a read-modify-write, so pin it to the
+	// version we just fetched. A concurrent sync committing between the GET and this
+	// PUT would otherwise be silently overwritten with stale content.
 	if _, err := cl.PutResource(api.PutResourceRequest{
-		ID:            id,
-		Visibility:    api.Private,
-		Blob:          blob,
-		EncryptedMeta: metaBlob,
-		WrappedKey:    &wrapped,
+		ID:              id,
+		Visibility:      api.Private,
+		Blob:            blob,
+		EncryptedMeta:   metaBlob,
+		WrappedKey:      &wrapped,
+		ExpectedVersion: res.Version,
 	}); err != nil {
+		if errors.Is(err, client.ErrConflict) {
+			return errors.New("resource changed while rotating its key; re-run `aqt private`")
+		}
 		return err
 	}
 

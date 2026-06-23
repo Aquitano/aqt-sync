@@ -9,8 +9,20 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
+// isolateConfigDir points os.UserConfigDir at a throwaway directory on every
+// platform, so the test never touches (or deletes) the developer's real cached
+// session. UserConfigDir reads AppData on Windows, XDG_CONFIG_HOME on Linux, and
+// $HOME/Library/Application Support on macOS.
+func isolateConfigDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("AppData", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+}
+
 func TestSessionCacheRoundTrip(t *testing.T) {
-	t.Setenv("AppData", t.TempDir()) // isolate the config dir (Windows UserConfigDir)
+	isolateConfigDir(t)
 
 	var mk crypto.MasterKey
 	for i := range mk {
@@ -35,8 +47,36 @@ func TestSessionCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionCacheIsMachineBound(t *testing.T) {
+	isolateConfigDir(t)
+
+	orig := machineSecretFn
+	t.Cleanup(func() { machineSecretFn = orig })
+
+	var mk crypto.MasterKey
+	for i := range mk {
+		mk[i] = byte(i)
+	}
+	machineSecretFn = func() []byte { return []byte("machine-A") }
+	if err := SaveSession("default", mk, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same file on a different machine (different secret) must not decrypt.
+	machineSecretFn = func() []byte { return []byte("machine-B") }
+	if _, ok := LoadSession("default"); ok {
+		t.Fatal("a session sealed on another machine must not open here")
+	}
+
+	// And once it fails to open, the unusable file is removed.
+	p, _ := sessionPath("default")
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("an undecryptable session should be removed")
+	}
+}
+
 func TestSessionCacheRejectsMalformed(t *testing.T) {
-	t.Setenv("AppData", t.TempDir())
+	isolateConfigDir(t)
 
 	p, err := sessionPath("default")
 	if err != nil {
