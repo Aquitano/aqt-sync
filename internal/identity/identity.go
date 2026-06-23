@@ -8,10 +8,14 @@
 package identity
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -91,13 +95,72 @@ func Save(p *Profile) error {
 // --- session cache ---
 //
 // The session cache holds the derived master key so a working session does not
-// re-prompt for the passphrase on every command. SECURITY TRADE-OFF: the master
-// key is written to a 0600 file, so anyone who can read that file can decrypt
-// your data. Exposure is bounded by the TTL and cleared by `aqt logout`.
+// re-prompt for the passphrase on every command. The key is encrypted at rest
+// under a machine-bound key (see sessionKey) before being written to a 0600 file,
+// so a copied or backed-up session file is useless on any other machine — closing
+// the home-dir-backup / cloud-sync exposure.
+//
+// SECURITY TRADE-OFF: this does not defend against another process running as the
+// same user on this machine, which can re-derive the same machine key. The full
+// fix is the OS keychain / an in-memory agent (DESIGN.md section 5). Exposure is
+// otherwise bounded by the TTL and cleared by `aqt logout`.
 
 type session struct {
-	MasterKey []byte `json:"masterKey"`
-	ExpiresAt int64  `json:"expiresAt"` // unix seconds; 0 means no expiry
+	Sealed    crypto.SealedBlob `json:"sealed"`
+	ExpiresAt int64             `json:"expiresAt"` // unix seconds; 0 means no expiry
+}
+
+// sessionAAD domain-separates the at-rest session seal from other ciphertexts.
+const sessionAAD = "aqt-session-at-rest-v1"
+
+// machineSecretFn is overridable in tests to simulate a different machine.
+var machineSecretFn = machineSecret
+
+// sessionKey derives the at-rest encryption key from a stable per-machine secret,
+// so the sealed session can only be opened on the machine that wrote it.
+func sessionKey() crypto.ContentKey {
+	sum := sha256.Sum256(append([]byte(sessionAAD+"\x00"), machineSecretFn()...))
+	return crypto.ContentKey(sum)
+}
+
+// machineSecret returns a stable identifier for this machine that does not travel
+// in a home-directory backup, so a restored/synced session file cannot be
+// decrypted elsewhere. It falls back to the hostname (weaker, but still binds the
+// cache to this host rather than leaving the key in cleartext).
+func machineSecret() []byte {
+	for _, p := range []string{"/etc/machine-id", "/var/lib/dbus/machine-id"} {
+		if b, err := os.ReadFile(p); err == nil {
+			if s := strings.TrimSpace(string(b)); s != "" {
+				return []byte("aqt-machine-id:" + s)
+			}
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		if out, err := exec.Command("ioreg", "-rd1", "-c", "IOPlatformExpertDevice").Output(); err == nil {
+			if id := parsePlatformUUID(out); id != "" {
+				return []byte("aqt-platform-uuid:" + id)
+			}
+		}
+	}
+	if h, err := os.Hostname(); err == nil && h != "" {
+		return []byte("aqt-host:" + h)
+	}
+	return []byte("aqt-no-machine-binding")
+}
+
+// parsePlatformUUID extracts the IOPlatformUUID value from `ioreg` output.
+func parsePlatformUUID(out []byte) string {
+	const marker = `"IOPlatformUUID" = "`
+	s := string(out)
+	i := strings.Index(s, marker)
+	if i < 0 {
+		return ""
+	}
+	rest := s[i+len(marker):]
+	if j := strings.IndexByte(rest, '"'); j >= 0 {
+		return rest[:j]
+	}
+	return ""
 }
 
 func sessionPath(name string) (string, error) {
@@ -121,11 +184,15 @@ func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	sealed, err := crypto.Seal(mk[:], sessionKey(), []byte(sessionAAD))
+	if err != nil {
+		return err
+	}
 	var exp int64
 	if ttl > 0 {
 		exp = time.Now().Add(ttl).Unix()
 	}
-	b, err := json.Marshal(session{MasterKey: mk[:], ExpiresAt: exp})
+	b, err := json.Marshal(session{Sealed: sealed, ExpiresAt: exp})
 	if err != nil {
 		return err
 	}
@@ -149,7 +216,7 @@ func LoadSession(name string) (crypto.MasterKey, bool) {
 		return mk, false
 	}
 	var s session
-	if err := json.Unmarshal(b, &s); err != nil || len(s.MasterKey) != crypto.KeySize {
+	if err := json.Unmarshal(b, &s); err != nil {
 		os.Remove(path)
 		return mk, false
 	}
@@ -157,7 +224,14 @@ func LoadSession(name string) (crypto.MasterKey, bool) {
 		os.Remove(path)
 		return mk, false
 	}
-	copy(mk[:], s.MasterKey)
+	// A failure here means a wrong/absent machine key (the file was copied from
+	// another machine) or the legacy plaintext format — treat both as a miss.
+	plain, err := crypto.Open(s.Sealed, sessionKey(), []byte(sessionAAD))
+	if err != nil || len(plain) != crypto.KeySize {
+		os.Remove(path)
+		return mk, false
+	}
+	copy(mk[:], plain)
 	return mk, true
 }
 

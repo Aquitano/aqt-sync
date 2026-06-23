@@ -47,6 +47,34 @@ func TestSessionCacheRoundTrip(t *testing.T) {
 	}
 }
 
+func TestSessionCacheIsMachineBound(t *testing.T) {
+	isolateConfigDir(t)
+
+	orig := machineSecretFn
+	t.Cleanup(func() { machineSecretFn = orig })
+
+	var mk crypto.MasterKey
+	for i := range mk {
+		mk[i] = byte(i)
+	}
+	machineSecretFn = func() []byte { return []byte("machine-A") }
+	if err := SaveSession("default", mk, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same file on a different machine (different secret) must not decrypt.
+	machineSecretFn = func() []byte { return []byte("machine-B") }
+	if _, ok := LoadSession("default"); ok {
+		t.Fatal("a session sealed on another machine must not open here")
+	}
+
+	// And once it fails to open, the unusable file is removed.
+	p, _ := sessionPath("default")
+	if _, err := os.Stat(p); !os.IsNotExist(err) {
+		t.Fatal("an undecryptable session should be removed")
+	}
+}
+
 func TestSessionCacheRejectsMalformed(t *testing.T) {
 	isolateConfigDir(t)
 
