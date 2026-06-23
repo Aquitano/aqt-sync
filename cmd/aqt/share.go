@@ -141,13 +141,20 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
+	// Optimistic concurrency: the rotate is a read-modify-write, so pin it to the
+	// version we just fetched. A concurrent sync committing between the GET and this
+	// PUT would otherwise be silently overwritten with stale content.
 	if _, err := cl.PutResource(api.PutResourceRequest{
-		ID:            id,
-		Visibility:    api.Private,
-		Blob:          blob,
-		EncryptedMeta: metaBlob,
-		WrappedKey:    &wrapped,
+		ID:              id,
+		Visibility:      api.Private,
+		Blob:            blob,
+		EncryptedMeta:   metaBlob,
+		WrappedKey:      &wrapped,
+		ExpectedVersion: res.Version,
 	}); err != nil {
+		if errors.Is(err, client.ErrConflict) {
+			return errors.New("resource changed while rotating its key; re-run `aqt private`")
+		}
 		return err
 	}
 
