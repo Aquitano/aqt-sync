@@ -110,15 +110,58 @@ CREATE TABLE IF NOT EXISTS chunks (
     PRIMARY KEY(owner_handle, chunk_id)
 );
 -- Which chunks a resource's current manifest references; the GC roots. Replaced
--- in full on every resource write, so it always reflects the live manifest.
+-- in full on every resource write, so it always reflects the live manifest. The
+-- FK to chunks (with foreign_keys on) is the backstop for the GC/dedup race: a
+-- manifest that references a chunk the owner no longer stores is rejected at PUT
+-- rather than committing a dangling reference that a later clone/pull can't read.
 CREATE TABLE IF NOT EXISTS resource_chunks (
-    resource_id TEXT NOT NULL,
-    chunk_id    TEXT NOT NULL,
-    PRIMARY KEY(resource_id, chunk_id)
+    resource_id  TEXT NOT NULL,
+    owner_handle TEXT NOT NULL,
+    chunk_id     TEXT NOT NULL,
+    PRIMARY KEY(resource_id, chunk_id),
+    FOREIGN KEY(owner_handle, chunk_id) REFERENCES chunks(owner_handle, chunk_id)
 );
 CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id);`
-	_, err := s.db.Exec(schema)
-	return err
+	if _, err := s.db.Exec(schema); err != nil {
+		return err
+	}
+	return s.checkSchema()
+}
+
+// checkSchema guards against a data dir created by an older build whose
+// resource_chunks predates the owner_handle column + FK. CREATE TABLE IF NOT
+// EXISTS silently no-ops over such a table, after which every chunked write fails
+// the INSERT with an opaque error and the FK backstop is absent. There is no
+// versioned migration yet (this feature is pre-release), so fail loudly with a
+// recoverable instruction instead of limping along corrupt.
+func (s *Store) checkSchema() error {
+	var hasOwner bool
+	rows, err := s.db.Query(`PRAGMA table_info(resource_chunks)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			cid, notnull, pk int
+			name, ctype      string
+			dflt             sql.NullString
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "owner_handle" {
+			hasOwner = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasOwner {
+		return errors.New("resource_chunks schema is from an older build (missing owner_handle); " +
+			"delete the server data dir and re-sync")
+	}
+	return nil
 }
 
 // --- Accounts & devices ---
@@ -296,16 +339,16 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		tx.Rollback()
 		return "", 0, err
 	}
-	if err := replaceResourceChunks(tx, id, req.ChunkRefs); err != nil {
+	if err := replaceResourceChunks(tx, id, owner, req.ChunkRefs); err != nil {
 		tx.Rollback()
 		return "", 0, err
 	}
-	if err := s.writeBlob(id, req.Blob.Ciphertext); err != nil {
+	if err := s.writeBlob(id, req.Blob.Nonce, req.Blob.Ciphertext); err != nil {
 		tx.Rollback()
 		return "", 0, err
 	}
 	if err := tx.Commit(); err != nil {
-		_ = os.Remove(s.blobPath(id)) // row never committed; drop the now-orphan blob
+		_ = os.Remove(s.blobPath(id, req.Blob.Nonce)) // row never committed; drop the now-orphan blob
 		return "", 0, err
 	}
 	return id, version, nil
@@ -331,6 +374,23 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 	}
 	version := current + 1
 
+	// Blobs are immutable per version: write the new version to its own durable
+	// file before the row commits, never mutating the live one. The committed
+	// row's version then selects the authoritative blob, so a crash or a failed
+	// write at any point can only orphan the new file, never pair the row's nonce
+	// with mismatched bytes (which would make the resource undecryptable). The new
+	// file is dropped unless the commit roots it.
+	newPath := s.blobPath(req.ID, req.Blob.Nonce)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(newPath)
+		}
+	}()
+	if err := s.writeBlob(req.ID, req.Blob.Nonce, req.Blob.Ciphertext); err != nil {
+		return "", 0, err
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", 0, err
@@ -350,19 +410,15 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 	}
 	// Replace the GC roots to match the new manifest; chunks only this version
 	// referenced become unreferenced and eligible for a later sweep.
-	if err := replaceResourceChunks(tx, req.ID, req.ChunkRefs); err != nil {
-		tx.Rollback()
-		return "", 0, err
-	}
-	// Atomic blob replace: on failure the temp file is discarded and the old
-	// blob stays, so rolling back the row leaves a consistent resource.
-	if err := s.writeBlob(req.ID, req.Blob.Ciphertext); err != nil {
+	if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
 		tx.Rollback()
 		return "", 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return "", 0, err
 	}
+	committed = true
+	s.removeStaleBlobs(req.ID, req.Blob.Nonce) // reclaim the superseded blob(s)
 	return req.ID, version, nil
 }
 
@@ -395,7 +451,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		return out, ErrNotFound
 	}
 
-	ciphertext, err := s.readBlob(id)
+	ciphertext, err := s.readBlob(id, nonce)
 	if err != nil {
 		return out, err
 	}
@@ -498,9 +554,7 @@ func (s *Store) DeleteResource(owner, id string) error {
 	if _, err := s.db.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
 		return err
 	}
-	if err := os.Remove(s.blobPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
+	s.removeStaleBlobs(id, nil) // drop every blob file for this resource
 	return nil
 }
 
@@ -510,14 +564,14 @@ func (s *Store) DeleteResource(owner, id string) error {
 // scoped to one owner. The server verifies the address on upload and otherwise
 // never inspects them.
 
-func replaceResourceChunks(tx *sql.Tx, resourceID string, refs []string) error {
+func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) error {
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, resourceID); err != nil {
 		return err
 	}
 	for _, id := range refs {
 		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO resource_chunks(resource_id, chunk_id) VALUES(?,?)`,
-			resourceID, id,
+			`INSERT OR IGNORE INTO resource_chunks(resource_id, owner_handle, chunk_id) VALUES(?,?,?)`,
+			resourceID, owner, id,
 		); err != nil {
 			return err
 		}
@@ -525,9 +579,16 @@ func replaceResourceChunks(tx *sql.Tx, resourceID string, refs []string) error {
 	return nil
 }
 
-// MissingChunks returns the subset of ids the owner does not already store.
+// MissingChunks returns the subset of ids the owner does not already store, and
+// re-arms the GC age guard on the ids it does (the dedup-hit set).
+//
+// A chunk present here is one the caller will reference in its imminent manifest
+// PUT but will not re-upload. Without the touch, a concurrent GC could reap an
+// old, momentarily-unreferenced chunk in the window between this check and that
+// PUT, leaving the committed manifest pointing at a deleted blob. Bumping
+// created_at keeps such a chunk past the age guard until the PUT roots it.
 func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
-	var missing []string
+	var missing, present []string
 	for _, id := range ids {
 		var one int
 		err := s.db.QueryRow(
@@ -540,13 +601,41 @@ func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+		present = append(present, id)
+	}
+	if err := s.touchChunks(owner, present); err != nil {
+		return nil, err
 	}
 	return missing, nil
 }
 
+// touchChunks resets created_at to now for the owner's given chunks, re-arming
+// the GC age guard so a sync that is about to reference them has time to commit.
+func (s *Store) touchChunks(owner string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	args := make([]any, 0, len(ids)+2)
+	args = append(args, time.Now().Unix())
+	for _, id := range ids {
+		args = append(args, id)
+	}
+	args = append(args, owner)
+	_, err := s.db.Exec(
+		`UPDATE chunks SET created_at = ? WHERE chunk_id IN (`+placeholders(len(ids))+`) AND owner_handle = ?`,
+		args...,
+	)
+	return err
+}
+
+// placeholders returns "?,?,..." with n entries for an IN clause.
+func placeholders(n int) string {
+	return strings.TrimPrefix(strings.Repeat(",?", n), ",")
+}
+
 // PutChunks stores chunks for the owner, verifying that each id is the hex sha256
-// of its data. Storage is idempotent: a chunk already present is left as-is (its
-// upload timestamp is not bumped, so the GC age guard still applies to it).
+// of its data. Storage is idempotent: re-uploading a present chunk bumps its
+// created_at, re-arming the GC age guard for a sync about to reference it.
 func (s *Store) PutChunks(owner string, chunks []api.ChunkData) (int, error) {
 	now := time.Now().Unix()
 	stored := 0
@@ -559,7 +648,8 @@ func (s *Store) PutChunks(owner string, chunks []api.ChunkData) (int, error) {
 			return stored, err
 		}
 		if _, err := s.db.Exec(
-			`INSERT OR IGNORE INTO chunks(owner_handle, chunk_id, length, created_at) VALUES(?,?,?,?)`,
+			`INSERT INTO chunks(owner_handle, chunk_id, length, created_at) VALUES(?,?,?,?)
+			 ON CONFLICT(owner_handle, chunk_id) DO UPDATE SET created_at = excluded.created_at`,
 			owner, ch.ID, len(ch.Data), now,
 		); err != nil {
 			return stored, err
@@ -605,9 +695,7 @@ func (s *Store) GCChunks(owner string, minAge time.Duration) (int, error) {
 		`SELECT chunk_id FROM chunks
 		 WHERE owner_handle = ? AND created_at < ?
 		   AND chunk_id NOT IN (
-		     SELECT rc.chunk_id FROM resource_chunks rc
-		     JOIN resources r ON r.id = rc.resource_id
-		     WHERE r.owner_handle = ?
+		     SELECT resource_chunks.chunk_id FROM resource_chunks WHERE resource_chunks.owner_handle = ?
 		   )`,
 		owner, cutoff, owner,
 	)
@@ -642,31 +730,53 @@ func (s *Store) GCChunks(owner string, minAge time.Duration) (int, error) {
 }
 
 // --- blob store ---
+//
+// A resource's blob is stored as one immutable file per nonce
+// (blobs/<id>.<hex-nonce>.bin). Each reseal draws a fresh nonce, so a content
+// change writes a new file and never mutates an existing one; the resource's row
+// (which carries the live blob_nonce) selects the authoritative file. A
+// half-applied write can therefore only orphan a new file, never pair the row's
+// nonce with mismatched bytes. A visibility flip keeps the nonce, so it needs no
+// blob rewrite. Superseded files are reclaimed after the row that supersedes
+// them commits.
 
-func (s *Store) blobPath(id string) string { return filepath.Join(s.blobsDir, id+".bin") }
-
-// writeBlob writes ciphertext via a temp file then rename, so a replace either
-// fully swaps in the new content or leaves the old blob untouched.
-func (s *Store) writeBlob(id string, ciphertext []byte) error {
-	final := s.blobPath(id)
-	tmp := final + ".tmp"
-	if err := os.WriteFile(tmp, ciphertext, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, final); err != nil {
-		// Windows MoveFile fails when the destination exists; replace it. The
-		// brief non-atomic window is acceptable for v1.
-		_ = os.Remove(final)
-		if err := os.Rename(tmp, final); err != nil {
-			_ = os.Remove(tmp)
-			return err
-		}
-	}
-	return nil
+func (s *Store) blobPath(id string, nonce []byte) string {
+	return filepath.Join(s.blobsDir, id+"."+hex.EncodeToString(nonce)+".bin")
 }
 
-func (s *Store) readBlob(id string) ([]byte, error) {
-	b, err := os.ReadFile(s.blobPath(id))
+// writeBlob writes a blob to its nonce-addressed file and fsyncs it, so the bytes
+// are durable before the referencing row commits.
+func (s *Store) writeBlob(id string, nonce, ciphertext []byte) error {
+	f, err := os.OpenFile(s.blobPath(id, nonce), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(ciphertext); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
+}
+
+// removeStaleBlobs deletes every blob file of id except the one for keepNonce
+// (pass nil to drop them all). Best-effort: a leak here costs only disk, never
+// correctness.
+func (s *Store) removeStaleBlobs(id string, keepNonce []byte) {
+	keep := s.blobPath(id, keepNonce)
+	matches, _ := filepath.Glob(filepath.Join(s.blobsDir, id+".*.bin"))
+	for _, m := range matches {
+		if m != keep {
+			_ = os.Remove(m)
+		}
+	}
+}
+
+func (s *Store) readBlob(id string, nonce []byte) ([]byte, error) {
+	b, err := os.ReadFile(s.blobPath(id, nonce))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrNotFound
 	}
