@@ -45,6 +45,12 @@ func FileBytes(e Entry, fetch func(id string) ([]byte, error)) ([]byte, error) {
 
 // WriteFile writes an entry's bytes under dir at its relative path, creating
 // parent directories and applying the recorded mode.
+//
+// It writes a sibling temp file, fsyncs it, and renames it into place. Rename
+// replaces whatever currently occupies the path atomically and without following
+// it, so a crash mid-write leaves the old file or the new one but never a
+// truncated mix, and a stale local symlink is overwritten in place rather than
+// followed (os.WriteFile would write through it to a possibly out-of-tree target).
 func WriteFile(dir string, e Entry, data []byte) error {
 	full, err := safeJoin(dir, e.Path)
 	if err != nil {
@@ -57,7 +63,28 @@ func WriteFile(dir string, e Entry, data []byte) error {
 	if mode == 0 {
 		mode = 0o600
 	}
-	return os.WriteFile(full, data, mode)
+
+	tmp, err := os.CreateTemp(filepath.Dir(full), ".aqt-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName) // no-op once renamed; cleans up every failure path
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, mode); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, full)
 }
 
 // WriteSymlink recreates a symlink entry under dir, pointing at its stored target

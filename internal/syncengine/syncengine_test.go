@@ -212,6 +212,55 @@ func TestWriteFileRejectsPathEscape(t *testing.T) {
 	}
 }
 
+func TestWriteFileReplacesStaleSymlinkInsteadOfFollowing(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	victim := filepath.Join(outside, "victim.txt")
+	if err := os.WriteFile(victim, []byte("do not touch"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A stale local symlink points out of the tree. A peer flipping this path from
+	// a symlink to a regular file must not let the write land on the link target.
+	link := filepath.Join(root, "entry")
+	if err := os.Symlink(victim, link); err != nil {
+		t.Skipf("symlinks unsupported on this filesystem: %v", err)
+	}
+	if err := WriteFile(root, Entry{Path: "entry", Mode: 0o600}, []byte("new content")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "do not touch" {
+		t.Fatalf("write followed the stale symlink to its target: victim = %q", got)
+	}
+	fi, err := os.Lstat(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("path is still a symlink; the stale link was not replaced")
+	}
+	if got, _ := os.ReadFile(link); string(got) != "new content" {
+		t.Fatalf("entry content = %q, want new content", got)
+	}
+}
+
+func TestWriteFileLeavesNoTempBehind(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteFile(dir, Entry{Path: "nested/file.txt", Mode: 0o640}, []byte("payload")); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "nested/file.txt"))
+	if err != nil || string(got) != "payload" {
+		t.Fatalf("content = %q err=%v, want payload", got, err)
+	}
+	entries, err := os.ReadDir(filepath.Join(dir, "nested"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("destination dir has %d entries, want 1 (a staged temp leaked)", len(entries))
+	}
+}
+
 func TestNestedAqtignore(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, ".aqtignore", []byte("*.log\n"))
