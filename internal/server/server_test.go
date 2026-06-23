@@ -424,6 +424,40 @@ func TestShareViewLandingPage(t *testing.T) {
 	}
 }
 
+func TestChunkEndpointsRoundTrip(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.signup("chunkapi@example.com", "passphrase for chunk api")
+	a := chunkOf("hello chunk world")
+
+	var check api.ChunkCheckResponse
+	if code := h.do(http.MethodPost, "/v1/chunks/check", token,
+		api.ChunkCheckRequest{IDs: []string{a.ID}}, &check); code != http.StatusOK {
+		t.Fatalf("check: %d", code)
+	}
+	if len(check.Missing) != 1 {
+		t.Fatalf("expected 1 missing before upload, got %d", len(check.Missing))
+	}
+
+	if code := h.do(http.MethodPost, "/v1/chunks", token,
+		api.ChunkUploadRequest{Chunks: []api.ChunkData{a}}, nil); code != http.StatusOK {
+		t.Fatalf("upload: %d", code)
+	}
+	var fetch api.ChunkFetchResponse
+	if code := h.do(http.MethodPost, "/v1/chunks/fetch", token,
+		api.ChunkFetchRequest{IDs: []string{a.ID}}, &fetch); code != http.StatusOK {
+		t.Fatalf("fetch: %d", code)
+	}
+	if len(fetch.Chunks) != 1 || string(fetch.Chunks[0].Data) != "hello chunk world" {
+		t.Fatalf("fetch returned %+v", fetch.Chunks)
+	}
+
+	// The chunk store requires auth.
+	if code := h.do(http.MethodPost, "/v1/chunks/check", "",
+		api.ChunkCheckRequest{IDs: []string{a.ID}}, nil); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated chunk check: got %d, want 401", code)
+	}
+}
+
 func mustSalt(h *harness, email string) crypto.KdfParams {
 	h.t.Helper()
 	var salt api.SaltResponse

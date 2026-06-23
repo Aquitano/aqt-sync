@@ -56,6 +56,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), pushCmd(), pullCmd(), lsCmd(), shareCmd(), privateCmd())
+	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd())
 	return root
 }
 

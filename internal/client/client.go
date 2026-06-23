@@ -96,6 +96,33 @@ func (c *Client) DeleteResource(id string) error {
 	return c.do(http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil, nil)
 }
 
+// CheckChunks returns which of the given chunk ids the server is missing.
+func (c *Client) CheckChunks(ids []string) ([]string, error) {
+	var r api.ChunkCheckResponse
+	err := c.do(http.MethodPost, "/v1/chunks/check", api.ChunkCheckRequest{IDs: ids}, &r)
+	return r.Missing, err
+}
+
+// PutChunks uploads a batch of content-addressed chunks. The caller is
+// responsible for keeping a batch under the server body cap.
+func (c *Client) PutChunks(chunks []api.ChunkData) error {
+	return c.do(http.MethodPost, "/v1/chunks", api.ChunkUploadRequest{Chunks: chunks}, nil)
+}
+
+// FetchChunks downloads a batch of chunks by id.
+func (c *Client) FetchChunks(ids []string) ([]api.ChunkData, error) {
+	var r api.ChunkFetchResponse
+	err := c.do(http.MethodPost, "/v1/chunks/fetch", api.ChunkFetchRequest{IDs: ids}, &r)
+	return r.Chunks, err
+}
+
+// GC asks the server to sweep the owner's unreferenced chunks.
+func (c *Client) GC() (int, error) {
+	var r api.GCResponse
+	err := c.do(http.MethodPost, "/v1/gc", nil, &r)
+	return r.Deleted, err
+}
+
 func (c *Client) do(method, path string, body, out any) error {
 	var reader io.Reader
 	if body != nil {

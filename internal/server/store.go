@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,20 +30,24 @@ var ErrConflict = errors.New("conflict")
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs on the filesystem. It holds no plaintext and no live keys.
 type Store struct {
-	db       *sql.DB
-	blobsDir string
+	db        *sql.DB
+	blobsDir  string
+	chunksDir string
 }
 
 func OpenStore(dataDir string) (*Store, error) {
 	blobsDir := filepath.Join(dataDir, "blobs")
-	if err := os.MkdirAll(blobsDir, 0o700); err != nil {
-		return nil, fmt.Errorf("create data dir: %w", err)
+	chunksDir := filepath.Join(dataDir, "chunks")
+	for _, d := range []string{blobsDir, chunksDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			return nil, fmt.Errorf("create data dir: %w", err)
+		}
 	}
 	db, err := sql.Open("sqlite", filepath.Join(dataDir, "aqt.db"))
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
-	s := &Store{db: db, blobsDir: blobsDir}
+	s := &Store{db: db, blobsDir: blobsDir, chunksDir: chunksDir}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -80,7 +85,22 @@ CREATE TABLE IF NOT EXISTS resources (
     wrapped_key    TEXT,
     blob_nonce     BLOB NOT NULL,
     version        INTEGER NOT NULL
-);`
+);
+CREATE TABLE IF NOT EXISTS chunks (
+    owner_handle TEXT NOT NULL,
+    chunk_id     TEXT NOT NULL,
+    length       INTEGER NOT NULL,
+    created_at   INTEGER NOT NULL,
+    PRIMARY KEY(owner_handle, chunk_id)
+);
+-- Which chunks a resource's current manifest references; the GC roots. Replaced
+-- in full on every resource write, so it always reflects the live manifest.
+CREATE TABLE IF NOT EXISTS resource_chunks (
+    resource_id TEXT NOT NULL,
+    chunk_id    TEXT NOT NULL,
+    PRIMARY KEY(resource_id, chunk_id)
+);
+CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id);`
 	_, err := s.db.Exec(schema)
 	return err
 }
@@ -260,6 +280,10 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		tx.Rollback()
 		return "", 0, err
 	}
+	if err := replaceResourceChunks(tx, id, req.ChunkRefs); err != nil {
+		tx.Rollback()
+		return "", 0, err
+	}
 	if err := s.writeBlob(id, req.Blob.Ciphertext); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -294,6 +318,12 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, req.ID, owner,
 	)
 	if err != nil {
+		tx.Rollback()
+		return "", 0, err
+	}
+	// Replace the GC roots to match the new manifest; chunks only this version
+	// referenced become unreferenced and eligible for a later sweep.
+	if err := replaceResourceChunks(tx, req.ID, req.ChunkRefs); err != nil {
 		tx.Rollback()
 		return "", 0, err
 	}
@@ -436,10 +466,152 @@ func (s *Store) DeleteResource(owner, id string) error {
 	if n == 0 {
 		return ErrNotFound
 	}
+	// Drop the GC roots; the chunks themselves are reclaimed by a later sweep
+	// (they may still be referenced by another of the owner's resources).
+	if _, err := s.db.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
+		return err
+	}
 	if err := os.Remove(s.blobPath(id)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+// --- chunk store ---
+//
+// Chunks are opaque, content-addressed (id = hex sha256 of the ciphertext), and
+// scoped to one owner. The server verifies the address on upload and otherwise
+// never inspects them.
+
+func replaceResourceChunks(tx *sql.Tx, resourceID string, refs []string) error {
+	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, resourceID); err != nil {
+		return err
+	}
+	for _, id := range refs {
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO resource_chunks(resource_id, chunk_id) VALUES(?,?)`,
+			resourceID, id,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MissingChunks returns the subset of ids the owner does not already store.
+func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
+	var missing []string
+	for _, id := range ids {
+		var one int
+		err := s.db.QueryRow(
+			`SELECT 1 FROM chunks WHERE owner_handle = ? AND chunk_id = ?`, owner, id,
+		).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			missing = append(missing, id)
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return missing, nil
+}
+
+// PutChunks stores chunks for the owner, verifying that each id is the hex sha256
+// of its data. Storage is idempotent: a chunk already present is left as-is (its
+// upload timestamp is not bumped, so the GC age guard still applies to it).
+func (s *Store) PutChunks(owner string, chunks []api.ChunkData) (int, error) {
+	now := time.Now().Unix()
+	stored := 0
+	for _, ch := range chunks {
+		sum := sha256.Sum256(ch.Data)
+		if hex.EncodeToString(sum[:]) != ch.ID {
+			return stored, fmt.Errorf("chunk %s: data does not match its id", ch.ID)
+		}
+		if err := s.writeChunk(owner, ch.ID, ch.Data); err != nil {
+			return stored, err
+		}
+		if _, err := s.db.Exec(
+			`INSERT OR IGNORE INTO chunks(owner_handle, chunk_id, length, created_at) VALUES(?,?,?,?)`,
+			owner, ch.ID, len(ch.Data), now,
+		); err != nil {
+			return stored, err
+		}
+		stored++
+	}
+	return stored, nil
+}
+
+// GetChunks returns the owner's chunks for the given ids. Ids the owner does not
+// have are silently skipped (the caller treats a short result as missing data).
+func (s *Store) GetChunks(owner string, ids []string) ([]api.ChunkData, error) {
+	out := make([]api.ChunkData, 0, len(ids))
+	for _, id := range ids {
+		var one int
+		err := s.db.QueryRow(
+			`SELECT 1 FROM chunks WHERE owner_handle = ? AND chunk_id = ?`, owner, id,
+		).Scan(&one)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		data, err := os.ReadFile(s.chunkPath(owner, id))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, err
+		}
+		out = append(out, api.ChunkData{ID: id, Data: data})
+	}
+	return out, nil
+}
+
+// GCChunks deletes the owner's chunks that no live resource references and that
+// were uploaded longer ago than minAge. The age guard keeps an in-flight push's
+// freshly uploaded chunks from being reaped before its manifest commits.
+func (s *Store) GCChunks(owner string, minAge time.Duration) (int, error) {
+	cutoff := time.Now().Add(-minAge).Unix()
+	rows, err := s.db.Query(
+		`SELECT chunk_id FROM chunks
+		 WHERE owner_handle = ? AND created_at < ?
+		   AND chunk_id NOT IN (
+		     SELECT rc.chunk_id FROM resource_chunks rc
+		     JOIN resources r ON r.id = rc.resource_id
+		     WHERE r.owner_handle = ?
+		   )`,
+		owner, cutoff, owner,
+	)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	var dead []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return 0, err
+		}
+		dead = append(dead, id)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+
+	deleted := 0
+	for _, id := range dead {
+		if _, err := s.db.Exec(`DELETE FROM chunks WHERE owner_handle = ? AND chunk_id = ?`, owner, id); err != nil {
+			return deleted, err
+		}
+		if err := os.Remove(s.chunkPath(owner, id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return deleted, err
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 // --- blob store ---
@@ -472,6 +644,29 @@ func (s *Store) readBlob(id string) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	return b, err
+}
+
+// chunkPath fans out content-addressed chunks by their id prefix to keep any one
+// directory small: chunks/<owner>/<ab>/<cd>/<id>.bin. The id is hex, so the path
+// is safe on case-insensitive filesystems.
+func (s *Store) chunkPath(owner, id string) string {
+	return filepath.Join(s.chunksDir, owner, id[0:2], id[2:4], id+".bin")
+}
+
+func (s *Store) writeChunk(owner, id string, data []byte) error {
+	path := s.chunkPath(owner, id)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // newID returns a URL-safe random identifier encoding nBytes of entropy.

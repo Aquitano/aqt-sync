@@ -49,6 +49,12 @@ func (s *Server) Router() *gin.Engine {
 			authed.GET("/resources", s.listResources)
 			authed.POST("/resources/:id/visibility", s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
+
+			// Folder-sync chunk store: opaque, content-addressed, owner-scoped.
+			authed.POST("/chunks/check", s.checkChunks)
+			authed.POST("/chunks", s.uploadChunks)
+			authed.POST("/chunks/fetch", s.fetchChunks)
+			authed.POST("/gc", s.runGC)
 		}
 	}
 	return r

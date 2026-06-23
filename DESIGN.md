@@ -210,8 +210,8 @@ files (FastCDC), deduplicating chunks per account, and storing a sealed manifest
 as an ordinary resource — see 4.2a. v1 tracked folders are **private** (your own
 machines), which keeps the chunk store uniformly owner-scoped; sharing a whole
 folder publicly is deferred (single-file `--public` already covers sharing).
-Not yet built: the `watch` daemon, public whole-folder sharing, and in-browser
-decryption on the `/x/<id>` page.
+Not yet built: the `watch` daemon, pack-and-seal folders (`.aqtconfig pack=true`),
+public whole-folder sharing, and in-browser decryption on the `/x/<id>` page.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
 to override), then `aqt --server http://localhost:8080 login`.
@@ -344,9 +344,10 @@ No refcounts — the manifests are the source of truth, which survives crashes.
 
 **`.aqtignore`** uses a pragmatic gitignore subset (comments, anchored paths,
 `*`/`?`/`**` globs, trailing-slash dir rules); `.aqt/` is always ignored.
-**`.aqtconfig`** (JSON) sets per-folder options; `pack` selects pack-and-seal (the
-whole tree tarred into one sealed blob, no chunk-level dedup) instead of the
-chunked default.
+**`.aqtconfig`** (JSON) sets per-folder options; `pack` is reserved for
+pack-and-seal (the whole tree tarred into one sealed blob, no chunk-level dedup)
+instead of the chunked default — parsed today, but `sync` errors on `pack=true`
+until that path is built (the chunked default is what ships).
 
 ### 4.3 Server HTTP API (`@aqt/server`)
 

@@ -9,8 +9,20 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
+// isolateConfigDir points os.UserConfigDir at a throwaway directory on every
+// platform, so the test never touches (or deletes) the developer's real cached
+// session. UserConfigDir reads AppData on Windows, XDG_CONFIG_HOME on Linux, and
+// $HOME/Library/Application Support on macOS.
+func isolateConfigDir(t *testing.T) {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("AppData", dir)
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	t.Setenv("HOME", dir)
+}
+
 func TestSessionCacheRoundTrip(t *testing.T) {
-	t.Setenv("AppData", t.TempDir()) // isolate the config dir (Windows UserConfigDir)
+	isolateConfigDir(t)
 
 	var mk crypto.MasterKey
 	for i := range mk {
@@ -36,7 +48,7 @@ func TestSessionCacheRoundTrip(t *testing.T) {
 }
 
 func TestSessionCacheRejectsMalformed(t *testing.T) {
-	t.Setenv("AppData", t.TempDir())
+	isolateConfigDir(t)
 
 	p, err := sessionPath("default")
 	if err != nil {
