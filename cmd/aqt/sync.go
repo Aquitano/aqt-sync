@@ -356,8 +356,11 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
 		// Reclaim chunks the superseded manifest version no longer references.
-		// Best-effort: a sync that uploaded fine should not fail on cleanup.
-		if n, err := c.cl.GC(); err == nil && n > 0 {
+		// Best-effort: a sync that uploaded fine should not fail on cleanup, but a
+		// failure is worth a line since GC is the one step that deletes blobs.
+		if n, err := c.cl.GC(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: chunk GC failed: %v\n", err)
+		} else if n > 0 {
 			fmt.Fprintf(os.Stderr, "reclaimed %d unreferenced chunks\n", n)
 		}
 	}
