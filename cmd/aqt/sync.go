@@ -356,6 +356,17 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		}
 	}
 
+	// Fold paths that converged to identical content on both sides into the new
+	// base. Plan emits no action for them (there is nothing to transfer), so without
+	// this they stay "changed on both sides" forever: a later remote-only delete is
+	// then misread as a local add, the file is re-pushed, and the deletion never
+	// propagates.
+	for p, le := range localByPath {
+		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
+			newBase[p] = re
+		}
+	}
+
 	// Push the server-side change FIRST. Uploading chunks and PUTting the manifest
 	// before any local file is touched means a version conflict (another sync
 	// committed first) returns with nothing half-applied on disk, so the caller
