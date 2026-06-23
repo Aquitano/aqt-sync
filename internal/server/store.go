@@ -47,10 +47,22 @@ func OpenStore(dataDir string) (*Store, error) {
 			return nil, fmt.Errorf("create data dir: %w", err)
 		}
 	}
-	db, err := sql.Open("sqlite", filepath.Join(dataDir, "aqt.db"))
+	// busy_timeout lets a writer wait out a momentarily-locked database instead
+	// of failing the request with SQLITE_BUSY; WAL keeps readers off the writer's
+	// back; foreign_keys turns on the resource_chunks -> chunks reference so a
+	// dangling chunk reference fails the write loudly instead of inserting silently.
+	dsn := filepath.Join(dataDir, "aqt.db") +
+		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
+	// One writer connection. The store has no in-process lock around chunk
+	// uploads, GC, or creates, so two writers on separate connections would race
+	// to SQLITE_BUSY and surface as 500s the client never retries. A single
+	// connection serializes every write in-process. This suits the v1
+	// single-instance server; horizontal scaling would need real row locks.
+	db.SetMaxOpenConns(1)
 	s := &Store{db: db, blobsDir: blobsDir, chunksDir: chunksDir}
 	if err := s.migrate(); err != nil {
 		db.Close()
