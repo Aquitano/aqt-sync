@@ -190,10 +190,10 @@ cmd/aqt/            CLI: login/logout, whoami, push, pull, ls, share, private  [
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
-internal/server/    Gin handlers + SQLite/FS store                             [implemented + tested]
+internal/server/    Gin handlers + SQLite/FS store + chunk store + GC           [implemented + tested]
 internal/identity/  local profile, keystore, session cache                     [implemented + tested]
 internal/client/    HTTP API client                                            [implemented]
-internal/syncengine/  tracked-folder snapshot/diff                             [TODO]
+internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
 ```
 
 Working end-to-end today: signup/device-attach (Ed25519 challenge/response),
@@ -204,8 +204,14 @@ under the owner's master key, so even public resources can later be shared/rotat
 Verified by `go test ./...` plus live multi-machine cycles. A public share link
 (`/x/<id>`) opens a landing page that resolves the resource and shows the `aqt
 pull` command; in-browser decryption is deferred (the CLI does the decrypt).
-Not yet built: tracked-folder `init`/`sync`/`status`, the `watch` daemon, and
-in-browser decryption on the `/x/<id>` page.
+
+Tracked folders (`init`/`status`/`sync`/`clone`) sync a directory by chunking its
+files (FastCDC), deduplicating chunks per account, and storing a sealed manifest
+as an ordinary resource — see 4.2a. v1 tracked folders are **private** (your own
+machines), which keeps the chunk store uniformly owner-scoped; sharing a whole
+folder publicly is deferred (single-file `--public` already covers sharing).
+Not yet built: the `watch` daemon, public whole-folder sharing, and in-browser
+decryption on the `/x/<id>` page.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
 to override), then `aqt --server http://localhost:8080 login`.
@@ -294,6 +300,54 @@ function plan(local: Manifest, base: Manifest, remote: Manifest): SyncPlan;  // 
 `base` is the last-synced manifest cached in `.aqt/`. A `conflict` action is never
 auto-resolved unless `--force` is passed.
 
+### 4.2a Folder sync — implemented design
+
+The TS sketch above predates the build; the authoritative interfaces are the Go
+signatures in `internal/syncengine` and `internal/crypto`. What ships:
+
+**A folder is a resource whose blob is a sealed manifest.** `init` creates a
+private resource; `sync` uploads new chunks then PUTs an updated, re-sealed
+manifest (version++); `clone` fetches the manifest and the chunks it references.
+Ownership, versioning, and the master-key-wrapped content key are inherited from
+the resource model unchanged.
+
+**Chunking + dedup.** Files at or below an inline threshold (the FastCDC minimum)
+are stored inline in the manifest (which is itself sealed), so a tree of many
+tiny files never spawns tiny on-disk blobs. Larger files are split with **FastCDC**
+(content-defined, so an edit re-chunks locally around the change). Each chunk is
+sealed with **keyed convergent encryption**:
+
+```
+convergenceKey = HKDF(masterKey, "aqt-convergence-v1")     // account-scoped, never sent
+chunkKey       = HKDF(convergenceKey, sha256(plaintext))    // unique per distinct plaintext
+ciphertext     = XChaCha20-Poly1305(chunkKey, nonce=0, plaintext)   // deterministic
+chunkID        = hex(sha256(ciphertext))                    // server storage address
+```
+
+Same account + same bytes → identical `ciphertext`/`chunkID`, so the server stores
+one copy (dedup spans all of the account's folders). Different accounts derive a
+different `convergenceKey`, so identical plaintext yields different ciphertext and
+ID — no cross-user equality oracle. The zero nonce is safe because `chunkKey`
+never repeats for distinct plaintext. The per-chunk `chunkKey` lives only in the
+sealed manifest; the server holds ciphertext addressed by `chunkID` and nothing
+else. Hex (not base64url) IDs avoid collisions on case-insensitive filesystems.
+
+**Storage layout.** Sealed-blob resources keep `blobs/<id>.bin`. Chunks live in a
+content-addressed, per-owner store with two-level fanout:
+`chunks/<owner>/<ab>/<cd>/<chunkID>.bin`. The server records, per resource, which
+chunk IDs its current manifest references (opaque hashes) so GC has roots.
+
+**GC = mark-and-sweep, per owner.** Roots are the chunk references of the owner's
+live resources; chunks not reachable from any root *and* older than an age guard
+(so an in-flight upload isn't reaped before its manifest commits) are deleted.
+No refcounts — the manifests are the source of truth, which survives crashes.
+
+**`.aqtignore`** uses a pragmatic gitignore subset (comments, anchored paths,
+`*`/`?`/`**` globs, trailing-slash dir rules); `.aqt/` is always ignored.
+**`.aqtconfig`** (JSON) sets per-folder options; `pack` selects pack-and-seal (the
+whole tree tarred into one sealed blob, no chunk-level dedup) instead of the
+chunked default.
+
 ### 4.3 Server HTTP API (`@aqt/server`)
 
 Zero-knowledge REST over HTTPS. Auth is a bearer device token (`Authorization:
@@ -320,8 +374,15 @@ POST   /v1/resources/:id/visibility  Body: { visibility, ciphertext, encryptedMe
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility).
 
-# Tracked folders are resources whose blob is an encrypted manifest + child blobs.
-GET    /v1/resources/:id/manifest    → sealed manifest blob (client decrypts).
+# Tracked folders: the folder's blob IS the sealed manifest, so it uses the
+# resource routes above; PUT additionally carries chunkRefs (the chunk ids the
+# new manifest references) so the server can root GC. Chunks are opaque,
+# content-addressed, owner-scoped, and all require the owner token:
+POST   /v1/chunks/check              Body: { ids } → { missing }   (have/want before upload)
+POST   /v1/chunks                    Body: { chunks: [{ id, data }] } → { stored }
+                                     Server verifies sha256(data)==id, stores under the owner.
+POST   /v1/chunks/fetch              Body: { ids } → { chunks: [{ id, data }] }
+POST   /v1/gc                        Mark-and-sweep the owner's unreferenced chunks → { deleted }
 ```
 
 The server enforces: ownership, visibility (a private id returns 404 to anyone but
@@ -355,7 +416,9 @@ function currentSession(): Session | null;                                 // fo
 
 ## 5. Open implementation questions (not blocking the interface)
 
-- **Chunked streaming for large files** — `seal/open` currently seals the whole payload in memory; the server caps a body at 32 MiB. Content-defined chunking + dedup is deferred.
+- **Large single files / streaming** — `push`/`pull` still seal a whole file in memory under the 32 MiB body cap. Folder sync chunks files (FastCDC) and uploads chunks in batches, so a tracked large file is fine; a single `aqt push` of a >32 MiB file is not yet streamed.
+- **Manifest size** — a folder's sealed manifest is one resource blob, so it shares the 32 MiB cap. Huge trees that overflow it would need a split/subtree manifest (deferred).
+- **Public whole-folder sharing** — v1 tracked folders are private, so the chunk store is uniformly owner-scoped. Sharing a folder publicly needs its chunks under the folder key (not the account convergence key) in a publicly-readable space — deferred.
 - **Argon2id tuning** (`time`/`memory`) per machine.
 - **Account-enumeration oracle** — `GET /account/salt` confirms which emails are registered, and auth endpoints have no rate limiting.
 - **Defense-in-depth crypto** — AEAD additional-data domain separation across blob/wrap/gated-wrap; complete key wiping (`ContentKey` has no `Wipe`).
@@ -364,7 +427,9 @@ function currentSession(): Session | null;                                 // fo
 
 Resolved since the first draft: device attach is now an Ed25519 challenge/response
 (no secret sent); resources support owner-checked in-place update + versioning; the
-passphrase is cached per session so it is entered once, not per command.
+passphrase is cached per session so it is entered once, not per command. Content-
+defined chunking + dedup is built for folders (FastCDC + keyed convergent
+encryption, §4.2a); chunk lifecycle is mark-and-sweep GC scoped per owner.
 
 These are deliberately left to implementation; the interfaces above don't change
 based on how they're answered.
