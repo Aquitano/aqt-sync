@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"testing"
 	"time"
 
@@ -97,6 +98,39 @@ func TestChunkStoreRoundTripAndGC(t *testing.T) {
 	}
 	if deleted, err := s.GCChunks(owner, forceGC); err != nil || deleted != 1 {
 		t.Fatalf("gc after delete removed %d err=%v, want 1", deleted, err)
+	}
+}
+
+func TestUpdateResourceVersionConflict(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "occ@example.com")
+	ck, _ := crypto.GenerateContentKey()
+
+	req := func(id string, expected int, body string) api.PutResourceRequest {
+		blob, _ := crypto.Seal([]byte(body), ck)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+		return api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+			WrappedKey: &wrapped, ExpectedVersion: expected,
+		}
+	}
+
+	id, v, err := s.PutResource(owner, req("", 0, "v1"))
+	if err != nil || v != 1 {
+		t.Fatalf("create: v=%d err=%v", v, err)
+	}
+	// An update based on the current version succeeds and bumps it.
+	if _, v2, err := s.PutResource(owner, req(id, 1, "v2")); err != nil || v2 != 2 {
+		t.Fatalf("update@1: v=%d err=%v", v2, err)
+	}
+	// A second update still claiming version 1 is stale and must be rejected.
+	if _, _, err := s.PutResource(owner, req(id, 1, "v3")); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale update: got %v, want ErrVersionConflict", err)
+	}
+	// Catching up to the current version works again (the retry path).
+	if _, v3, err := s.PutResource(owner, req(id, 2, "v3")); err != nil || v3 != 3 {
+		t.Fatalf("update@2: v=%d err=%v", v3, err)
 	}
 }
 

@@ -20,6 +20,10 @@ import (
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
 var ErrNotFound = errors.New("not found")
 
+// ErrConflict maps a 409 so callers can distinguish a version conflict (the
+// resource moved under them) and retry against the new state.
+var ErrConflict = errors.New("conflict")
+
 type Client struct {
 	baseURL string
 	token   string
@@ -152,6 +156,9 @@ func (c *Client) do(method, path string, body, out any) error {
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode == http.StatusNotFound {
 		return ErrNotFound
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return ErrConflict
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var e api.ErrorResponse

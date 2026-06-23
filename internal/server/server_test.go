@@ -424,6 +424,36 @@ func TestShareViewLandingPage(t *testing.T) {
 	}
 }
 
+func TestPutResourceVersionConflictReturns409(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("occ-http@example.com", "passphrase for occ http")
+	ck, _ := crypto.GenerateContentKey()
+
+	put := func(id string, expected int, body string) (api.PutResourceResponse, int) {
+		blob, _ := crypto.Seal([]byte(body), ck)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+		var resp api.PutResourceResponse
+		code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+			WrappedKey: &wrapped, ExpectedVersion: expected,
+		}, &resp)
+		return resp, code
+	}
+
+	created, code := put("", 0, "v1")
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d", code)
+	}
+	if _, code := put(created.ID, 1, "v2"); code != http.StatusOK {
+		t.Fatalf("update@1: %d", code)
+	}
+	// Second writer still based on version 1 must be told to re-sync.
+	if _, code := put(created.ID, 1, "v3"); code != http.StatusConflict {
+		t.Fatalf("stale update: got %d, want 409", code)
+	}
+}
+
 func TestChunkEndpointsRoundTrip(t *testing.T) {
 	h := newHarness(t)
 	token, _ := h.signup("chunkapi@example.com", "passphrase for chunk api")

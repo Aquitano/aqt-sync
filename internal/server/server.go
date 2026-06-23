@@ -224,6 +224,10 @@ func (s *Server) putResource(c *gin.Context) {
 		defer s.resLocks.lock(req.ID)()
 	}
 	id, version, err := s.store.PutResource(owner, req)
+	if errors.Is(err, ErrVersionConflict) {
+		abort(c, http.StatusConflict, "resource changed since you last fetched it; re-sync")
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		// Update targeting an id the caller doesn't own (or that doesn't exist).
 		abort(c, http.StatusNotFound, "not found")

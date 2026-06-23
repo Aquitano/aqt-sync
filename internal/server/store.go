@@ -27,6 +27,10 @@ var ErrNotFound = errors.New("not found")
 // ErrConflict is returned when a unique constraint (e.g. duplicate email) fails.
 var ErrConflict = errors.New("conflict")
 
+// ErrVersionConflict is returned when an update's ExpectedVersion no longer
+// matches the stored version: another writer got there first.
+var ErrVersionConflict = errors.New("version conflict")
+
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs on the filesystem. It holds no plaintext and no live keys.
 type Store struct {
@@ -296,30 +300,41 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 }
 
 func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
-	var version int
+	var current int
 	err := s.db.QueryRow(
 		`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
-	).Scan(&version)
+	).Scan(&current)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, ErrNotFound
 	}
 	if err != nil {
 		return "", 0, err
 	}
-	version++
+	// Optimistic concurrency: a client that based its update on an older version
+	// is rejected so a concurrent write is never lost. (The per-resource server
+	// lock makes this check-then-update atomic; the WHERE version=? on the UPDATE
+	// is a second line of defense.)
+	if req.ExpectedVersion > 0 && current != req.ExpectedVersion {
+		return "", 0, ErrVersionConflict
+	}
+	version := current + 1
 
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", 0, err
 	}
-	_, err = tx.Exec(
+	res, err := tx.Exec(
 		`UPDATE resources SET visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?
-		 WHERE id=? AND owner_handle=?`,
-		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, req.ID, owner,
+		 WHERE id=? AND owner_handle=? AND version=?`,
+		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, req.ID, owner, current,
 	)
 	if err != nil {
 		tx.Rollback()
 		return "", 0, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		tx.Rollback()
+		return "", 0, ErrVersionConflict
 	}
 	// Replace the GC roots to match the new manifest; chunks only this version
 	// referenced become unreferenced and eligible for a later sweep.

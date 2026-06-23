@@ -74,13 +74,19 @@ type SaltResponse struct {
 //
 // ChunkRefs lists the chunk ids the blob (a folder's sealed manifest) references.
 // The server stores them as the resource's GC roots; it never inspects them.
+//
+// ExpectedVersion, when > 0, is the version the client based this update on. The
+// server rejects the write (409) if the stored version differs, so a concurrent
+// write is never silently lost — the client re-fetches and retries. Omit it (0)
+// for a create or an unconditional replace.
 type PutResourceRequest struct {
-	ID            string             `json:"id,omitempty"`
-	Visibility    Visibility         `json:"visibility"`
-	Blob          crypto.SealedBlob  `json:"blob"`
-	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
-	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
-	ChunkRefs     []string           `json:"chunkRefs,omitempty"`
+	ID              string             `json:"id,omitempty"`
+	Visibility      Visibility         `json:"visibility"`
+	Blob            crypto.SealedBlob  `json:"blob"`
+	EncryptedMeta   crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
+	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 }
 
 // ChunkData is one opaque, content-addressed chunk on the wire. ID is the hex

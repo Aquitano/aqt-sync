@@ -30,6 +30,10 @@ const (
 	// server's body cap (base64 in JSON inflates ~33%, hence the conservative cap).
 	uploadBatchBytes = 8 << 20
 	fetchBatchCount  = 256
+	// maxSyncAttempts bounds the optimistic-concurrency retry: if this many
+	// reconcile passes each lose the race to a concurrent sync, give up and ask
+	// the user to re-run rather than spin.
+	maxSyncAttempts = 5
 )
 
 // --- commands ---
@@ -221,43 +225,60 @@ func runSync(dir string, opts syncOptions) error {
 	conv := crypto.DeriveConvergenceKey(mk)
 	defer conv.Wipe()
 
-	res, err := cl.GetResource(st.ID)
-	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("folder resource %s not found on the server", st.ID)
-	}
-	if err != nil {
-		return err
-	}
-	if res.WrappedKey == nil {
-		return errors.New("folder resource has no owner key; cannot sync")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap folder key: %w", err)
-	}
-	remote, err := syncengine.OpenManifest(res.Blob, ck)
-	if err != nil {
-		return fmt.Errorf("decrypt remote manifest: %w", err)
-	}
-
+	// Snapshot the working tree once; it does not change between retries.
 	snap, err := syncengine.Take(root, conv, syncengine.DefaultChunker(), &base)
 	if err != nil {
 		return err
 	}
 	local := snap.Manifest
 
-	actions := syncengine.Plan(local, base, remote)
-	if opts.dryRun {
-		return printPlan(actions)
+	// reconcile runs one pass against the current remote. It returns
+	// client.ErrConflict if another sync committed first; the loop below then
+	// re-plans against the new remote, so a concurrent write is never lost.
+	reconcile := func() error {
+		res, err := cl.GetResource(st.ID)
+		if errors.Is(err, client.ErrNotFound) {
+			return fmt.Errorf("folder resource %s not found on the server", st.ID)
+		}
+		if err != nil {
+			return err
+		}
+		if res.WrappedKey == nil {
+			return errors.New("folder resource has no owner key; cannot sync")
+		}
+		ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+		if err != nil {
+			return fmt.Errorf("unwrap folder key: %w", err)
+		}
+		remote, err := syncengine.OpenManifest(res.Blob, ck)
+		if err != nil {
+			return fmt.Errorf("decrypt remote manifest: %w", err)
+		}
+		actions := syncengine.Plan(local, base, remote)
+		if opts.dryRun {
+			return printPlan(actions)
+		}
+		if err := abortOnConflicts(actions, opts.force); err != nil {
+			return err
+		}
+		return applySync(applyCtx{
+			root: root, cl: cl, opts: opts,
+			base: base, local: local, remote: remote,
+			snap: snap, ck: ck, mk: mk, version: res.Version, id: st.ID,
+		}, actions)
 	}
-	if err := abortOnConflicts(actions, opts.force); err != nil {
+
+	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
+		err := reconcile()
+		if errors.Is(err, client.ErrConflict) {
+			if attempt == 0 {
+				fmt.Fprintln(os.Stderr, "remote changed during sync; re-reconciling")
+			}
+			continue
+		}
 		return err
 	}
-	return applySync(applyCtx{
-		root: root, cl: cl, opts: opts,
-		base: base, local: local, remote: remote,
-		snap: snap, ck: ck, mk: mk, version: res.Version, id: st.ID,
-	}, actions)
+	return errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
 }
 
 // applyCtx bundles the state applySync needs, keeping its signature readable.
@@ -322,28 +343,33 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		}
 	}
 
-	// Downloads first: never delete or overwrite local data before the new data
-	// is safely on disk.
+	// Push the server-side change FIRST. Uploading chunks and PUTting the manifest
+	// before any local file is touched means a version conflict (another sync
+	// committed first) returns with nothing half-applied on disk, so the caller
+	// can re-plan and retry cleanly.
+	if push && remoteChanged {
+		if err := uploadMissing(c.cl, c.snap.NewChunks, uploads); err != nil {
+			return err
+		}
+		manifest := manifestFrom(merged, c.version+1)
+		if _, err := putFolderUpdate(c.cl, c.id, manifest, c.ck, c.mk, c.version); err != nil {
+			return err // client.ErrConflict on a stale version: retried by the caller
+		}
+		// Reclaim chunks the superseded manifest version no longer references.
+		// Best-effort: a sync that uploaded fine should not fail on cleanup.
+		if n, err := c.cl.GC(); err == nil && n > 0 {
+			fmt.Fprintf(os.Stderr, "reclaimed %d unreferenced chunks\n", n)
+		}
+	}
+
+	// Server is updated; now bring the local tree in line. Downloads before
+	// deletes, so local data is never removed before its replacement is on disk.
 	if err := runDownloads(c.cl, c.root, downloads); err != nil {
 		return err
 	}
 	for _, p := range localDeletes {
 		if err := syncengine.RemoveFile(c.root, p); err != nil {
 			return err
-		}
-	}
-	if push && remoteChanged {
-		if err := uploadMissing(c.cl, c.snap.NewChunks, uploads); err != nil {
-			return err
-		}
-		manifest := manifestFrom(merged, c.version+1)
-		if _, err := putFolderUpdate(c.cl, c.id, manifest, c.ck, c.mk); err != nil {
-			return err
-		}
-		// Reclaim chunks the superseded manifest version no longer references.
-		// Best-effort: a sync that uploaded fine should not fail on cleanup.
-		if n, err := c.cl.GC(); err == nil && n > 0 {
-			fmt.Fprintf(os.Stderr, "reclaimed %d unreferenced chunks\n", n)
 		}
 	}
 
@@ -542,9 +568,10 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 	})
 }
 
-// putFolderUpdate replaces an existing folder's manifest. Its encrypted metadata
-// is re-sealed from the manifest's own state, so the name follows the resource.
-func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey) (api.PutResourceResponse, error) {
+// putFolderUpdate replaces an existing folder's manifest, conditional on the
+// resource still being at expectedVersion (else the server returns a conflict).
+// Its encrypted metadata is re-sealed from the manifest's own state.
+func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	blob, err := syncengine.SealManifest(m, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
@@ -559,7 +586,7 @@ func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, ck cry
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(),
+		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(), ExpectedVersion: expectedVersion,
 	})
 }
 
