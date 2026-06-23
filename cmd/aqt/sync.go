@@ -264,7 +264,8 @@ func runSync(dir string, opts syncOptions) error {
 		return applySync(applyCtx{
 			root: root, cl: cl, opts: opts,
 			base: base, local: local, remote: remote,
-			snap: snap, ck: ck, mk: mk, version: res.Version, id: st.ID,
+			snap: snap, ck: ck, mk: mk, meta: res.EncryptedMeta,
+			version: res.Version, id: st.ID,
 		}, actions)
 	}
 
@@ -292,6 +293,7 @@ type applyCtx struct {
 	snap    *syncengine.Snapshot
 	ck      crypto.ContentKey
 	mk      crypto.MasterKey
+	meta    crypto.SealedBlob // the resource's existing sealed metadata, carried forward
 	version int
 	id      string
 }
@@ -352,7 +354,7 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 			return err
 		}
 		manifest := manifestFrom(merged, c.version+1)
-		if _, err := putFolderUpdate(c.cl, c.id, manifest, c.ck, c.mk, c.version); err != nil {
+		if _, err := putFolderUpdate(c.cl, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
 		// Reclaim chunks the superseded manifest version no longer references.
@@ -573,13 +575,10 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 
 // putFolderUpdate replaces an existing folder's manifest, conditional on the
 // resource still being at expectedVersion (else the server returns a conflict).
-// Its encrypted metadata is re-sealed from the manifest's own state.
-func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
+// The encrypted metadata (the folder name sealed at init) is carried forward
+// unchanged, so a sync never clobbers it.
+func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	blob, err := syncengine.SealManifest(m, ck)
-	if err != nil {
-		return api.PutResourceResponse{}, err
-	}
-	metaBlob, err := crypto.Seal([]byte(`{"name":"folder","size":0}`), ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -588,7 +587,7 @@ func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, ck cry
 		return api.PutResourceResponse{}, err
 	}
 	return cl.PutResource(api.PutResourceRequest{
-		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
+		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
 		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(), ExpectedVersion: expectedVersion,
 	})
 }
