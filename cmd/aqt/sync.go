@@ -194,6 +194,13 @@ var errSyncNoBase = errors.New("no last-synced state found (.aqt/base.json missi
 	"syncing now could resurrect deleted files. Re-run with --reconcile to reconcile local and remote " +
 	"(one-sided differences become conflicts to review), or `aqt clone` into a fresh directory")
 
+// errConflictsRemain and errSyncRace are sentinels so main() can map them to the
+// documented "sync conflict" exit code (4).
+var (
+	errConflictsRemain = errors.New("conflicts changed on both sides; resolve them or re-run with --force (local wins)")
+	errSyncRace        = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
+)
+
 func runSync(dir string, opts syncOptions) error {
 	if opts.pushOnly && opts.pullOnly {
 		return errors.New("--push-only and --pull-only are mutually exclusive")
@@ -298,7 +305,7 @@ func runSync(dir string, opts syncOptions) error {
 		}
 		return err
 	}
-	return errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
+	return errSyncRace
 }
 
 // applyCtx bundles the state applySync needs, keeping its signature readable.
@@ -778,7 +785,7 @@ func abortOnConflicts(actions []syncengine.Action, force bool) error {
 		return nil
 	}
 	printPaths("conflict", conflicts)
-	return errors.New("conflicts changed on both sides; resolve them or re-run with --force (local wins)")
+	return errConflictsRemain
 }
 
 func printPlan(actions []syncengine.Action) error {
