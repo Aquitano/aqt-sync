@@ -2,6 +2,7 @@ package syncengine
 
 import (
 	"bytes"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -160,6 +161,58 @@ func TestPlanThreeWay(t *testing.T) {
 		if got[path] != kind {
 			t.Errorf("%s: got %v, want %v", path, got[path], kind)
 		}
+	}
+}
+
+func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "real.txt", []byte("hello"))
+	if err := os.Symlink("real.txt", filepath.Join(dir, "link.txt")); err != nil {
+		t.Skipf("symlinks unsupported on this filesystem: %v", err)
+	}
+
+	snap, err := Take(dir, mustIgnore(t, dir), testConv(t), DefaultChunker(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, ok := snap.Manifest.Lookup("link.txt")
+	if !ok || !link.IsSymlink() || link.Link != "real.txt" {
+		t.Fatalf("symlink not captured as a target: %+v", link)
+	}
+	if len(link.Chunks) != 0 || link.Inline != nil {
+		t.Fatal("a symlink must not be sealed as content")
+	}
+
+	// Materialize into a fresh tree and confirm the link is recreated, not followed.
+	out := t.TempDir()
+	for _, e := range snap.Manifest.Entries {
+		if e.IsSymlink() {
+			if err := WriteSymlink(out, e); err != nil {
+				t.Fatal(err)
+			}
+			continue
+		}
+		data, err := FileBytes(e, func(string) ([]byte, error) { return nil, fmt.Errorf("unexpected chunk fetch") })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteFile(out, e, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := os.Readlink(filepath.Join(out, "link.txt"))
+	if err != nil || got != "real.txt" {
+		t.Fatalf("materialized link target = %q err=%v, want real.txt", got, err)
+	}
+}
+
+func TestWriteFileRejectsPathEscape(t *testing.T) {
+	dir := t.TempDir()
+	if err := WriteFile(dir, Entry{Path: "../escape.txt", Mode: 0o600}, []byte("x")); err == nil {
+		t.Fatal("a path escaping the tracked root must be rejected")
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "escape.txt")); err == nil {
+		t.Fatal("escape file should not have been written")
 	}
 }
 

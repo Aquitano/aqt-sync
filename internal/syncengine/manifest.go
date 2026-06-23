@@ -14,18 +14,23 @@ const (
 	ControlDir = ".aqt"
 )
 
-// Entry describes one file in a tracked folder. Small files carry their bytes
-// inline (the manifest is sealed, so this stays confidential); larger files
-// reference content-addressed chunks. Hash is over the plaintext and drives
-// change detection.
+// Entry describes one entry in a tracked folder. A symlink stores its target in
+// Link (it is never followed). A small regular file carries its bytes inline
+// (the manifest is sealed, so this stays confidential); a larger one references
+// content-addressed chunks. Hash is over the plaintext (or the link target) and
+// drives change detection.
 type Entry struct {
 	Path   string         `json:"path"` // POSIX, relative to the tracked root
 	Mode   uint32         `json:"mode"`
 	Size   int64          `json:"size"`
 	Hash   string         `json:"hash"`
+	Link   string         `json:"link,omitempty"` // symlink target; set => this entry is a symlink
 	Inline []byte         `json:"inline,omitempty"`
 	Chunks []crypto.Chunk `json:"chunks,omitempty"`
 }
+
+// IsSymlink reports whether the entry describes a symbolic link.
+func (e Entry) IsSymlink() bool { return e.Link != "" }
 
 // Manifest is the sealed description of a tracked folder. It is stored as the
 // folder resource's blob, so the server only ever holds its ciphertext.

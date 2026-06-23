@@ -469,6 +469,12 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) er
 		return ct, nil
 	}
 	for _, e := range entries {
+		if e.IsSymlink() {
+			if err := syncengine.WriteSymlink(root, e); err != nil {
+				return err
+			}
+			continue
+		}
 		data, err := syncengine.FileBytes(e, get)
 		if err != nil {
 			return err

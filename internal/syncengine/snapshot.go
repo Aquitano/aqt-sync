@@ -18,10 +18,21 @@ type Snapshot struct {
 	NewChunks map[string][]byte
 }
 
-// walkFiles invokes fn for every tracked regular file under dir (ignored paths
-// and non-regular files are skipped), passing each file's relative POSIX path,
-// info, and contents.
-func walkFiles(dir string, ig *Ignore, fn func(rel string, info fs.FileInfo, data []byte) error) error {
+// fileNode is one tracked entry surfaced by the walk: either a symlink (target
+// set) or a regular file (data set).
+type fileNode struct {
+	rel     string
+	info    fs.FileInfo
+	symlink bool
+	target  string
+	data    []byte
+}
+
+// walkFiles invokes fn for every tracked symlink and regular file under dir.
+// Ignored paths and other special files (devices, sockets, fifos) are skipped.
+// Symlinks are read with Readlink — never followed — so a link into an ignored
+// or out-of-tree location is captured as its target, not its contents.
+func walkFiles(dir string, ig *Ignore, fn func(fileNode) error) error {
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -40,18 +51,28 @@ func walkFiles(dir string, ig *Ignore, fn func(rel string, info fs.FileInfo, dat
 			}
 			return nil
 		}
-		if !d.Type().IsRegular() || ig.Match(rel, false) {
+		if ig.Match(rel, false) {
 			return nil
 		}
 		info, err := d.Info()
 		if err != nil {
 			return err
 		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			return fn(fileNode{rel: rel, info: info, symlink: true, target: target})
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		return fn(rel, info, data)
+		return fn(fileNode{rel: rel, info: info, data: data})
 	})
 }
 
@@ -60,16 +81,23 @@ func hashOf(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func entryMeta(rel string, info fs.FileInfo, hash string) Entry {
-	return Entry{Path: rel, Mode: uint32(info.Mode().Perm()), Size: info.Size(), Hash: hash}
+// metaEntry builds the path/size/mode/hash (and Link, for symlinks) part of an
+// entry. The link hash is domain-separated from file content so a file whose
+// bytes equal a link's target is never mistaken for unchanged.
+func metaEntry(n fileNode) Entry {
+	if n.symlink {
+		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: hashOf([]byte("symlink\x00" + n.target))}
+	}
+	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size(), Hash: hashOf(n.data)}
 }
 
-// Scan reads dir into a manifest of path/size/mode/hash only — no sealing — for
-// cheap change detection (e.g. `status`) without needing the convergence key.
+// Scan reads dir into a manifest of path/size/mode/hash (and link targets) only —
+// no sealing — for cheap change detection (e.g. `status`) without the convergence
+// key.
 func Scan(dir string, ig *Ignore) (Manifest, error) {
 	var m Manifest
-	err := walkFiles(dir, ig, func(rel string, info fs.FileInfo, data []byte) error {
-		m.Entries = append(m.Entries, entryMeta(rel, info, hashOf(data)))
+	err := walkFiles(dir, ig, func(n fileNode) error {
+		m.Entries = append(m.Entries, metaEntry(n))
 		return nil
 	})
 	sortEntries(m.Entries)
@@ -88,17 +116,19 @@ func Take(dir string, ig *Ignore, conv crypto.ConvergenceKey, chunker *Chunker, 
 	}
 	snap := &Snapshot{NewChunks: map[string][]byte{}}
 
-	err := walkFiles(dir, ig, func(rel string, info fs.FileInfo, data []byte) error {
-		hash := hashOf(data)
-		if prev, ok := reuse[rel]; ok && prev.Hash == hash {
+	err := walkFiles(dir, ig, func(n fileNode) error {
+		entry := metaEntry(n)
+		if prev, ok := reuse[n.rel]; ok && prev.Hash == entry.Hash {
 			snap.Manifest.Entries = append(snap.Manifest.Entries, prev)
 			return nil
 		}
-		entry := entryMeta(rel, info, hash)
-		if len(data) <= chunker.Min {
-			entry.Inline = data
-		} else {
-			for _, piece := range chunker.Split(data) {
+		switch {
+		case n.symlink:
+			// fully described by metaEntry (target in Link); nothing to seal
+		case len(n.data) <= chunker.Min:
+			entry.Inline = n.data
+		default:
+			for _, piece := range chunker.Split(n.data) {
 				ct, ch, err := crypto.SealChunk(piece, conv)
 				if err != nil {
 					return err

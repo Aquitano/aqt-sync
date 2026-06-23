@@ -4,9 +4,22 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
+
+// safeJoin resolves dir/relPath and refuses a result that escapes dir, so a
+// corrupted or hostile manifest (e.g. a "../" path) cannot write outside the
+// tracked root. Symlink targets are not constrained — only the entry's own path.
+func safeJoin(dir, relPath string) (string, error) {
+	full := filepath.Join(dir, filepath.FromSlash(relPath))
+	rel, err := filepath.Rel(dir, full)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q escapes the tracked root", relPath)
+	}
+	return full, nil
+}
 
 // FileBytes reconstructs an entry's plaintext. Inline (and empty) files return
 // directly; chunked files are reassembled from chunks, which fetch must supply
@@ -33,7 +46,10 @@ func FileBytes(e Entry, fetch func(id string) ([]byte, error)) ([]byte, error) {
 // WriteFile writes an entry's bytes under dir at its relative path, creating
 // parent directories and applying the recorded mode.
 func WriteFile(dir string, e Entry, data []byte) error {
-	full := filepath.Join(dir, filepath.FromSlash(e.Path))
+	full, err := safeJoin(dir, e.Path)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 		return err
 	}
@@ -44,10 +60,29 @@ func WriteFile(dir string, e Entry, data []byte) error {
 	return os.WriteFile(full, data, mode)
 }
 
+// WriteSymlink recreates a symlink entry under dir, pointing at its stored target
+// verbatim. An existing file at the path is replaced (the target may have moved).
+func WriteSymlink(dir string, e Entry) error {
+	full, err := safeJoin(dir, e.Path)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
+		return err
+	}
+	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return os.Symlink(e.Link, full)
+}
+
 // RemoveFile deletes dir/relPath, pruning now-empty parent directories up to (but
 // not including) the tracked root. A missing file is not an error.
 func RemoveFile(dir, relPath string) error {
-	full := filepath.Join(dir, filepath.FromSlash(relPath))
+	full, err := safeJoin(dir, relPath)
+	if err != nil {
+		return err
+	}
 	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
 		return err
 	}
