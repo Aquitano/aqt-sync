@@ -488,6 +488,40 @@ func TestChunkEndpointsRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResourceBodyAllowsBlobAboveControlCap(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("bigblob@example.com", "passphrase for a big blob")
+
+	// 1 MiB is far above the control-route cap; the resource route must still
+	// accept it, since a folder's whole sealed manifest lives in this blob (A2).
+	big := bytes.Repeat([]byte("x"), 1<<20)
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal(big, ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+
+	var resp api.PutResourceResponse
+	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+	}, &resp); code != http.StatusCreated {
+		t.Fatalf("1 MiB resource PUT: got %d, want 201", code)
+	}
+}
+
+func TestControlRouteRejectsOversizedBody(t *testing.T) {
+	h := newHarness(t)
+	// A control body padded past the tight control cap is rejected by the size
+	// limit (the same payload would be well within the resource route's cap).
+	req := api.CreateAccountRequest{
+		Email:      "x@example.com",
+		PublicKey:  make([]byte, ed25519.PublicKeySize),
+		DeviceName: strings.Repeat("a", maxControlBody+1),
+	}
+	if code := h.do(http.MethodPost, "/v1/account", "", req, nil); code < 400 {
+		t.Fatalf("oversized control body: got %d, want a 4xx rejection", code)
+	}
+}
+
 func mustSalt(h *harness, email string) crypto.KdfParams {
 	h.t.Helper()
 	var salt api.SaltResponse

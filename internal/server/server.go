@@ -27,14 +27,27 @@ func New(store *Store) *Server {
 	}
 }
 
-// maxBodyBytes caps a single request body. It bounds the per-resource size in
-// v1 (chunked uploads for large files are deferred) and limits memory blowup.
-const maxBodyBytes = 32 << 20 // 32 MiB
+// Per-route request-body caps. A single global cap previously coupled three
+// unrelated concerns — a small JSON control request, a chunk batch, and a folder's
+// whole sealed manifest — so the tightest reasonable limit for one became a
+// structural ceiling for the others (A2). Each route now gets a cap matched to
+// what it legitimately carries.
+//
+// A folder large enough to exceed maxResourceBody (hundreds of thousands of
+// entries) still needs a segmented manifest; that is the remaining half of A2.
+const (
+	maxControlBody  = 64 << 10 // 64 KiB: account/auth/visibility — a few small fields
+	maxChunkBody    = 32 << 20 // 32 MiB: a chunk batch (client batches well under this)
+	maxResourceBody = 64 << 20 // 64 MiB: a file's ciphertext or a folder's sealed manifest
+)
 
 // Router builds the Gin engine with all routes mounted.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
-	r.Use(gin.Recovery(), limitBody)
+	// The engine-wide cap is the loosest; stacked limiters apply the smallest, so
+	// per-route middleware below only tightens it (a forgotten route is still
+	// bounded, never unlimited).
+	r.Use(gin.Recovery(), limitBody(maxResourceBody))
 
 	// Human-facing landing page for a public share link. Decryption runs in the
 	// CLI; the content key is in the URL fragment, which never reaches the server.
@@ -45,7 +58,7 @@ func (s *Server) Router() *gin.Engine {
 		// Unauthenticated account/auth routes are rate-limited per client: they are
 		// the surface for brute-force, account enumeration, and challenge-table
 		// pumping.
-		unauth := v1.Group("", s.limiter.middleware)
+		unauth := v1.Group("", s.limiter.middleware, limitBody(maxControlBody))
 		{
 			unauth.POST("/account", s.createAccount)
 			unauth.GET("/account/salt", s.accountSalt)
@@ -59,24 +72,31 @@ func (s *Server) Router() *gin.Engine {
 
 		authed := v1.Group("", s.authMiddleware)
 		{
+			// The blob (a file's ciphertext or a folder's sealed manifest) is the one
+			// large payload; it keeps the engine-wide maxResourceBody.
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
-			authed.POST("/resources/:id/visibility", s.setVisibility)
+			authed.POST("/resources/:id/visibility", limitBody(maxControlBody), s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
 
 			// Folder-sync chunk store: opaque, content-addressed, owner-scoped.
-			authed.POST("/chunks/check", s.checkChunks)
-			authed.POST("/chunks", s.uploadChunks)
-			authed.POST("/chunks/fetch", s.fetchChunks)
+			authed.POST("/chunks/check", limitBody(maxChunkBody), s.checkChunks)
+			authed.POST("/chunks", limitBody(maxChunkBody), s.uploadChunks)
+			authed.POST("/chunks/fetch", limitBody(maxChunkBody), s.fetchChunks)
 			authed.POST("/gc", s.runGC)
 		}
 	}
 	return r
 }
 
-func limitBody(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBodyBytes)
-	c.Next()
+// limitBody caps a route's request body at n bytes. Stacked limiters apply the
+// smallest cap (each wraps the previous reader), so the engine-wide cap is the
+// loosest and per-route middleware only tightens it.
+func limitBody(n int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, n)
+		c.Next()
+	}
 }
 
 // --- auth ---
