@@ -102,12 +102,12 @@ func TestPrivatePushPullRoundTrip(t *testing.T) {
 	// Client-side seal: content key seals the body and the metadata; the content
 	// key itself is wrapped under the master key for a private resource.
 	ck, _ := crypto.GenerateContentKey()
-	blob, err := crypto.Seal(plaintext, ck)
+	blob, err := crypto.Seal(plaintext, ck, crypto.AADBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
 	metaJSON, _ := json.Marshal(api.Metadata{Name: ".env", Size: int64(len(plaintext))})
-	metaBlob, err := crypto.Seal(metaJSON, ck)
+	metaBlob, err := crypto.Seal(metaJSON, ck, crypto.AADMeta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +140,7 @@ func TestPrivatePushPullRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unwrap: %v", err)
 	}
-	decrypted, err := crypto.Open(got.Blob, unwrapped)
+	decrypted, err := crypto.Open(got.Blob, unwrapped, crypto.AADBlob)
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
@@ -161,8 +161,8 @@ func TestPublicResourceReadableWithoutAuth(t *testing.T) {
 
 	plaintext := []byte("public snippet")
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal(plaintext, ck)
-	metaBlob, _ := crypto.Seal([]byte(`{"name":"note.txt","size":14}`), ck)
+	blob, _ := crypto.Seal(plaintext, ck, crypto.AADBlob)
+	metaBlob, _ := crypto.Seal([]byte(`{"name":"note.txt","size":14}`), ck, crypto.AADMeta)
 
 	var put api.PutResourceResponse
 	code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
@@ -181,7 +181,7 @@ func TestPublicResourceReadableWithoutAuth(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("anonymous read of public resource: got %d", code)
 	}
-	decrypted, err := crypto.Open(got.Blob, ck)
+	decrypted, err := crypto.Open(got.Blob, ck, crypto.AADBlob)
 	if err != nil {
 		t.Fatalf("open public blob: %v", err)
 	}
@@ -267,8 +267,8 @@ func TestUpdateResourceReplacesInPlace(t *testing.T) {
 
 	put := func(id string, body []byte) api.PutResourceResponse {
 		ck, _ := crypto.GenerateContentKey()
-		blob, _ := crypto.Seal(body, ck)
-		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		blob, _ := crypto.Seal(body, ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 		var resp api.PutResourceResponse
 		code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
@@ -295,8 +295,8 @@ func TestUpdateResourceReplacesInPlace(t *testing.T) {
 	// A different owner cannot update this resource.
 	otherToken, _ := h.signup("other@example.com", "another passphrase")
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal([]byte("hijack"), ck)
-	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	blob, _ := crypto.Seal([]byte("hijack"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 	code := h.do(http.MethodPut, "/v1/resources", otherToken, api.PutResourceRequest{
 		ID: created.ID, Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
@@ -311,8 +311,8 @@ func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
 	token, mk := h.signup("share@example.com", "passphrase here")
 
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal([]byte("shared body"), ck)
-	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	blob, _ := crypto.Seal([]byte("shared body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	var put api.PutResourceResponse
@@ -338,7 +338,7 @@ func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
 	if anon.WrappedKey != nil {
 		t.Fatal("anonymous reader must not receive the wrapped key")
 	}
-	if got, err := crypto.Open(anon.Blob, ck); err != nil || string(got) != "shared body" {
+	if got, err := crypto.Open(anon.Blob, ck, crypto.AADBlob); err != nil || string(got) != "shared body" {
 		t.Fatalf("anon decrypt: %q err=%v", got, err)
 	}
 
@@ -357,8 +357,8 @@ func TestPublicPutKeepsOwnerWrappedKey(t *testing.T) {
 	token, mk := h.signup("pubowner@example.com", "a passphrase")
 
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal([]byte("public with owner key"), ck)
-	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	blob, _ := crypto.Seal([]byte("public with owner key"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	var put api.PutResourceResponse
@@ -387,8 +387,8 @@ func TestShareViewLandingPage(t *testing.T) {
 	token, mk := h.signup("web@example.com", "a passphrase for the web view")
 
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal([]byte("body"), ck)
-	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	put := func(vis api.Visibility) string {
@@ -430,8 +430,8 @@ func TestPutResourceVersionConflictReturns409(t *testing.T) {
 	ck, _ := crypto.GenerateContentKey()
 
 	put := func(id string, expected int, body string) (api.PutResourceResponse, int) {
-		blob, _ := crypto.Seal([]byte(body), ck)
-		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 		var resp api.PutResourceResponse
 		code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{

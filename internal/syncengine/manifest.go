@@ -87,13 +87,13 @@ func SealManifest(m Manifest, ck crypto.ContentKey) (crypto.SealedBlob, error) {
 	if err != nil {
 		return crypto.SealedBlob{}, err
 	}
-	return crypto.Seal(b, ck)
+	return crypto.Seal(b, ck, crypto.AADBlob)
 }
 
 // OpenManifest decrypts and parses a sealed manifest blob.
 func OpenManifest(blob crypto.SealedBlob, ck crypto.ContentKey) (Manifest, error) {
 	var m Manifest
-	plain, err := crypto.Open(blob, ck)
+	plain, err := crypto.Open(blob, ck, crypto.AADBlob)
 	if err != nil {
 		return m, err
 	}

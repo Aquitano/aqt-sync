@@ -114,11 +114,11 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
-	plaintext, err := crypto.Open(res.Blob, oldCK)
+	plaintext, err := crypto.Open(res.Blob, oldCK, crypto.AADBlob)
 	if err != nil {
 		return fmt.Errorf("decrypt: %w", err)
 	}
-	metaPlain, err := crypto.Open(res.EncryptedMeta, oldCK)
+	metaPlain, err := crypto.Open(res.EncryptedMeta, oldCK, crypto.AADMeta)
 	if err != nil {
 		return fmt.Errorf("decrypt metadata: %w", err)
 	}
@@ -129,11 +129,11 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
-	blob, err := crypto.Seal(plaintext, newCK)
+	blob, err := crypto.Seal(plaintext, newCK, crypto.AADBlob)
 	if err != nil {
 		return err
 	}
-	metaBlob, err := crypto.Seal(metaPlain, newCK)
+	metaBlob, err := crypto.Seal(metaPlain, newCK, crypto.AADMeta)
 	if err != nil {
 		return err
 	}

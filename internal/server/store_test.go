@@ -73,8 +73,8 @@ func TestChunkStoreRoundTripAndGC(t *testing.T) {
 
 	// A resource referencing chunk a roots it; an immediate sweep keeps a, drops b.
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal([]byte("sealed manifest"), ck)
-	meta, _ := crypto.Seal([]byte(`{"name":"folder","size":0}`), ck)
+	blob, _ := crypto.Seal([]byte("sealed manifest"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"folder","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 	id, _, err := s.PutResource(owner, api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
@@ -113,8 +113,8 @@ func TestUpdateResourceVersionConflict(t *testing.T) {
 	ck, _ := crypto.GenerateContentKey()
 
 	req := func(id string, expected int, body string) api.PutResourceRequest {
-		blob, _ := crypto.Seal([]byte(body), ck)
-		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 		return api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
@@ -223,8 +223,8 @@ func TestManifestRejectsDanglingChunkReference(t *testing.T) {
 	owner := s.mustAccount(t, "fk@example.com")
 	ck, _ := crypto.GenerateContentKey()
 	mkReq := func(id string, expected int, body string, refs []string) api.PutResourceRequest {
-		blob, _ := crypto.Seal([]byte(body), ck)
-		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 		return api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
@@ -252,7 +252,7 @@ func TestManifestRejectsDanglingChunkReference(t *testing.T) {
 	if got.Version != 1 {
 		t.Fatalf("version = %d after a failed update, want 1 (old blob clobbered)", got.Version)
 	}
-	if plain, err := crypto.Open(got.Blob, ck); err != nil || string(plain) != "v1" {
+	if plain, err := crypto.Open(got.Blob, ck, crypto.AADBlob); err != nil || string(plain) != "v1" {
 		t.Fatalf("blob after a failed update = %q err = %v, want v1", plain, err)
 	}
 	entries, err := os.ReadDir(s.blobsDir)
@@ -271,8 +271,8 @@ func TestUpdatesReclaimSupersededBlobs(t *testing.T) {
 	owner := s.mustAccount(t, "blobs@example.com")
 	ck, _ := crypto.GenerateContentKey()
 	put := func(id string, expected int, body string) string {
-		blob, _ := crypto.Seal([]byte(body), ck)
-		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 		rid, _, err := s.PutResource(owner, api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
@@ -298,7 +298,7 @@ func TestUpdatesReclaimSupersededBlobs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plain, err := crypto.Open(got.Blob, ck); err != nil || string(plain) != "v3-final-content" {
+	if plain, err := crypto.Open(got.Blob, ck, crypto.AADBlob); err != nil || string(plain) != "v3-final-content" {
 		t.Fatalf("latest blob = %q err=%v, want v3-final-content", plain, err)
 	}
 }

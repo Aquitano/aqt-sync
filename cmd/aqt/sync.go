@@ -607,7 +607,7 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	metaBlob, err := crypto.Seal(metaJSON, ck)
+	metaBlob, err := crypto.Seal(metaJSON, ck, crypto.AADMeta)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}

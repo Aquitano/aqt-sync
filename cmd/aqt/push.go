@@ -60,7 +60,7 @@ func runPush(path string, opts pushOptions) error {
 	if err != nil {
 		return err
 	}
-	blob, err := crypto.Seal(data, ck)
+	blob, err := crypto.Seal(data, ck, crypto.AADBlob)
 	if err != nil {
 		return err
 	}
@@ -68,7 +68,7 @@ func runPush(path string, opts pushOptions) error {
 	if err != nil {
 		return err
 	}
-	metaBlob, err := crypto.Seal(metaJSON, ck)
+	metaBlob, err := crypto.Seal(metaJSON, ck, crypto.AADMeta)
 	if err != nil {
 		return err
 	}

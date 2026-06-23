@@ -62,7 +62,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 
-	plaintext, err := crypto.Open(res.Blob, ck)
+	plaintext, err := crypto.Open(res.Blob, ck, crypto.AADBlob)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
@@ -139,7 +139,7 @@ func parseRef(ref string) (id, fragment string) {
 
 func decodeMeta(blob crypto.SealedBlob, ck crypto.ContentKey) api.Metadata {
 	var m api.Metadata
-	if plain, err := crypto.Open(blob, ck); err == nil {
+	if plain, err := crypto.Open(blob, ck, crypto.AADMeta); err == nil {
 		_ = json.Unmarshal(plain, &m)
 	}
 	return m

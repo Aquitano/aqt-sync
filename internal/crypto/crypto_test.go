@@ -116,7 +116,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 	}
 	plaintext := []byte("DATABASE_URL=postgres://localhost/app\nAPI_KEY=sk-secret\n")
 
-	blob, err := Seal(plaintext, ck)
+	blob, err := Seal(plaintext, ck, AADBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +124,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 		t.Fatal("ciphertext leaks plaintext")
 	}
 
-	got, err := Open(blob, ck)
+	got, err := Open(blob, ck, AADBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,12 +135,12 @@ func TestSealOpenRoundTrip(t *testing.T) {
 
 func TestOpenRejectsTamper(t *testing.T) {
 	ck, _ := GenerateContentKey()
-	blob, err := Seal([]byte("secret"), ck)
+	blob, err := Seal([]byte("secret"), ck, AADBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
 	blob.Ciphertext[0] ^= 0xff
-	if _, err := Open(blob, ck); err == nil {
+	if _, err := Open(blob, ck, AADBlob); err == nil {
 		t.Fatal("tampered ciphertext must fail the auth tag check")
 	}
 }
@@ -148,12 +148,28 @@ func TestOpenRejectsTamper(t *testing.T) {
 func TestOpenRejectsWrongKey(t *testing.T) {
 	ck, _ := GenerateContentKey()
 	other, _ := GenerateContentKey()
-	blob, err := Seal([]byte("secret"), ck)
+	blob, err := Seal([]byte("secret"), ck, AADBlob)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(blob, other); err == nil {
+	if _, err := Open(blob, other, AADBlob); err == nil {
 		t.Fatal("wrong key must not decrypt")
+	}
+}
+
+func TestOpenRejectsWrongAAD(t *testing.T) {
+	ck, _ := GenerateContentKey()
+	// A blob sealed in the metadata role must not open in the body role, even with
+	// the right key: this is what stops a server reinterpreting one field as another.
+	blob, err := Seal([]byte("metadata"), ck, AADMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(blob, ck, AADBlob); err == nil {
+		t.Fatal("a blob sealed under one role must not open under another")
+	}
+	if _, err := Open(blob, ck, AADMeta); err != nil {
+		t.Fatalf("matching role must open: %v", err)
 	}
 }
 
