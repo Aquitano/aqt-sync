@@ -317,7 +317,18 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 			if !push {
 				continue
 			}
-			e := localByPath[a.Path]
+			e, ok := localByPath[a.Path]
+			if !ok {
+				// A conflict resolved local-wins where the file is gone locally
+				// (local delete vs remote modify): local winning means deleting it
+				// on the remote too. Uploading the zero Entry here would PUT a
+				// path-less empty entry, drop the remote edit, and corrupt the
+				// manifest (several such paths collapse to one on reload).
+				delete(merged, a.Path)
+				delete(newBase, a.Path)
+				remoteChanged = true
+				continue
+			}
 			merged[a.Path] = e
 			newBase[a.Path] = e
 			uploads = append(uploads, e)
