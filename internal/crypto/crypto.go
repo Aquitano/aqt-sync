@@ -66,6 +66,27 @@ const (
 	defaultThreads = 4
 )
 
+// Gated-link Argon2id profile. A gated link is semi-public — anyone holding it
+// has the salt, costs, and wrapped key and can brute-force offline — and link
+// passwords are typically weaker than account passphrases, so the gate is tuned
+// deliberately higher than the interactive account-unlock profile.
+const (
+	gatedTime    = 4
+	gatedMemory  = 256 * 1024 // 256 MiB
+	gatedThreads = 4
+)
+
+// Upper bounds on KDF parameters accepted by DeriveMasterKey. They cap the work
+// (and memory) a fragment- or server-supplied set of params can force on a
+// client, so a crafted link or a hostile server cannot OOM/hang it on password
+// entry. The bounds sit comfortably above every profile this package mints.
+const (
+	maxKdfMemory  = 1 << 20 // 1 GiB, in KiB
+	maxKdfTime    = 16
+	maxKdfThreads = 16
+	maxKdfSalt    = 1024
+)
+
 // NewKdfParams returns fresh parameters with a random salt and default costs.
 func NewKdfParams() (KdfParams, error) {
 	salt := make([]byte, saltSize)
@@ -81,16 +102,47 @@ func NewKdfParams() (KdfParams, error) {
 	}, nil
 }
 
+// NewGatedKdfParams returns fresh parameters at the higher gated-link cost.
+func NewGatedKdfParams() (KdfParams, error) {
+	p, err := NewKdfParams()
+	if err != nil {
+		return KdfParams{}, err
+	}
+	p.Time = gatedTime
+	p.Memory = gatedMemory
+	p.Threads = gatedThreads
+	return p, nil
+}
+
+// validate rejects unsupported or out-of-range KDF params before they reach the
+// (expensive, attacker-influenced) derivation.
+func (p KdfParams) validate() error {
+	switch {
+	case p.Algo != "argon2id":
+		return fmt.Errorf("unsupported kdf algo %q", p.Algo)
+	case len(p.Salt) == 0:
+		return errors.New("kdf params missing salt")
+	case len(p.Salt) > maxKdfSalt:
+		return fmt.Errorf("kdf salt too long: %d bytes", len(p.Salt))
+	case p.Memory == 0 || p.Memory > maxKdfMemory:
+		return fmt.Errorf("kdf memory out of range: %d KiB", p.Memory)
+	case p.Time == 0 || p.Time > maxKdfTime:
+		return fmt.Errorf("kdf time out of range: %d", p.Time)
+	case p.Threads == 0 || p.Threads > maxKdfThreads:
+		return fmt.Errorf("kdf threads out of range: %d", p.Threads)
+	}
+	return nil
+}
+
 // DeriveMasterKey derives the master key from a passphrase and KDF parameters.
 // Given the same passphrase and params it is deterministic, which is what lets a
 // new machine reconstruct the key after fetching the account's stored params.
+// The params are clamped first: they may come from a hostile server (account
+// salt) or a crafted share link (gated fragment).
 func DeriveMasterKey(passphrase string, p KdfParams) (MasterKey, error) {
 	var mk MasterKey
-	if p.Algo != "argon2id" {
-		return mk, fmt.Errorf("unsupported kdf algo %q", p.Algo)
-	}
-	if len(p.Salt) == 0 {
-		return mk, errors.New("kdf params missing salt")
+	if err := p.validate(); err != nil {
+		return mk, err
 	}
 	out := argon2.IDKey([]byte(passphrase), p.Salt, p.Time, p.Memory, p.Threads, KeySize)
 	copy(mk[:], out)
@@ -212,7 +264,7 @@ func EncodeFragment(ck ContentKey, password string) (string, error) {
 	if password == "" {
 		return fragPublic + b64.EncodeToString(ck[:]), nil
 	}
-	params, err := NewKdfParams()
+	params, err := NewGatedKdfParams()
 	if err != nil {
 		return "", err
 	}

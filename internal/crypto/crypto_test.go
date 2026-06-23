@@ -79,6 +79,36 @@ func TestDeriveMasterKeyRejectsBadParams(t *testing.T) {
 	}
 }
 
+func TestDeriveMasterKeyClampsParams(t *testing.T) {
+	base, err := NewKdfParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Params above the caps are rejected before the expensive derivation runs, so a
+	// crafted link / hostile server cannot force an OOM or hang.
+	oversize := base
+	oversize.Memory = maxKdfMemory + 1
+	if _, err := DeriveMasterKey("pw", oversize); err == nil {
+		t.Fatal("expected error for memory above the cap")
+	}
+	hot := base
+	hot.Time = maxKdfTime + 1
+	if _, err := DeriveMasterKey("pw", hot); err == nil {
+		t.Fatal("expected error for time above the cap")
+	}
+
+	gated, err := NewGatedKdfParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := gated.validate(); err != nil {
+		t.Fatalf("gated params must validate: %v", err)
+	}
+	if gated.Memory <= base.Memory || gated.Time < base.Time {
+		t.Fatal("gated profile should cost more than the interactive default")
+	}
+}
+
 func TestSealOpenRoundTrip(t *testing.T) {
 	ck, err := GenerateContentKey()
 	if err != nil {
