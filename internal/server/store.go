@@ -236,7 +236,12 @@ const challengeTTL = 2 * time.Minute
 func (s *Store) CreateChallenge(email string) (id string, nonce []byte, err error) {
 	id = newID(16)
 	nonce = randomBytes(32)
-	expiresAt := time.Now().Add(challengeTTL).Unix()
+	now := time.Now()
+	// Opportunistic sweep: challenges are deleted on consume, but an unconsumed one
+	// would otherwise linger forever. Reaping expired rows on each issue keeps the
+	// table bounded without a background job.
+	s.db.Exec(`DELETE FROM challenges WHERE expires_at < ?`, now.Unix())
+	expiresAt := now.Add(challengeTTL).Unix()
 	_, err = s.db.Exec(
 		`INSERT INTO challenges(id, email, nonce, expires_at) VALUES(?,?,?,?)`,
 		id, email, nonce, expiresAt,

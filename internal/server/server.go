@@ -16,9 +16,16 @@ import (
 type Server struct {
 	store    *Store
 	resLocks *keyedMutex
+	limiter  *ipRateLimiter
 }
 
-func New(store *Store) *Server { return &Server{store: store, resLocks: newKeyedMutex()} }
+func New(store *Store) *Server {
+	return &Server{
+		store:    store,
+		resLocks: newKeyedMutex(),
+		limiter:  newIPRateLimiter(unauthRatePerSec, unauthBurst),
+	}
+}
 
 // maxBodyBytes caps a single request body. It bounds the per-resource size in
 // v1 (chunked uploads for large files are deferred) and limits memory blowup.
@@ -35,10 +42,16 @@ func (s *Server) Router() *gin.Engine {
 
 	v1 := r.Group("/v1")
 	{
-		v1.POST("/account", s.createAccount)
-		v1.GET("/account/salt", s.accountSalt)
-		v1.POST("/auth/challenge", s.authChallenge)
-		v1.POST("/devices", s.attachDevice)
+		// Unauthenticated account/auth routes are rate-limited per client: they are
+		// the surface for brute-force, account enumeration, and challenge-table
+		// pumping.
+		unauth := v1.Group("", s.limiter.middleware)
+		{
+			unauth.POST("/account", s.createAccount)
+			unauth.GET("/account/salt", s.accountSalt)
+			unauth.POST("/auth/challenge", s.authChallenge)
+			unauth.POST("/devices", s.attachDevice)
+		}
 
 		// Public resource reads need no auth; the id is unguessable and the
 		// decrypt key lives only in the caller's URL fragment.
