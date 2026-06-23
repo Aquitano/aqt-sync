@@ -14,10 +14,11 @@ import (
 )
 
 type Server struct {
-	store *Store
+	store    *Store
+	resLocks *keyedMutex
 }
 
-func New(store *Store) *Server { return &Server{store: store} }
+func New(store *Store) *Server { return &Server{store: store, resLocks: newKeyedMutex()} }
 
 // maxBodyBytes caps a single request body. It bounds the per-resource size in
 // v1 (chunked uploads for large files are deferred) and limits memory blowup.
@@ -217,6 +218,11 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
+	// Serialize updates to an existing resource so two concurrent syncs cannot
+	// interleave their writes. A create (no id) targets a fresh id, so no lock.
+	if req.ID != "" {
+		defer s.resLocks.lock(req.ID)()
+	}
 	id, version, err := s.store.PutResource(owner, req)
 	if errors.Is(err, ErrNotFound) {
 		// Update targeting an id the caller doesn't own (or that doesn't exist).
@@ -276,6 +282,7 @@ func (s *Server) setVisibility(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
+	defer s.resLocks.lock(c.Param("id"))()
 	version, err := s.store.SetVisibility(owner, c.Param("id"), req.Visibility)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
@@ -290,6 +297,7 @@ func (s *Server) setVisibility(c *gin.Context) {
 
 func (s *Server) deleteResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
+	defer s.resLocks.lock(c.Param("id"))()
 	err := s.store.DeleteResource(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")

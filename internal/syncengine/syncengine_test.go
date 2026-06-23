@@ -40,11 +40,7 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 	big := bytes.Repeat([]byte("0123456789abcdef"), 8<<10) // 128 KiB
 	writeFile(t, dir, "nested/big.bin", big)
 
-	ig, err := LoadIgnore(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	snap, err := Take(dir, ig, testConv(t), DefaultChunker(), nil)
+	snap, err := Take(dir, testConv(t), DefaultChunker(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,12 +65,12 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 	writeFile(t, dir, "a.bin", big)
 
 	conv := testConv(t)
-	first, err := Take(dir, mustIgnore(t, dir), conv, DefaultChunker(), nil)
+	first, err := Take(dir, conv, DefaultChunker(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A second snapshot against the first as base must re-seal nothing.
-	second, err := Take(dir, mustIgnore(t, dir), conv, DefaultChunker(), &first.Manifest)
+	second, err := Take(dir, conv, DefaultChunker(), &first.Manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +82,7 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 func TestManifestSealOpenRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "x", bytes.Repeat([]byte("y"), 40<<10))
-	snap, err := Take(dir, mustIgnore(t, dir), testConv(t), DefaultChunker(), nil)
+	snap, err := Take(dir, testConv(t), DefaultChunker(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +167,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 		t.Skipf("symlinks unsupported on this filesystem: %v", err)
 	}
 
-	snap, err := Take(dir, mustIgnore(t, dir), testConv(t), DefaultChunker(), nil)
+	snap, err := Take(dir, testConv(t), DefaultChunker(), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,11 +212,34 @@ func TestWriteFileRejectsPathEscape(t *testing.T) {
 	}
 }
 
-func mustIgnore(t *testing.T, dir string) *Ignore {
-	t.Helper()
-	ig, err := LoadIgnore(dir)
+func TestNestedAqtignore(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, ".aqtignore", []byte("*.log\n"))
+	writeFile(t, dir, "app.log", []byte("x"))  // ignored by root
+	writeFile(t, dir, "keep.txt", []byte("x")) // kept
+	// A nested .aqtignore adds rules for its subtree, and can re-include a path
+	// the root excluded.
+	writeFile(t, dir, "sub/.aqtignore", []byte("secret.*\n!important.log\n"))
+	writeFile(t, dir, "sub/secret.key", []byte("x"))    // ignored by the nested file
+	writeFile(t, dir, "sub/important.log", []byte("x")) // re-included despite root *.log
+	writeFile(t, dir, "sub/notes.txt", []byte("x"))     // kept
+
+	m, err := Scan(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return ig
+	got := map[string]bool{}
+	for _, e := range m.Entries {
+		got[e.Path] = true
+	}
+	for _, p := range []string{"keep.txt", "sub/important.log", "sub/notes.txt"} {
+		if !got[p] {
+			t.Errorf("expected %q to be tracked", p)
+		}
+	}
+	for _, p := range []string{"app.log", "sub/secret.key"} {
+		if got[p] {
+			t.Errorf("expected %q to be ignored", p)
+		}
+	}
 }

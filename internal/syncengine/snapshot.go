@@ -30,9 +30,12 @@ type fileNode struct {
 
 // walkFiles invokes fn for every tracked symlink and regular file under dir.
 // Ignored paths and other special files (devices, sockets, fifos) are skipped.
-// Symlinks are read with Readlink — never followed — so a link into an ignored
-// or out-of-tree location is captured as its target, not its contents.
-func walkFiles(dir string, ig *Ignore, fn func(fileNode) error) error {
+// It loads each directory's .aqtignore as it descends (skipping ignored
+// directories, whose .aqtignore is therefore never consulted), so nested rules
+// apply to their subtree. Symlinks are read with Readlink — never followed — so
+// a link into an ignored or out-of-tree location is captured as its target.
+func walkFiles(dir string, fn func(fileNode) error) error {
+	ig := newIgnore()
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -43,12 +46,14 @@ func walkFiles(dir string, ig *Ignore, fn func(fileNode) error) error {
 		}
 		rel = filepath.ToSlash(rel)
 		if rel == "." {
+			ig.loadDir(dir, "")
 			return nil
 		}
 		if d.IsDir() {
 			if ig.Match(rel, true) {
 				return filepath.SkipDir
 			}
+			ig.loadDir(path, rel)
 			return nil
 		}
 		if ig.Match(rel, false) {
@@ -93,10 +98,10 @@ func metaEntry(n fileNode) Entry {
 
 // Scan reads dir into a manifest of path/size/mode/hash (and link targets) only —
 // no sealing — for cheap change detection (e.g. `status`) without the convergence
-// key.
-func Scan(dir string, ig *Ignore) (Manifest, error) {
+// key. Nested .aqtignore files are honored.
+func Scan(dir string) (Manifest, error) {
 	var m Manifest
-	err := walkFiles(dir, ig, func(n fileNode) error {
+	err := walkFiles(dir, func(n fileNode) error {
 		m.Entries = append(m.Entries, metaEntry(n))
 		return nil
 	})
@@ -109,14 +114,14 @@ func Scan(dir string, ig *Ignore) (Manifest, error) {
 // When base is non-nil, a file whose plaintext is unchanged reuses its previous
 // entry verbatim — so unchanged files are neither re-sealed nor re-listed for
 // upload.
-func Take(dir string, ig *Ignore, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest) (*Snapshot, error) {
+func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest) (*Snapshot, error) {
 	var reuse map[string]Entry
 	if base != nil {
 		reuse = base.byPath()
 	}
 	snap := &Snapshot{NewChunks: map[string][]byte{}}
 
-	err := walkFiles(dir, ig, func(n fileNode) error {
+	err := walkFiles(dir, func(n fileNode) error {
 		entry := metaEntry(n)
 		if prev, ok := reuse[n.rel]; ok && prev.Hash == entry.Hash {
 			snap.Manifest.Entries = append(snap.Manifest.Entries, prev)

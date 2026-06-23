@@ -142,11 +142,7 @@ func runStatus(dir string) error {
 	if err != nil {
 		return err
 	}
-	ig, err := syncengine.LoadIgnore(root)
-	if err != nil {
-		return err
-	}
-	local, err := syncengine.Scan(root, ig)
+	local, err := syncengine.Scan(root)
 	if err != nil {
 		return err
 	}
@@ -193,6 +189,13 @@ func runSync(dir string, opts syncOptions) error {
 	if err != nil {
 		return err
 	}
+	// Serialize concurrent syncs of the same folder on this machine; the server
+	// enforces the same per-resource on its side.
+	release, err := acquireSyncLock(root)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if cfg, err := syncengine.LoadConfig(root); err != nil {
 		return err
 	} else if cfg.Pack {
@@ -237,11 +240,7 @@ func runSync(dir string, opts syncOptions) error {
 		return fmt.Errorf("decrypt remote manifest: %w", err)
 	}
 
-	ig, err := syncengine.LoadIgnore(root)
-	if err != nil {
-		return err
-	}
-	snap, err := syncengine.Take(root, ig, conv, syncengine.DefaultChunker(), &base)
+	snap, err := syncengine.Take(root, conv, syncengine.DefaultChunker(), &base)
 	if err != nil {
 		return err
 	}
