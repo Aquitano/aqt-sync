@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -56,6 +57,16 @@ func (h *harness) do(method, path, token string, body, out any) int {
 		}
 	}
 	return rec.Code
+}
+
+// get issues an unauthenticated GET and returns the raw recorder (for non-JSON
+// responses like the HTML share view).
+func (h *harness) get(path string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
 }
 
 // signup creates an account from a passphrase and returns its token + master key.
@@ -368,6 +379,48 @@ func TestPublicPutKeepsOwnerWrappedKey(t *testing.T) {
 	h.do(http.MethodGet, "/v1/resources/"+put.ID, "", nil, &anon)
 	if anon.WrappedKey != nil {
 		t.Fatal("anonymous reader must not receive the wrapped key")
+	}
+}
+
+func TestShareViewLandingPage(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("web@example.com", "a passphrase for the web view")
+
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+
+	put := func(vis api.Visibility) string {
+		var resp api.PutResourceResponse
+		if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+			Visibility: vis, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+		}, &resp); code != http.StatusCreated {
+			t.Fatalf("put %s: status %d", vis, code)
+		}
+		return resp.ID
+	}
+
+	// A public resource gets a human landing page that names it and shows pull.
+	rec := h.get("/x/" + put(api.Public))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("public share view: got %d, want 200", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("content-type = %q, want text/html", ct)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, "aqt pull") {
+		t.Fatal("landing page should show the pull command")
+	}
+
+	// A private id 404s: the page must never confirm a private resource exists.
+	if rec := h.get("/x/" + put(api.Private)); rec.Code != http.StatusNotFound {
+		t.Fatalf("private /x: got %d, want 404", rec.Code)
+	}
+
+	// An unknown id 404s too.
+	if rec := h.get("/x/does-not-exist"); rec.Code != http.StatusNotFound {
+		t.Fatalf("unknown /x: got %d, want 404", rec.Code)
 	}
 }
 

@@ -364,6 +364,21 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	return out, nil
 }
 
+// ResourceVisibility returns a resource's visibility without loading its blob.
+// The web landing page uses it to decide whether to render (public) or 404
+// (private or unknown), so a private resource's existence is never confirmed.
+func (s *Store) ResourceVisibility(id string) (api.Visibility, error) {
+	var vis string
+	err := s.db.QueryRow(`SELECT visibility FROM resources WHERE id = ?`, id).Scan(&vis)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	if err != nil {
+		return "", err
+	}
+	return api.Visibility(vis), nil
+}
+
 // SetVisibility flips a resource public/private in place (owner-checked, version
 // bumped) without touching the blob or its wrapped key.
 func (s *Store) SetVisibility(owner, id string, vis api.Visibility) (int, error) {

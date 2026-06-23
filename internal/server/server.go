@@ -28,6 +28,10 @@ func (s *Server) Router() *gin.Engine {
 	r := gin.New()
 	r.Use(gin.Recovery(), limitBody)
 
+	// Human-facing landing page for a public share link. Decryption runs in the
+	// CLI; the content key is in the URL fragment, which never reaches the server.
+	r.GET("/x/:id", s.shareView)
+
 	v1 := r.Group("/v1")
 	{
 		v1.POST("/account", s.createAccount)

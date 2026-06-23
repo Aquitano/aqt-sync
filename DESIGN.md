@@ -201,8 +201,11 @@ private + public push/pull (key-in-fragment), password-gated links, `share`,
 `private` (key rotation), `ls`, and a `login`-cached session key so the passphrase
 is entered once per session (`logout` clears it). Every push wraps the content key
 under the owner's master key, so even public resources can later be shared/rotated.
-Verified by `go test ./...` plus live multi-machine cycles. Not yet built:
-tracked-folder `init`/`sync`/`status`, the `watch` daemon, and the `/x/<id>` web view.
+Verified by `go test ./...` plus live multi-machine cycles. A public share link
+(`/x/<id>`) opens a landing page that resolves the resource and shows the `aqt
+pull` command; in-browser decryption is deferred (the CLI does the decrypt).
+Not yet built: tracked-folder `init`/`sync`/`status`, the `watch` daemon, and
+in-browser decryption on the `/x/<id>` page.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
 to override), then `aqt --server http://localhost:8080 login`.
