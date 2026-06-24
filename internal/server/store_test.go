@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -529,6 +530,55 @@ func TestPutPackRejectsSliceOutOfRange(t *testing.T) {
 		t.Fatalf("out-of-range slice: got %v, want ErrBadPack", err)
 	}
 	_ = packID
+}
+
+// A crafted pack whose index offset overflows int64 (off=MaxInt64, len=1) must be
+// rejected as a bad pack, not slip past the bounds check and panic the slice.
+func TestPutPackRejectsOverflowSlice(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "overflow@example.com")
+	obj := []byte("real object bytes")
+	var buf bytes.Buffer
+	buf.Write(obj)
+	index := []api.PackIndexEntry{{ID: objID(obj), Off: math.MaxInt64, Len: 1}}
+	ij, _ := json.Marshal(index)
+	buf.Write(ij)
+	var lb [4]byte
+	binary.BigEndian.PutUint32(lb[:], uint32(len(ij)))
+	buf.Write(lb[:])
+	data := buf.Bytes()
+
+	if _, err := s.PutPack(owner, objID(data), data); !errors.Is(err, ErrBadPack) {
+		t.Fatalf("overflowing slice: got %v, want ErrBadPack (must not panic)", err)
+	}
+}
+
+// Locating an object re-arms the age guard on its pack, so a concurrent GC cannot
+// reap a pack a download is mid-read of (the read-path analogue of the dedup touch).
+func TestLocateRearmsAgeGuard(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "locaterace@example.com")
+	packID, data, ids := packOf("download target")
+	if _, err := s.PutPack(owner, packID, data); err != nil {
+		t.Fatal(err)
+	}
+	// Age the pack past the guard and leave it unreferenced: a superseded version's
+	// object that a slow reader still needs.
+	if _, err := s.db.Exec(
+		`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`,
+		time.Now().Add(-2*time.Hour).Unix(), owner, packID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if locs, err := s.LocateObjects(owner, ids); err != nil || len(locs) != 1 {
+		t.Fatalf("locate: %+v err=%v", locs, err)
+	}
+	if deleted, _, err := s.GCPacks(owner, gcMinAge); err != nil || deleted != 0 {
+		t.Fatalf("gc deleted %d err=%v, want 0 (locate must re-arm the guard)", deleted, err)
+	}
+	if _, err := os.Stat(s.packPath(owner, packID)); err != nil {
+		t.Fatalf("pack reaped despite the locate touch: %v", err)
+	}
 }
 
 func TestGCDoesNotCrossOwners(t *testing.T) {

@@ -90,6 +90,20 @@ func TestSyncE2E(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
+// A located-but-missing object surfaces client.ErrNotFound, which the reconcile
+// loop maps to a conflict-retry: a manifest whose objects were GC'd by a concurrent
+// supersede is re-read against the current version instead of hard-failing.
+func TestPackSourceMissingObjectIsNotFound(t *testing.T) {
+	src := &packSource{
+		locs:  map[string]api.ObjectLocation{},
+		spans: map[string]packSpan{},
+		cache: newPackCache(1),
+	}
+	if _, err := src.get("deadbeef"); !errors.Is(err, client.ErrNotFound) {
+		t.Fatalf("get of an unlocated object = %v, want client.ErrNotFound", err)
+	}
+}
+
 // TestSyncDedupHoldsOnResync covers the Phase 1 acceptance: a re-sync with no local
 // changes uploads no new packs (the have/want gate dedups), and a clone reconstructs
 // the chunked content byte-for-byte from the packs.

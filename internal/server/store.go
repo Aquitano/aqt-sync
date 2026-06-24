@@ -752,8 +752,11 @@ func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
 		return 0, err
 	}
 	for _, e := range index {
-		if e.Off < 0 || e.Len < 0 || e.Off+e.Len > objectsEnd {
-			return 0, fmt.Errorf("%w: object %s slice [%d,%d) escapes the object region", ErrBadPack, e.ID, e.Off, e.Off+e.Len)
+		// Off and Len come from client JSON, so the bounds check must never add them
+		// (off=MaxInt64 + len=1 would wrap negative, slip past, and panic the slice).
+		// Compare against objectsEnd without ever computing Off+Len.
+		if e.Off < 0 || e.Len < 0 || e.Off > objectsEnd || e.Len > objectsEnd-e.Off {
+			return 0, fmt.Errorf("%w: object %s slice escapes the object region", ErrBadPack, e.ID)
 		}
 		s := sha256.Sum256(data[e.Off : e.Off+e.Len])
 		if hex.EncodeToString(s[:]) != e.ID {
@@ -821,10 +824,18 @@ func parsePackIndex(data []byte) (index []api.PackIndexEntry, objectsEnd int, er
 }
 
 // LocateObjects resolves object ids to their pack and byte range so a client can
-// range-fetch them. Ids the owner does not store are silently skipped (the caller
-// errors if it needed one). A read path, so it does not touch the age guard.
+// range-fetch them, and re-arms the GC age guard on every pack it resolves. Ids the
+// owner does not store are silently skipped (the caller errors if it needed one).
+//
+// The touch is what keeps a concurrent GC from reaping a pack a download is mid-read
+// of: the same defense MissingChunks applies to a writer's dedup hits, applied here
+// to a reader's in-flight fetch. Without it a sync that supersedes the version being
+// read (unrooting its now-aged manifest/file objects) plus a GC could 404 the
+// in-flight read.
 func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation, error) {
 	out := make([]api.ObjectLocation, 0, len(ids))
+	seenPack := map[string]bool{}
+	var packs []string
 	for _, id := range ids {
 		var (
 			packID      string
@@ -840,8 +851,42 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 			return nil, err
 		}
 		out = append(out, api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length})
+		if !seenPack[packID] {
+			seenPack[packID] = true
+			packs = append(packs, packID)
+		}
+	}
+	if err := s.touchPacks(owner, packs); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+// touchPacks re-arms the GC age guard on the named packs. The id list is batched so
+// the IN clause stays well under SQLite's bound-variable limit even for a clone that
+// resolves many packs at once.
+func (s *Store) touchPacks(owner string, packIDs []string) error {
+	const batch = 400
+	now := time.Now().Unix()
+	for start := 0; start < len(packIDs); start += batch {
+		end := start + batch
+		if end > len(packIDs) {
+			end = len(packIDs)
+		}
+		group := packIDs[start:end]
+		args := make([]any, 0, len(group)+2)
+		args = append(args, now, owner)
+		for _, id := range group {
+			args = append(args, id)
+		}
+		if _, err := s.db.Exec(
+			`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // PackFileForOwner returns the on-disk path of a pack the owner stores, or
@@ -866,9 +911,22 @@ func (s *Store) PackFileForOwner(owner, packID string) (string, error) {
 // in-flight push's freshly uploaded packs from being reaped before its manifest
 // commits. v1 only deletes fully-dead packs; dead objects inside a still-live pack
 // are tolerated until a future repack. Returns the pack count and bytes reclaimed.
+//
+// The dead-pack selection and the row deletes run in one transaction. On the single
+// writer connection a transaction monopolizes the connection for its duration, so a
+// concurrent CheckChunks touch or a resource PUT cannot interleave between the
+// SELECT and the DELETEs: it either commits before this sweep began (and the touched
+// pack reads as young, so it is not selected) or serializes after it. Without that,
+// a touch landing after the SELECT was invisible to the in-flight sweep, which would
+// then reap a pack a concurrent push was about to root — turning the FK backstop
+// into a spurious push failure instead of a clean dedup hit.
 func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) {
 	cutoff := time.Now().Add(-minAge).Unix()
-	rows, err := s.db.Query(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	rows, err := tx.Query(
 		`SELECT pack_id, length FROM packs
 		 WHERE owner_handle = ? AND created_at < ?
 		   AND pack_id NOT IN (
@@ -879,6 +937,7 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		owner, cutoff, owner,
 	)
 	if err != nil {
+		tx.Rollback()
 		return 0, 0, err
 	}
 	type deadPack struct {
@@ -890,35 +949,46 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		var d deadPack
 		if err := rows.Scan(&d.id, &d.length); err != nil {
 			rows.Close()
+			tx.Rollback()
 			return 0, 0, err
 		}
 		dead = append(dead, d)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
+		tx.Rollback()
 		return 0, 0, err
 	}
 	rows.Close()
 
-	deleted := 0
 	var freed int64
 	for _, d := range dead {
 		// Objects FK-reference the pack, so they go first. A dead pack's objects are
 		// by definition unreferenced by resource_chunks, so removing them cannot
 		// violate that backstop.
-		if _, err := s.db.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
-			return deleted, freed, err
+		if _, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
+			tx.Rollback()
+			return 0, 0, err
 		}
-		if _, err := s.db.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
-			return deleted, freed, err
+		if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
+			tx.Rollback()
+			return 0, 0, err
 		}
-		if err := os.Remove(s.packPath(owner, d.id)); err != nil && !errors.Is(err, os.ErrNotExist) {
-			return deleted, freed, err
-		}
-		deleted++
 		freed += d.length
 	}
-	return deleted, freed, nil
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+
+	// Remove the pack files only after the rows are durably gone: a crash here leaks
+	// an unreferenced file (reclaimable later), never a live row pointing at a
+	// deleted file. Best-effort, matching the blob store.
+	for _, d := range dead {
+		if err := os.Remove(s.packPath(owner, d.id)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return len(dead), freed, err
+		}
+	}
+	return len(dead), freed, nil
 }
 
 // --- blob store ---

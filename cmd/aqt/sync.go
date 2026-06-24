@@ -296,6 +296,13 @@ func runSync(dir string, opts syncOptions) error {
 			return fmt.Errorf("unwrap folder key: %w", err)
 		}
 		remote, err := openRemoteManifest(cl, res.Blob, ck)
+		if errors.Is(err, client.ErrNotFound) {
+			// We read version res.Version's root, but a concurrent sync superseded it
+			// and GC reaped its now-unreferenced manifest objects before we fetched
+			// them. Re-reconcile against the current version (same path the server's
+			// own version conflict takes), rather than hard-failing the sync.
+			return client.ErrConflict
+		}
 		if err != nil {
 			return fmt.Errorf("decrypt remote manifest: %w", err)
 		}
@@ -662,7 +669,10 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 func (s *packSource) get(id string) ([]byte, error) {
 	loc, ok := s.locs[id]
 	if !ok {
-		return nil, fmt.Errorf("server could not locate chunk %s", id)
+		// The object was not in the locate response: the owner no longer stores it
+		// (e.g. a concurrent sync superseded this version and GC reaped it). Surface
+		// ErrNotFound so a manifest read can retry against the current version.
+		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
 	}
 	span := s.spans[loc.PackID]
 	data, ok := s.cache.get(loc.PackID)
