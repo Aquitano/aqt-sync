@@ -177,6 +177,28 @@ func promptLine(label string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+// promptYesNo asks a yes/no question and returns def when the answer is empty.
+// Without a terminal (pipe/CI) it returns def without reading, so a scripted run
+// takes the default instead of blocking — and never consumes a line a later
+// prompt (e.g. the passphrase) is waiting on.
+func promptYesNo(label string, def bool) (bool, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return def, nil
+	}
+	line, err := promptLine(label)
+	if err != nil {
+		return def, err
+	}
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return def, nil
+	}
+}
+
 // sharedStdin is a single buffered reader so multiple prompts (the email, plus
 // the signup passphrase + confirmation) don't lose lines to per-call buffering.
 var sharedStdin *bufio.Reader

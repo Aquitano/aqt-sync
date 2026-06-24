@@ -20,6 +20,60 @@ func mkGitDir(t *testing.T, dir string, files ...string) {
 	}
 }
 
+func TestFirstGitRepoRoot(t *testing.T) {
+	root := t.TempDir()
+	mkGitDir(t, root, "HEAD")
+	rel, ok := firstGitRepo(root)
+	if !ok {
+		t.Fatal("a repo at the root must be detected")
+	}
+	if rel != "." {
+		t.Fatalf("rel = %q, want \".\"", rel)
+	}
+}
+
+func TestFirstGitRepoNested(t *testing.T) {
+	root := t.TempDir()
+	mkGitDir(t, filepath.Join(root, "vendored"), "HEAD")
+	rel, ok := firstGitRepo(root)
+	if !ok {
+		t.Fatal("a nested repo must be detected")
+	}
+	if rel != "vendored" {
+		t.Fatalf("rel = %q, want \"vendored\"", rel)
+	}
+}
+
+func TestFirstGitRepoSubmodulePointer(t *testing.T) {
+	root := t.TempDir()
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(sub, ".git"), []byte("gitdir: ../.git/modules/sub\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rel, ok := firstGitRepo(root)
+	if !ok {
+		t.Fatal("a submodule (.git pointer file) must be detected")
+	}
+	if rel != "sub" {
+		t.Fatalf("rel = %q, want \"sub\"", rel)
+	}
+}
+
+func TestFirstGitRepoNoneAndControlDirSkipped(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A .git buried under the control dir must not count.
+	mkGitDir(t, filepath.Join(root, ".aqt"), "HEAD")
+	if _, ok := firstGitRepo(root); ok {
+		t.Fatal("no real repo present; .aqt/.git must be skipped")
+	}
+}
+
 func TestGitBusyCleanRepo(t *testing.T) {
 	root := t.TempDir()
 	mkGitDir(t, root, "HEAD", "config") // a normal repo with no lock

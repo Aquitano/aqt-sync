@@ -152,7 +152,11 @@ aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
 ```
 
 `.aqtignore` uses gitignore syntax. Conflicts (changed both sides) are left
-untouched and reported; `--force` resolves in favor of local.
+untouched and reported; `--force` resolves in favor of local. When the target
+tree holds a git repository, `init` notices it and asks whether to track the
+`.git` directory too — declined by default (it ignores `.git`); accepting writes a
+`!.git/` rule into the starter `.aqtignore`. Without a terminal the prompt takes
+the default, so scripted `init` stays non-interactive.
 
 ```console
 $ aqt init && aqt sync

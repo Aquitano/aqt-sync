@@ -129,6 +129,33 @@ func TestIgnoreMatching(t *testing.T) {
 	}
 }
 
+// .git is ignored by default, but a root `!.git/` re-includes the directory and
+// everything under it — the override the init prompt writes when the user opts to
+// sync their git history.
+func TestIgnoreGitNegation(t *testing.T) {
+	def := t.TempDir()
+	igDef, err := LoadIgnore(def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !igDef.Match(".git", true) {
+		t.Fatal(".git must be ignored by default")
+	}
+
+	tracked := t.TempDir()
+	writeFile(t, tracked, ".aqtignore", []byte("!.git/\n"))
+	ig, err := LoadIgnore(tracked)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ig.Match(".git", true) {
+		t.Fatal("!.git/ must re-include the .git directory")
+	}
+	if ig.Match(".git/config", false) {
+		t.Fatal("!.git/ must re-include files under .git")
+	}
+}
+
 func TestPlanThreeWay(t *testing.T) {
 	mk := func(entries ...Entry) Manifest { return Manifest{Entries: entries} }
 	e := func(path, hash string) Entry { return Entry{Path: path, Hash: hash} }

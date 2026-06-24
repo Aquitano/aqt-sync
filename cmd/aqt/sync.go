@@ -108,6 +108,15 @@ func runInit(dir string) error {
 	}
 	defer mk.Wipe()
 
+	// aqt ignores .git by default; offer to track it when this tree holds a repo.
+	syncGit := false
+	if repo, ok := firstGitRepo(abs); ok {
+		syncGit, err = promptSyncGit(repo)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Register an empty private folder resource; the first `sync` fills it.
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
@@ -122,7 +131,7 @@ func runInit(dir string) error {
 	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
 		return err
 	}
-	if err := writeStarterIgnore(abs); err != nil {
+	if err := writeStarterIgnore(abs, syncGit); err != nil {
 		return err
 	}
 	if err := saveState(abs, folderState{ID: resp.ID, Server: prof.Server}); err != nil {
@@ -740,12 +749,38 @@ node_modules/
 *.log
 `
 
-func writeStarterIgnore(root string) error {
+// starterIgnoreWithGit re-includes .git for a user who chose to track their git
+// history at init: aqt always ignores .git, and a leading ! overrides that.
+const starterIgnoreWithGit = `# aqt ignore patterns (gitignore syntax)
+# track the git repository (aqt ignores .git by default; ! re-includes it)
+!.git/
+node_modules/
+.DS_Store
+*.log
+`
+
+func writeStarterIgnore(root string, syncGit bool) error {
 	path := filepath.Join(root, ".aqtignore")
 	if _, err := os.Stat(path); err == nil {
 		return nil // do not clobber an existing one
 	}
-	return os.WriteFile(path, []byte(starterIgnore), 0o644)
+	body := starterIgnore
+	if syncGit {
+		body = starterIgnoreWithGit
+	}
+	return os.WriteFile(path, []byte(body), 0o644)
+}
+
+// promptSyncGit asks whether to track the git repository at repo (relative to the
+// tracked root, "." for the root). Declined by default — syncing a live .git
+// captures its locks and loose objects, which most users do not want.
+func promptSyncGit(repo string) (bool, error) {
+	where := "this folder is a git repository"
+	if repo != "." {
+		where = fmt.Sprintf("this folder contains a git repository at %s", repo)
+	}
+	fmt.Fprintf(os.Stderr, "%s; aqt ignores .git by default.\n", where)
+	return promptYesNo("Sync the .git directory too? [y/N]: ", false)
 }
 
 // --- misc helpers ---

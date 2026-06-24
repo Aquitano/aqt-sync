@@ -82,6 +82,49 @@ func gitBusy(root string) (busy bool, repoDir string, err error) {
 	return false, "", walkErr
 }
 
+// firstGitRepo returns the tracked-tree-relative path of the first git working
+// tree found under root ("." for the root itself), and whether one exists. It
+// recognizes both a .git directory and the .git pointer files submodules and
+// linked worktrees use, skips the control directory, and never descends into a
+// git directory's internals. Best-effort: an unreadable subtree is skipped.
+func firstGitRepo(root string) (rel string, found bool) {
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case syncengine.ControlDir:
+				return filepath.SkipDir
+			case ".git":
+				rel = repoRel(root, path)
+				return errStopWalk
+			}
+			return nil
+		}
+		// A non-directory .git is a submodule/worktree pointer or a symlink.
+		if d.Name() == ".git" {
+			rel = repoRel(root, path)
+			return errStopWalk
+		}
+		return nil
+	})
+	return rel, errors.Is(walkErr, errStopWalk)
+}
+
+// repoRel names the working tree holding gitPath, relative to root (POSIX, "."
+// for the root itself).
+func repoRel(root, gitPath string) string {
+	r, err := filepath.Rel(root, filepath.Dir(gitPath))
+	if err != nil {
+		return "."
+	}
+	return filepath.ToSlash(r)
+}
+
 // gitDirBusy reports whether gitDir shows a running or paused git operation: a
 // top-level lock file, or an in-progress-operation marker. Refs locks
 // (refs/**/*.lock) are deliberately not scanned — index.lock already covers every
