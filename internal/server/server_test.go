@@ -522,6 +522,100 @@ func TestControlRouteRejectsOversizedBody(t *testing.T) {
 	}
 }
 
+func TestDeviceListAndRevoke(t *testing.T) {
+	h := newHarness(t)
+	const email, pass = "devices@example.com", "a passphrase for devices"
+	token1, _ := h.signup(email, pass)
+
+	// Attach a second device to the same account.
+	var second api.AuthResponse
+	if code := h.attachWith(email, pass, mustSalt(h, email), &second); code != http.StatusCreated {
+		t.Fatalf("attach second device: %d", code)
+	}
+
+	// The owner sees both devices.
+	var list api.ListDevicesResponse
+	if code := h.do(http.MethodGet, "/v1/devices", token1, nil, &list); code != http.StatusOK {
+		t.Fatalf("list devices: %d", code)
+	}
+	if len(list.Devices) != 2 {
+		t.Fatalf("device count = %d, want 2", len(list.Devices))
+	}
+
+	// Listing requires auth.
+	if code := h.do(http.MethodGet, "/v1/devices", "", nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated list: got %d, want 401", code)
+	}
+
+	// A different account cannot revoke this account's device (ownership scoping).
+	intruder, _ := h.signup("intruder@example.com", "another passphrase entirely")
+	if code := h.do(http.MethodDelete, "/v1/devices/"+second.DeviceID, intruder, nil, nil); code != http.StatusNotFound {
+		t.Fatalf("cross-owner revoke: got %d, want 404", code)
+	}
+
+	// The owner revokes the second device; its token stops working.
+	if code := h.do(http.MethodDelete, "/v1/devices/"+second.DeviceID, token1, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("revoke device: %d", code)
+	}
+	if code := h.do(http.MethodGet, "/v1/devices", second.Token, nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("revoked token still works: got %d, want 401", code)
+	}
+
+	// Only the first device remains.
+	var after api.ListDevicesResponse
+	if code := h.do(http.MethodGet, "/v1/devices", token1, nil, &after); code != http.StatusOK {
+		t.Fatalf("post-revoke list: %d", code)
+	}
+	if len(after.Devices) != 1 {
+		t.Fatalf("post-revoke device count = %d, want 1", len(after.Devices))
+	}
+}
+
+func TestListResourcesReturnsWrappedKey(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("listkey@example.com", "passphrase for list key")
+
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	metaJSON, _ := json.Marshal(api.Metadata{Name: "secret.env", Size: 4, Kind: api.KindFile})
+	meta, _ := crypto.Seal(metaJSON, ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+
+	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+	}, nil); code != http.StatusCreated {
+		t.Fatalf("put: %d", code)
+	}
+
+	var list api.ListResourcesResponse
+	if code := h.do(http.MethodGet, "/v1/resources", token, nil, &list); code != http.StatusOK {
+		t.Fatalf("list: %d", code)
+	}
+	if len(list.Resources) != 1 {
+		t.Fatalf("resource count = %d, want 1", len(list.Resources))
+	}
+	item := list.Resources[0]
+	if item.WrappedKey == nil {
+		t.Fatal("list item must carry the owner's wrapped key so ls can decrypt the name")
+	}
+	// The wrapped key + master key recover the name the client sealed.
+	unwrapped, err := crypto.UnwrapKey(*item.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		t.Fatalf("unwrap: %v", err)
+	}
+	plain, err := crypto.Open(item.EncryptedMeta, unwrapped, crypto.AADMeta)
+	if err != nil {
+		t.Fatalf("open meta: %v", err)
+	}
+	var got api.Metadata
+	if err := json.Unmarshal(plain, &got); err != nil {
+		t.Fatalf("unmarshal meta: %v", err)
+	}
+	if got.Name != "secret.env" || got.Kind != api.KindFile {
+		t.Fatalf("decrypted meta = %+v, want name=secret.env kind=file", got)
+	}
+}
+
 func mustSalt(h *harness, email string) crypto.KdfParams {
 	h.t.Helper()
 	var salt api.SaltResponse

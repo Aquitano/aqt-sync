@@ -302,6 +302,41 @@ func (s *Store) OwnerByToken(token string) (string, error) {
 	return owner, err
 }
 
+// ListDevices returns the owner's attached devices (id + name). Token hashes never
+// leave the store.
+func (s *Store) ListDevices(owner string) ([]api.Device, error) {
+	rows, err := s.db.Query(
+		`SELECT device_id, name FROM devices WHERE owner_handle = ? ORDER BY device_id`, owner,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	devices := []api.Device{}
+	for rows.Next() {
+		var d api.Device
+		if err := rows.Scan(&d.ID, &d.Name); err != nil {
+			return nil, err
+		}
+		devices = append(devices, d)
+	}
+	return devices, rows.Err()
+}
+
+// DeleteDevice revokes a device, scoped to its owner so one account cannot revoke
+// another's device. Returns ErrNotFound if no such device belongs to the owner.
+func (s *Store) DeleteDevice(owner, deviceID string) error {
+	res, err := s.db.Exec(`DELETE FROM devices WHERE device_id = ? AND owner_handle = ?`, deviceID, owner)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // --- Resources ---
 
 // PutResource creates a resource (req.ID empty) or replaces one in place
@@ -519,7 +554,7 @@ func (s *Store) SetVisibility(owner, id string, vis api.Visibility) (int, error)
 
 func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 	rows, err := s.db.Query(
-		`SELECT id, visibility, encrypted_meta, version FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
+		`SELECT id, visibility, encrypted_meta, wrapped_key, version FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
 	)
 	if err != nil {
 		return nil, err
@@ -529,16 +564,27 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 	var items []api.ResourceListItem
 	for rows.Next() {
 		var (
-			item     api.ResourceListItem
-			vis      string
-			metaJSON string
+			item        api.ResourceListItem
+			vis         string
+			metaJSON    string
+			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&item.ID, &vis, &metaJSON, &item.Version); err != nil {
+		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version); err != nil {
 			return nil, err
 		}
 		item.Visibility = api.Visibility(vis)
 		if err := json.Unmarshal([]byte(metaJSON), &item.EncryptedMeta); err != nil {
 			return nil, err
+		}
+		// The owner's recovery key, so they can decrypt their own resource names in
+		// `ls`/`find`. This endpoint is owner-only (authed), so returning it leaks
+		// nothing a per-resource GET would not.
+		if wrappedJSON.Valid {
+			var wk crypto.WrappedKey
+			if err := json.Unmarshal([]byte(wrappedJSON.String), &wk); err != nil {
+				return nil, err
+			}
+			item.WrappedKey = &wk
 		}
 		items = append(items, item)
 	}
