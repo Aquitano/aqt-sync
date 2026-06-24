@@ -90,6 +90,37 @@ func TestSyncE2E(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
+// TestSyncDedupHoldsOnResync covers the Phase 1 acceptance: a re-sync with no local
+// changes uploads no new packs (the have/want gate dedups), and a clone reconstructs
+// the chunked content byte-for-byte from the packs.
+func TestSyncDedupHoldsOnResync(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "big.dat", bigContent())
+	writeTree(t, origin, "notes.txt", "small inline file")
+	h.sync(origin)
+
+	afterFirst := h.countPacks()
+	if afterFirst == 0 {
+		t.Fatal("first sync of a chunked file should have uploaded at least one pack")
+	}
+
+	// A second sync with nothing changed must upload no new packs.
+	h.sync(origin)
+	if got := h.countPacks(); got != afterFirst {
+		t.Fatalf("no-op re-sync changed pack count: %d -> %d (dedup did not hold)", afterFirst, got)
+	}
+
+	// A fresh clone reconstructs the chunked file exactly, fetching from packs.
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	if got := readTree(t, replica, "big.dat"); got != bigContent() {
+		t.Fatal("clone did not reconstruct the chunked file from packs")
+	}
+	assertTreeEqual(t, origin, replica)
+}
+
 // TestSyncRefusesMissingBase covers C7: a sync with no base must refuse rather
 // than reconcile against an empty base (which resurrects deletions), and
 // --reconcile must surface one-sided differences as conflicts.
@@ -182,8 +213,9 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 // --- harness ---
 
 type e2eHarness struct {
-	t   *testing.T
-	url string
+	t       *testing.T
+	url     string
+	dataDir string
 }
 
 func newE2E(t *testing.T) *e2eHarness {
@@ -193,7 +225,8 @@ func newE2E(t *testing.T) *e2eHarness {
 	t.Setenv("HOME", home)                                      // darwin config dir
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config")) // linux config dir
 
-	store, err := server.OpenStore(t.TempDir())
+	dataDir := t.TempDir()
+	store, err := server.OpenStore(dataDir)
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
@@ -201,9 +234,29 @@ func newE2E(t *testing.T) *e2eHarness {
 	ts := httptest.NewServer(server.New(store).Router())
 	t.Cleanup(ts.Close)
 
-	h := &e2eHarness{t: t, url: ts.URL}
+	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir}
 	h.signup("e2e@example.com", "correct horse battery staple")
 	return h
+}
+
+// countPacks returns how many pack files the server has stored, so a test can
+// assert that a no-op re-sync uploads nothing (dedup holds).
+func (h *e2eHarness) countPacks() int {
+	h.t.Helper()
+	n := 0
+	err := filepath.WalkDir(filepath.Join(h.dataDir, "packs"), func(_ string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(d.Name(), ".bin") {
+			n++
+		}
+		return nil
+	})
+	if err != nil {
+		h.t.Fatalf("count packs: %v", err)
+	}
+	return n
 }
 
 // signup registers an account against the test server and writes the profile +

@@ -113,31 +113,102 @@ func (c *Client) DeleteResource(id string) error {
 	return c.do(http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil, nil)
 }
 
-// CheckChunks returns which of the given chunk ids the server is missing.
+// CheckChunks returns which of the given object ids the server is missing — the
+// have/want gate before packing and uploading.
 func (c *Client) CheckChunks(ids []string) ([]string, error) {
 	var r api.ChunkCheckResponse
 	err := c.do(http.MethodPost, "/v1/chunks/check", api.ChunkCheckRequest{IDs: ids}, &r)
 	return r.Missing, err
 }
 
-// PutChunks uploads a batch of content-addressed chunks. The caller is
-// responsible for keeping a batch under the server body cap.
-func (c *Client) PutChunks(chunks []api.ChunkData) error {
-	return c.do(http.MethodPost, "/v1/chunks", api.ChunkUploadRequest{Chunks: chunks}, nil)
+// LocateChunks resolves object ids to the packs and byte ranges that hold them, so
+// the caller can range-fetch only what it needs.
+func (c *Client) LocateChunks(ids []string) ([]api.ObjectLocation, error) {
+	var r api.LocateResponse
+	err := c.do(http.MethodPost, "/v1/chunks/locate", api.LocateRequest{IDs: ids}, &r)
+	return r.Locations, err
 }
 
-// FetchChunks downloads a batch of chunks by id.
-func (c *Client) FetchChunks(ids []string) ([]api.ChunkData, error) {
-	var r api.ChunkFetchResponse
-	err := c.do(http.MethodPost, "/v1/chunks/fetch", api.ChunkFetchRequest{IDs: ids}, &r)
-	return r.Chunks, err
+// PutPack uploads one raw pack. The id is its content address; the server verifies
+// it. Idempotent: re-uploading a stored pack succeeds without re-storing it.
+func (c *Client) PutPack(packID string, pack []byte) error {
+	return c.putRaw("/v1/packs/"+url.PathEscape(packID), pack)
 }
 
-// GC asks the server to sweep the owner's unreferenced chunks.
-func (c *Client) GC() (int, error) {
+// GetPackRange downloads length bytes of a pack starting at off, via an HTTP Range
+// request, so a pull transfers only the span covering the objects it needs.
+func (c *Client) GetPackRange(packID string, off, length int64) ([]byte, error) {
+	return c.getRange("/v1/packs/"+url.PathEscape(packID), off, length)
+}
+
+// GC asks the server to sweep the owner's fully-dead packs, returning the pack
+// count and bytes reclaimed.
+func (c *Client) GC() (deletedPacks int, freedBytes int64, err error) {
 	var r api.GCResponse
-	err := c.do(http.MethodPost, "/v1/gc", nil, &r)
-	return r.Deleted, err
+	err = c.do(http.MethodPost, "/v1/gc", nil, &r)
+	return r.DeletedPacks, r.FreedBytes, err
+}
+
+// putRaw uploads an opaque body as application/octet-stream (the pack transport),
+// mapping non-2xx responses the same way do() does.
+func (c *Client) putRaw(path string, body []byte) error {
+	req, err := http.NewRequest(http.MethodPut, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request PUT %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	return statusError(resp.StatusCode, path, data)
+}
+
+// getRange downloads [off, off+length) of an opaque body via a Range request and
+// returns the raw bytes. The server answers 206 (partial) or 200 (whole); both are
+// success.
+func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+length-1))
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("request GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if err := statusError(resp.StatusCode, path, data); err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+// statusError maps an HTTP status to the package's sentinel errors, mirroring the
+// tail of do() so the raw transport reports failures the same way.
+func statusError(status int, path string, body []byte) error {
+	switch {
+	case status == http.StatusNotFound:
+		return ErrNotFound
+	case status == http.StatusConflict:
+		return ErrConflict
+	case status < 200 || status >= 300:
+		var e api.ErrorResponse
+		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			return fmt.Errorf("server: %s (%d)", e.Error, status)
+		}
+		return fmt.Errorf("server returned %d for %s", status, path)
+	}
+	return nil
 }
 
 func (c *Client) do(method, path string, body, out any) error {
@@ -167,18 +238,8 @@ func (c *Client) do(method, path string, body, out any) error {
 	defer resp.Body.Close()
 
 	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode == http.StatusNotFound {
-		return ErrNotFound
-	}
-	if resp.StatusCode == http.StatusConflict {
-		return ErrConflict
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		var e api.ErrorResponse
-		if json.Unmarshal(data, &e) == nil && e.Error != "" {
-			return fmt.Errorf("server: %s (%d)", e.Error, resp.StatusCode)
-		}
-		return fmt.Errorf("server returned %d", resp.StatusCode)
+	if err := statusError(resp.StatusCode, path, data); err != nil {
+		return err
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)

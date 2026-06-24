@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -454,37 +455,89 @@ func TestPutResourceVersionConflictReturns409(t *testing.T) {
 	}
 }
 
-func TestChunkEndpointsRoundTrip(t *testing.T) {
+// raw issues a request with an opaque body and returns the recorder, for the pack
+// transport (octet-stream PUT, range GET) the JSON do() helper cannot model.
+func (h *harness) raw(method, path, token string, header map[string]string, body []byte) *httptest.ResponseRecorder {
+	h.t.Helper()
+	req := httptest.NewRequest(method, path, bytes.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	for k, v := range header {
+		req.Header.Set(k, v)
+	}
+	rec := httptest.NewRecorder()
+	h.router.ServeHTTP(rec, req)
+	return rec
+}
+
+func TestPackEndpointsRoundTrip(t *testing.T) {
 	h := newHarness(t)
-	token, _ := h.signup("chunkapi@example.com", "passphrase for chunk api")
-	a := chunkOf("hello chunk world")
+	token, _ := h.signup("packapi@example.com", "passphrase for pack api")
+	packID, pack, ids := packOf("hello pack world", "second object here")
 
 	var check api.ChunkCheckResponse
 	if code := h.do(http.MethodPost, "/v1/chunks/check", token,
-		api.ChunkCheckRequest{IDs: []string{a.ID}}, &check); code != http.StatusOK {
+		api.ChunkCheckRequest{IDs: ids}, &check); code != http.StatusOK {
 		t.Fatalf("check: %d", code)
 	}
-	if len(check.Missing) != 1 {
-		t.Fatalf("expected 1 missing before upload, got %d", len(check.Missing))
+	if len(check.Missing) != 2 {
+		t.Fatalf("expected 2 missing before upload, got %d", len(check.Missing))
 	}
 
-	if code := h.do(http.MethodPost, "/v1/chunks", token,
-		api.ChunkUploadRequest{Chunks: []api.ChunkData{a}}, nil); code != http.StatusOK {
-		t.Fatalf("upload: %d", code)
-	}
-	var fetch api.ChunkFetchResponse
-	if code := h.do(http.MethodPost, "/v1/chunks/fetch", token,
-		api.ChunkFetchRequest{IDs: []string{a.ID}}, &fetch); code != http.StatusOK {
-		t.Fatalf("fetch: %d", code)
-	}
-	if len(fetch.Chunks) != 1 || string(fetch.Chunks[0].Data) != "hello chunk world" {
-		t.Fatalf("fetch returned %+v", fetch.Chunks)
+	if rec := h.raw(http.MethodPut, "/v1/packs/"+packID, token,
+		map[string]string{"Content-Type": "application/octet-stream"}, pack); rec.Code != http.StatusOK {
+		t.Fatalf("put pack: %d (%s)", rec.Code, rec.Body.String())
 	}
 
-	// The chunk store requires auth.
+	if code := h.do(http.MethodPost, "/v1/chunks/check", token,
+		api.ChunkCheckRequest{IDs: ids}, &check); code != http.StatusOK || len(check.Missing) != 0 {
+		t.Fatalf("check after upload: code=%d missing=%d", code, len(check.Missing))
+	}
+
+	// Locate resolves an object to its pack byte range.
+	var loc api.LocateResponse
+	if code := h.do(http.MethodPost, "/v1/chunks/locate", token,
+		api.LocateRequest{IDs: []string{ids[1]}}, &loc); code != http.StatusOK || len(loc.Locations) != 1 {
+		t.Fatalf("locate: code=%d locations=%d", code, len(loc.Locations))
+	}
+	got := loc.Locations[0]
+	if got.PackID != packID {
+		t.Fatalf("located in pack %s, want %s", got.PackID, packID)
+	}
+
+	// Whole-pack GET returns the bytes verbatim.
+	rec := h.raw(http.MethodGet, "/v1/packs/"+packID, token, nil, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get pack: %d", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), pack) {
+		t.Fatal("whole-pack GET did not round-trip the bytes")
+	}
+
+	// A Range GET returns just the requested object slice (206 Partial Content).
+	rng := fmt.Sprintf("bytes=%d-%d", got.Off, got.Off+got.Len-1)
+	rec = h.raw(http.MethodGet, "/v1/packs/"+packID, token, map[string]string{"Range": rng}, nil)
+	if rec.Code != http.StatusPartialContent {
+		t.Fatalf("range get: %d, want 206", rec.Code)
+	}
+	if rec.Body.String() != "second object here" {
+		t.Fatalf("range get body = %q, want the second object", rec.Body.String())
+	}
+
+	// A pack whose bytes do not match the id in the path is rejected.
+	if rec := h.raw(http.MethodPut, "/v1/packs/"+packID, token,
+		map[string]string{"Content-Type": "application/octet-stream"}, append([]byte("x"), pack...)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("mislabeled pack: got %d, want 400", rec.Code)
+	}
+
+	// The pack store requires auth.
 	if code := h.do(http.MethodPost, "/v1/chunks/check", "",
-		api.ChunkCheckRequest{IDs: []string{a.ID}}, nil); code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated chunk check: got %d, want 401", code)
+		api.ChunkCheckRequest{IDs: ids}, nil); code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated check: got %d, want 401", code)
+	}
+	if rec := h.raw(http.MethodGet, "/v1/packs/"+packID, "", nil, nil); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated pack get: got %d, want 401", rec.Code)
 	}
 }
 

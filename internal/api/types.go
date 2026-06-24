@@ -98,13 +98,6 @@ type PutResourceRequest struct {
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 }
 
-// ChunkData is one opaque, content-addressed chunk on the wire. ID is the hex
-// sha256 of Data; the server verifies the binding on upload.
-type ChunkData struct {
-	ID   string `json:"id"`
-	Data []byte `json:"data"`
-}
-
 // PackIndexEntry locates one object inside a pack: its content-address id and the
 // byte slice [Off, Off+Len) of its ciphertext, relative to the start of the pack.
 // A pack's trailing index is a JSON array of these (see syncengine.PackBuilder for
@@ -145,25 +138,17 @@ type ChunkCheckResponse struct {
 	Missing []string `json:"missing"`
 }
 
-type ChunkUploadRequest struct {
-	Chunks []ChunkData `json:"chunks"`
+// PutPackResponse acknowledges a pack upload, reporting how many of its objects
+// were newly stored (zero means every object already existed: a fully-deduped pack).
+type PutPackResponse struct {
+	StoredObjects int `json:"storedObjects"`
 }
 
-type ChunkUploadResponse struct {
-	Stored int `json:"stored"`
-}
-
-type ChunkFetchRequest struct {
-	IDs []string `json:"ids"`
-}
-
-type ChunkFetchResponse struct {
-	Chunks []ChunkData `json:"chunks"`
-}
-
-// GCResponse reports how many unreferenced chunks a sweep deleted.
+// GCResponse reports a pack-level sweep: how many fully-dead packs were deleted and
+// how many bytes that reclaimed.
 type GCResponse struct {
-	Deleted int `json:"deleted"`
+	DeletedPacks int   `json:"deletedPacks"`
+	FreedBytes   int64 `json:"freedBytes"`
 }
 
 type PutResourceResponse struct {

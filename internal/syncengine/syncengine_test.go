@@ -10,6 +10,21 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
+// captureSink records the chunks a snapshot seals so a test can assert what was
+// (re)sealed without the snapshot holding ciphertext itself.
+type captureSink struct {
+	ids   []string
+	bytes map[string][]byte
+}
+
+func newCaptureSink() *captureSink { return &captureSink{bytes: map[string][]byte{}} }
+
+func (s *captureSink) Add(ch crypto.Chunk, ct []byte) error {
+	s.ids = append(s.ids, ch.ID)
+	s.bytes[ch.ID] = append([]byte(nil), ct...)
+	return nil
+}
+
 func testConv(t *testing.T) crypto.ConvergenceKey {
 	t.Helper()
 	p, err := crypto.NewKdfParams()
@@ -40,12 +55,13 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 	big := bytes.Repeat([]byte("0123456789abcdef"), 8<<10) // 128 KiB
 	writeFile(t, dir, "nested/big.bin", big)
 
-	snap, err := Take(dir, testConv(t), DefaultChunker(), nil)
+	sink := newCaptureSink()
+	m, err := Take(dir, testConv(t), DefaultChunker(), nil, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	byPath := snap.Manifest.byPath()
+	byPath := m.byPath()
 	small, ok := byPath["small.txt"]
 	if !ok || small.Inline == nil || len(small.Chunks) != 0 {
 		t.Fatalf("small file should be inline, got %+v", small)
@@ -54,7 +70,7 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 	if !ok || len(bigEntry.Chunks) < 2 || bigEntry.Inline != nil {
 		t.Fatalf("big file should be chunked, got %d chunks", len(bigEntry.Chunks))
 	}
-	if len(snap.NewChunks) == 0 {
+	if len(sink.ids) == 0 {
 		t.Fatal("expected sealed chunks for the big file")
 	}
 }
@@ -65,29 +81,33 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 	writeFile(t, dir, "a.bin", big)
 
 	conv := testConv(t)
-	first, err := Take(dir, conv, DefaultChunker(), nil)
+	first, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink())
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A second snapshot against the first as base must re-seal nothing.
-	second, err := Take(dir, conv, DefaultChunker(), &first.Manifest)
+	sink := newCaptureSink()
+	second, err := Take(dir, conv, DefaultChunker(), &first, sink)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(second.NewChunks) != 0 {
-		t.Fatalf("unchanged file re-sealed %d chunks", len(second.NewChunks))
+	if len(sink.ids) != 0 {
+		t.Fatalf("unchanged file re-sealed %d chunks", len(sink.ids))
+	}
+	if len(second.Entries) != 1 {
+		t.Fatalf("second snapshot lost entries: %d", len(second.Entries))
 	}
 }
 
 func TestManifestSealOpenRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, dir, "x", bytes.Repeat([]byte("y"), 40<<10))
-	snap, err := Take(dir, testConv(t), DefaultChunker(), nil)
+	m, err := Take(dir, testConv(t), DefaultChunker(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	ck, _ := crypto.GenerateContentKey()
-	blob, err := SealManifest(snap.Manifest, ck)
+	blob, err := SealManifest(m, ck)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,11 +214,11 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 		t.Skipf("symlinks unsupported on this filesystem: %v", err)
 	}
 
-	snap, err := Take(dir, testConv(t), DefaultChunker(), nil)
+	m, err := Take(dir, testConv(t), DefaultChunker(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	link, ok := snap.Manifest.Lookup("link.txt")
+	link, ok := m.Lookup("link.txt")
 	if !ok || !link.IsSymlink() || link.Link != "real.txt" {
 		t.Fatalf("symlink not captured as a target: %+v", link)
 	}
@@ -208,7 +228,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 
 	// Materialize into a fresh tree and confirm the link is recreated, not followed.
 	out := t.TempDir()
-	for _, e := range snap.Manifest.Entries {
+	for _, e := range m.Entries {
 		if e.IsSymlink() {
 			if err := WriteSymlink(out, e); err != nil {
 				t.Fatal(err)
