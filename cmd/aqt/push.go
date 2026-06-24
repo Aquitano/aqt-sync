@@ -64,7 +64,7 @@ func runPush(path string, opts pushOptions) error {
 	if err != nil {
 		return err
 	}
-	metaJSON, err := json.Marshal(api.Metadata{Name: name, Size: int64(len(data))})
+	metaJSON, err := json.Marshal(api.Metadata{Name: name, Size: int64(len(data)), Kind: api.KindFile})
 	if err != nil {
 		return err
 	}

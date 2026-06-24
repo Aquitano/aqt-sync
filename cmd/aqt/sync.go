@@ -603,7 +603,7 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	metaJSON, err := json.Marshal(api.Metadata{Name: filepath.Base(dir)})
+	metaJSON, err := json.Marshal(api.Metadata{Name: filepath.Base(dir), Kind: api.KindFolder})
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}

@@ -15,11 +15,20 @@ const (
 	Public  Visibility = "public"
 )
 
+// Resource kinds carried in Metadata.Kind so the client can tell a single-file
+// push from a tracked-folder manifest without decrypting the blob. An absent kind
+// (older resources) is treated as a file.
+const (
+	KindFile   = "file"
+	KindFolder = "folder"
+)
+
 // Metadata is the plaintext resource description. The client seals it under the
 // content key before upload; the server stores only the ciphertext.
 type Metadata struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
+	Kind string `json:"kind,omitempty"`
 }
 
 // CreateAccountRequest registers a new account and attaches the first device.
@@ -148,15 +157,32 @@ type GetResourceResponse struct {
 	Version       int                `json:"version"`
 }
 
+// ResourceListItem describes one of the owner's resources. WrappedKey (the
+// content key under the owner's master key) is included so `aqt ls`/`aqt find`
+// can decrypt the sealed metadata locally; the list endpoint is owner-only, so it
+// reveals nothing a GET of each resource would not.
 type ResourceListItem struct {
-	ID            string            `json:"id"`
-	Visibility    Visibility        `json:"visibility"`
-	EncryptedMeta crypto.SealedBlob `json:"encryptedMeta"`
-	Version       int               `json:"version"`
+	ID            string             `json:"id"`
+	Visibility    Visibility         `json:"visibility"`
+	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	Version       int                `json:"version"`
 }
 
 type ListResourcesResponse struct {
 	Resources []ResourceListItem `json:"resources"`
+}
+
+// Device is one attached device on an account. The server never returns the token
+// (only its hash is stored); Current is set client-side to mark the local device.
+type Device struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Current bool   `json:"current,omitempty"`
+}
+
+type ListDevicesResponse struct {
+	Devices []Device `json:"devices"`
 }
 
 type ErrorResponse struct {

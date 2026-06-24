@@ -57,6 +57,19 @@ func (c *Client) AttachDevice(req api.AttachDeviceRequest) (api.AuthResponse, er
 	return r, err
 }
 
+// ListDevices returns the devices attached to the authenticated account.
+func (c *Client) ListDevices() ([]api.Device, error) {
+	var r api.ListDevicesResponse
+	err := c.do(http.MethodGet, "/v1/devices", nil, &r)
+	return r.Devices, err
+}
+
+// DeleteDevice revokes a device by id. Revoking the current device invalidates
+// this client's own token.
+func (c *Client) DeleteDevice(id string) error {
+	return c.do(http.MethodDelete, "/v1/devices/"+url.PathEscape(id), nil, nil)
+}
+
 // Salt fetches an account's KDF params. found is false if the account does not
 // exist, which `login` uses to branch between signup and device attach.
 func (c *Client) Salt(email string) (params crypto.KdfParams, found bool, err error) {

@@ -50,10 +50,18 @@ func loginCmd() *cobra.Command {
 }
 
 func logoutCmd() *cobra.Command {
-	return &cobra.Command{
+	var allDevices bool
+	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Clear the cached session key (the passphrase is needed again next time)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// --all-devices revokes every *other* device first; this device stays
+			// attached but locked (its local key material is dropped below).
+			if allDevices {
+				if err := revokeOtherDevices(); err != nil {
+					return err
+				}
+			}
 			name := firstNonEmpty(flagProfile, identity.DefaultProfile)
 			if err := identity.ClearSession(name); err != nil {
 				return err
@@ -62,6 +70,31 @@ func logoutCmd() *cobra.Command {
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&allDevices, "all-devices", false, "also revoke every other device on the account")
+	return cmd
+}
+
+func revokeOtherDevices() error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	devices, err := cl.ListDevices()
+	if err != nil {
+		return err
+	}
+	revoked := 0
+	for _, d := range devices {
+		if d.ID == prof.DeviceID {
+			continue
+		}
+		if err := cl.DeleteDevice(d.ID); err != nil {
+			return fmt.Errorf("revoke device %s: %w", d.ID, err)
+		}
+		revoked++
+	}
+	fmt.Fprintf(os.Stderr, "revoked %d other device(s)\n", revoked)
+	return nil
 }
 
 // createAccount runs first-run signup. A typo'd passphrase becomes the account

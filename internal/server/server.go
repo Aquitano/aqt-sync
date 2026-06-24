@@ -79,6 +79,12 @@ func (s *Server) Router() *gin.Engine {
 			authed.POST("/resources/:id/visibility", limitBody(maxControlBody), s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
 
+			// Device management. Attach (POST /devices) is unauthenticated above
+			// (it is how a new device proves itself); listing and revoking require
+			// an existing device's token.
+			authed.GET("/devices", s.listDevices)
+			authed.DELETE("/devices/:id", s.deleteDevice)
+
 			// Folder-sync chunk store: opaque, content-addressed, owner-scoped.
 			authed.POST("/chunks/check", limitBody(maxChunkBody), s.checkChunks)
 			authed.POST("/chunks", limitBody(maxChunkBody), s.uploadChunks)
@@ -227,6 +233,30 @@ func (s *Server) attachDevice(c *gin.Context) {
 		return
 	}
 	abort(c, http.StatusUnauthorized, "invalid credentials")
+}
+
+func (s *Server) listDevices(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	devices, err := s.store.ListDevices(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "list devices failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ListDevicesResponse{Devices: devices})
+}
+
+func (s *Server) deleteDevice(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	err := s.store.DeleteDevice(owner, c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "delete device failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // --- resource handlers ---

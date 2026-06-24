@@ -113,6 +113,72 @@ func TestSyncRefusesMissingBase(t *testing.T) {
 	h.sync(origin)
 }
 
+// TestLsAndFindDecryptNames covers the new listing/search path: `ls` must decrypt
+// resource names and sizes, and `find` must expand a tracked folder into its
+// member files so a single index covers everything.
+func TestLsAndFindDecryptNames(t *testing.T) {
+	h := newE2E(t)
+
+	// A single-file push.
+	fdir := t.TempDir()
+	fpath := filepath.Join(fdir, "secret.env")
+	if err := os.WriteFile(fpath, []byte("API_KEY=xyz"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPush(fpath, pushOptions{noClip: true, quiet: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	// A tracked folder with a nested file.
+	folder := t.TempDir()
+	h.init(folder)
+	writeTree(t, folder, "notes/todo.txt", "buy milk")
+	h.sync(folder)
+
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, ok := identity.LoadSession(prof.Name)
+	if !ok {
+		t.Fatal("expected a cached session")
+	}
+
+	rows, err := collectResources(cl, mk)
+	if err != nil {
+		t.Fatalf("collectResources: %v", err)
+	}
+	var sawFile, sawFolder bool
+	for _, r := range rows {
+		if r.Kind == api.KindFile && r.Name == "secret.env" {
+			sawFile = true
+		}
+		if r.Kind == api.KindFolder && r.Name == filepath.Base(folder) {
+			sawFolder = true
+		}
+	}
+	if !sawFile {
+		t.Errorf("ls did not surface the decrypted file name; rows=%+v", rows)
+	}
+	if !sawFolder {
+		t.Errorf("ls did not surface the folder; rows=%+v", rows)
+	}
+
+	entries, err := buildFindIndex(cl, mk)
+	if err != nil {
+		t.Fatalf("buildFindIndex: %v", err)
+	}
+	var sawMember bool
+	for _, e := range entries {
+		if e.Kind == kindFolderFile && e.Path == "notes/todo.txt" {
+			sawMember = true
+		}
+	}
+	if !sawMember {
+		t.Errorf("find did not surface the folder member; entries=%+v", entries)
+	}
+}
+
 // --- harness ---
 
 type e2eHarness struct {
@@ -124,7 +190,7 @@ func newE2E(t *testing.T) *e2eHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	home := t.TempDir()
-	t.Setenv("HOME", home)                                       // darwin config dir
+	t.Setenv("HOME", home)                                      // darwin config dir
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config")) // linux config dir
 
 	store, err := server.OpenStore(t.TempDir())
