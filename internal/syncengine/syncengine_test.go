@@ -99,24 +99,105 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 	}
 }
 
-func TestManifestSealOpenRoundTrip(t *testing.T) {
+// The manifest round-trips through the object store: chunk+seal it, seal the root
+// pointer under the content key, then reassemble it from the captured objects.
+func TestManifestRootRoundTrip(t *testing.T) {
 	dir := t.TempDir()
-	writeFile(t, dir, "x", bytes.Repeat([]byte("y"), 40<<10))
-	m, err := Take(dir, testConv(t), DefaultChunker(), nil, nil)
+	// A manifest large enough to span several chunks, so reassembly is exercised.
+	for i := 0; i < 40; i++ {
+		writeFile(t, dir, fmt.Sprintf("dir%02d/file.txt", i), []byte(fmt.Sprintf("contents of file %02d", i)))
+	}
+	conv := testConv(t)
+	m, err := Take(dir, conv, DefaultChunker(), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+
+	sink := newCaptureSink()
+	chunks, err := ChunkManifest(m, conv, DefaultChunker(), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("manifest produced no chunks")
+	}
+
 	ck, _ := crypto.GenerateContentKey()
-	blob, err := SealManifest(m, ck)
+	root := ManifestRoot{Version: m.Version, Chunks: chunks}
+	blob, err := SealManifestRoot(root, ck)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenManifest(blob, ck)
+	gotRoot, err := OpenManifestRoot(blob, ck)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Entries) != 1 || got.Entries[0].Path != "x" {
-		t.Fatalf("manifest round trip lost entries: %+v", got.Entries)
+
+	fetch := func(id string) ([]byte, error) {
+		ct, ok := sink.bytes[id]
+		if !ok {
+			return nil, fmt.Errorf("missing chunk %s", id)
+		}
+		return ct, nil
+	}
+	got, err := OpenManifestFromRoot(gotRoot, fetch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Entries) != len(m.Entries) {
+		t.Fatalf("round trip changed entry count: %d -> %d", len(m.Entries), len(got.Entries))
+	}
+	for i := range m.Entries {
+		if got.Entries[i].Path != m.Entries[i].Path || got.Entries[i].Hash != m.Entries[i].Hash {
+			t.Fatalf("entry %d differs after round trip", i)
+		}
+	}
+}
+
+// Editing one file in a path-sorted manifest re-cuts only nearby chunks, so most
+// manifest objects are shared with the prior version (the Phase 3 dedup win).
+func TestManifestEditReusesMostChunks(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 200; i++ {
+		writeFile(t, dir, fmt.Sprintf("dir%03d/file.txt", i), []byte(fmt.Sprintf("contents of file number %03d here", i)))
+	}
+	conv := testConv(t)
+	m1, err := Take(dir, conv, DefaultChunker(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c1, err := ChunkManifest(m1, conv, DefaultChunker(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c1) < 3 {
+		t.Fatalf("manifest should span several chunks, got %d", len(c1))
+	}
+
+	// Edit a single file near the middle.
+	writeFile(t, dir, "dir100/file.txt", []byte("a different content for one hundred"))
+	m2, err := Take(dir, conv, DefaultChunker(), &m1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c2, err := ChunkManifest(m2, conv, DefaultChunker(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prev := map[string]bool{}
+	for _, ch := range c1 {
+		prev[ch.ID] = true
+	}
+	shared := 0
+	for _, ch := range c2 {
+		if prev[ch.ID] {
+			shared++
+		}
+	}
+	// A whole-manifest re-cut would share none; CDC should keep most of them.
+	if shared < len(c2)/2 {
+		t.Fatalf("one-file edit re-cut too much: shared %d of %d manifest chunks", shared, len(c2))
 	}
 }
 

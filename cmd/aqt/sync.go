@@ -122,8 +122,10 @@ func runInit(dir string) error {
 	if err != nil {
 		return err
 	}
+	conv := crypto.DeriveConvergenceKey(mk)
+	defer conv.Wipe()
 	manifest := syncengine.Manifest{Version: 1}
-	resp, err := putFolder(cl, "", manifest, ck, mk, abs)
+	resp, err := putFolder(cl, conv, "", manifest, ck, mk, abs)
 	if err != nil {
 		return err
 	}
@@ -293,7 +295,7 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return fmt.Errorf("unwrap folder key: %w", err)
 		}
-		remote, err := syncengine.OpenManifest(res.Blob, ck)
+		remote, err := openRemoteManifest(cl, res.Blob, ck)
 		if err != nil {
 			return fmt.Errorf("decrypt remote manifest: %w", err)
 		}
@@ -314,7 +316,7 @@ func runSync(dir string, opts syncOptions) error {
 		return applySync(applyCtx{
 			root: root, cl: cl, opts: opts,
 			base: base, local: local, remote: remote,
-			ck: ck, mk: mk, meta: res.EncryptedMeta,
+			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			version: res.Version, id: st.ID,
 		}, actions)
 	}
@@ -340,6 +342,7 @@ type applyCtx struct {
 	base    syncengine.Manifest
 	local   syncengine.Manifest
 	remote  syncengine.Manifest
+	conv    crypto.ConvergenceKey
 	ck      crypto.ContentKey
 	mk      crypto.MasterKey
 	meta    crypto.SealedBlob // the resource's existing sealed metadata, carried forward
@@ -423,7 +426,7 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 	// here we only commit the merged manifest that roots them.
 	if push && remoteChanged {
 		manifest := manifestFrom(merged, c.version+1)
-		if _, err := putFolderUpdate(c.cl, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
+		if _, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
 		// Reclaim packs the superseded manifest version no longer references.
@@ -481,7 +484,7 @@ func runClone(ref, dir string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	manifest, err := syncengine.OpenManifest(res.Blob, ck)
+	manifest, err := openRemoteManifest(cl, res.Blob, ck)
 	if err != nil {
 		return fmt.Errorf("decrypt manifest: %w", err)
 	}
@@ -588,7 +591,7 @@ func (u *packUploader) flush() error {
 // packs that hold them. A pack-backed chunk source range-fetches packs on demand
 // and caches a few, so neither a whole file nor the whole tree is ever in memory.
 func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) error {
-	src, err := newPackSource(cl, entries)
+	src, err := newPackSource(cl, distinctChunkIDs(entries))
 	if err != nil {
 		return err
 	}
@@ -624,8 +627,7 @@ type packSource struct {
 	cache *packCache
 }
 
-func newPackSource(cl *client.Client, entries []syncengine.Entry) (*packSource, error) {
-	ids := distinctChunkIDs(entries)
+func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	s := &packSource{
 		cl:    cl,
 		locs:  make(map[string]api.ObjectLocation, len(ids)),
@@ -740,8 +742,59 @@ func distinctChunkIDs(entries []syncengine.Entry) []string {
 
 // --- folder resource helpers ---
 
-func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
-	blob, err := syncengine.SealManifest(m, ck)
+// uploadManifestObjects chunks the manifest through the convergence key, uploads
+// the objects the server lacks (via the same pack pipeline as file content), and
+// returns the root pointer plus the resource's full GC roots: every file-chunk id
+// the manifest references unioned with the manifest's own object ids. The manifest
+// objects must be on the server before the resource PUT roots them, hence the flush.
+func uploadManifestObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.ManifestRoot, []string, error) {
+	up := newPackUploader(cl)
+	chunks, err := syncengine.ChunkManifest(m, conv, syncengine.DefaultChunker(), up)
+	if err != nil {
+		return syncengine.ManifestRoot{}, nil, err
+	}
+	if err := up.Flush(); err != nil {
+		return syncengine.ManifestRoot{}, nil, err
+	}
+	refs := m.ChunkIDs()
+	for _, ch := range chunks {
+		refs = append(refs, ch.ID)
+	}
+	return syncengine.ManifestRoot{Version: m.Version, Chunks: chunks}, refs, nil
+}
+
+// openRemoteManifest reconstructs a folder's manifest from its root pointer: it
+// decrypts the tiny root, then fetches and reassembles the manifest objects from
+// their packs. The inverse of uploadManifestObjects.
+func openRemoteManifest(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
+	root, err := syncengine.OpenManifestRoot(blob, ck)
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	if len(root.Chunks) == 0 {
+		return syncengine.Manifest{Version: root.Version}, nil
+	}
+	src, err := newPackSource(cl, manifestChunkIDs(root.Chunks))
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	return syncengine.OpenManifestFromRoot(root, src.get)
+}
+
+func manifestChunkIDs(chunks []crypto.Chunk) []string {
+	ids := make([]string, len(chunks))
+	for i, ch := range chunks {
+		ids[i] = ch.ID
+	}
+	return ids
+}
+
+func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
+	root, refs, err := uploadManifestObjects(cl, conv, m)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	blob, err := syncengine.SealManifestRoot(root, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -759,7 +812,7 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(),
+		WrappedKey: &wrapped, ChunkRefs: refs,
 	})
 }
 
@@ -767,8 +820,12 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 // resource still being at expectedVersion (else the server returns a conflict).
 // The encrypted metadata (the folder name sealed at init) is carried forward
 // unchanged, so a sync never clobbers it.
-func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
-	blob, err := syncengine.SealManifest(m, ck)
+func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
+	root, refs, err := uploadManifestObjects(cl, conv, m)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	blob, err := syncengine.SealManifestRoot(root, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -778,7 +835,7 @@ func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, meta c
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
-		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(), ExpectedVersion: expectedVersion,
+		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 	})
 }
 
