@@ -388,7 +388,7 @@ func startWatchDaemon(root string, interval time.Duration) error {
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true} // detach from this terminal
+	detachAgent(cmd) // run the watcher in its own session/group, free of this terminal
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -477,7 +477,7 @@ func runAgentStop(dir string) error {
 		return fmt.Errorf("pid %d is not an aqt watcher (likely a recycled PID); refusing to signal it. "+
 			"Delete %s if you are sure no agent is running", pid, path)
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil {
+	if err := terminateAgent(pid); err != nil {
 		return fmt.Errorf("signal agent (pid %d): %w", pid, err)
 	}
 	fmt.Printf("stopped watch agent (pid %d)\n", pid)

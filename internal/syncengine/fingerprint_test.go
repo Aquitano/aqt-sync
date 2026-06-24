@@ -3,6 +3,7 @@ package syncengine
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -27,6 +28,12 @@ func TestFingerprintStableThenDetectsChanges(t *testing.T) {
 		t.Fatal("an unchanged tree must yield a stable fingerprint")
 	}
 
+	if runtime.GOOS == "windows" {
+		// Windows file modes carry no exec/group permission bits, so chmod cannot
+		// move the fingerprint here; the size/mtime/content detection above (and the
+		// authoritative content hash in Take) is what guards changes on Windows.
+		return
+	}
 	if err := os.Chmod(file, 0o600); err != nil {
 		t.Fatal(err)
 	}

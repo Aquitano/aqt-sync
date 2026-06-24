@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -55,15 +54,4 @@ func readLockPID(path string) (int, bool) {
 		return 0, false
 	}
 	return pid, true
-}
-
-// processAlive reports whether pid is a live process. Signal 0 probes liveness
-// without affecting the target on Unix; on platforms without signals it errors,
-// so a stale lock is reclaimed rather than left wedging the folder.
-func processAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	return proc.Signal(syscall.Signal(0)) == nil
 }
