@@ -105,6 +105,36 @@ type ChunkData struct {
 	Data []byte `json:"data"`
 }
 
+// PackIndexEntry locates one object inside a pack: its content-address id and the
+// byte slice [Off, Off+Len) of its ciphertext, relative to the start of the pack.
+// A pack's trailing index is a JSON array of these (see syncengine.PackBuilder for
+// the on-the-wire pack layout); the server verifies every slice against its id.
+type PackIndexEntry struct {
+	ID  string `json:"id"`
+	Off int    `json:"off"`
+	Len int    `json:"len"`
+}
+
+// ObjectLocation tells a client where to download an object: which pack holds it
+// and the byte range [Off, Off+Len) within that pack. Returned by /v1/chunks/locate
+// so a pull can range-fetch only the packs (and byte spans) it needs.
+type ObjectLocation struct {
+	ID     string `json:"id"`
+	PackID string `json:"packId"`
+	Off    int64  `json:"off"`
+	Len    int64  `json:"len"`
+}
+
+// LocateRequest asks where a set of object ids live; the response carries one
+// ObjectLocation per id the owner stores (unknown ids are simply absent).
+type LocateRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type LocateResponse struct {
+	Locations []ObjectLocation `json:"locations"`
+}
+
 // ChunkCheckRequest asks which of the given chunk ids the owner does not yet have
 // (the have/want negotiation before an upload).
 type ChunkCheckRequest struct {

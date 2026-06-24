@@ -3,7 +3,10 @@
 // a tracked folder; the crypto lives in internal/crypto.
 package syncengine
 
-import "math"
+import (
+	"io"
+	"math"
+)
 
 // Chunker splits a byte stream at content-defined boundaries using FastCDC
 // (Xia et al., 2016). Boundaries depend only on a bounded window of preceding
@@ -60,6 +63,46 @@ func (c *Chunker) Split(data []byte) [][]byte {
 		data = data[n:]
 	}
 	return chunks
+}
+
+// SplitStream chunks an io.Reader without ever buffering more than ~Max bytes,
+// calling emit once per chunk in order. A FastCDC boundary depends only on the
+// bytes preceding it, so a boundary found within a buffered window of at least Max
+// bytes is final regardless of what follows — which is what lets the stream be cut
+// with bounded memory. The cuts are identical to Split over the same bytes, so the
+// two are interchangeable for dedup.
+//
+// The slice passed to emit is only valid for the duration of the call; the backing
+// buffer is reused once emit returns, so an implementation that retains the bytes
+// must copy them (crypto.SealChunk produces an independent ciphertext, so the
+// common seal-then-pack caller needs no copy).
+func (c *Chunker) SplitStream(r io.Reader, emit func(chunk []byte) error) error {
+	buf := make([]byte, 0, 2*c.Max)
+	read := make([]byte, c.Max)
+	eof := false
+	for {
+		// Top the window up to at least Max bytes (or EOF) before cutting, so the
+		// boundary search sees the same window Split would and the cuts agree.
+		for !eof && len(buf) < c.Max {
+			n, err := r.Read(read)
+			if n > 0 {
+				buf = append(buf, read[:n]...)
+			}
+			if err == io.EOF {
+				eof = true
+			} else if err != nil {
+				return err
+			}
+		}
+		if len(buf) == 0 {
+			return nil
+		}
+		n := c.nextCut(buf)
+		if err := emit(buf[:n]); err != nil {
+			return err
+		}
+		buf = buf[:copy(buf, buf[n:])]
+	}
 }
 
 // nextCut returns the length of the next chunk at the front of data.
