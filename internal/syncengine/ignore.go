@@ -12,7 +12,9 @@ import (
 // or embedded-/ anchoring, and * / ? / ** globs. Like gitignore, rules live in
 // per-directory files: a nested .aqtignore adds rules scoped to its subtree, and
 // deeper rules (evaluated later) override shallower ones. The control directory
-// is always ignored. Not supported: character classes ([a-z]) and escapes.
+// and .git are always ignored (a tracked tree syncs working files, never a live
+// git directory's locks/objects), though a later rule may re-include with `!`.
+// Not supported: character classes ([a-z]) and escapes.
 type Ignore struct {
 	scopes []ignoreScope
 }
@@ -30,9 +32,9 @@ type ignoreRule struct {
 	dirOnly bool
 }
 
-// newIgnore seeds a matcher that always excludes the control directory.
+// newIgnore seeds a matcher that always excludes the control directory and .git.
 func newIgnore() *Ignore {
-	return &Ignore{scopes: []ignoreScope{{dir: "", rules: compileRules([]string{ControlDir + "/"})}}}
+	return &Ignore{scopes: []ignoreScope{{dir: "", rules: compileRules([]string{ControlDir + "/", ".git/"})}}}
 }
 
 // loadDir adds the rules from absDir/.aqtignore, scoped to relDir. A directory
