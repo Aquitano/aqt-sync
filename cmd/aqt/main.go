@@ -27,6 +27,16 @@ const defaultServer = "http://localhost:8080"
 // passphrase prompt. `aqt login --ttl` overrides it; `aqt logout` clears it.
 const defaultSessionTTL = 8 * time.Hour
 
+// exitDeferred (EX_TEMPFAIL) marks a `watch --once` run that declined to sync
+// because git stayed busy: not a failure, retry later. Distinct from 0 so cron
+// can tell "synced" from "skipped".
+const exitDeferred = 75
+
+// errSessionRequired means the master key could not be unlocked: no cached
+// session and no passphrase supplied (an empty entry, or a detached daemon with
+// no terminal to prompt). Retrying without re-login cannot fix it.
+var errSessionRequired = errors.New("no unlocked session and no passphrase provided; run `aqt login`")
+
 var (
 	flagServer  string
 	flagProfile string
@@ -47,12 +57,14 @@ func exitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
-	case errors.Is(err, identity.ErrNoProfile):
+	case errors.Is(err, identity.ErrNoProfile), errors.Is(err, errSessionRequired):
 		return 3
 	case errors.Is(err, errConflictsRemain), errors.Is(err, errSyncRace), errors.Is(err, client.ErrConflict):
 		return 4
 	case isNetworkError(err):
 		return 5
+	case errors.Is(err, errWatchSkipped):
+		return exitDeferred
 	default:
 		return 1
 	}
@@ -86,7 +98,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), devicesCmd(), pushCmd(), pullCmd(), lsCmd(), findCmd(), shareCmd(), privateCmd())
-	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd())
+	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	return root
 }
 
@@ -165,6 +177,28 @@ func promptLine(label string) (string, error) {
 	return strings.TrimSpace(line), nil
 }
 
+// promptYesNo asks a yes/no question and returns def when the answer is empty.
+// Without a terminal (pipe/CI) it returns def without reading, so a scripted run
+// takes the default instead of blocking — and never consumes a line a later
+// prompt (e.g. the passphrase) is waiting on.
+func promptYesNo(label string, def bool) (bool, error) {
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return def, nil
+	}
+	line, err := promptLine(label)
+	if err != nil {
+		return def, err
+	}
+	switch strings.ToLower(line) {
+	case "y", "yes":
+		return true, nil
+	case "n", "no":
+		return false, nil
+	default:
+		return def, nil
+	}
+}
+
 // sharedStdin is a single buffered reader so multiple prompts (the email, plus
 // the signup passphrase + confirmation) don't lose lines to per-call buffering.
 var sharedStdin *bufio.Reader
@@ -193,7 +227,7 @@ func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
 		return crypto.MasterKey{}, err
 	}
 	if pass == "" {
-		return crypto.MasterKey{}, errors.New("empty passphrase")
+		return crypto.MasterKey{}, errSessionRequired
 	}
 	mk, err := prof.Unlock(pass)
 	if err != nil {

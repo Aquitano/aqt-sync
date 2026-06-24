@@ -67,7 +67,8 @@ key directly or prompt for a password to unwrap it. The server sees only `<id>`.
 Global flags (all commands): `--server <url>` (self-host; default `https://aqt.sh`),
 `--profile <name>`, `--json`, `-q/--quiet`, `-v/--verbose`, `-h/--help`, `-V/--version`.
 
-Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network.
+Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network ·
+`75` deferred (`watch --once` skipped because git was busy; retry later).
 
 ### 3.1 Push — the hero command
 
@@ -151,7 +152,11 @@ aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
 ```
 
 `.aqtignore` uses gitignore syntax. Conflicts (changed both sides) are left
-untouched and reported; `--force` resolves in favor of local.
+untouched and reported; `--force` resolves in favor of local. When the target
+tree holds a git repository, `init` notices it and asks whether to track the
+`.git` directory too — declined by default (it ignores `.git`); accepting writes a
+`!.git/` rule into the starter `.aqtignore`. Without a terminal the prompt takes
+the default, so scripted `init` stays non-interactive.
 
 ```console
 $ aqt init && aqt sync
@@ -164,10 +169,25 @@ tracking ~/secrets → aqt://fold_K9p2
 ```
 aqt watch <dir>           Foreground watcher; syncs on change (debounced).
       -d, --daemon        Detach and run in background under the agent.
-          --interval <d>  Debounce floor (default 2s).
+          --interval <d>  Debounce floor (default 2s; overrides .aqtconfig).
           --once          Sync now and exit (cron-friendly).
 aqt agent status|stop|logs [<dir>]   Manage background watchers.
 ```
+
+The watcher fingerprints the tree (path/size/mtime/mode, no content read) each
+`--interval` and syncs once it settles. A push is **held back while any sub-repo
+is mid-operation** — a lock file (`index.lock`, top-level `*.lock`) *or* a paused
+state with no lock (`MERGE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`,
+`rebase-merge/`, `rebase-apply/`) — so it never captures a half-written or
+conflict-marked tree; it resumes when git finishes. The git scan is best-effort
+(an unreadable subtree is skipped, not treated as idle) and covers nested repos,
+submodules, and worktrees.
+
+`-d` unlocks the session on the launching terminal first (so the detached child,
+which has no tty, never needs to prompt), writes a pid + log under `.aqt/`, and
+waits for the child to come up. If the cached session later expires, the daemon
+stops cleanly (it can't prompt) rather than looping. Per-folder defaults live in
+`.aqtconfig` (see §4.2a): `watch.interval` and `watch.gitGuard`.
 
 ### 3.6 Identity
 
@@ -188,7 +208,7 @@ requires a confirm prompt and an explicit "this cannot be reset" warning.
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, ls, find, share, private  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, ls, find, share, private, watch/agent  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
@@ -215,8 +235,22 @@ files (FastCDC), deduplicating chunks per account, and storing a sealed manifest
 as an ordinary resource — see 4.2a. v1 tracked folders are **private** (your own
 machines), which keeps the chunk store uniformly owner-scoped; sharing a whole
 folder publicly is deferred (single-file `--public` already covers sharing).
-Not yet built: the `watch` daemon, pack-and-seal folders (`.aqtconfig pack=true`),
-public whole-folder sharing, and in-browser decryption on the `/x/<id>` page.
+
+The `watch` daemon (`watch`/`agent`) fingerprints a tracked folder (stat only, no
+content read) each `--interval` (default 2s) and runs a two-way `sync` once the
+tree settles. A push is held back while any sub-repo is mid-operation — both the
+lock files git holds while running (`index.lock`, top-level `*.lock`) and the
+paused states that carry no lock (`MERGE_HEAD`/`CHERRY_PICK_HEAD`/`REVERT_HEAD`,
+`rebase-merge/`, `rebase-apply/`), across nested repos and submodule/worktree
+`.git` pointers — so a sync never captures a half-written or conflict-marked tree,
+and an edit that lands mid-sync is not lost. `-d/--daemon` detaches the watcher
+(pid + log under `.aqt/`, session unlocked up front so the child never prompts);
+`aqt agent status|stop|logs` manages it (and won't signal a recycled PID);
+`--once` is the cron-friendly single guarded sync. Per-folder defaults
+(`watch.interval`, `watch.gitGuard`) live in `.aqtconfig`.
+
+Not yet built: pack-and-seal folders (`.aqtconfig pack=true`), public
+whole-folder sharing, and in-browser decryption on the `/x/<id>` page.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
 to override), then `aqt --server http://localhost:8080 login`.
@@ -348,11 +382,25 @@ live resources; chunks not reachable from any root *and* older than an age guard
 No refcounts — the manifests are the source of truth, which survives crashes.
 
 **`.aqtignore`** uses a pragmatic gitignore subset (comments, anchored paths,
-`*`/`?`/`**` globs, trailing-slash dir rules); `.aqt/` is always ignored.
-**`.aqtconfig`** (JSON) sets per-folder options; `pack` is reserved for
-pack-and-seal (the whole tree tarred into one sealed blob, no chunk-level dedup)
-instead of the chunked default — parsed today, but `sync` errors on `pack=true`
-until that path is built (the chunked default is what ships).
+`*`/`?`/`**` globs, trailing-slash dir rules); `.aqt/` and `.git/` are always
+ignored (a tracked tree syncs working files, never a live git directory), though
+a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options:
+
+```jsonc
+{
+  "pack": false,                 // reserved for pack-and-seal (see below)
+  "watch": {
+    "interval": "5s",            // watch debounce floor; --interval overrides it
+    "gitGuard": true             // hold pushes while a sub-repo is mid-operation (default true)
+  }
+}
+```
+
+`pack` is reserved for pack-and-seal (the whole tree tarred into one sealed blob,
+no chunk-level dedup) instead of the chunked default — parsed today, but `sync`
+errors on `pack=true` until that path is built (the chunked default is what
+ships). The `watch` block lets a folder pin its daemon behavior in-tree, the same
+way `.aqtignore` pins its exclusions.
 
 ### 4.3 Server HTTP API (`@aqt/server`)
 

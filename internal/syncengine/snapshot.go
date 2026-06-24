@@ -3,6 +3,7 @@ package syncengine
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -107,6 +108,66 @@ func Scan(dir string) (Manifest, error) {
 	})
 	sortEntries(m.Entries)
 	return m, err
+}
+
+// Fingerprint summarizes the tracked tree from metadata only — path, size,
+// mtime, mode, and symlink target — without reading any file contents. It is the
+// watch daemon's cheap change detector: one lstat per file instead of a full
+// read+hash, so a continuously-polling watcher does not re-read the whole tree
+// every tick. Honors nested .aqtignore exactly as Scan does.
+//
+// The residual gap versus a content hash is an edit that preserves size, mode,
+// and mtime to the nanosecond — exceedingly rare, and caught on the next stat
+// change anyway because the authoritative content hashing happens in Take when a
+// sync actually runs.
+func Fingerprint(dir string) (string, error) {
+	h := sha256.New()
+	ig := newIgnore()
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "." {
+			ig.loadDir(dir, "")
+			return nil
+		}
+		if d.IsDir() {
+			if ig.Match(rel, true) {
+				return filepath.SkipDir
+			}
+			ig.loadDir(path, rel)
+			return nil
+		}
+		if ig.Match(rel, false) {
+			return nil
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(h, "L\x00%s\x00%s\n", rel, target)
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(h, "F\x00%s\x00%d\x00%d\x00%o\n", rel, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm())
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Take scans dir into a Snapshot. Files at or below the chunker minimum are
