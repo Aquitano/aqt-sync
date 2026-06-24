@@ -127,7 +127,9 @@ wrote ./.env (1.2 KB)
 aqt share   <id>          Make a private resource public; print the fragment link.
 aqt private <id>          Make public again private: ROTATES the content key,
                           re-encrypts, old links die. Prints the new aqt:// ref.
-aqt ls      [--json]      List your resources: id, name, size, visibility, version.
+aqt ls      [--json]      List your resources: name, kind, size, visibility, id.
+aqt find    [query]       Fuzzy-search all files + folder contents in fzf; prints
+                          the selected resource's ref. --json / --no-fzf for scripts.
 aqt info    <id|url>      Metadata for one resource (no decrypt needed for your own).
 aqt rm      <id>...       Delete server-side ciphertext + metadata.
 ```
@@ -186,7 +188,7 @@ requires a confirm prompt and an explicit "this cannot be reset" warning.
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, push, pull, ls, share, private  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, ls, find, share, private  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
@@ -197,9 +199,12 @@ internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way p
 ```
 
 Working end-to-end today: signup/device-attach (Ed25519 challenge/response),
-private + public push/pull (key-in-fragment), password-gated links, `share`,
-`private` (key rotation), `ls`, and a `login`-cached session key so the passphrase
-is entered once per session (`logout` clears it). Every push wraps the content key
+device management (`devices ls`/`devices rm`, `logout --all-devices` to revoke
+other devices), private + public push/pull (key-in-fragment), password-gated
+links, `share`, `private` (key rotation), `ls` (decrypts names + sizes locally
+from each resource's owner-wrapped key), `find` (fzf fuzzy search across files and
+folder contents), and a `login`-cached session key so the passphrase is entered
+once per session (`logout` clears it). Every push wraps the content key
 under the owner's master key, so even public resources can later be shared/rotated.
 Verified by `go test ./...` plus live multi-machine cycles. A public share link
 (`/x/<id>`) opens a landing page that resolves the resource and shows the `aqt
