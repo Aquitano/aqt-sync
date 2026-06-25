@@ -11,8 +11,17 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
+
+// streamThreshold is the size at or above which a private push streams through the
+// chunk/pack pipeline rather than sealing the whole file in one inline blob. Public
+// files and stdin stay inline (public streaming needs the deferred publicly-readable
+// object store; stdin has no size to threshold on).
+const streamThreshold = 8 << 20
 
 type pushOptions struct {
 	public   bool
@@ -49,6 +58,13 @@ func runPush(path string, opts pushOptions) error {
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
+	}
+
+	// Large private files stream; everything else takes the inline path below.
+	if path != "-" && !opts.public && opts.password == "" {
+		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Size() >= streamThreshold {
+			return runPushStream(cl, prof, path, opts)
+		}
 	}
 
 	data, name, err := readInput(path, opts.name)
@@ -105,7 +121,75 @@ func runPush(path string, opts pushOptions) error {
 		// (and, for public pushes, deletable — its key lived only in the link).
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
-	printResult(ref, name, len(data), req.Visibility, opts)
+	printResult(ref, name, int64(len(data)), req.Visibility, opts)
+	return nil
+}
+
+// runPushStream uploads a large private file as convergent chunk objects under a
+// sealed FileRoot, so the file is never held whole in memory.
+func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts pushOptions) error {
+	name := opts.name
+	if name == "" {
+		name = filepath.Base(path)
+	}
+
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	conv := crypto.DeriveConvergenceKey(mk)
+	defer conv.Wipe()
+
+	ck, err := crypto.GenerateContentKey()
+	if err != nil {
+		return err
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	up := newPackUploader(cl)
+	chunks, size, err := syncengine.ChunkFile(f, conv, syncengine.DefaultChunker(), up)
+	if err != nil {
+		return err
+	}
+	if err := up.Flush(); err != nil {
+		return err
+	}
+
+	root := syncengine.FileRoot{Version: syncengine.FileRootVersion, Size: size, Chunks: chunks}
+	blob, err := syncengine.SealFileRoot(root, ck)
+	if err != nil {
+		return err
+	}
+	metaJSON, err := json.Marshal(api.Metadata{Name: name, Size: size, Kind: api.KindFile, Streamed: true})
+	if err != nil {
+		return err
+	}
+	metaBlob, err := crypto.Seal(metaJSON, ck, crypto.AADMeta)
+	if err != nil {
+		return err
+	}
+	wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return err
+	}
+
+	resp, err := cl.PutResource(api.PutResourceRequest{
+		Visibility:    api.Private,
+		Blob:          blob,
+		EncryptedMeta: metaBlob,
+		WrappedKey:    &wrapped,
+		ChunkRefs:     root.ChunkIDs(),
+	})
+	if err != nil {
+		return err
+	}
+	printResult("aqt://"+resp.ID, name, size, api.Private, opts)
 	return nil
 }
 
@@ -135,7 +219,7 @@ func buildRef(server, id string, vis api.Visibility, ck crypto.ContentKey, passw
 	return fmt.Sprintf("%s/x/%s#%s", strings.TrimRight(server, "/"), id, frag), nil
 }
 
-func printResult(ref, name string, size int, vis api.Visibility, opts pushOptions) {
+func printResult(ref, name string, size int64, vis api.Visibility, opts pushOptions) {
 	if opts.quiet {
 		fmt.Println(ref)
 		return

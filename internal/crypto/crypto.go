@@ -201,9 +201,9 @@ var (
 )
 
 // Seal encrypts plaintext under a content key, binding aad as additional
-// authenticated data (the ciphertext's role; see the AAD tags above). v1 seals the
-// whole payload in one shot; chunked streaming for large files is deferred
-// (DESIGN.md section 5).
+// authenticated data (the ciphertext's role; see the AAD tags above). It seals the
+// whole payload in one shot, so it is used for bounded payloads (small files,
+// metadata, the manifest/file roots); large content streams through SealChunk.
 func Seal(plaintext []byte, ck ContentKey, aad []byte) (SealedBlob, error) {
 	aead, err := chacha20poly1305.NewX(ck[:])
 	if err != nil {
