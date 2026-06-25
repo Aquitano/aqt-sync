@@ -14,10 +14,9 @@ import (
 )
 
 // runPackSync reconciles a pack-and-seal folder (.aqtconfig pack=true). The server
-// holds only one opaque blob, so there is nothing to merge per file: it is a
-// whole-folder last-writer-wins. Either side changed since the last sync gets
-// pushed or pulled in full; a change on both sides is a folder-level conflict that
-// --force resolves local-wins.
+// holds one opaque blob, so there is nothing to merge per file: it is whole-folder
+// last-writer-wins. Whichever side changed is pushed or pulled in full; a change on
+// both is a folder-level conflict that --force resolves local-wins.
 func runPackSync(root string, opts syncOptions) error {
 	st, err := loadState(root)
 	if err != nil {
@@ -40,8 +39,8 @@ func runPackSync(root string, opts syncOptions) error {
 	}
 	defer mk.Wipe()
 
-	// Pack-and-seal never chunks per file, so a metadata+hash scan is all that the
-	// local side needs to decide whether the tree changed since the last sync.
+	// A metadata+hash scan is all the local side needs to tell whether the tree
+	// changed since the last sync; pack-and-seal never chunks per file.
 	local, err := syncengine.Scan(root)
 	if err != nil {
 		return err
@@ -249,9 +248,8 @@ func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 		return err
 	}
 	reclaimPacks(c.cl)
-	// Record the manifest of exactly what was tarred, not the earlier c.local scan:
-	// a file changing between the scan and the re-walk would otherwise leave a base
-	// that disagrees with the shipped bytes and spuriously reads as a local change.
+	// Base off what was actually tarred, not the earlier c.local scan: a file changing
+	// in between would leave a base disagreeing with the shipped bytes.
 	if err := savePackBase(c.root, shipped, resp.Version); err != nil {
 		return err
 	}
@@ -279,10 +277,9 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 		}
 		return err
 	}
-	// Prune whatever the remote no longer carries. Scan the tree as it is now rather
-	// than trust the pre-pull c.local: a prior pull that aborted mid-stream (a segment
-	// GC'd by a concurrent push) can have left files that are in neither c.local nor
-	// the new remote, and those must go too so the tree ends equal to the remote.
+	// Prune whatever the remote no longer carries, scanning the tree as it is now: a
+	// prior pull that aborted mid-stream can have left files in neither c.local nor the
+	// new remote, and those must go too so the tree ends equal to the remote.
 	postPull, err := syncengine.Scan(c.root)
 	if err != nil {
 		return err

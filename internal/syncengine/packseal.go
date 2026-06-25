@@ -15,30 +15,26 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// Pack-and-seal is the alternative to the chunked default (see DESIGN.md 4.2a):
-// the whole tracked tree is tarred and sealed into one opaque object stream rather
-// than chunked per file. It leaks no structure (the server sees only fixed-size,
-// per-sync-unique segments) at the cost of dedup — any change re-ships the whole
-// folder. Selected per folder by .aqtconfig pack=true.
+// Pack-and-seal (DESIGN.md 4.2a) is the alternative to the chunked default: the whole
+// tree is tarred and sealed into one opaque, per-sync-unique object stream. It hides
+// file structure at the cost of dedup — any change re-ships the folder. Selected per
+// folder by .aqtconfig pack=true.
 
 // PackRootVersion identifies the on-the-wire layout of a sealed pack-and-seal root.
 const PackRootVersion = 1
 
-// segTarget is the plaintext span sealed into one segment object. It is fixed-size,
-// not content-defined: the only thing the object boundaries can leak is the tree's
-// total byte count, never its internal file structure — the property that separates
-// pack-and-seal from the chunked default. A handful of segments share one pack.
+// segTarget is the fixed plaintext span per segment. Fixed-size, not content-defined:
+// the boundaries can leak only the tree's total byte count, never its file structure —
+// the property that separates pack-and-seal from the chunked default.
 const segTarget = 4 << 20
 
 // epoch zeroes the tar entries' modification time so the tarball does not carry
 // per-file mtimes (and so two packs of the same bytes differ only by their nonces).
 var epoch = time.Unix(0, 0)
 
-// Segment names one sealed slice of the tarball stream by its content-address id
-// and plaintext length. The slice is sealed under the folder content key with a
-// fresh random nonce (stored as a prefix of the object bytes), so re-sealing the
-// same plaintext yields a different id every sync: pack-and-seal keeps no
-// chunk-level dedup, and each sync's segments supersede the last.
+// Segment names one sealed slice of the tarball by its content-address id and
+// plaintext length. Each carries a fresh random nonce, so re-sealing the same bytes
+// yields a new id every sync: no chunk-level dedup, and each sync supersedes the last.
 type Segment struct {
 	ID  string `json:"id"`
 	Len int    `json:"len"`
@@ -54,8 +50,7 @@ type PackRoot struct {
 }
 
 // SegmentIDs returns the object ids the root references — its GC roots, sent as the
-// resource's ChunkRefs. They are distinct by construction (each carries a unique
-// nonce), so no dedup pass is needed.
+// resource's ChunkRefs. Distinct by construction (unique nonces), so no dedup pass.
 func (r PackRoot) SegmentIDs() []string {
 	ids := make([]string, len(r.Segments))
 	for i, s := range r.Segments {
@@ -92,11 +87,9 @@ type nopObjectSink struct{}
 
 func (nopObjectSink) Add(string, []byte) error { return nil }
 
-// sealSegment seals one tarball slice under the content key and returns the object
-// to store (its nonce prefixed to the ciphertext, content-addressed) plus the
-// Segment record the root needs. The zero nonce trick used for convergent chunks is
-// unavailable here — the key is the same for every segment — so a fresh random nonce
-// per segment is what keeps (key, nonce) pairs unique.
+// sealSegment seals one tarball slice under the content key, returning the object to
+// store (nonce-prefixed ciphertext, content-addressed) and its Segment record. The key
+// is shared across segments, so a fresh random nonce per segment keeps (key,nonce) unique.
 func sealSegment(plain []byte, ck crypto.ContentKey) (object []byte, seg Segment, err error) {
 	blob, err := crypto.Seal(plain, ck, crypto.AADPack)
 	if err != nil {
@@ -129,12 +122,11 @@ func openSegment(object []byte, seg Segment, ck crypto.ContentKey) ([]byte, erro
 	return plain, nil
 }
 
-// TarAndSeal walks dir (honoring .aqtignore exactly as Scan/Take do), writes a tar
-// of every tracked file and symlink, and seals the stream into fixed-size segments
-// fed to sink as they fill — so the whole tree is never held in memory. It returns
-// the root naming those segments in order plus the manifest of exactly what it
-// tarred (path/mode/size/content-hash), so the caller records a base that matches
-// the shipped bytes rather than a separately-taken scan. sink may be nil.
+// TarAndSeal walks dir (honoring .aqtignore like Scan), tars every tracked file and
+// symlink, and seals the stream into fixed-size segments fed to sink as they fill, so
+// the tree is never held in memory. Returns the root naming the segments in order and
+// the manifest of exactly what it tarred, so the caller's base matches the shipped
+// bytes rather than a separate scan. sink may be nil.
 func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Manifest, error) {
 	if sink == nil {
 		sink = nopObjectSink{}
@@ -163,10 +155,9 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 	return PackRoot{Version: PackRootVersion, Size: ss.size, Segments: ss.segments}, manifest, nil
 }
 
-// writeTarEntry appends one node with a content-only header — permission bits, but a
-// zeroed mtime and no owner identity, so the tarball carries the tree's bytes and
-// modes and nothing about the host. It returns the manifest Entry for the node,
-// hashing a regular file's content as it streams so the result matches a Scan.
+// writeTarEntry writes one node with a content-only header (perms, but zeroed mtime
+// and no owner identity, so nothing about the host leaks) and returns its manifest
+// Entry, hashing a file's bytes as they stream so the result matches a Scan.
 func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	if n.symlink {
 		if err := tw.WriteHeader(&tar.Header{
@@ -199,20 +190,17 @@ func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	if err != nil {
 		return Entry{}, err
 	}
-	// tar headers commit to Size up front; a file that grew or shrank between the
-	// stat and the read would desync the archive, so fail loudly rather than ship a
-	// corrupt tarball.
+	// tar commits to Size up front; a file resized between stat and read would desync
+	// the archive, so fail loudly rather than ship a corrupt tarball.
 	if written != n.info.Size() {
 		return Entry{}, fmt.Errorf("file %s changed size during pack (%d != %d)", n.rel, written, n.info.Size())
 	}
 	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size(), Hash: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
-// segmentSink is the io.Writer the tar stream is written into: it accumulates bytes
-// and seals each segTarget-sized slice into sink as the buffer fills, so the streamed
-// content stays O(segTarget + one pack) regardless of tree size. The segment records
-// it collects are a separate O(num segments) id+len list, the same characteristic as
-// the chunked path's per-chunk list.
+// segmentSink is the io.Writer the tar streams into: it seals each segTarget-sized
+// slice as the buffer fills, so streamed content stays O(segTarget + one pack). Its
+// segment records are a separate O(num segments) id+len list, as on the chunked path.
 type segmentSink struct {
 	ck       crypto.ContentKey
 	sink     ObjectSink
@@ -252,11 +240,9 @@ func (s *segmentSink) finish() error {
 	return err
 }
 
-// ExtractToTree reassembles a pack-and-seal tarball from its segments (fetched by id
-// via fetch) and unpacks it under dir, streaming each segment so neither the tarball
-// nor any file is held whole in memory. It returns the manifest of what it wrote
-// (path/mode/size/hash, link targets) so the caller can record the new base and
-// prune local files the tarball no longer contains.
+// ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
+// it under dir, streaming so neither the tarball nor any file is held whole in memory.
+// Returns the manifest of what it wrote, for the caller to record as base and prune by.
 func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
 	pr, pw := io.Pipe()
 	go func() {
@@ -283,22 +269,18 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 		pr.CloseWithError(err) // unblock the writer if extraction bailed early
 		return Manifest{}, err
 	}
-	// tar.Reader stops at the archive trailer without draining the rest of the pipe,
-	// so close the read end to unblock the writer goroutine on any trailing bytes a
-	// malformed archive might carry past the trailer (otherwise it leaks, pinned in
-	// pw.Write). A well-formed archive ends at the trailer and the writer is already
-	// done; Close is then a no-op.
+	// tar.Reader stops at the trailer without draining the pipe; closing the read end
+	// unblocks the writer goroutine on any trailing bytes a malformed archive carries
+	// past it (else it leaks). A well-formed archive is already done, so this is a no-op.
 	pr.Close()
 	sortEntries(m.Entries)
 	return m, nil
 }
 
-// extractTar writes every regular file and symlink in the tar under dir and returns
-// their manifest. Each entry's own path is constrained by safeJoin, and
-// writeAtomic/WriteSymlink additionally refuse to descend through a symlinked parent
-// component — so a hostile archive cannot escape the tracked root by ordering a
-// symlink entry ahead of a file written through it. (safeJoin alone only guards the
-// final lexical path, not intermediate symlinks.)
+// extractTar writes every regular file and symlink under dir and returns their
+// manifest. safeJoin guards each entry's own path; writeAtomic/WriteSymlink also
+// refuse a symlinked parent, so a hostile archive can't escape via a symlink ordered
+// ahead of a file written through it.
 func extractTar(dir string, r io.Reader) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)
@@ -329,8 +311,8 @@ func extractTar(dir string, r io.Reader) (Manifest, error) {
 			e.Hash = hex.EncodeToString(h.Sum(nil))
 			m.Entries = append(m.Entries, e)
 		default:
-			// Parent dirs are created by writeAtomic; we write no other type, so an
-			// unexpected one is skipped rather than trusted.
+			// Other types (dirs, hardlinks, ...) are not written; parent dirs come
+			// from writeAtomic.
 		}
 	}
 }

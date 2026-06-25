@@ -26,12 +26,10 @@ func safeJoin(dir, relPath string) (string, error) {
 }
 
 // refuseSymlinkParents rejects a write whose path descends through an existing
-// symlinked directory component. safeJoin only constrains the leaf lexically, so
-// without this a manifest or archive that first creates a symlink (dir -> outside the
-// root) and then writes dir/file would have MkdirAll/CreateTemp/Rename follow the link
-// and land the write outside the root. A legitimately scanned tree never has a file
-// under a symlink — the walk reads a symlink as a leaf and does not descend into it —
-// so this only ever fires on a corrupt or hostile input, never normal sync.
+// symlinked directory component, which safeJoin's lexical leaf check misses: without
+// it, an archive that creates a symlink (-> outside the root) then writes through it
+// escapes via MkdirAll/Rename. A scanned tree never puts a file under a symlink (the
+// walk does not descend into one), so this only fires on hostile input.
 func refuseSymlinkParents(dir, full string) error {
 	rel, err := filepath.Rel(dir, full)
 	if err != nil {
