@@ -108,13 +108,19 @@ func streamHash(path string) (string, error) {
 
 // metaEntry builds the path/size/mode (and Link/Hash, for symlinks) part of an
 // entry. A regular file's content Hash is filled in by the caller after it reads
-// or streams the bytes. The link hash is domain-separated from file content so a
-// file whose bytes equal a link's target is never mistaken for unchanged.
+// or streams the bytes.
 func metaEntry(n fileNode) Entry {
 	if n.symlink {
-		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: hashOf([]byte("symlink\x00" + n.target))}
+		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: linkHash(n.target)}
 	}
 	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size()}
+}
+
+// linkHash hashes a symlink's target, domain-separated from file content so a file
+// whose bytes equal a link's target is never mistaken for it. Pack-and-seal extraction
+// reuses it so an untarred tree scans back to identical hashes.
+func linkHash(target string) string {
+	return hashOf([]byte("symlink\x00" + target))
 }
 
 // Scan reads dir into a manifest of path/size/mode/hash (and link targets) only —

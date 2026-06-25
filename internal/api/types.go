@@ -32,6 +32,10 @@ type Metadata struct {
 	// Streamed marks a file whose blob is a sealed FileRoot over chunk objects rather
 	// than the inline ciphertext, so pull reconstructs it from the objects.
 	Streamed bool `json:"streamed,omitempty"`
+	// Packed marks a pack-and-seal folder whose blob is a sealed PackRoot over a
+	// tarball of the whole tree (no chunk-level dedup), so sync/clone reconstruct it
+	// by untarring rather than per-file. A folder resource without this is chunked.
+	Packed bool `json:"packed,omitempty"`
 }
 
 // CreateAccountRequest registers a new account and attaches the first device.

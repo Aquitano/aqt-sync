@@ -14,7 +14,8 @@ import (
 
 // safeJoin resolves dir/relPath and refuses a result that escapes dir, so a
 // corrupted or hostile manifest (e.g. a "../" path) cannot write outside the
-// tracked root. Symlink targets are not constrained — only the entry's own path.
+// tracked root. It is purely lexical: it guards the entry's own final path, not
+// intermediate components that may be symlinks — refuseSymlinkParents covers those.
 func safeJoin(dir, relPath string) (string, error) {
 	full := filepath.Join(dir, filepath.FromSlash(relPath))
 	rel, err := filepath.Rel(dir, full)
@@ -22,6 +23,36 @@ func safeJoin(dir, relPath string) (string, error) {
 		return "", fmt.Errorf("path %q escapes the tracked root", relPath)
 	}
 	return full, nil
+}
+
+// refuseSymlinkParents rejects a write whose path descends through an existing
+// symlinked directory component, which safeJoin's lexical leaf check misses: without
+// it, an archive that creates a symlink (-> outside the root) then writes through it
+// escapes via MkdirAll/Rename. A scanned tree never puts a file under a symlink (the
+// walk does not descend into one), so this only fires on hostile input.
+func refuseSymlinkParents(dir, full string) error {
+	rel, err := filepath.Rel(dir, full)
+	if err != nil {
+		return err
+	}
+	cur := dir
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		cur = filepath.Join(cur, part)
+		if cur == full {
+			break // the leaf itself is replaced, not followed, by the caller
+		}
+		fi, err := os.Lstat(cur)
+		if os.IsNotExist(err) {
+			break // nothing below here exists yet; MkdirAll will create real dirs
+		}
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("path %q descends through a symlink at %q", rel, cur)
+		}
+	}
+	return nil
 }
 
 // WriteEntry reconstructs an entry's plaintext into dst. Inline (and empty) files
@@ -89,6 +120,9 @@ func writeAtomic(dir string, e Entry, write func(w io.Writer) error) error {
 	if err != nil {
 		return err
 	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
 		return err
 	}
@@ -130,6 +164,9 @@ func writeAtomic(dir string, e Entry, write func(w io.Writer) error) error {
 func WriteSymlink(dir string, e Entry) error {
 	full, err := safeJoin(dir, e.Path)
 	if err != nil {
+		return err
+	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {

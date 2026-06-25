@@ -250,8 +250,8 @@ and an edit that lands mid-sync is not lost. `-d/--daemon` detaches the watcher
 `--once` is the cron-friendly single guarded sync. Per-folder defaults
 (`watch.interval`, `watch.gitGuard`) live in `.aqtconfig`.
 
-Not yet built: pack-and-seal folders (`.aqtconfig pack=true`), public
-whole-folder sharing, and in-browser decryption on the `/x/<id>` page.
+Not yet built: public whole-folder sharing and in-browser decryption on the
+`/x/<id>` page.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
 to override), then `aqt --server http://localhost:8080 login`.
@@ -403,7 +403,7 @@ a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options
 
 ```jsonc
 {
-  "pack": false,                 // reserved for pack-and-seal (see below)
+  "pack": false,                 // pack-and-seal instead of chunked sync (see below)
   "watch": {
     "interval": "5s",            // watch debounce floor; --interval overrides it
     "gitGuard": true             // hold pushes while a sub-repo is mid-operation (default true)
@@ -411,11 +411,18 @@ a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options
 }
 ```
 
-`pack` is reserved for pack-and-seal (the whole tree tarred into one sealed blob,
-no chunk-level dedup) instead of the chunked default — parsed today, but `sync`
-errors on `pack=true` until that path is built (the chunked default is what
-ships). The `watch` block lets a folder pin its daemon behavior in-tree, the same
-way `.aqtignore` pins its exclusions.
+`pack` selects pack-and-seal instead of the chunked default: the whole tree is
+tarred and sealed under the folder content key into fixed-size segments (a fresh
+nonce each, so no chunk-level dedup), streamed through the same packs as file
+content so the 64 MiB blob ceiling no longer caps the tree by its byte size — only
+the sealed `PackRoot` (a compact segment-id list) rides in the resource blob, so the
+practical bound moves to its segment count (hundreds of thousands of 4 MiB segments,
+i.e. ~TB scale), the same segmented-manifest limit the chunked path has. It leaks no per-file structure —
+the server sees only opaque, per-sync-unique segments — but any change re-ships the
+whole folder, and `sync` reconciles it whole-folder last-writer-wins (a change on
+both sides is one conflict; `--force` resolves local-wins) rather than merging per
+file; `clone` untars it. The `watch` block lets a folder pin its daemon behavior
+in-tree, the same way `.aqtignore` pins its exclusions.
 
 ### 4.3 Server HTTP API (`@aqt/server`)
 
