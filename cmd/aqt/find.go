@@ -158,7 +158,7 @@ func folderMembers(cl *client.Client, id string, mk crypto.MasterKey) ([]synceng
 	if err != nil {
 		return nil, err
 	}
-	m, err := syncengine.OpenManifest(res.Blob, ck)
+	m, err := openRemoteManifest(cl, res.Blob, ck)
 	if err != nil {
 		return nil, err
 	}

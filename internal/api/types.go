@@ -98,11 +98,34 @@ type PutResourceRequest struct {
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 }
 
-// ChunkData is one opaque, content-addressed chunk on the wire. ID is the hex
-// sha256 of Data; the server verifies the binding on upload.
-type ChunkData struct {
-	ID   string `json:"id"`
-	Data []byte `json:"data"`
+// PackIndexEntry locates one object inside a pack: its content-address id and the
+// byte slice [Off, Off+Len) of its ciphertext, relative to the start of the pack.
+// A pack's trailing index is a JSON array of these (see syncengine.PackBuilder for
+// the on-the-wire pack layout); the server verifies every slice against its id.
+type PackIndexEntry struct {
+	ID  string `json:"id"`
+	Off int    `json:"off"`
+	Len int    `json:"len"`
+}
+
+// ObjectLocation tells a client where to download an object: which pack holds it
+// and the byte range [Off, Off+Len) within that pack. Returned by /v1/chunks/locate
+// so a pull can range-fetch only the packs (and byte spans) it needs.
+type ObjectLocation struct {
+	ID     string `json:"id"`
+	PackID string `json:"packId"`
+	Off    int64  `json:"off"`
+	Len    int64  `json:"len"`
+}
+
+// LocateRequest asks where a set of object ids live; the response carries one
+// ObjectLocation per id the owner stores (unknown ids are simply absent).
+type LocateRequest struct {
+	IDs []string `json:"ids"`
+}
+
+type LocateResponse struct {
+	Locations []ObjectLocation `json:"locations"`
 }
 
 // ChunkCheckRequest asks which of the given chunk ids the owner does not yet have
@@ -115,25 +138,17 @@ type ChunkCheckResponse struct {
 	Missing []string `json:"missing"`
 }
 
-type ChunkUploadRequest struct {
-	Chunks []ChunkData `json:"chunks"`
+// PutPackResponse acknowledges a pack upload, reporting how many of its objects
+// were newly stored (zero means every object already existed: a fully-deduped pack).
+type PutPackResponse struct {
+	StoredObjects int `json:"storedObjects"`
 }
 
-type ChunkUploadResponse struct {
-	Stored int `json:"stored"`
-}
-
-type ChunkFetchRequest struct {
-	IDs []string `json:"ids"`
-}
-
-type ChunkFetchResponse struct {
-	Chunks []ChunkData `json:"chunks"`
-}
-
-// GCResponse reports how many unreferenced chunks a sweep deleted.
+// GCResponse reports a pack-level sweep: how many fully-dead packs were deleted and
+// how many bytes that reclaimed.
 type GCResponse struct {
-	Deleted int `json:"deleted"`
+	DeletedPacks int   `json:"deletedPacks"`
+	FreedBytes   int64 `json:"freedBytes"`
 }
 
 type PutResourceResponse struct {

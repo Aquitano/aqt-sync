@@ -26,10 +26,10 @@ type folderState struct {
 const (
 	stateFile = "state.json"
 	baseFile  = "base.json"
-	// uploadBatchBytes bounds a single chunk-upload request so it stays under the
-	// server's body cap (base64 in JSON inflates ~33%, hence the conservative cap).
-	uploadBatchBytes = 8 << 20
-	fetchBatchCount  = 256
+	// packCacheSize bounds how many recently-fetched pack byte-ranges a pull keeps,
+	// so a pack shared by several files is not re-GET per file while download memory
+	// stays O(pack), independent of tree size.
+	packCacheSize = 4
 	// maxSyncAttempts bounds the optimistic-concurrency retry: if this many
 	// reconcile passes each lose the race to a concurrent sync, give up and ask
 	// the user to re-run rather than spin.
@@ -122,8 +122,10 @@ func runInit(dir string) error {
 	if err != nil {
 		return err
 	}
+	conv := crypto.DeriveConvergenceKey(mk)
+	defer conv.Wipe()
 	manifest := syncengine.Manifest{Version: 1}
-	resp, err := putFolder(cl, "", manifest, ck, mk, abs)
+	resp, err := putFolder(cl, conv, "", manifest, ck, mk, abs)
 	if err != nil {
 		return err
 	}
@@ -253,12 +255,27 @@ func runSync(dir string, opts syncOptions) error {
 	conv := crypto.DeriveConvergenceKey(mk)
 	defer conv.Wipe()
 
-	// Snapshot the working tree once; it does not change between retries.
-	snap, err := syncengine.Take(root, conv, syncengine.DefaultChunker(), &base)
-	if err != nil {
-		return err
+	// Snapshot the working tree once; it does not change between retries. When this
+	// sync will push, stream every changed file through the chunker and upload the
+	// packs the server lacks as we go, so memory stays O(one pack) regardless of
+	// tree size; the manifest we later PUT references those objects. A pull-only or
+	// dry-run pass uploads nothing, so a metadata+hash scan is enough to plan.
+	var local syncengine.Manifest
+	if opts.pullOnly || opts.dryRun {
+		local, err = syncengine.Scan(root)
+		if err != nil {
+			return err
+		}
+	} else {
+		up := newPackUploader(cl)
+		local, err = syncengine.Take(root, conv, syncengine.DefaultChunker(), &base, up)
+		if err != nil {
+			return err
+		}
+		if err := up.Flush(); err != nil {
+			return err
+		}
 	}
-	local := snap.Manifest
 
 	// reconcile runs one pass against the current remote. It returns
 	// client.ErrConflict if another sync committed first; the loop below then
@@ -278,7 +295,14 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return fmt.Errorf("unwrap folder key: %w", err)
 		}
-		remote, err := syncengine.OpenManifest(res.Blob, ck)
+		remote, err := openRemoteManifest(cl, res.Blob, ck)
+		if errors.Is(err, client.ErrNotFound) {
+			// We read version res.Version's root, but a concurrent sync superseded it
+			// and GC reaped its now-unreferenced manifest objects before we fetched
+			// them. Re-reconcile against the current version (same path the server's
+			// own version conflict takes), rather than hard-failing the sync.
+			return client.ErrConflict
+		}
 		if err != nil {
 			return fmt.Errorf("decrypt remote manifest: %w", err)
 		}
@@ -299,7 +323,7 @@ func runSync(dir string, opts syncOptions) error {
 		return applySync(applyCtx{
 			root: root, cl: cl, opts: opts,
 			base: base, local: local, remote: remote,
-			snap: snap, ck: ck, mk: mk, meta: res.EncryptedMeta,
+			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			version: res.Version, id: st.ID,
 		}, actions)
 	}
@@ -325,7 +349,7 @@ type applyCtx struct {
 	base    syncengine.Manifest
 	local   syncengine.Manifest
 	remote  syncengine.Manifest
-	snap    *syncengine.Snapshot
+	conv    crypto.ConvergenceKey
 	ck      crypto.ContentKey
 	mk      crypto.MasterKey
 	meta    crypto.SealedBlob // the resource's existing sealed metadata, carried forward
@@ -402,25 +426,23 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		}
 	}
 
-	// Push the server-side change FIRST. Uploading chunks and PUTting the manifest
-	// before any local file is touched means a version conflict (another sync
-	// committed first) returns with nothing half-applied on disk, so the caller
-	// can re-plan and retry cleanly.
+	// Push the server-side change FIRST, before any local file is touched, so a
+	// version conflict (another sync committed first) returns with nothing
+	// half-applied on disk and the caller can re-plan cleanly. The objects these
+	// entries reference were already packed and uploaded during the snapshot pass;
+	// here we only commit the merged manifest that roots them.
 	if push && remoteChanged {
-		if err := uploadMissing(c.cl, c.snap.NewChunks, uploads); err != nil {
-			return err
-		}
 		manifest := manifestFrom(merged, c.version+1)
-		if _, err := putFolderUpdate(c.cl, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
+		if _, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
-		// Reclaim chunks the superseded manifest version no longer references.
+		// Reclaim packs the superseded manifest version no longer references.
 		// Best-effort: a sync that uploaded fine should not fail on cleanup, but a
-		// failure is worth a line since GC is the one step that deletes blobs.
-		if n, err := c.cl.GC(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: chunk GC failed: %v\n", err)
+		// failure is worth a line since GC is the one step that deletes packs.
+		if n, freed, err := c.cl.GC(); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: pack GC failed: %v\n", err)
 		} else if n > 0 {
-			fmt.Fprintf(os.Stderr, "reclaimed %d unreferenced chunks\n", n)
+			fmt.Fprintf(os.Stderr, "reclaimed %d packs (%d bytes)\n", n, freed)
 		}
 	}
 
@@ -469,7 +491,7 @@ func runClone(ref, dir string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	manifest, err := syncengine.OpenManifest(res.Blob, ck)
+	manifest, err := openRemoteManifest(cl, res.Blob, ck)
 	if err != nil {
 		return fmt.Errorf("decrypt manifest: %w", err)
 	}
@@ -502,58 +524,83 @@ func runClone(ref, dir string) error {
 
 // --- chunk transfer ---
 
-// uploadMissing uploads the chunks of the given entries that the server lacks,
-// batched under the body cap. Ciphertext comes from the snapshot that sealed them.
-func uploadMissing(cl *client.Client, sealed map[string][]byte, entries []syncengine.Entry) error {
-	ids := distinctChunkIDs(entries)
-	if len(ids) == 0 {
-		return nil
-	}
-	missing, err := cl.CheckChunks(ids)
-	if err != nil {
-		return err
-	}
-	var batch []api.ChunkData
-	size := 0
-	flush := func() error {
-		if len(batch) == 0 {
-			return nil
-		}
-		if err := cl.PutChunks(batch); err != nil {
-			return err
-		}
-		batch, size = nil, 0
-		return nil
-	}
-	for _, id := range missing {
-		ct, ok := sealed[id]
-		if !ok {
-			return fmt.Errorf("internal: no sealed ciphertext for chunk %s", id)
-		}
-		batch = append(batch, api.ChunkData{ID: id, Data: ct})
-		size += len(ct)
-		if size >= uploadBatchBytes {
-			if err := flush(); err != nil {
-				return err
-			}
-		}
-	}
-	return flush()
+// packUploader is the ChunkSink Take feeds during a push. It buffers sealed chunks
+// up to ~packTarget, then asks the server which it lacks, packs only those, and
+// uploads the pack — so the have/want gate and packing fold into one streaming pass
+// and memory stays bounded by the candidate buffer. A per-run seen set dedups a
+// chunk shared by several files within the same sync.
+type packUploader struct {
+	cl       *client.Client
+	target   int
+	seen     map[string]bool
+	cand     []candidate
+	candSize int
 }
 
-// runDownloads fetches every chunk the entries reference, then reconstructs and
-// writes each file under root.
-func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) error {
-	fetched, err := fetchChunks(cl, distinctChunkIDs(entries))
+type candidate struct {
+	id string
+	ct []byte
+}
+
+func newPackUploader(cl *client.Client) *packUploader {
+	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}}
+}
+
+// Add buffers one sealed chunk, flushing a pack once the buffer reaches the target.
+func (u *packUploader) Add(ch crypto.Chunk, ciphertext []byte) error {
+	if u.seen[ch.ID] {
+		return nil
+	}
+	u.seen[ch.ID] = true
+	u.cand = append(u.cand, candidate{id: ch.ID, ct: ciphertext})
+	u.candSize += len(ciphertext)
+	if u.candSize >= u.target {
+		return u.flush()
+	}
+	return nil
+}
+
+// Flush uploads any buffered remainder; call once after the snapshot pass.
+func (u *packUploader) Flush() error { return u.flush() }
+
+func (u *packUploader) flush() error {
+	if len(u.cand) == 0 {
+		return nil
+	}
+	ids := make([]string, len(u.cand))
+	for i, c := range u.cand {
+		ids[i] = c.id
+	}
+	missing, err := u.cl.CheckChunks(ids)
 	if err != nil {
 		return err
 	}
-	get := func(id string) ([]byte, error) {
-		ct, ok := fetched[id]
-		if !ok {
-			return nil, fmt.Errorf("server did not return chunk %s", id)
+	want := make(map[string]bool, len(missing))
+	for _, id := range missing {
+		want[id] = true
+	}
+	pb := syncengine.NewPackBuilder()
+	for _, c := range u.cand {
+		if want[c.id] {
+			pb.Add(c.id, c.ct)
 		}
-		return ct, nil
+	}
+	u.cand = u.cand[:0]
+	u.candSize = 0
+	if pb.Empty() {
+		return nil // every candidate already on the server (a re-sync)
+	}
+	packID, pack := pb.Finish()
+	return u.cl.PutPack(packID, pack)
+}
+
+// runDownloads materializes each entry under root, streaming its chunks from the
+// packs that hold them. A pack-backed chunk source range-fetches packs on demand
+// and caches a few, so neither a whole file nor the whole tree is ever in memory.
+func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) error {
+	src, err := newPackSource(cl, distinctChunkIDs(entries))
+	if err != nil {
+		return err
 	}
 	for _, e := range entries {
 		if e.IsSymlink() {
@@ -562,33 +609,131 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) er
 			}
 			continue
 		}
-		data, err := syncengine.FileBytes(e, get)
-		if err != nil {
-			return err
-		}
-		if err := syncengine.WriteFile(root, e, data); err != nil {
+		if err := syncengine.MaterializeFile(root, e, src.get); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func fetchChunks(cl *client.Client, ids []string) (map[string][]byte, error) {
-	out := make(map[string][]byte, len(ids))
-	for start := 0; start < len(ids); start += fetchBatchCount {
-		end := start + fetchBatchCount
-		if end > len(ids) {
-			end = len(ids)
+// packSpan is the byte range of a pack covering every object a download needs from
+// it — fetched in one Range request, never the whole pack when only a few objects
+// are wanted.
+type packSpan struct {
+	base int64
+	end  int64
+}
+
+// packSource resolves chunk ids to pack byte ranges (one locate up front) and
+// serves their ciphertext, fetching each pack's covering span on demand and keeping
+// a small LRU so a pack shared by several files is fetched once.
+type packSource struct {
+	cl    *client.Client
+	locs  map[string]api.ObjectLocation
+	spans map[string]packSpan
+	cache *packCache
+}
+
+func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
+	s := &packSource{
+		cl:    cl,
+		locs:  make(map[string]api.ObjectLocation, len(ids)),
+		spans: map[string]packSpan{},
+		cache: newPackCache(packCacheSize),
+	}
+	if len(ids) == 0 {
+		return s, nil
+	}
+	located, err := cl.LocateChunks(ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, loc := range located {
+		s.locs[loc.ID] = loc
+		span, ok := s.spans[loc.PackID]
+		if !ok {
+			s.spans[loc.PackID] = packSpan{base: loc.Off, end: loc.Off + loc.Len}
+			continue
 		}
-		chunks, err := cl.FetchChunks(ids[start:end])
+		if loc.Off < span.base {
+			span.base = loc.Off
+		}
+		if loc.Off+loc.Len > span.end {
+			span.end = loc.Off + loc.Len
+		}
+		s.spans[loc.PackID] = span
+	}
+	return s, nil
+}
+
+func (s *packSource) get(id string) ([]byte, error) {
+	loc, ok := s.locs[id]
+	if !ok {
+		// The object was not in the locate response: the owner no longer stores it
+		// (e.g. a concurrent sync superseded this version and GC reaped it). Surface
+		// ErrNotFound so a manifest read can retry against the current version.
+		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
+	}
+	span := s.spans[loc.PackID]
+	data, ok := s.cache.get(loc.PackID)
+	if !ok {
+		var err error
+		data, err = s.cl.GetPackRange(loc.PackID, span.base, span.end-span.base)
 		if err != nil {
 			return nil, err
 		}
-		for _, ch := range chunks {
-			out[ch.ID] = ch.Data
+		if int64(len(data)) < span.end-span.base {
+			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", loc.PackID, len(data), span.end-span.base)
+		}
+		s.cache.put(loc.PackID, data)
+	}
+	start := loc.Off - span.base
+	return data[start : start+loc.Len], nil
+}
+
+// packCache is a tiny count-bounded LRU of fetched pack byte-ranges, so download
+// memory is O(packCacheSize packs) regardless of how many files a pack serves.
+type packCache struct {
+	cap   int
+	data  map[string][]byte
+	order []string // least-recently-used first
+}
+
+func newPackCache(capacity int) *packCache {
+	return &packCache{cap: capacity, data: make(map[string][]byte, capacity)}
+}
+
+func (c *packCache) get(id string) ([]byte, bool) {
+	b, ok := c.data[id]
+	if ok {
+		c.touch(id)
+	}
+	return b, ok
+}
+
+func (c *packCache) put(id string, b []byte) {
+	if _, ok := c.data[id]; ok {
+		c.data[id] = b
+		c.touch(id)
+		return
+	}
+	c.data[id] = b
+	c.order = append(c.order, id)
+	for len(c.order) > c.cap {
+		evict := c.order[0]
+		c.order = c.order[1:]
+		delete(c.data, evict)
+	}
+}
+
+func (c *packCache) touch(id string) {
+	for i, v := range c.order {
+		if v == id {
+			c.order = append(c.order[:i], c.order[i+1:]...)
+			break
 		}
 	}
-	return out, nil
+	c.order = append(c.order, id)
 }
 
 func distinctChunkIDs(entries []syncengine.Entry) []string {
@@ -607,8 +752,59 @@ func distinctChunkIDs(entries []syncengine.Entry) []string {
 
 // --- folder resource helpers ---
 
-func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
-	blob, err := syncengine.SealManifest(m, ck)
+// uploadManifestObjects chunks the manifest through the convergence key, uploads
+// the objects the server lacks (via the same pack pipeline as file content), and
+// returns the root pointer plus the resource's full GC roots: every file-chunk id
+// the manifest references unioned with the manifest's own object ids. The manifest
+// objects must be on the server before the resource PUT roots them, hence the flush.
+func uploadManifestObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.ManifestRoot, []string, error) {
+	up := newPackUploader(cl)
+	chunks, err := syncengine.ChunkManifest(m, conv, syncengine.DefaultChunker(), up)
+	if err != nil {
+		return syncengine.ManifestRoot{}, nil, err
+	}
+	if err := up.Flush(); err != nil {
+		return syncengine.ManifestRoot{}, nil, err
+	}
+	refs := m.ChunkIDs()
+	for _, ch := range chunks {
+		refs = append(refs, ch.ID)
+	}
+	return syncengine.ManifestRoot{Version: m.Version, Chunks: chunks}, refs, nil
+}
+
+// openRemoteManifest reconstructs a folder's manifest from its root pointer: it
+// decrypts the tiny root, then fetches and reassembles the manifest objects from
+// their packs. The inverse of uploadManifestObjects.
+func openRemoteManifest(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
+	root, err := syncengine.OpenManifestRoot(blob, ck)
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	if len(root.Chunks) == 0 {
+		return syncengine.Manifest{Version: root.Version}, nil
+	}
+	src, err := newPackSource(cl, manifestChunkIDs(root.Chunks))
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	return syncengine.OpenManifestFromRoot(root, src.get)
+}
+
+func manifestChunkIDs(chunks []crypto.Chunk) []string {
+	ids := make([]string, len(chunks))
+	for i, ch := range chunks {
+		ids[i] = ch.ID
+	}
+	return ids
+}
+
+func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
+	root, refs, err := uploadManifestObjects(cl, conv, m)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	blob, err := syncengine.SealManifestRoot(root, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -626,7 +822,7 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(),
+		WrappedKey: &wrapped, ChunkRefs: refs,
 	})
 }
 
@@ -634,8 +830,12 @@ func putFolder(cl *client.Client, id string, m syncengine.Manifest, ck crypto.Co
 // resource still being at expectedVersion (else the server returns a conflict).
 // The encrypted metadata (the folder name sealed at init) is carried forward
 // unchanged, so a sync never clobbers it.
-func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
-	blob, err := syncengine.SealManifest(m, ck)
+func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
+	root, refs, err := uploadManifestObjects(cl, conv, m)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	blob, err := syncengine.SealManifestRoot(root, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -645,7 +845,7 @@ func putFolderUpdate(cl *client.Client, id string, m syncengine.Manifest, meta c
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
-		WrappedKey: &wrapped, ChunkRefs: m.ChunkIDs(), ExpectedVersion: expectedVersion,
+		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 	})
 }
 

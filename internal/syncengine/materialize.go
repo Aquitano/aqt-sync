@@ -1,7 +1,10 @@
 package syncengine
 
 import (
+	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,37 +24,67 @@ func safeJoin(dir, relPath string) (string, error) {
 	return full, nil
 }
 
-// FileBytes reconstructs an entry's plaintext. Inline (and empty) files return
-// directly; chunked files are reassembled from chunks, which fetch must supply
-// keyed by id. Each chunk is verified against its address and AEAD tag on open.
-func FileBytes(e Entry, fetch func(id string) ([]byte, error)) ([]byte, error) {
+// WriteEntry reconstructs an entry's plaintext into dst. Inline (and empty) files
+// write their stored bytes; chunked files stream chunk-by-chunk via fetch, so the
+// whole file is never held in memory. Each chunk is verified against its address,
+// AEAD tag, and length on open, so corrupt or wrong-keyed content fails loudly
+// rather than landing on disk.
+func WriteEntry(dst io.Writer, e Entry, fetch func(id string) ([]byte, error)) error {
 	if len(e.Chunks) == 0 {
-		return e.Inline, nil
+		_, err := dst.Write(e.Inline)
+		return err
 	}
-	var out []byte
 	for _, ch := range e.Chunks {
 		ct, err := fetch(ch.ID)
 		if err != nil {
-			return nil, fmt.Errorf("fetch chunk %s: %w", ch.ID, err)
+			return fmt.Errorf("fetch chunk %s: %w", ch.ID, err)
 		}
 		plain, err := crypto.OpenChunk(ct, ch)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		out = append(out, plain...)
+		if _, err := dst.Write(plain); err != nil {
+			return err
+		}
 	}
-	return out, nil
+	return nil
 }
 
-// WriteFile writes an entry's bytes under dir at its relative path, creating
-// parent directories and applying the recorded mode.
-//
-// It writes a sibling temp file, fsyncs it, and renames it into place. Rename
-// replaces whatever currently occupies the path atomically and without following
-// it, so a crash mid-write leaves the old file or the new one but never a
-// truncated mix, and a stale local symlink is overwritten in place rather than
-// followed (os.WriteFile would write through it to a possibly out-of-tree target).
+// FileBytes reconstructs an entry's plaintext in memory. It is a thin wrapper over
+// WriteEntry for callers that genuinely need the bytes; the materialize path uses
+// MaterializeFile instead so large content never lands fully in RAM.
+func FileBytes(e Entry, fetch func(id string) ([]byte, error)) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := WriteEntry(&buf, e, fetch); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// WriteFile writes an entry's in-memory bytes under dir at its relative path.
 func WriteFile(dir string, e Entry, data []byte) error {
+	return writeAtomic(dir, e, func(w io.Writer) error {
+		_, err := w.Write(data)
+		return err
+	})
+}
+
+// MaterializeFile writes a chunked (or inline) entry under dir, streaming its
+// chunks straight to the destination file so the whole content is never held in
+// memory — the bounded-memory pull counterpart to the streaming push.
+func MaterializeFile(dir string, e Entry, fetch func(id string) ([]byte, error)) error {
+	return writeAtomic(dir, e, func(w io.Writer) error {
+		return WriteEntry(w, e, fetch)
+	})
+}
+
+// writeAtomic creates parent dirs, runs write into a sibling temp file, fsyncs it,
+// applies the entry's mode, and renames it into place. Rename replaces whatever
+// occupies the path atomically and without following it, so a crash mid-write
+// leaves the old file or the new one but never a truncated mix, and a stale local
+// symlink is overwritten rather than followed (a plain write would write through it
+// to a possibly out-of-tree target).
+func writeAtomic(dir string, e Entry, write func(w io.Writer) error) error {
 	full, err := safeJoin(dir, e.Path)
 	if err != nil {
 		return err
@@ -70,7 +103,12 @@ func WriteFile(dir string, e Entry, data []byte) error {
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once renamed; cleans up every failure path
-	if _, err := tmp.Write(data); err != nil {
+	bw := bufio.NewWriter(tmp)
+	if err := write(bw); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := bw.Flush(); err != nil {
 		tmp.Close()
 		return err
 	}

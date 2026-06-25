@@ -212,7 +212,7 @@ cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, ls, find, sh
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
-internal/server/    Gin handlers + SQLite/FS store + chunk store + GC           [implemented + tested]
+internal/server/    Gin handlers + SQLite/FS store + packed object store + GC   [implemented + tested]
 internal/identity/  local profile, keystore, session cache                     [implemented + tested]
 internal/client/    HTTP API client                                            [implemented]
 internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
@@ -231,10 +231,11 @@ Verified by `go test ./...` plus live multi-machine cycles. A public share link
 pull` command; in-browser decryption is deferred (the CLI does the decrypt).
 
 Tracked folders (`init`/`status`/`sync`/`clone`) sync a directory by chunking its
-files (FastCDC), deduplicating chunks per account, and storing a sealed manifest
-as an ordinary resource — see 4.2a. v1 tracked folders are **private** (your own
-machines), which keeps the chunk store uniformly owner-scoped; sharing a whole
-folder publicly is deferred (single-file `--public` already covers sharing).
+files (FastCDC), deduplicating objects per account, packing them into raw pack
+files, and storing the manifest itself as objects under a tiny sealed root — see
+4.2a. v1 tracked folders are **private** (your own machines), which keeps the
+object store uniformly owner-scoped; sharing a whole folder publicly is deferred
+(single-file `--public` already covers sharing).
 
 The `watch` daemon (`watch`/`agent`) fingerprints a tracked folder (stat only, no
 content read) each `--interval` (default 2s) and runs a two-way `sync` once the
@@ -344,11 +345,16 @@ auto-resolved unless `--force` is passed.
 The TS sketch above predates the build; the authoritative interfaces are the Go
 signatures in `internal/syncengine` and `internal/crypto`. What ships:
 
-**A folder is a resource whose blob is a sealed manifest.** `init` creates a
-private resource; `sync` uploads new chunks then PUTs an updated, re-sealed
-manifest (version++); `clone` fetches the manifest and the chunks it references.
-Ownership, versioning, and the master-key-wrapped content key are inherited from
-the resource model unchanged.
+**A folder is a resource whose blob is a sealed manifest root.** `init` creates a
+private resource; `sync` streams changed files into packs (uploading the objects
+the server lacks) then PUTs an updated root pointer (version++); `clone` fetches
+the manifest objects, reassembles the manifest, and streams in the file objects it
+references. The manifest is no longer the blob itself: it is chunked through the
+same pipeline as file content and stored as objects, and the resource blob is a
+tiny sealed `ManifestRoot` naming those objects (so a one-file edit re-uploads a
+handful of manifest objects, not the whole manifest — the 64 MiB blob ceiling is
+gone). Ownership, versioning, and the master-key-wrapped content key are inherited
+from the resource model unchanged.
 
 **Chunking + dedup.** Files at or below an inline threshold (the FastCDC minimum)
 are stored inline in the manifest (which is itself sealed), so a tree of many
@@ -371,15 +377,24 @@ never repeats for distinct plaintext. The per-chunk `chunkKey` lives only in the
 sealed manifest; the server holds ciphertext addressed by `chunkID` and nothing
 else. Hex (not base64url) IDs avoid collisions on case-insensitive filesystems.
 
-**Storage layout.** Sealed-blob resources keep `blobs/<id>.bin`. Chunks live in a
-content-addressed, per-owner store with two-level fanout:
-`chunks/<owner>/<ab>/<cd>/<chunkID>.bin`. The server records, per resource, which
-chunk IDs its current manifest references (opaque hashes) so GC has roots.
+**Storage layout.** Sealed-blob resources keep `blobs/<id>.bin`. Objects (chunks)
+are not one file each: they are concatenated into **packs** (~16 MiB), one
+immutable content-addressed file with a self-describing trailing index, fanned out
+per owner: `packs/<owner>/<ab>/<cd>/<packID>.bin`. A pack ships as raw bytes (no
+base64), and a pull range-fetches only the span covering the objects it needs. The
+server maps `chunkID → (packID, offset, length)` in an `objects` table and records,
+per resource, which object IDs its current root references (opaque hashes) so GC
+has roots. Object IDs are still `hex(sha256(ciphertext))`; the dedup key is
+unchanged, so pack non-determinism (ordering) does not affect dedup.
 
-**GC = mark-and-sweep, per owner.** Roots are the chunk references of the owner's
-live resources; chunks not reachable from any root *and* older than an age guard
-(so an in-flight upload isn't reaped before its manifest commits) are deleted.
-No refcounts — the manifests are the source of truth, which survives crashes.
+**GC = mark-and-sweep at pack granularity, per owner.** Roots are the object
+references of the owner's live resources (file-chunk IDs ∪ manifest-object IDs). A
+pack is deleted when **none** of its objects is reachable from any root *and* it is
+older than an age guard (so an in-flight upload isn't reaped before its manifest
+commits). v1 tolerates dead objects inside a still-live pack (repack is a
+follow-up). No refcounts — the manifests are the source of truth, which survives
+crashes; the resource→objects foreign key is the backstop that rejects a root
+referencing an object the owner no longer stores.
 
 **`.aqtignore`** uses a pragmatic gitignore subset (comments, anchored paths,
 `*`/`?`/`**` globs, trailing-slash dir rules); `.aqt/` and `.git/` are always
@@ -428,15 +443,17 @@ POST   /v1/resources/:id/visibility  Body: { visibility, ciphertext, encryptedMe
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility).
 
-# Tracked folders: the folder's blob IS the sealed manifest, so it uses the
-# resource routes above; PUT additionally carries chunkRefs (the chunk ids the
-# new manifest references) so the server can root GC. Chunks are opaque,
-# content-addressed, owner-scoped, and all require the owner token:
-POST   /v1/chunks/check              Body: { ids } → { missing }   (have/want before upload)
-POST   /v1/chunks                    Body: { chunks: [{ id, data }] } → { stored }
-                                     Server verifies sha256(data)==id, stores under the owner.
-POST   /v1/chunks/fetch              Body: { ids } → { chunks: [{ id, data }] }
-POST   /v1/gc                        Mark-and-sweep the owner's unreferenced chunks → { deleted }
+# Tracked folders: the folder's blob is a sealed ManifestRoot pointing at the
+# manifest objects, so it uses the resource routes above; PUT additionally carries
+# chunkRefs (file-object ids ∪ manifest-object ids the new root references) so the
+# server can root GC. Objects ship inside raw packs; all routes require the owner token:
+POST   /v1/chunks/check              Body: { ids } → { missing }   (have/want before packing)
+POST   /v1/chunks/locate             Body: { ids } → { locations: [{ id, packId, off, len }] }
+PUT    /v1/packs/:id                  Body: raw pack bytes (octet-stream). id = sha256(pack);
+                                     server verifies the address and every object slice. Range-able GET.
+                                     → { storedObjects }
+GET    /v1/packs/:id                  → raw pack bytes; supports Range (pull fetches only the needed span)
+POST   /v1/gc                        Pack-level mark-and-sweep → { deletedPacks, freedBytes }
 ```
 
 The server enforces: ownership, visibility (a private id returns 404 to anyone but
@@ -470,9 +487,10 @@ function currentSession(): Session | null;                                 // fo
 
 ## 5. Open implementation questions (not blocking the interface)
 
-- **Large single files / streaming** — `push`/`pull` still seal a whole file in memory under the 32 MiB body cap. Folder sync chunks files (FastCDC) and uploads chunks in batches, so a tracked large file is fine; a single `aqt push` of a >32 MiB file is not yet streamed.
-- **Manifest size** — a folder's sealed manifest is one resource blob, so it shares the 32 MiB cap. Huge trees that overflow it would need a split/subtree manifest (deferred).
-- **Public whole-folder sharing** — v1 tracked folders are private, so the chunk store is uniformly owner-scoped. Sharing a folder publicly needs its chunks under the folder key (not the account convergence key) in a publicly-readable space — deferred.
+- **Large single files / streaming** — single-file `push`/`pull` still seal a whole file in memory under the 32 MiB body cap. Folder `sync`/`clone` now stream: files are chunked (FastCDC), sealed, and packed in a bounded-memory pass, and pulls range-fetch packs, so a tracked tree (or a multi-GB file in one) uses memory O(one pack + manifest) regardless of size. Streaming the single-file `aqt push` path is still open.
+- **Manifest size** — the manifest is chunked through the same pipeline and stored as objects; the resource blob is a kilobyte-sized sealed `ManifestRoot`, so the old 64 MiB blob ceiling is gone. The manifest is still reconstructed in memory to plan/merge (O(tree-metadata)); true subtree/Merkle-DAG dedup is the deferred Phase 4.
+- **Repack** — pack-level GC v1 deletes only fully-dead packs, leaving dead objects inside still-live packs; reclaiming that space needs a repack pass (copy live objects into a fresh pack), deferred.
+- **Public whole-folder sharing** — v1 tracked folders are private, so the object store is uniformly owner-scoped. Sharing a folder publicly needs its objects under the folder key (not the account convergence key) in a publicly-readable space — deferred.
 - **Argon2id tuning** (`time`/`memory`) per machine.
 - **Account-enumeration oracle** — `GET /account/salt` confirms which emails are registered, and auth endpoints have no rate limiting.
 - **Defense-in-depth crypto** — AEAD additional-data domain separation across blob/wrap/gated-wrap; complete key wiping (`ContentKey` has no `Wipe`).

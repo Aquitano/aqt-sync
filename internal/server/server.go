@@ -37,7 +37,8 @@ func New(store *Store) *Server {
 // entries) still needs a segmented manifest; that is the remaining half of A2.
 const (
 	maxControlBody  = 64 << 10 // 64 KiB: account/auth/visibility — a few small fields
-	maxChunkBody    = 32 << 20 // 32 MiB: a chunk batch (client batches well under this)
+	maxChunkBody    = 32 << 20 // 32 MiB: a check/locate id list (client batches well under this)
+	maxPackBody     = 32 << 20 // 32 MiB: one raw pack (client targets ~16 MiB, headroom for the index)
 	maxResourceBody = 64 << 20 // 64 MiB: a file's ciphertext or a folder's sealed manifest
 )
 
@@ -85,10 +86,13 @@ func (s *Server) Router() *gin.Engine {
 			authed.GET("/devices", s.listDevices)
 			authed.DELETE("/devices/:id", s.deleteDevice)
 
-			// Folder-sync chunk store: opaque, content-addressed, owner-scoped.
+			// Folder-sync packed object store: opaque, content-addressed,
+			// owner-scoped. Objects ship inside raw packs; check/locate negotiate
+			// which objects to up/download by id.
 			authed.POST("/chunks/check", limitBody(maxChunkBody), s.checkChunks)
-			authed.POST("/chunks", limitBody(maxChunkBody), s.uploadChunks)
-			authed.POST("/chunks/fetch", limitBody(maxChunkBody), s.fetchChunks)
+			authed.POST("/chunks/locate", limitBody(maxChunkBody), s.locateChunks)
+			authed.PUT("/packs/:id", limitBody(maxPackBody), s.putPack)
+			authed.GET("/packs/:id", s.getPack)
 			authed.POST("/gc", s.runGC)
 		}
 	}

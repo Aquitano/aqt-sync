@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,22 +12,29 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// Snapshot is the result of scanning a tracked directory: the manifest plus the
-// ciphertexts of any chunks it (re)sealed, keyed by chunk id, so the caller can
-// upload the ones the server is missing.
-type Snapshot struct {
-	Manifest  Manifest
-	NewChunks map[string][]byte
+// ChunkSink receives the ciphertext of each chunk a snapshot seals for a changed
+// file, so the caller can pack and upload it without the snapshot ever holding the
+// whole tree in memory. ciphertext is owned by the sink after the call returns
+// (crypto.SealChunk produces an independent allocation, so no copy is needed).
+type ChunkSink interface {
+	Add(ch crypto.Chunk, ciphertext []byte) error
 }
 
+// nopSink discards chunks; Take uses it when a snapshot only needs the manifest
+// (no upload), though callers typically reach for Scan in that case.
+type nopSink struct{}
+
+func (nopSink) Add(crypto.Chunk, []byte) error { return nil }
+
 // fileNode is one tracked entry surfaced by the walk: either a symlink (target
-// set) or a regular file (data set).
+// set) or a regular file. The walk reads no file content — it carries the path so
+// a caller can stream the file itself, keeping walk memory O(1) per node.
 type fileNode struct {
 	rel     string
+	path    string
 	info    fs.FileInfo
 	symlink bool
 	target  string
-	data    []byte
 }
 
 // walkFiles invokes fn for every tracked symlink and regular file under dir.
@@ -69,16 +77,12 @@ func walkFiles(dir string, fn func(fileNode) error) error {
 			if err != nil {
 				return err
 			}
-			return fn(fileNode{rel: rel, info: info, symlink: true, target: target})
+			return fn(fileNode{rel: rel, path: path, info: info, symlink: true, target: target})
 		}
 		if !d.Type().IsRegular() {
 			return nil
 		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return fn(fileNode{rel: rel, info: info, data: data})
+		return fn(fileNode{rel: rel, path: path, info: info})
 	})
 }
 
@@ -87,23 +91,49 @@ func hashOf(data []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// metaEntry builds the path/size/mode/hash (and Link, for symlinks) part of an
-// entry. The link hash is domain-separated from file content so a file whose
-// bytes equal a link's target is never mistaken for unchanged.
+// streamHash returns the hex sha256 of a file's contents without holding it in
+// memory — the bounded-memory change detector for files too large to inline.
+func streamHash(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// metaEntry builds the path/size/mode (and Link/Hash, for symlinks) part of an
+// entry. A regular file's content Hash is filled in by the caller after it reads
+// or streams the bytes. The link hash is domain-separated from file content so a
+// file whose bytes equal a link's target is never mistaken for unchanged.
 func metaEntry(n fileNode) Entry {
 	if n.symlink {
 		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: hashOf([]byte("symlink\x00" + n.target))}
 	}
-	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size(), Hash: hashOf(n.data)}
+	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size()}
 }
 
 // Scan reads dir into a manifest of path/size/mode/hash (and link targets) only —
-// no sealing — for cheap change detection (e.g. `status`) without the convergence
-// key. Nested .aqtignore files are honored.
+// no sealing — for cheap change detection (e.g. `status`, and the local side of a
+// pull-only sync) without the convergence key. Large files are hashed streaming,
+// so scan memory is bounded regardless of file size. Nested .aqtignore files are
+// honored.
 func Scan(dir string) (Manifest, error) {
 	var m Manifest
 	err := walkFiles(dir, func(n fileNode) error {
-		m.Entries = append(m.Entries, metaEntry(n))
+		e := metaEntry(n)
+		if !n.symlink {
+			h, err := streamHash(n.path)
+			if err != nil {
+				return err
+			}
+			e.Hash = h
+		}
+		m.Entries = append(m.Entries, e)
 		return nil
 	})
 	sortEntries(m.Entries)
@@ -170,45 +200,110 @@ func Fingerprint(dir string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// Take scans dir into a Snapshot. Files at or below the chunker minimum are
-// stored inline; larger files are chunked and sealed under the convergence key.
-// When base is non-nil, a file whose plaintext is unchanged reuses its previous
-// entry verbatim — so unchanged files are neither re-sealed nor re-listed for
-// upload.
-func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest) (*Snapshot, error) {
+// Take scans dir into a manifest, streaming each file so memory stays O(one pack
+// buffer + manifest) regardless of file or tree size. Files at or below the chunker
+// minimum are inlined; larger files are chunked and sealed under the convergence
+// key, and each sealed chunk's ciphertext is handed to sink (the pack assembler) as
+// it is produced — Take never accumulates ciphertext itself.
+//
+// When base is non-nil, a file whose content is unchanged reuses its previous entry
+// verbatim, so it is neither re-sealed nor re-uploaded. The unchanged check reads
+// the file once to hash it (the read a sync must do anyway) but skips the seal; a
+// large file that did change is the only case sealed, and it streams.
+//
+// sink may be nil for a manifest-only snapshot (no upload).
+func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest, sink ChunkSink) (Manifest, error) {
+	if sink == nil {
+		sink = nopSink{}
+	}
 	var reuse map[string]Entry
 	if base != nil {
 		reuse = base.byPath()
 	}
-	snap := &Snapshot{NewChunks: map[string][]byte{}}
+	var m Manifest
 
 	err := walkFiles(dir, func(n fileNode) error {
-		entry := metaEntry(n)
-		if prev, ok := reuse[n.rel]; ok && prev.Hash == entry.Hash {
-			snap.Manifest.Entries = append(snap.Manifest.Entries, prev)
+		if n.symlink {
+			e := metaEntry(n)
+			if prev, ok := reuse[n.rel]; ok && prev.Hash == e.Hash {
+				e = prev
+			}
+			m.Entries = append(m.Entries, e)
 			return nil
 		}
-		switch {
-		case n.symlink:
-			// fully described by metaEntry (target in Link); nothing to seal
-		case len(n.data) <= chunker.Min:
-			entry.Inline = n.data
-		default:
-			for _, piece := range chunker.Split(n.data) {
-				ct, ch, err := crypto.SealChunk(piece, conv)
-				if err != nil {
-					return err
-				}
-				entry.Chunks = append(entry.Chunks, ch)
-				snap.NewChunks[ch.ID] = ct
-			}
+		e, err := snapshotFile(n, reuse, conv, chunker, sink)
+		if err != nil {
+			return err
 		}
-		snap.Manifest.Entries = append(snap.Manifest.Entries, entry)
+		m.Entries = append(m.Entries, e)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return Manifest{}, err
 	}
-	sortEntries(snap.Manifest.Entries)
-	return snap, nil
+	sortEntries(m.Entries)
+	return m, nil
+}
+
+// snapshotFile turns one regular file into an entry, reusing the base entry when
+// the content is unchanged so it is not re-sealed. Small files inline; larger ones
+// stream through the chunker into sink.
+func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink) (Entry, error) {
+	entry := metaEntry(n)
+	prev, inBase := reuse[n.rel]
+	size := n.info.Size()
+
+	// Small files are inlined into the (sealed) manifest; read fully — bounded by
+	// the inline cutoff — and hash.
+	if size <= int64(chunker.Min) {
+		data, err := os.ReadFile(n.path)
+		if err != nil {
+			return Entry{}, err
+		}
+		entry.Hash = hashOf(data)
+		if inBase && prev.Hash == entry.Hash {
+			return prev, nil
+		}
+		entry.Inline = data
+		return entry, nil
+	}
+
+	// Large files: if base holds a same-size entry, hash first (one read, no seal)
+	// to skip re-sealing an unchanged file. Otherwise it is new or changed and must
+	// be sealed regardless.
+	if inBase && prev.Size == size {
+		h, err := streamHash(n.path)
+		if err != nil {
+			return Entry{}, err
+		}
+		if h == prev.Hash {
+			return prev, nil
+		}
+	}
+	return sealFile(n, entry, conv, chunker, sink)
+}
+
+// sealFile streams a file through the chunker once, sealing each chunk into sink
+// and computing the content hash from the same pass.
+func sealFile(n fileNode, entry Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink) (Entry, error) {
+	f, err := os.Open(n.path)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	tee := io.TeeReader(f, h)
+	err = chunker.SplitStream(tee, func(piece []byte) error {
+		ct, ch, err := crypto.SealChunk(piece, conv)
+		if err != nil {
+			return err
+		}
+		entry.Chunks = append(entry.Chunks, ch)
+		return sink.Add(ch, ct)
+	})
+	if err != nil {
+		return Entry{}, err
+	}
+	entry.Hash = hex.EncodeToString(h.Sum(nil))
+	return entry, nil
 }
