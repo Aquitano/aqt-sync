@@ -194,8 +194,9 @@ type WrappedKey struct {
 // sealed under the same content key). Binding the resource id as well is a future
 // step: the id is server-assigned and unknown when the client seals on create.
 var (
-	AADBlob    = []byte("aqt-blob-v1")    // resource body (file bytes or folder manifest)
+	AADBlob    = []byte("aqt-blob-v1")    // resource body (file bytes or folder manifest/root)
 	AADMeta    = []byte("aqt-meta-v1")    // resource metadata
+	AADPack    = []byte("aqt-pack-v1")    // a pack-and-seal tarball segment (sealed under the folder content key)
 	aadKeyWrap = []byte("aqt-keywrap-v1") // content key wrapped under the master key
 	aadGated   = []byte("aqt-gated-v1")   // content key wrapped under a link password
 )

@@ -117,15 +117,27 @@ func runInit(dir string) error {
 		}
 	}
 
-	// Register an empty private folder resource; the first `sync` fills it.
+	cfg, err := syncengine.LoadConfig(abs)
+	if err != nil {
+		return err
+	}
+
+	// Register an empty private folder resource; the first `sync` fills it. A
+	// pack-and-seal folder (.aqtconfig pack=true) is created with an empty PackRoot;
+	// the chunked default with an empty manifest.
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
 		return err
 	}
-	conv := crypto.DeriveConvergenceKey(mk)
-	defer conv.Wipe()
 	manifest := syncengine.Manifest{Version: 1}
-	resp, err := putFolder(cl, conv, "", manifest, ck, mk, abs)
+	var resp api.PutResourceResponse
+	if cfg.Pack {
+		resp, err = putPackFolderCreate(cl, syncengine.PackRoot{Version: syncengine.PackRootVersion}, ck, mk, abs)
+	} else {
+		conv := crypto.DeriveConvergenceKey(mk)
+		resp, err = putFolder(cl, conv, "", manifest, ck, mk, abs)
+		conv.Wipe()
+	}
 	if err != nil {
 		return err
 	}
@@ -230,7 +242,7 @@ func runSync(dir string, opts syncOptions) error {
 	if cfg, err := syncengine.LoadConfig(root); err != nil {
 		return err
 	} else if cfg.Pack {
-		return errors.New("pack-and-seal folders (.aqtconfig pack=true) are not yet implemented; use chunked sync")
+		return runPackSync(root, opts)
 	}
 	st, err := loadState(root)
 	if err != nil {
@@ -436,14 +448,7 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		if _, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
-		// Reclaim packs the superseded manifest version no longer references.
-		// Best-effort: a sync that uploaded fine should not fail on cleanup, but a
-		// failure is worth a line since GC is the one step that deletes packs.
-		if n, freed, err := c.cl.GC(); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: pack GC failed: %v\n", err)
-		} else if n > 0 {
-			fmt.Fprintf(os.Stderr, "reclaimed %d packs (%d bytes)\n", n, freed)
-		}
+		reclaimPacks(c.cl)
 	}
 
 	// Server is updated; now bring the local tree in line. Downloads before
@@ -491,10 +496,7 @@ func runClone(ref, dir string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	manifest, err := openRemoteManifest(cl, res.Blob, ck)
-	if err != nil {
-		return fmt.Errorf("decrypt manifest: %w", err)
-	}
+	meta := decodeMeta(res.EncryptedMeta, ck)
 
 	if dir == "" {
 		dir = id
@@ -506,7 +508,8 @@ func runClone(ref, dir string) error {
 	if err := ensureEmptyDir(abs); err != nil {
 		return err
 	}
-	if err := runDownloads(cl, abs, manifest.Entries); err != nil {
+	base, err := materializeClone(cl, abs, res, ck, meta)
+	if err != nil {
 		return err
 	}
 	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
@@ -515,11 +518,41 @@ func runClone(ref, dir string) error {
 	if err := saveState(abs, folderState{ID: id, Server: prof.Server}); err != nil {
 		return err
 	}
-	if err := saveBase(abs, manifest); err != nil {
+	if err := saveBase(abs, base); err != nil {
 		return err
 	}
-	fmt.Printf("cloned %d files into %s\n", len(manifest.Entries), abs)
+	fmt.Printf("cloned %d files into %s\n", len(base.Entries), abs)
 	return nil
+}
+
+// materializeClone writes a freshly cloned folder's content under abs and returns
+// the manifest to record as its base. A pack-and-seal folder is untarred from its
+// sealed segments; the chunked default streams each file from its packs.
+func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse, ck crypto.ContentKey, meta api.Metadata) (syncengine.Manifest, error) {
+	if meta.Packed {
+		root, err := syncengine.OpenPackRoot(res.Blob, ck)
+		if err != nil {
+			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
+		}
+		src, err := newPackSource(cl, root.SegmentIDs())
+		if err != nil {
+			return syncengine.Manifest{}, err
+		}
+		base, err := syncengine.ExtractToTree(abs, root, ck, src.get)
+		if err != nil {
+			return syncengine.Manifest{}, err
+		}
+		base.Version = res.Version
+		return base, nil
+	}
+	manifest, err := openRemoteManifest(cl, res.Blob, ck)
+	if err != nil {
+		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)
+	}
+	if err := runDownloads(cl, abs, manifest.Entries); err != nil {
+		return syncengine.Manifest{}, err
+	}
+	return manifest, nil
 }
 
 // --- chunk transfer ---
@@ -1043,4 +1076,15 @@ func printPaths(label string, paths []string) {
 func summarize(uploads, downloads []syncengine.Entry, localDeletes []string, pushed bool) {
 	fmt.Printf("synced: %d up, %d down, %d removed locally\n", len(uploads), len(downloads), len(localDeletes))
 	_ = pushed
+}
+
+// reclaimPacks sweeps the packs the just-superseded manifest no longer references.
+// Best-effort: a sync that uploaded fine should not fail on cleanup, but GC is the
+// only step that deletes packs, so a failure is worth a line.
+func reclaimPacks(cl *client.Client) {
+	if n, freed, err := cl.GC(); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: pack GC failed: %v\n", err)
+	} else if n > 0 {
+		fmt.Fprintf(os.Stderr, "reclaimed %d packs (%d bytes)\n", n, freed)
+	}
 }
