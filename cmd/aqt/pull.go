@@ -37,6 +37,20 @@ func pullCmd() *cobra.Command {
 	return cmd
 }
 
+func catCmd() *cobra.Command {
+	var password string
+	cmd := &cobra.Command{
+		Use:   "cat <url|id|aqt://ref>",
+		Short: "Decrypt a resource to stdout without writing to disk",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runPull(args[0], "", password, true, false)
+		},
+	}
+	cmd.Flags().StringVarP(&password, "password", "P", "", "password for a gated link")
+	return cmd
+}
+
 func runPull(ref, out, password string, toStdout, force bool) error {
 	id, fragment := parseRef(ref)
 

@@ -208,7 +208,7 @@ requires a confirm prompt and an explicit "this cannot be reset" warning.
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, ls, find, share, private, watch/agent  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, cat, ls, info, find, share, private, rm, watch/agent  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
