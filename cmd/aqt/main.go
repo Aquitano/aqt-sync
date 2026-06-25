@@ -97,7 +97,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagServer, "server", "", "server URL override")
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 
-	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), devicesCmd(), pushCmd(), pullCmd(), lsCmd(), findCmd(), shareCmd(), privateCmd())
+	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	return root
 }

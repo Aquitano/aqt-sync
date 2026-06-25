@@ -90,7 +90,7 @@ func runDevicesRemove(ids []string) error {
 		}
 		if err := cl.DeleteDevice(id); err != nil {
 			if errors.Is(err, client.ErrNotFound) {
-				return fmt.Errorf("device %s not found (or not yours)", id)
+				return fmt.Errorf("device %s not found (or not yours); run `aqt devices` to list yours", id)
 			}
 			return err
 		}
