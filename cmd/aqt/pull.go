@@ -13,6 +13,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 func pullCmd() *cobra.Command {
@@ -76,13 +77,58 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 
+	meta := decodeMeta(res.EncryptedMeta, ck)
+	if meta.Streamed {
+		return pullStream(cl, res, ck, out, meta, toStdout, force)
+	}
+
 	plaintext, err := crypto.Open(res.Blob, ck, crypto.AADBlob)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
-	meta := decodeMeta(res.EncryptedMeta, ck)
-
 	return writeOutput(plaintext, out, meta, toStdout, force)
+}
+
+// pullStream reconstructs a streamed file from its objects, writing chunks to the
+// destination as they are fetched so the whole file is never held in memory.
+func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, toStdout, force bool) error {
+	root, err := syncengine.OpenFileRoot(res.Blob, ck)
+	if err != nil {
+		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
+	}
+	src, err := newPackSource(cl, root.ChunkIDs())
+	if err != nil {
+		return err
+	}
+	if toStdout {
+		return syncengine.WriteFileRoot(os.Stdout, root, src.get)
+	}
+	dest := out
+	if dest == "" {
+		dest = meta.Name
+		if dest == "" || dest == "stdin" {
+			dest = "aqt-download"
+		}
+	}
+	if !force {
+		if _, err := os.Stat(dest); err == nil {
+			return fmt.Errorf("%s already exists (use --force to overwrite)", dest)
+		}
+	}
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if err := syncengine.WriteFileRoot(f, root, src.get); err != nil {
+		f.Close()
+		_ = os.Remove(dest)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, root.Size)
+	return nil
 }
 
 // contentKey recovers the content key either from the share fragment (public/

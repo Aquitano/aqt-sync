@@ -29,6 +29,9 @@ type Metadata struct {
 	Name string `json:"name"`
 	Size int64  `json:"size"`
 	Kind string `json:"kind,omitempty"`
+	// Streamed marks a file whose blob is a sealed FileRoot over chunk objects rather
+	// than the inline ciphertext, so pull reconstructs it from the objects.
+	Streamed bool `json:"streamed,omitempty"`
 }
 
 // CreateAccountRequest registers a new account and attaches the first device.

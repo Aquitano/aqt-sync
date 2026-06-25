@@ -59,6 +59,11 @@ func runShare(idArg, password string, noClip bool) error {
 	if err != nil {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
+	// A streamed file's objects live in the owner-only pack store, so a public reader
+	// could not fetch them even with the link key.
+	if decodeMeta(res.EncryptedMeta, ck).Streamed {
+		return errors.New("this is a streamed private file; public sharing of streamed files is not supported yet")
+	}
 	if res.Visibility != api.Public {
 		if _, err := cl.SetVisibility(id, api.Public); err != nil {
 			return err
