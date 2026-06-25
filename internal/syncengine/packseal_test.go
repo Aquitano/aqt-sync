@@ -1,6 +1,8 @@
 package syncengine
 
 import (
+	"archive/tar"
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -53,9 +55,16 @@ func TestPackRoundTrip(t *testing.T) {
 
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, err := TarAndSeal(src, ck, store)
+	root, shipped, err := TarAndSeal(src, ck, store)
 	if err != nil {
 		t.Fatalf("TarAndSeal: %v", err)
+	}
+	// The manifest TarAndSeal reports must match a direct Scan, so pushPack can
+	// record it as the base without a Scan/re-walk disagreement.
+	if scan, err := Scan(src); err != nil {
+		t.Fatal(err)
+	} else {
+		assertManifestHashesEqual(t, scan, shipped)
 	}
 	if len(root.Segments) < 2 {
 		t.Fatalf("expected the big file to span multiple segments, got %d", len(root.Segments))
@@ -102,11 +111,11 @@ func TestPackNonConvergent(t *testing.T) {
 	writeFile(t, src, "a.txt", []byte("stable content"))
 	ck := testContentKey(t)
 
-	first, err := TarAndSeal(src, ck, memObjects{})
+	first, _, err := TarAndSeal(src, ck, memObjects{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := TarAndSeal(src, ck, memObjects{})
+	second, _, err := TarAndSeal(src, ck, memObjects{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +135,7 @@ func TestPackSegmentTamperRejected(t *testing.T) {
 	writeFile(t, src, "a.txt", []byte("trust but verify"))
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, err := TarAndSeal(src, ck, store)
+	root, _, err := TarAndSeal(src, ck, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,12 +152,56 @@ func TestPackWrongKeyRejected(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("secret"))
 	store := memObjects{}
-	root, err := TarAndSeal(src, testContentKey(t), store)
+	root, _, err := TarAndSeal(src, testContentKey(t), store)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := ExtractToTree(t.TempDir(), root, testContentKey(t), store.get); err == nil {
 		t.Fatal("extract accepted the wrong content key")
+	}
+}
+
+// TestExtractRefusesSymlinkTraversal builds a hostile tar by hand — a symlink entry
+// pointing out of the tree, then a regular file written through it — seals it as
+// pack-and-seal segments, and asserts extraction refuses it rather than landing the
+// file at the symlink's target. safeJoin alone would pass both entries (neither path
+// contains ".."); refuseSymlinkParents is what stops the escape.
+func TestExtractRefusesSymlinkTraversal(t *testing.T) {
+	outside := t.TempDir() // stands in for an out-of-tree location the symlink targets
+
+	var tarBuf bytes.Buffer
+	tw := tar.NewWriter(&tarBuf)
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeSymlink, Name: "evil", Linkname: outside, Mode: 0o777}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.WriteHeader(&tar.Header{Typeflag: tar.TypeReg, Name: "evil/payload", Mode: 0o644, Size: 5}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write([]byte("pwned")); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Seal the hostile tar into segments exactly as TarAndSeal would, so it travels
+	// the real ExtractToTree path.
+	ck := testContentKey(t)
+	ss := &segmentSink{ck: ck, sink: memObjects{}}
+	store := ss.sink.(memObjects)
+	if _, err := ss.Write(tarBuf.Bytes()); err != nil {
+		t.Fatal(err)
+	}
+	if err := ss.finish(); err != nil {
+		t.Fatal(err)
+	}
+	root := PackRoot{Version: PackRootVersion, Size: int64(tarBuf.Len()), Segments: ss.segments}
+
+	if _, err := ExtractToTree(t.TempDir(), root, ck, store.get); err == nil {
+		t.Fatal("extract accepted a symlink-traversal archive")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "payload")); err == nil {
+		t.Fatal("hostile archive escaped the tracked root: payload written outside")
 	}
 }
 

@@ -132,40 +132,53 @@ func openSegment(object []byte, seg Segment, ck crypto.ContentKey) ([]byte, erro
 // TarAndSeal walks dir (honoring .aqtignore exactly as Scan/Take do), writes a tar
 // of every tracked file and symlink, and seals the stream into fixed-size segments
 // fed to sink as they fill — so the whole tree is never held in memory. It returns
-// the root naming those segments in order. sink may be nil for a size-only pass.
-func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, error) {
+// the root naming those segments in order plus the manifest of exactly what it
+// tarred (path/mode/size/content-hash), so the caller records a base that matches
+// the shipped bytes rather than a separately-taken scan. sink may be nil.
+func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Manifest, error) {
 	if sink == nil {
 		sink = nopObjectSink{}
 	}
 	ss := &segmentSink{ck: ck, sink: sink}
 	tw := tar.NewWriter(ss)
+	var manifest Manifest
 	err := walkFiles(dir, func(n fileNode) error {
-		return writeTarEntry(tw, n)
+		e, err := writeTarEntry(tw, n)
+		if err != nil {
+			return err
+		}
+		manifest.Entries = append(manifest.Entries, e)
+		return nil
 	})
 	if err != nil {
-		return PackRoot{}, err
+		return PackRoot{}, Manifest{}, err
 	}
 	if err := tw.Close(); err != nil { // flushes the archive trailer into ss
-		return PackRoot{}, err
+		return PackRoot{}, Manifest{}, err
 	}
 	if err := ss.finish(); err != nil {
-		return PackRoot{}, err
+		return PackRoot{}, Manifest{}, err
 	}
-	return PackRoot{Version: PackRootVersion, Size: ss.size, Segments: ss.segments}, nil
+	sortEntries(manifest.Entries)
+	return PackRoot{Version: PackRootVersion, Size: ss.size, Segments: ss.segments}, manifest, nil
 }
 
 // writeTarEntry appends one node with a content-only header — permission bits, but a
 // zeroed mtime and no owner identity, so the tarball carries the tree's bytes and
-// modes and nothing about the host.
-func writeTarEntry(tw *tar.Writer, n fileNode) error {
+// modes and nothing about the host. It returns the manifest Entry for the node,
+// hashing a regular file's content as it streams so the result matches a Scan.
+func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	if n.symlink {
-		return tw.WriteHeader(&tar.Header{
+		if err := tw.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeSymlink,
 			Name:     n.rel,
 			Linkname: n.target,
 			Mode:     0o777,
 			ModTime:  epoch,
-		})
+		}); err != nil {
+			return Entry{}, err
+		}
+		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: linkHash(n.target)}, nil
 	}
 	if err := tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
@@ -174,29 +187,32 @@ func writeTarEntry(tw *tar.Writer, n fileNode) error {
 		Size:     n.info.Size(),
 		ModTime:  epoch,
 	}); err != nil {
-		return err
+		return Entry{}, err
 	}
 	f, err := os.Open(n.path)
 	if err != nil {
-		return err
+		return Entry{}, err
 	}
 	defer f.Close()
-	written, err := io.Copy(tw, f)
+	h := sha256.New()
+	written, err := io.Copy(tw, io.TeeReader(f, h))
 	if err != nil {
-		return err
+		return Entry{}, err
 	}
 	// tar headers commit to Size up front; a file that grew or shrank between the
 	// stat and the read would desync the archive, so fail loudly rather than ship a
 	// corrupt tarball.
 	if written != n.info.Size() {
-		return fmt.Errorf("file %s changed size during pack (%d != %d)", n.rel, written, n.info.Size())
+		return Entry{}, fmt.Errorf("file %s changed size during pack (%d != %d)", n.rel, written, n.info.Size())
 	}
-	return nil
+	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size(), Hash: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 // segmentSink is the io.Writer the tar stream is written into: it accumulates bytes
-// and seals each segTarget-sized slice into sink as the buffer fills, so memory
-// stays O(segTarget + one pack) regardless of tree size.
+// and seals each segTarget-sized slice into sink as the buffer fills, so the streamed
+// content stays O(segTarget + one pack) regardless of tree size. The segment records
+// it collects are a separate O(num segments) id+len list, the same characteristic as
+// the chunked path's per-chunk list.
 type segmentSink struct {
 	ck       crypto.ContentKey
 	sink     ObjectSink
@@ -267,13 +283,22 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 		pr.CloseWithError(err) // unblock the writer if extraction bailed early
 		return Manifest{}, err
 	}
+	// tar.Reader stops at the archive trailer without draining the rest of the pipe,
+	// so close the read end to unblock the writer goroutine on any trailing bytes a
+	// malformed archive might carry past the trailer (otherwise it leaks, pinned in
+	// pw.Write). A well-formed archive ends at the trailer and the writer is already
+	// done; Close is then a no-op.
+	pr.Close()
 	sortEntries(m.Entries)
 	return m, nil
 }
 
 // extractTar writes every regular file and symlink in the tar under dir and returns
-// their manifest. Each path is resolved through safeJoin (via writeAtomic /
-// WriteSymlink), so a corrupt or hostile archive cannot escape the tracked root.
+// their manifest. Each entry's own path is constrained by safeJoin, and
+// writeAtomic/WriteSymlink additionally refuse to descend through a symlinked parent
+// component — so a hostile archive cannot escape the tracked root by ordering a
+// symlink entry ahead of a file written through it. (safeJoin alone only guards the
+// final lexical path, not intermediate symlinks.)
 func extractTar(dir string, r io.Reader) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)

@@ -97,6 +97,82 @@ func TestPackSyncRefusesMissingBase(t *testing.T) {
 	h.sync(origin)                                   // base restored, plain sync works
 }
 
+// TestPackDirectionalFlagsConflict verifies a directional flag does not silently
+// discard the other side. When both sides changed since the last sync, --pull-only
+// must conflict instead of overwriting and pruning the local working copy, and
+// --push-only must conflict instead of clobbering the remote; --force then makes the
+// chosen direction an explicit, opted-in resolution.
+func TestPackDirectionalFlagsConflict(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "shared.txt", "v0")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	// Diverge both sides from the cloned base.
+	writeTree(t, origin, "shared.txt", "origin edit")
+	h.sync(origin)
+	writeTree(t, replica, "keep-local.txt", "only on replica")
+
+	// --pull-only would extract origin's tree over the replica and prune the
+	// local-only file; it must conflict, and the local work must survive untouched.
+	if err := runSync(replica, syncOptions{pullOnly: true}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("--pull-only with both sides changed: want errConflictsRemain, got %v", err)
+	}
+	if got := readTree(t, replica, "keep-local.txt"); got != "only on replica" {
+		t.Fatalf("--pull-only destroyed local work: %q", got)
+	}
+	// --push-only would clobber origin's edit; it must conflict too.
+	if err := runSync(replica, syncOptions{pushOnly: true}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("--push-only with both sides changed: want errConflictsRemain, got %v", err)
+	}
+
+	// --force --pull-only is the explicit opt-in: the replica takes origin's tree,
+	// dropping its own unsynced file.
+	h.syncOpts(replica, syncOptions{pullOnly: true, force: true})
+	if got := readTree(t, replica, "shared.txt"); got != "origin edit" {
+		t.Fatalf("--force --pull-only did not take remote: %q", got)
+	}
+	assertAbsent(t, replica, "keep-local.txt")
+}
+
+// TestPackReconcileNoBaseDiffers covers the baseless --reconcile branch the existing
+// missing-base test skips: when local and remote actually differ with no base to
+// judge add-vs-delete, it must conflict, and --force resolves local-wins and rebuilds
+// a base the next plain sync accepts.
+func TestPackReconcileNoBaseDiffers(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "remote value")
+	h.sync(origin)
+
+	// Drop the base and change the file so local != remote with nothing to reconcile
+	// against.
+	if err := os.Remove(controlPath(origin, baseFile)); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "a.txt", "local value")
+	if err := runSync(origin, syncOptions{reconcile: true}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("baseless reconcile of differing trees: want errConflictsRemain, got %v", err)
+	}
+
+	// --force pushes local-wins and rebuilds the base; a fresh clone proves the remote
+	// now holds the local value.
+	h.syncOpts(origin, syncOptions{reconcile: true, force: true})
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	if got := readTree(t, replica, "a.txt"); got != "local value" {
+		t.Fatalf("force reconcile did not push local value: %q", got)
+	}
+}
+
 func TestDecidePack(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -109,10 +185,16 @@ func TestDecidePack(t *testing.T) {
 		{"remote only", false, true, syncOptions{}, packPull},
 		{"both", true, true, syncOptions{}, packConflict},
 		{"both forced", true, true, syncOptions{force: true}, packPush},
-		{"both push-only", true, true, syncOptions{pushOnly: true}, packPush},
-		{"both pull-only", true, true, syncOptions{pullOnly: true}, packPull},
+		// A directional flag must not silently discard the other side: when it also
+		// changed, the restricted action is a conflict until --force makes it explicit.
+		{"both push-only", true, true, syncOptions{pushOnly: true}, packConflict},
+		{"both pull-only", true, true, syncOptions{pullOnly: true}, packConflict},
+		{"both push-only forced", true, true, syncOptions{pushOnly: true, force: true}, packPush},
+		{"both pull-only forced", true, true, syncOptions{pullOnly: true, force: true}, packPull},
 		{"push-only no local", false, true, syncOptions{pushOnly: true}, packNoop},
 		{"pull-only no remote", true, false, syncOptions{pullOnly: true}, packNoop},
+		{"push-only local only", true, false, syncOptions{pushOnly: true}, packPush},
+		{"pull-only remote only", false, true, syncOptions{pullOnly: true}, packPull},
 	}
 	for _, c := range cases {
 		if got := decidePack(c.local, c.remote, c.opts); got != c.want {

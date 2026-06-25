@@ -414,7 +414,10 @@ a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options
 `pack` selects pack-and-seal instead of the chunked default: the whole tree is
 tarred and sealed under the folder content key into fixed-size segments (a fresh
 nonce each, so no chunk-level dedup), streamed through the same packs as file
-content so the blob ceiling does not bound it. It leaks no per-file structure —
+content so the 64 MiB blob ceiling no longer caps the tree by its byte size — only
+the sealed `PackRoot` (a compact segment-id list) rides in the resource blob, so the
+practical bound moves to its segment count (hundreds of thousands of 4 MiB segments,
+i.e. ~TB scale), the same segmented-manifest limit the chunked path has. It leaks no per-file structure —
 the server sees only opaque, per-sync-unique segments — but any change re-ships the
 whole folder, and `sync` reconciles it whole-folder last-writer-wins (a change on
 both sides is one conflict; `--force` resolves local-wins) rather than merging per

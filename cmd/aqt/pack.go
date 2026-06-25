@@ -128,19 +128,30 @@ const (
 )
 
 // decidePack maps the two-sided change state to one whole-folder action under the
-// last-writer-wins model. --push-only/--pull-only restrict it to a single side.
+// last-writer-wins model. --push-only/--pull-only restrict the direction, but they
+// do not waive the conflict guard: if the other side also moved, the restricted
+// action would silently discard it, so it is a conflict unless --force makes the
+// discard explicit — the same protection the chunked path applies to every sync.
 func decidePack(localChanged, remoteChanged bool, opts syncOptions) packDecision {
 	switch {
 	case opts.pushOnly:
-		if localChanged {
+		switch {
+		case !localChanged:
+			return packNoop
+		case remoteChanged && !opts.force:
+			return packConflict
+		default:
 			return packPush
 		}
-		return packNoop
 	case opts.pullOnly:
-		if remoteChanged {
+		switch {
+		case !remoteChanged:
+			return packNoop
+		case localChanged && !opts.force:
+			return packConflict
+		default:
 			return packPull
 		}
-		return packNoop
 	case localChanged && remoteChanged:
 		if opts.force {
 			return packPush
@@ -226,7 +237,7 @@ func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.Conte
 // commits the new root (version-checked, so a concurrent push is retried not lost).
 func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
 	packer := newSegmentPacker(c.cl)
-	root, err := syncengine.TarAndSeal(c.root, ck, packer)
+	root, shipped, err := syncengine.TarAndSeal(c.root, ck, packer)
 	if err != nil {
 		return err
 	}
@@ -238,10 +249,13 @@ func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 		return err
 	}
 	reclaimPacks(c.cl)
-	if err := savePackBase(c.root, c.local, resp.Version); err != nil {
+	// Record the manifest of exactly what was tarred, not the earlier c.local scan:
+	// a file changing between the scan and the re-walk would otherwise leave a base
+	// that disagrees with the shipped bytes and spuriously reads as a local change.
+	if err := savePackBase(c.root, shipped, resp.Version); err != nil {
 		return err
 	}
-	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(c.local.Entries))
+	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(shipped.Entries))
 	return nil
 }
 
@@ -265,8 +279,16 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 		}
 		return err
 	}
+	// Prune whatever the remote no longer carries. Scan the tree as it is now rather
+	// than trust the pre-pull c.local: a prior pull that aborted mid-stream (a segment
+	// GC'd by a concurrent push) can have left files that are in neither c.local nor
+	// the new remote, and those must go too so the tree ends equal to the remote.
+	postPull, err := syncengine.Scan(c.root)
+	if err != nil {
+		return err
+	}
 	remoteByPath := remote.ByPath()
-	for _, e := range c.local.Entries {
+	for _, e := range postPull.Entries {
 		if _, ok := remoteByPath[e.Path]; !ok {
 			if err := syncengine.RemoveFile(c.root, e.Path); err != nil {
 				return err
@@ -282,9 +304,14 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 
 // remoteEqualsLocal extracts the remote tree to a throwaway dir and reports whether
 // it matches the working tree, so a baseless reconcile of two identical trees is not
-// flagged as a conflict.
+// flagged as a conflict. The scratch dir sits under the folder's control dir so the
+// extraction lands on the same filesystem as the tree (not a possibly tmpfs /tmp).
 func remoteEqualsLocal(c packCtx, root syncengine.PackRoot, ck crypto.ContentKey) (bool, error) {
-	tmp, err := os.MkdirTemp("", "aqt-pack-reconcile-*")
+	scratch := filepath.Join(c.root, syncengine.ControlDir)
+	if err := os.MkdirAll(scratch, 0o700); err != nil {
+		return false, err
+	}
+	tmp, err := os.MkdirTemp(scratch, "reconcile-")
 	if err != nil {
 		return false, err
 	}
