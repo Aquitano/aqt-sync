@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -17,23 +18,30 @@ import (
 )
 
 // folderState is the per-folder pointer stored in .aqt/state.json: which resource
-// on which server this directory tracks.
+// on which server this directory tracks, plus when its packs were last GC'd.
 type folderState struct {
 	ID     string `json:"id"`
 	Server string `json:"server"`
+	LastGC int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
 }
 
 const (
 	stateFile = "state.json"
 	baseFile  = "base.json"
-	// packCacheSize bounds how many recently-fetched pack byte-ranges a pull keeps,
-	// so a pack shared by several files is not re-GET per file while download memory
-	// stays O(pack), independent of tree size.
-	packCacheSize = 4
+	// packCacheBytes is the download pack-range cache budget: a pack shared by several
+	// files is not re-GET per file, while download memory stays bounded by bytes (not
+	// a fixed pack count) and independent of tree size.
+	packCacheBytes = 128 << 20
 	// maxSyncAttempts bounds the optimistic-concurrency retry: if this many
 	// reconcile passes each lose the race to a concurrent sync, give up and ask
 	// the user to re-run rather than spin.
 	maxSyncAttempts = 5
+	// gcMinInterval throttles how often a sync fires server GC. A pack the server
+	// can actually reap is older than its own age guard (gcMinAge, 1h), so sweeping
+	// after every push — the watch daemon does this every few seconds — almost always
+	// scans for nothing while monopolizing the single DB connection. One sweep per
+	// interval still reclaims a just-unrooted old pack within the hour.
+	gcMinInterval = time.Hour
 )
 
 // --- commands ---
@@ -70,6 +78,7 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.dryRun, "dry-run", false, "print the plan without making changes")
 	f.BoolVar(&opts.force, "force", false, "resolve conflicts in favor of local")
 	f.BoolVar(&opts.reconcile, "reconcile", false, "reconcile without a base (.aqt/base.json missing): one-sided differences become conflicts to review")
+	f.BoolVar(&opts.rehash, "rehash", false, "re-hash every file instead of trusting size+mtime (catches edits that preserve them)")
 	return cmd
 }
 
@@ -208,6 +217,7 @@ type syncOptions struct {
 	dryRun    bool
 	force     bool
 	reconcile bool
+	rehash    bool
 }
 
 // errSyncNoBase signals that a sync has no last-synced state to reconcile against
@@ -280,7 +290,7 @@ func runSync(dir string, opts syncOptions) error {
 		}
 	} else {
 		up := newPackUploader(cl)
-		local, err = syncengine.Take(root, conv, syncengine.DefaultChunker(), &base, up)
+		local, err = syncengine.Take(root, conv, syncengine.DefaultChunker(), &base, up, opts.rehash)
 		if err != nil {
 			return err
 		}
@@ -431,10 +441,12 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 	// base. Plan emits no action for them (there is nothing to transfer), so without
 	// this they stay "changed on both sides" forever: a later remote-only delete is
 	// then misread as a local add, the file is re-pushed, and the deletion never
-	// propagates.
+	// propagates. Keep the local entry (same hash as remote): base.json is local-only
+	// bookkeeping, and the local entry carries this machine's mtime, so the next sync
+	// stat-fast-paths the file instead of re-hashing it.
 	for p, le := range localByPath {
 		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
-			newBase[p] = re
+			newBase[p] = le
 		}
 	}
 
@@ -448,7 +460,7 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		if _, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
-		reclaimPacks(c.cl)
+		reclaimPacks(c.root, c.cl)
 	}
 
 	// Server is updated; now bring the local tree in line. Downloads before
@@ -672,7 +684,7 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 		cl:    cl,
 		locs:  make(map[string]api.ObjectLocation, len(ids)),
 		spans: map[string]packSpan{},
-		cache: newPackCache(packCacheSize),
+		cache: newPackCache(packCacheBytes),
 	}
 	if len(ids) == 0 {
 		return s, nil
@@ -724,16 +736,20 @@ func (s *packSource) get(id string) ([]byte, error) {
 	return data[start : start+loc.Len], nil
 }
 
-// packCache is a tiny count-bounded LRU of fetched pack byte-ranges, so download
-// memory is O(packCacheSize packs) regardless of how many files a pack serves.
+// packCache is a byte-bounded LRU of fetched pack byte-ranges, so download memory is
+// capped by total bytes (not a fixed pack count): a pack shared by many files is not
+// re-fetched just because a few other packs were touched, while a handful of large
+// packs cannot blow the budget. At least the most-recent entry is always kept, so a
+// single pack larger than the budget still serves.
 type packCache struct {
-	cap   int
-	data  map[string][]byte
-	order []string // least-recently-used first
+	capBytes int
+	bytes    int
+	data     map[string][]byte
+	order    []string // least-recently-used first
 }
 
-func newPackCache(capacity int) *packCache {
-	return &packCache{cap: capacity, data: make(map[string][]byte, capacity)}
+func newPackCache(capBytes int) *packCache {
+	return &packCache{capBytes: capBytes, data: map[string][]byte{}}
 }
 
 func (c *packCache) get(id string) ([]byte, bool) {
@@ -745,17 +761,27 @@ func (c *packCache) get(id string) ([]byte, bool) {
 }
 
 func (c *packCache) put(id string, b []byte) {
-	if _, ok := c.data[id]; ok {
+	if old, ok := c.data[id]; ok {
+		c.bytes += len(b) - len(old)
 		c.data[id] = b
 		c.touch(id)
+		c.evict()
 		return
 	}
 	c.data[id] = b
+	c.bytes += len(b)
 	c.order = append(c.order, id)
-	for len(c.order) > c.cap {
-		evict := c.order[0]
+	c.evict()
+}
+
+// evict drops least-recently-used packs until the cache fits its byte budget, always
+// keeping the most-recently-used entry so get can serve the pack just fetched.
+func (c *packCache) evict() {
+	for c.bytes > c.capBytes && len(c.order) > 1 {
+		victim := c.order[0]
 		c.order = c.order[1:]
-		delete(c.data, evict)
+		c.bytes -= len(c.data[victim])
+		delete(c.data, victim)
 	}
 }
 
@@ -1078,13 +1104,29 @@ func summarize(uploads, downloads []syncengine.Entry, localDeletes []string, pus
 	_ = pushed
 }
 
-// reclaimPacks sweeps the packs the just-superseded manifest no longer references.
-// Best-effort: a sync that uploaded fine should not fail on cleanup, but GC is the
-// only step that deletes packs, so a failure is worth a line.
-func reclaimPacks(cl *client.Client) {
-	if n, freed, err := cl.GC(); err != nil {
+// reclaimPacks sweeps the packs the just-superseded manifest no longer references,
+// throttled to once per gcMinInterval per folder so a burst of syncs (notably the
+// watch daemon) does not fire a full server sweep every time. The last-swept time is
+// recorded in folder state; the sync lock makes the read-modify-write race-free.
+// Best-effort: a sync that uploaded fine should not fail on cleanup.
+func reclaimPacks(root string, cl *client.Client) {
+	st, err := loadState(root)
+	stateOK := err == nil
+	if stateOK && st.LastGC > 0 && time.Since(time.Unix(st.LastGC, 0)) < gcMinInterval {
+		return
+	}
+	n, freed, err := cl.GC()
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: pack GC failed: %v\n", err)
-	} else if n > 0 {
+		return
+	}
+	if n > 0 {
 		fmt.Fprintf(os.Stderr, "reclaimed %d packs (%d bytes)\n", n, freed)
+	}
+	// Only record the sweep if state was readable, so a transient read error GCs
+	// unthrottled next time rather than clobbering state.json with a partial record.
+	if stateOK {
+		st.LastGC = time.Now().Unix()
+		_ = saveState(root, st)
 	}
 }

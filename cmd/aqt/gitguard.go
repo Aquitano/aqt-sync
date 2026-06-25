@@ -39,6 +39,7 @@ var gitInProgressMarkers = []string{
 // cannot read is skipped rather than aborting the whole scan (an aborted scan
 // would otherwise be read by the caller as "nothing busy" and bypass the guard).
 func gitBusy(root string) (busy bool, repoDir string, err error) {
+	ig, _ := syncengine.LoadIgnore(root) // root .aqtignore rules; nested files are not consulted here
 	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
@@ -56,6 +57,15 @@ func gitBusy(root string) (busy bool, repoDir string, err error) {
 					return errStopWalk
 				}
 				return filepath.SkipDir
+			}
+			// Skip subtrees the sync ignores (node_modules, build output, …): those
+			// files are never pushed, so a git op inside one cannot produce the
+			// half-written push the guard exists to prevent. .git is handled above, so
+			// the default ignore's .git rule does not hide a real busy repo here.
+			if rel, relErr := filepath.Rel(root, path); relErr == nil {
+				if rel = filepath.ToSlash(rel); rel != "." && ig.Match(rel, true) {
+					return filepath.SkipDir
+				}
 			}
 			return nil
 		}

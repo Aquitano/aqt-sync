@@ -366,12 +366,59 @@ func TestManifestRejectsDanglingChunkReference(t *testing.T) {
 	if plain, err := crypto.Open(got.Blob, ck, crypto.AADBlob); err != nil || string(plain) != "v1" {
 		t.Fatalf("blob after a failed update = %q err = %v, want v1", plain, err)
 	}
-	entries, err := os.ReadDir(s.blobsDir)
+	if n := countBlobs(t, s.blobsDir); n != 1 {
+		t.Fatalf("blobsDir has %d blob files, want 1 (a staged temp leaked)", n)
+	}
+}
+
+// countBlobs returns the number of blob files anywhere under dir. Blobs fan out by
+// id prefix (blobs/<ab>/<cd>/...), so they are no longer direct children of blobsDir.
+func countBlobs(t *testing.T, dir string) int {
+	t.Helper()
+	n := 0
+	err := filepath.Walk(dir, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() && strings.HasSuffix(info.Name(), ".bin") {
+			n++
+		}
+		return nil
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("blobsDir has %d entries, want 1 (a staged temp leaked)", len(entries))
+	return n
+}
+
+// Re-opening a data dir re-runs migrate as a no-op (user_version gates already-applied
+// steps), and the scaffold has created the device-token index.
+func TestMigrateIsIdempotentAndIndexesDeviceToken(t *testing.T) {
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	s2, err := OpenStore(dir) // second migrate over the same dir must not error
+	if err != nil {
+		t.Fatalf("re-open after migrate: %v", err)
+	}
+	defer s2.Close()
+
+	var uv int
+	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations) {
+		t.Fatalf("user_version = %d, want %d (all migrations applied)", uv, len(migrations))
+	}
+	var name string
+	if err := s2.db.QueryRow(
+		`SELECT name FROM sqlite_master WHERE type='index' AND name='idx_devices_token_hash'`,
+	).Scan(&name); err != nil {
+		t.Fatalf("device-token index missing after migrate: %v", err)
 	}
 }
 
@@ -398,12 +445,8 @@ func TestUpdatesReclaimSupersededBlobs(t *testing.T) {
 	put(id, 1, "v2")
 	put(id, 2, "v3-final-content")
 
-	entries, err := os.ReadDir(s.blobsDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Fatalf("blobsDir has %d files after 3 writes, want 1 (superseded blobs not reclaimed)", len(entries))
+	if n := countBlobs(t, s.blobsDir); n != 1 {
+		t.Fatalf("blobsDir has %d blob files after 3 writes, want 1 (superseded blobs not reclaimed)", n)
 	}
 	got, err := s.GetResource(id, owner)
 	if err != nil {
