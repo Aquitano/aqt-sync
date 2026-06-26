@@ -29,6 +29,7 @@ type pushOptions struct {
 	name     string
 	noClip   bool
 	quiet    bool
+	json     bool
 }
 
 func pushCmd() *cobra.Command {
@@ -120,7 +121,7 @@ func runPush(path string, opts pushOptions) error {
 		// (and, for public pushes, deletable — its key lived only in the link).
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
-	printResult(ref, name, int64(len(data)), req.Visibility, opts)
+	printResult(resp.ID, ref, name, int64(len(data)), req.Visibility, opts)
 	return nil
 }
 
@@ -188,7 +189,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return err
 	}
-	printResult("aqt://"+resp.ID, name, size, api.Private, opts)
+	printResult(resp.ID, "aqt://"+resp.ID, name, size, api.Private, opts)
 	return nil
 }
 
@@ -218,9 +219,39 @@ func buildRef(server, id string, vis api.Visibility, ck crypto.ContentKey, passw
 	return fmt.Sprintf("%s/x/%s#%s", strings.TrimRight(server, "/"), id, frag), nil
 }
 
-func printResult(ref, name string, size int64, vis api.Visibility, opts pushOptions) {
-	// The global -q/--quiet drives the CLI; opts.quiet keeps programmatic callers
-	// (the bare-path push, tests) able to request it directly.
+type pushJSON struct {
+	ID         string `json:"id"`
+	Ref        string `json:"ref"`
+	URL        string `json:"url,omitempty"`
+	Name       string `json:"name,omitempty"`
+	Bytes      int64  `json:"bytes"`
+	Visibility string `json:"visibility"`
+}
+
+// buildPushJSON assembles the documented push result. link is the share link from
+// buildRef; URL is set only for public pushes, since a private link is just the
+// aqt:// ref already carried by Ref.
+func buildPushJSON(id, link, name string, size int64, vis api.Visibility) pushJSON {
+	out := pushJSON{
+		ID:         id,
+		Ref:        "aqt://" + id,
+		Name:       name,
+		Bytes:      size,
+		Visibility: string(vis),
+	}
+	if vis == api.Public {
+		out.URL = link
+	}
+	return out
+}
+
+// printResult renders the push outcome. --json and -q/--quiet are global flags;
+// opts.* lets programmatic callers (the bare-path push, tests) request them too.
+func printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) {
+	if flagJSON || opts.json {
+		printJSON(buildPushJSON(id, ref, name, size, vis))
+		return
+	}
 	if flagQuiet || opts.quiet {
 		fmt.Println(ref)
 		return

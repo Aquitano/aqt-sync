@@ -8,3 +8,6 @@
 
 # Local scratch for manually exercising the CLI.
 /test/
+
+# Local agent worktrees / scratch
+.claude/
