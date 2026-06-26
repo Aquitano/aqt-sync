@@ -133,7 +133,8 @@ func createAccount(cl *client.Client, server, email string, ttl time.Duration) e
 	if err != nil {
 		return err
 	}
-	if err := saveProfile(server, email, kdf, resp); err != nil {
+	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
+	if err := saveProfile(server, email, fingerprint, kdf, resp); err != nil {
 		return err
 	}
 	return cacheSession(mk, ttl)
@@ -165,7 +166,8 @@ func attachDevice(cl *client.Client, server, email string, kdf crypto.KdfParams,
 	if err != nil {
 		return err
 	}
-	if err := saveProfile(server, email, kdf, resp); err != nil {
+	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
+	if err := saveProfile(server, email, fingerprint, kdf, resp); err != nil {
 		return err
 	}
 	return cacheSession(mk, ttl)
@@ -176,7 +178,7 @@ func cacheSession(mk crypto.MasterKey, ttl time.Duration) error {
 	return identity.SaveSession(firstNonEmpty(flagProfile, identity.DefaultProfile), mk, ttl)
 }
 
-func saveProfile(server, email string, kdf crypto.KdfParams, resp api.AuthResponse) error {
+func saveProfile(server, email, fingerprint string, kdf crypto.KdfParams, resp api.AuthResponse) error {
 	p := &identity.Profile{
 		Name:        firstNonEmpty(flagProfile, identity.DefaultProfile),
 		Server:      server,
@@ -184,6 +186,7 @@ func saveProfile(server, email string, kdf crypto.KdfParams, resp api.AuthRespon
 		OwnerHandle: resp.OwnerHandle,
 		DeviceID:    resp.DeviceID,
 		Token:       resp.Token,
+		Fingerprint: fingerprint,
 		Kdf:         kdf,
 	}
 	if err := identity.Save(p); err != nil {
@@ -202,7 +205,11 @@ func whoamiCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Printf("%s · device %s · %s\n", p.Email, p.DeviceID, p.Server)
+			fingerprint := p.Fingerprint
+			if fingerprint == "" {
+				fingerprint = "key unknown (re-login to populate)"
+			}
+			fmt.Printf("%s · device %s · %s · %s\n", p.Email, p.DeviceID, fingerprint, p.Server)
 			return nil
 		},
 	}
