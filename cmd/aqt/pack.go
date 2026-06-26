@@ -260,7 +260,7 @@ func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 	if err != nil {
 		return err
 	}
-	reclaimPacks(c.cl)
+	reclaimPacks(c.root, c.cl)
 	// Base off what was actually tarred, not the earlier c.local scan: a file changing
 	// in between would leave a base disagreeing with the shipped bytes.
 	if err := savePackBase(c.root, c.push.shipped, resp.Version); err != nil {

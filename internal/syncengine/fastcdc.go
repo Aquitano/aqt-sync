@@ -6,6 +6,7 @@ package syncengine
 import (
 	"io"
 	"math"
+	"sync"
 )
 
 // Chunker splits a byte stream at content-defined boundaries using FastCDC
@@ -19,6 +20,15 @@ type Chunker struct {
 	Max    int // longest chunk
 	maskS  uint64
 	maskL  uint64
+	bufs   *sync.Pool // *splitBuffers, reused across SplitStream calls to cut per-file allocation
+}
+
+// splitBuffers holds SplitStream's reusable working memory: window is the bounded
+// chunking buffer (cap 2*Max, never grown past it), read stages each Read. Pooling
+// them per chunker keeps a tree of many files from allocating ~3*Max per file.
+type splitBuffers struct {
+	window []byte
+	read   []byte
 }
 
 // Default chunker sizes. Small files inline below Min, so these only govern the
@@ -40,13 +50,17 @@ func NewChunker(min, normal, max int) *Chunker {
 	// more likely. Mask width tracks log2(Normal) so the average lands near it.
 	const normalization = 2
 	bits := uint(math.Round(math.Log2(float64(normal))))
-	return &Chunker{
+	c := &Chunker{
 		Min:    min,
 		Normal: normal,
 		Max:    max,
 		maskS:  lowMask(bits + normalization),
 		maskL:  lowMask(bits - normalization),
 	}
+	c.bufs = &sync.Pool{New: func() any {
+		return &splitBuffers{window: make([]byte, 0, 2*max), read: make([]byte, max)}
+	}}
+	return c
 }
 
 // DefaultChunker returns a chunker with the package default sizes.
@@ -77,8 +91,10 @@ func (c *Chunker) Split(data []byte) [][]byte {
 // must copy them (crypto.SealChunk produces an independent ciphertext, so the
 // common seal-then-pack caller needs no copy).
 func (c *Chunker) SplitStream(r io.Reader, emit func(chunk []byte) error) error {
-	buf := make([]byte, 0, 2*c.Max)
-	read := make([]byte, c.Max)
+	sb := c.bufs.Get().(*splitBuffers)
+	defer c.bufs.Put(sb)
+	buf := sb.window[:0] // append never exceeds cap 2*Max, so buf keeps sb.window's array
+	read := sb.read
 	eof := false
 	for {
 		// Top the window up to at least Max bytes (or EOF) before cutting, so the

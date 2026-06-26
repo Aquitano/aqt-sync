@@ -121,12 +121,30 @@ func (c *Client) CheckChunks(ids []string) ([]string, error) {
 	return r.Missing, err
 }
 
+// locateBatchSize bounds how many object ids ride in one /v1/chunks/locate request.
+// The server caps that body at 32 MiB; at ~67 bytes per 64-hex id in the JSON array
+// this keeps a request near 0.7 MiB, so a large clone (hundreds of thousands of chunk
+// ids) splits into a handful of requests instead of one that trips the cap with a 413.
+const locateBatchSize = 10_000
+
 // LocateChunks resolves object ids to the packs and byte ranges that hold them, so
-// the caller can range-fetch only what it needs.
+// the caller can range-fetch only what it needs. The id set is sent in bounded
+// batches and the results merged, so a clone of a multi-GiB tree never exceeds the
+// server's request-body cap.
 func (c *Client) LocateChunks(ids []string) ([]api.ObjectLocation, error) {
-	var r api.LocateResponse
-	err := c.do(http.MethodPost, "/v1/chunks/locate", api.LocateRequest{IDs: ids}, &r)
-	return r.Locations, err
+	locations := make([]api.ObjectLocation, 0, len(ids))
+	for start := 0; start < len(ids); start += locateBatchSize {
+		end := start + locateBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var r api.LocateResponse
+		if err := c.do(http.MethodPost, "/v1/chunks/locate", api.LocateRequest{IDs: ids[start:end]}, &r); err != nil {
+			return nil, err
+		}
+		locations = append(locations, r.Locations...)
+	}
+	return locations, nil
 }
 
 // PutPack uploads one raw pack. The id is its content address; the server verifies
