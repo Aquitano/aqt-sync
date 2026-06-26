@@ -237,6 +237,42 @@ func TestPackRootDoesNotCrossOpenAsManifest(t *testing.T) {
 	}
 }
 
+// TestExtractReplacesStaleParent covers a remote type change: a path that was a
+// regular file or a symlink locally is now a directory. The stale local entry must be
+// cleared so extraction can create the directory, instead of aborting on MkdirAll
+// (ENOTDIR for a file) or refuseSymlinkParents (for a symlink).
+func TestExtractReplacesStaleParent(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "data/inner.txt", []byte("hello"))
+	ck := testContentKey(t)
+	store := memObjects{}
+	root, _, err := TarAndSeal(src, ck, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stale := range []string{"file", "symlink"} {
+		t.Run(stale, func(t *testing.T) {
+			dst := t.TempDir()
+			switch stale {
+			case "file":
+				writeFile(t, dst, "data", []byte("stale file where a dir must go"))
+			case "symlink":
+				if err := os.Symlink("somewhere", filepath.Join(dst, "data")); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
+			if _, err := ExtractToTree(dst, root, ck, store.get); err != nil {
+				t.Fatalf("extract over stale %s: %v", stale, err)
+			}
+			got, err := os.ReadFile(filepath.Join(dst, "data", "inner.txt"))
+			if err != nil || string(got) != "hello" {
+				t.Fatalf("inner.txt not extracted over stale %s: got=%q err=%v", stale, got, err)
+			}
+		})
+	}
+}
+
 func assertManifestHashesEqual(t *testing.T, want, got Manifest) {
 	t.Helper()
 	wp, gp := want.byPath(), got.byPath()

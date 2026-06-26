@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -463,12 +464,21 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		reclaimPacks(c.cl)
 	}
 
-	// Server is updated; now bring the local tree in line. Downloads before
-	// deletes, so local data is never removed before its replacement is on disk.
+	// Server is updated; now bring the local tree in line. A local file or symlink the
+	// remote turned into a directory must be removed before the download that creates
+	// that directory, or the download would write through the stale entry (refused) or
+	// the later delete would hit a now-populated directory. Every other delete stays
+	// after the downloads, so local data is never removed before its replacement lands.
+	earlyDeletes, lateDeletes := partitionDeletesByDownload(localDeletes, downloads)
+	for _, p := range earlyDeletes {
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return err
+		}
+	}
 	if err := runDownloads(c.cl, c.root, downloads); err != nil {
 		return err
 	}
-	for _, p := range localDeletes {
+	for _, p := range lateDeletes {
 		if err := syncengine.RemoveFile(c.root, p); err != nil {
 			return err
 		}
@@ -805,6 +815,29 @@ func (c *packCache) touch(id string) {
 		}
 	}
 	c.order = append(c.order, id)
+}
+
+// partitionDeletesByDownload splits local deletes into those that clear a path some
+// download must create a directory at (a file/symlink → directory type change; run
+// before downloads) and the rest (run after downloads, so local data is never removed
+// before its replacement lands).
+func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry) (early, late []string) {
+	for _, d := range deletes {
+		prefix := d + "/"
+		isAncestor := false
+		for _, e := range downloads {
+			if strings.HasPrefix(e.Path, prefix) {
+				isAncestor = true
+				break
+			}
+		}
+		if isAncestor {
+			early = append(early, d)
+		} else {
+			late = append(late, d)
+		}
+	}
+	return early, late
 }
 
 func distinctChunkIDs(entries []syncengine.Entry) []string {

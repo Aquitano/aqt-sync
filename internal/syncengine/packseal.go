@@ -270,7 +270,7 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 		}
 		pw.Close()
 	}()
-	m, err := extractTar(dir, pr)
+	m, err := extractTar(newTreeWriter(dir), pr)
 	if err != nil {
 		pr.CloseWithError(err) // unblock the writer if extraction bailed early
 		return Manifest{}, err
@@ -283,11 +283,12 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 	return m, nil
 }
 
-// extractTar writes every regular file and symlink under dir and returns their
-// manifest. safeJoin guards each entry's own path; writeAtomic/WriteSymlink also
-// refuse a symlinked parent, so a hostile archive can't escape via a symlink ordered
-// ahead of a file written through it.
-func extractTar(dir string, r io.Reader) (Manifest, error) {
+// extractTar writes every regular file and symlink the archive carries and returns
+// their manifest. safeJoin guards each entry's own path; the treeWriter also refuses a
+// parent it created as a symlink this pass, so a hostile archive can't escape via a
+// symlink ordered ahead of a file written through it, while a stale local entry a
+// remote type change replaced with a directory is cleared rather than refused.
+func extractTar(w *treeWriter, r io.Reader) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)
 	for {
@@ -301,15 +302,15 @@ func extractTar(dir string, r io.Reader) (Manifest, error) {
 		switch hdr.Typeflag {
 		case tar.TypeSymlink:
 			e := Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)}
-			if err := WriteSymlink(dir, e); err != nil {
+			if err := w.writeSymlink(e); err != nil {
 				return Manifest{}, err
 			}
 			m.Entries = append(m.Entries, e)
 		case tar.TypeReg, tar.TypeRegA:
 			e := Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size}
 			h := sha256.New()
-			if err := writeAtomic(dir, e, func(w io.Writer) error {
-				_, err := io.Copy(w, io.TeeReader(tr, h))
+			if err := w.writeFile(e, func(out io.Writer) error {
+				_, err := io.Copy(out, io.TeeReader(tr, h))
 				return err
 			}); err != nil {
 				return Manifest{}, err
@@ -318,7 +319,7 @@ func extractTar(dir string, r io.Reader) (Manifest, error) {
 			m.Entries = append(m.Entries, e)
 		default:
 			// Other types (dirs, hardlinks, ...) are not written; parent dirs come
-			// from writeAtomic.
+			// from the treeWriter.
 		}
 	}
 }

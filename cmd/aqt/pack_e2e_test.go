@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 // TestPackSyncE2E drives a pack-and-seal folder (.aqtconfig pack=true) through the
@@ -227,6 +229,33 @@ func TestDecidePack(t *testing.T) {
 	for _, c := range cases {
 		if got := decidePack(c.local, c.remote, c.opts); got != c.want {
 			t.Errorf("%s: decidePack(%v,%v) = %d, want %d", c.name, c.local, c.remote, got, c.want)
+		}
+	}
+}
+
+func TestPartitionDeletesByDownload(t *testing.T) {
+	downloads := []syncengine.Entry{{Path: "link/inner.txt"}, {Path: "a/b/c.txt"}, {Path: "top.txt"}}
+	deletes := []string{"link", "a/b", "top.txt", "unrelated"}
+
+	early, late := partitionDeletesByDownload(deletes, downloads)
+
+	// "link" and "a/b" are ancestors of a download path (a file/symlink became a dir),
+	// so they run first. "top.txt" equals a download path but is not an ancestor (a file
+	// replaced by a file, handled by rename), and "unrelated" matches nothing.
+	wantEarly := map[string]bool{"link": true, "a/b": true}
+	for _, p := range early {
+		if !wantEarly[p] {
+			t.Errorf("unexpected early delete %q", p)
+		}
+		delete(wantEarly, p)
+	}
+	if len(wantEarly) != 0 {
+		t.Errorf("missing early deletes: %v", wantEarly)
+	}
+	wantLate := map[string]bool{"top.txt": true, "unrelated": true}
+	for _, p := range late {
+		if !wantLate[p] {
+			t.Errorf("unexpected late delete %q", p)
 		}
 	}
 }
