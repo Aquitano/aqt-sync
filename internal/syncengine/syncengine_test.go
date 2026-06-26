@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
@@ -153,6 +154,62 @@ func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
 
 // The manifest round-trips through the object store: chunk+seal it, seal the root
 // pointer under the content key, then reassemble it from the captured objects.
+// A permission-only change (chmod) on otherwise-identical content is a tracked edit:
+// the snapshot reuse path must carry the new mode through even though it skips the
+// content re-read, and the planner must surface it as an Upload despite an unchanged
+// content hash.
+func TestModeOnlyChangeSnapshottedAndPlanned(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.bin")
+	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("chmodme"), 32<<10)) // large -> chunked
+
+	conv := testConv(t)
+	base, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseEntry, _ := base.Lookup("a.bin")
+	if os.FileMode(baseEntry.Mode).Perm() != 0o644 {
+		t.Fatalf("base mode = %o, want 0644", baseEntry.Mode)
+	}
+
+	// chmod without touching content, then restore the mtime so the snapshot takes the
+	// reuse path (hash matches, no re-seal) rather than re-sealing the file.
+	if err := os.Chmod(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mtime := time.Unix(0, baseEntry.MTime)
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	sink := newCaptureSink()
+	next, err := Take(dir, conv, DefaultChunker(), &base, sink, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.ids) != 0 {
+		t.Fatalf("mode-only change re-sealed %d chunks; the reuse path must not re-read", len(sink.ids))
+	}
+	nextEntry, _ := next.Lookup("a.bin")
+	if os.FileMode(nextEntry.Mode).Perm() != 0o755 {
+		t.Fatalf("snapshot dropped the new mode: got %o, want 0755", nextEntry.Mode)
+	}
+	if nextEntry.Hash != baseEntry.Hash {
+		t.Fatalf("content hash changed on a mode-only edit: %s -> %s", baseEntry.Hash, nextEntry.Hash)
+	}
+
+	var got ActionKind
+	for _, a := range Plan(next, base, base) {
+		if a.Path == "a.bin" {
+			got = a.Kind
+		}
+	}
+	if got != Upload {
+		t.Fatalf("mode-only change planned as %q, want %q", got, Upload)
+	}
+}
+
 func TestManifestRootRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	// A manifest large enough to span several chunks, so reassembly is exercised.
