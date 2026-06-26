@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -32,10 +33,13 @@ func TestSaveStateRoundTripAtomic(t *testing.T) {
 		t.Fatalf("round-trip mismatch: %+v", st)
 	}
 
-	if fi, err := os.Stat(controlPath(root, stateFile)); err != nil {
-		t.Fatal(err)
-	} else if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("state perms = %o, want 600", perm)
+	// File mode bits are a Unix concept; Windows reports 0666 for a writable file.
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(controlPath(root, stateFile)); err != nil {
+			t.Fatal(err)
+		} else if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("state perms = %o, want 600", perm)
+		}
 	}
 
 	ents, err := os.ReadDir(ctl)

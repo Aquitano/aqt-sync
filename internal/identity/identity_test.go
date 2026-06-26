@@ -3,6 +3,7 @@ package identity
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,10 +46,13 @@ func TestProfileSaveRoundTripAtomic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(filepath.Join(dir, "default.json")); err != nil {
-		t.Fatal(err)
-	} else if perm := fi.Mode().Perm(); perm != 0o600 {
-		t.Fatalf("profile perms = %o, want 600", perm)
+	// File mode bits are a Unix concept; Windows reports 0666 for a writable file.
+	if runtime.GOOS != "windows" {
+		if fi, err := os.Stat(filepath.Join(dir, "default.json")); err != nil {
+			t.Fatal(err)
+		} else if perm := fi.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("profile perms = %o, want 600", perm)
+		}
 	}
 
 	ents, err := os.ReadDir(dir)
