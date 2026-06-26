@@ -13,19 +13,15 @@ import (
 )
 
 func infoCmd() *cobra.Command {
-	var (
-		asJSON   bool
-		password string
-	)
+	var password string
 	cmd := &cobra.Command{
 		Use:   "info <id|url>",
 		Short: "Show one resource's metadata (name, kind, size, visibility)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runInfo(args[0], password, asJSON)
+			return runInfo(args[0], password, flagJSON)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
 	cmd.Flags().StringVarP(&password, "password", "P", "", "password for a gated link")
 	return cmd
 }

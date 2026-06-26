@@ -13,29 +13,24 @@ import (
 )
 
 func devicesCmd() *cobra.Command {
-	var asJSON bool
 	cmd := &cobra.Command{
 		Use:   "devices",
 		Short: "List or revoke the devices attached to your account",
 		Args:  cobra.NoArgs,
 		// Bare `aqt devices` lists; `aqt devices ls|rm` use the subcommands.
-		RunE: func(cmd *cobra.Command, args []string) error { return runDevicesList(asJSON) },
+		RunE: func(cmd *cobra.Command, args []string) error { return runDevicesList(flagJSON) },
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
 	cmd.AddCommand(devicesLsCmd(), devicesRmCmd())
 	return cmd
 }
 
 func devicesLsCmd() *cobra.Command {
-	var asJSON bool
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "ls",
 		Short: "List attached devices",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return runDevicesList(asJSON) },
+		RunE:  func(cmd *cobra.Command, args []string) error { return runDevicesList(flagJSON) },
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
-	return cmd
 }
 
 func devicesRmCmd() *cobra.Command {
