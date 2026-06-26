@@ -59,17 +59,23 @@ func (r PackRoot) SegmentIDs() []string {
 	return ids
 }
 
+// SealPackRoot seals a pack-and-seal root under a dedicated AAD, distinct from the
+// chunked manifest root's AADBlob. The two root blobs are byte-compatible JSON under
+// the same content key, so without domain separation a pack root opens cleanly as an
+// empty manifest (its segments/size fields ignored) — routing a packed folder through
+// the chunked path would then silently wipe the tree or clone nothing. The distinct
+// tag makes that cross-open fail the AEAD check instead.
 func SealPackRoot(r PackRoot, ck crypto.ContentKey) (crypto.SealedBlob, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return crypto.SealedBlob{}, err
 	}
-	return crypto.Seal(b, ck, crypto.AADBlob)
+	return crypto.Seal(b, ck, crypto.AADPackRoot)
 }
 
 func OpenPackRoot(blob crypto.SealedBlob, ck crypto.ContentKey) (PackRoot, error) {
 	var r PackRoot
-	plain, err := crypto.Open(blob, ck, crypto.AADBlob)
+	plain, err := crypto.Open(blob, ck, crypto.AADPackRoot)
 	if err != nil {
 		return r, err
 	}

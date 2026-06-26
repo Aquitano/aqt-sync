@@ -205,6 +205,38 @@ func TestExtractRefusesSymlinkTraversal(t *testing.T) {
 	}
 }
 
+// TestPackRootDoesNotCrossOpenAsManifest guards the silent data-loss path: before the
+// pack root got its own AAD, a sealed PackRoot decrypted cleanly as an empty
+// ManifestRoot (both used AADBlob, and PackRoot's extra fields were simply ignored).
+// Routing a packed folder through the chunked path then read an empty manifest and
+// could wipe the working tree or clone nothing. The distinct AAD must make the
+// cross-open fail while each root still opens as itself.
+func TestPackRootDoesNotCrossOpenAsManifest(t *testing.T) {
+	ck := testContentKey(t)
+
+	packBlob, err := SealPackRoot(PackRoot{Version: PackRootVersion, Size: 123, Segments: []Segment{{ID: "abc", Len: 10}}}, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBlob, err := SealManifestRoot(ManifestRoot{Version: 1}, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenManifestRoot(packBlob, ck); err == nil {
+		t.Fatal("a sealed pack root opened as a manifest root; AAD domain separation missing")
+	}
+	if _, err := OpenPackRoot(manifestBlob, ck); err == nil {
+		t.Fatal("a sealed manifest root opened as a pack root; AAD domain separation missing")
+	}
+	if _, err := OpenPackRoot(packBlob, ck); err != nil {
+		t.Fatalf("pack root did not open as itself: %v", err)
+	}
+	if _, err := OpenManifestRoot(manifestBlob, ck); err != nil {
+		t.Fatalf("manifest root did not open as itself: %v", err)
+	}
+}
+
 func assertManifestHashesEqual(t *testing.T, want, got Manifest) {
 	t.Helper()
 	wp, gp := want.byPath(), got.byPath()

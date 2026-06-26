@@ -307,6 +307,18 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return fmt.Errorf("unwrap folder key: %w", err)
 		}
+		// Route by the server's truth, not just local .aqtconfig: a pack-and-seal folder
+		// reconciled as chunked would read an empty manifest and delete the whole tree.
+		// Refuse it instead. (AAD domain separation also makes the manifest read below
+		// fail, but this gives the actionable message.)
+		meta, err := decodeMeta(res.EncryptedMeta, ck)
+		if err != nil {
+			return err
+		}
+		if meta.Packed {
+			return errors.New("this folder is pack-and-seal on the server but is being synced as chunked; " +
+				"set pack=true in .aqtconfig, or re-clone it")
+		}
 		remote, err := openRemoteManifest(cl, res.Blob, ck)
 		if errors.Is(err, client.ErrNotFound) {
 			// We read version res.Version's root, but a concurrent sync superseded it
@@ -496,13 +508,22 @@ func runClone(ref, dir string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	meta := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return err
+	}
 
 	if dir == "" {
 		dir = id
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
+		return err
+	}
+	// Decrypt the resource root before creating the destination, so a wrong or corrupt
+	// key fails the clone without leaving an empty directory behind. The root blob is
+	// tiny; materializeClone re-opens it to do the actual reconstruction.
+	if err := validateCloneRoot(res.Blob, ck, meta.Packed); err != nil {
 		return err
 	}
 	if err := ensureEmptyDir(abs); err != nil {
@@ -522,6 +543,23 @@ func runClone(ref, dir string) error {
 		return err
 	}
 	fmt.Printf("cloned %d files into %s\n", len(base.Entries), abs)
+	return nil
+}
+
+// validateCloneRoot confirms the resource's sealed root decrypts under ck, using the
+// root type meta.Packed selects. The AAD is domain-separated per type, so a packed
+// folder mis-flagged as chunked (or the reverse) fails here rather than opening as an
+// empty tree.
+func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, packed bool) error {
+	var err error
+	if packed {
+		_, err = syncengine.OpenPackRoot(blob, ck)
+	} else {
+		_, err = syncengine.OpenManifestRoot(blob, ck)
+	}
+	if err != nil {
+		return fmt.Errorf("decrypt folder root: %w", err)
+	}
 	return nil
 }
 

@@ -86,7 +86,11 @@ func reconcilePack(c packCtx) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	if meta := decodeMeta(res.EncryptedMeta, ck); !meta.Packed {
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return err
+	}
+	if !meta.Packed {
 		return errors.New(".aqtconfig sets pack=true but this folder was created chunked; " +
 			"remove pack=true, or re-init a fresh folder to use pack-and-seal")
 	}

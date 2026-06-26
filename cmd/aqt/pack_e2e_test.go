@@ -173,6 +173,34 @@ func TestPackReconcileNoBaseDiffers(t *testing.T) {
 	}
 }
 
+// TestChunkedSyncRefusesPackedFolder guards the silent tree-wipe: a pack-and-seal
+// folder whose local .aqtconfig no longer carries pack=true is routed through the
+// chunked sync path. That path must refuse it (the resource metadata says packed),
+// not read an empty manifest and delete every local file.
+func TestChunkedSyncRefusesPackedFolder(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	writePackConfig(t, dir)
+	h.init(dir)
+	writeTree(t, dir, "keep.txt", "data")
+	writeTree(t, dir, "nested/also.txt", "more")
+	h.sync(dir)
+
+	// Drop pack=true so runSync routes this packed folder through the chunked path.
+	if err := os.Remove(filepath.Join(dir, ".aqtconfig")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSync(dir, syncOptions{}); err == nil {
+		t.Fatal("chunked sync of a packed folder did not error")
+	}
+	if got := readTree(t, dir, "keep.txt"); got != "data" {
+		t.Fatalf("keep.txt was damaged by the refused sync: %q", got)
+	}
+	if got := readTree(t, dir, "nested/also.txt"); got != "more" {
+		t.Fatalf("nested/also.txt was damaged by the refused sync: %q", got)
+	}
+}
+
 func TestDecidePack(t *testing.T) {
 	cases := []struct {
 		name          string
