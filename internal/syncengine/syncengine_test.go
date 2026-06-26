@@ -56,7 +56,7 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 	writeFile(t, dir, "nested/big.bin", big)
 
 	sink := newCaptureSink()
-	m, err := Take(dir, testConv(t), DefaultChunker(), nil, sink)
+	m, err := Take(dir, testConv(t), DefaultChunker(), nil, sink, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,13 +81,13 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 	writeFile(t, dir, "a.bin", big)
 
 	conv := testConv(t)
-	first, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink())
+	first, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A second snapshot against the first as base must re-seal nothing.
 	sink := newCaptureSink()
-	second, err := Take(dir, conv, DefaultChunker(), &first, sink)
+	second, err := Take(dir, conv, DefaultChunker(), &first, sink, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,6 +96,58 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 	}
 	if len(second.Entries) != 1 {
 		t.Fatalf("second snapshot lost entries: %d", len(second.Entries))
+	}
+}
+
+// The stat fast-path reuses the base entry when size+mode+mtime are unchanged,
+// without reading the file — so a content change that preserves all three is not
+// seen by default, and --rehash forces the authoritative content read that catches it.
+func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "a.bin")
+	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("fastpath"), 32<<10))
+	conv := testConv(t)
+	base, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseEntry, _ := base.Lookup("a.bin")
+
+	// Overwrite with different bytes of the same length, then restore the mtime so
+	// size+mode+mtime match the base entry.
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("CHANGED!"), 32<<10))
+	if err := os.Chtimes(path, info.ModTime(), info.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+
+	// Default: trust the stat, reuse the stale entry, read nothing.
+	sink := newCaptureSink()
+	fast, err := Take(dir, conv, DefaultChunker(), &base, sink, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := fast.Lookup("a.bin"); e.Hash != baseEntry.Hash {
+		t.Fatalf("fast path hash = %s, want the reused base hash %s", e.Hash, baseEntry.Hash)
+	}
+	if len(sink.ids) != 0 {
+		t.Fatalf("fast path re-sealed %d chunks; it must not read the file", len(sink.ids))
+	}
+
+	// --rehash forces the content read, catching the change.
+	sink2 := newCaptureSink()
+	full, err := Take(dir, conv, DefaultChunker(), &base, sink2, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e, _ := full.Lookup("a.bin"); e.Hash == baseEntry.Hash {
+		t.Fatal("rehash must detect the changed content")
+	}
+	if len(sink2.ids) == 0 {
+		t.Fatal("rehash must re-seal the changed file")
 	}
 }
 
@@ -108,7 +160,7 @@ func TestManifestRootRoundTrip(t *testing.T) {
 		writeFile(t, dir, fmt.Sprintf("dir%02d/file.txt", i), []byte(fmt.Sprintf("contents of file %02d", i)))
 	}
 	conv := testConv(t)
-	m, err := Take(dir, conv, DefaultChunker(), nil, nil)
+	m, err := Take(dir, conv, DefaultChunker(), nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +214,7 @@ func TestManifestEditReusesMostChunks(t *testing.T) {
 		writeFile(t, dir, fmt.Sprintf("dir%03d/file.txt", i), []byte(fmt.Sprintf("contents of file number %03d here", i)))
 	}
 	conv := testConv(t)
-	m1, err := Take(dir, conv, DefaultChunker(), nil, nil)
+	m1, err := Take(dir, conv, DefaultChunker(), nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,7 +228,7 @@ func TestManifestEditReusesMostChunks(t *testing.T) {
 
 	// Edit a single file near the middle.
 	writeFile(t, dir, "dir100/file.txt", []byte("a different content for one hundred"))
-	m2, err := Take(dir, conv, DefaultChunker(), &m1, nil)
+	m2, err := Take(dir, conv, DefaultChunker(), &m1, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,7 +347,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 		t.Skipf("symlinks unsupported on this filesystem: %v", err)
 	}
 
-	m, err := Take(dir, testConv(t), DefaultChunker(), nil, nil)
+	m, err := Take(dir, testConv(t), DefaultChunker(), nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

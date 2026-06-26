@@ -75,8 +75,14 @@ func OpenStore(dataDir string) (*Store, error) {
 
 func (s *Store) Close() error { return s.db.Close() }
 
-func (s *Store) migrate() error {
-	const schema = `
+// migrations are the forward-only schema steps, applied in order and tracked by
+// PRAGMA user_version. Append new steps; never edit or reorder a shipped one. Every
+// statement is IF NOT EXISTS, so re-running step 1 over a data dir created before
+// this scaffold (user_version still 0) is a harmless no-op that then lets the later
+// steps apply in place — no wipe-and-resync for additive changes.
+var migrations = []string{
+	// 1: v1 baseline.
+	`
 CREATE TABLE IF NOT EXISTS accounts (
     owner_handle TEXT PRIMARY KEY,
     email        TEXT UNIQUE NOT NULL,
@@ -138,9 +144,27 @@ CREATE TABLE IF NOT EXISTS resource_chunks (
     PRIMARY KEY(resource_id, chunk_id),
     FOREIGN KEY(owner_handle, chunk_id) REFERENCES objects(owner_handle, chunk_id)
 );
-CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id);`
-	if _, err := s.db.Exec(schema); err != nil {
+CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id);`,
+	// 2: index the device-token lookup authMiddleware runs on every request, and
+	// enforce token uniqueness.
+	`CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_hash ON devices(token_hash);`,
+}
+
+// migrate applies the migrations a data dir has not yet run, then validates the
+// resulting schema. PRAGMA user_version records how many steps have run.
+func (s *Store) migrate() error {
+	var applied int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&applied); err != nil {
 		return err
+	}
+	for i := applied; i < len(migrations); i++ {
+		if _, err := s.db.Exec(migrations[i]); err != nil {
+			return fmt.Errorf("apply migration %d: %w", i+1, err)
+		}
+		// PRAGMA takes no bound parameters; i+1 is a controlled integer, not user input.
+		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, i+1)); err != nil {
+			return err
+		}
 	}
 	return s.checkSchema()
 }
@@ -405,16 +429,32 @@ func (s *Store) PutResource(owner string, req api.PutResourceRequest) (id string
 func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
 	id := newID(8)
 	const version = 1
+
+	// Write and fsync the blob before opening the transaction, mirroring
+	// updateResource: keep the durable write off the single writer connection (an
+	// fsync inside the tx stalls every other request) and drop the file unless the
+	// commit roots it. The immutable-per-nonce layout means a crash only ever orphans
+	// this new file, never pairs the row's nonce with mismatched bytes.
+	newPath := s.blobPath(id, req.Blob.Nonce)
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.Remove(newPath)
+		}
+	}()
+	if err := s.writeBlob(id, req.Blob.Nonce, req.Blob.Ciphertext); err != nil {
+		return "", 0, err
+	}
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return "", 0, err
 	}
-	_, err = tx.Exec(
+	if _, err := tx.Exec(
 		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version)
 		 VALUES(?,?,?,?,?,?,?)`,
 		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version,
-	)
-	if err != nil {
+	); err != nil {
 		tx.Rollback()
 		return "", 0, err
 	}
@@ -422,14 +462,10 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		tx.Rollback()
 		return "", 0, err
 	}
-	if err := s.writeBlob(id, req.Blob.Nonce, req.Blob.Ciphertext); err != nil {
-		tx.Rollback()
-		return "", 0, err
-	}
 	if err := tx.Commit(); err != nil {
-		_ = os.Remove(s.blobPath(id, req.Blob.Nonce)) // row never committed; drop the now-orphan blob
 		return "", 0, err
 	}
+	committed = true
 	return id, version, nil
 }
 
@@ -666,10 +702,22 @@ func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) 
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, resourceID); err != nil {
 		return err
 	}
-	for _, id := range refs {
+	const batch = 300 // 3 bound vars per row, kept well under SQLite's limit
+	for start := 0; start < len(refs); start += batch {
+		end := min(start+batch, len(refs))
+		group := refs[start:end]
+		var values strings.Builder
+		args := make([]any, 0, len(group)*3)
+		for i, id := range group {
+			if i > 0 {
+				values.WriteByte(',')
+			}
+			values.WriteString("(?,?,?)")
+			args = append(args, resourceID, owner, id)
+		}
 		if _, err := tx.Exec(
-			`INSERT OR IGNORE INTO resource_chunks(resource_id, owner_handle, chunk_id) VALUES(?,?,?)`,
-			resourceID, owner, id,
+			`INSERT OR IGNORE INTO resource_chunks(resource_id, owner_handle, chunk_id) VALUES `+values.String(),
+			args...,
 		); err != nil {
 			return err
 		}
@@ -687,22 +735,49 @@ func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) 
 // and that PUT, leaving the committed manifest pointing at a deleted object.
 // Bumping the pack's created_at keeps it past the age guard until the PUT roots it.
 func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
-	var missing, present []string
-	for _, id := range ids {
-		var one int
-		err := s.db.QueryRow(
-			`SELECT 1 FROM objects WHERE owner_handle = ? AND chunk_id = ?`, owner, id,
-		).Scan(&one)
-		if errors.Is(err, sql.ErrNoRows) {
-			missing = append(missing, id)
-			continue
+	present := make(map[string]bool, len(ids))
+	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
+	for start := 0; start < len(ids); start += batch {
+		end := min(start+batch, len(ids))
+		group := ids[start:end]
+		args := make([]any, 0, len(group)+1)
+		args = append(args, owner)
+		for _, id := range group {
+			args = append(args, id)
 		}
+		rows, err := s.db.Query(
+			`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		)
 		if err != nil {
 			return nil, err
 		}
-		present = append(present, id)
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			present[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
-	if err := s.touchPacksFor(owner, present); err != nil {
+
+	var missing []string
+	for _, id := range ids {
+		if !present[id] {
+			missing = append(missing, id)
+		}
+	}
+	presentIDs := make([]string, 0, len(present))
+	for id := range present {
+		presentIDs = append(presentIDs, id)
+	}
+	if err := s.touchPacksFor(owner, presentIDs); err != nil {
 		return nil, err
 	}
 	return missing, nil
@@ -836,25 +911,42 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 	out := make([]api.ObjectLocation, 0, len(ids))
 	seenPack := map[string]bool{}
 	var packs []string
-	for _, id := range ids {
-		var (
-			packID      string
-			off, length int64
-		)
-		err := s.db.QueryRow(
-			`SELECT pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id = ?`, owner, id,
-		).Scan(&packID, &off, &length)
-		if errors.Is(err, sql.ErrNoRows) {
-			continue
+	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
+	for start := 0; start < len(ids); start += batch {
+		end := min(start+batch, len(ids))
+		group := ids[start:end]
+		args := make([]any, 0, len(group)+1)
+		args = append(args, owner)
+		for _, id := range group {
+			args = append(args, id)
 		}
+		rows, err := s.db.Query(
+			`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length})
-		if !seenPack[packID] {
-			seenPack[packID] = true
-			packs = append(packs, packID)
+		for rows.Next() {
+			var (
+				id, packID  string
+				off, length int64
+			)
+			if err := rows.Scan(&id, &packID, &off, &length); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out = append(out, api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length})
+			if !seenPack[packID] {
+				seenPack[packID] = true
+				packs = append(packs, packID)
+			}
 		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
 	}
 	if err := s.touchPacks(owner, packs); err != nil {
 		return nil, err
@@ -1002,13 +1094,25 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 // blob rewrite. Superseded files are reclaimed after the row that supersedes
 // them commits.
 
+// blobPath addresses a resource's blob by id+nonce. Like packPath, it fans the file
+// out by id prefix (blobs/<ab>/<cd>/<id>.<nonce>.bin) so blobs/ never grows into one
+// flat directory whose every entry a glob (removeStaleBlobs) must scan.
 func (s *Store) blobPath(id string, nonce []byte) string {
-	return filepath.Join(s.blobsDir, id+"."+hex.EncodeToString(nonce)+".bin")
+	return filepath.Join(s.blobDir(id), id+"."+hex.EncodeToString(nonce)+".bin")
+}
+
+// blobDir is the fan-out directory that holds id's blob file(s). Resource ids are
+// fixed-length (newID(8)), so the prefix slice is always in range.
+func (s *Store) blobDir(id string) string {
+	return filepath.Join(s.blobsDir, id[0:2], id[2:4])
 }
 
 // writeBlob writes a blob to its nonce-addressed file and fsyncs it, so the bytes
 // are durable before the referencing row commits.
 func (s *Store) writeBlob(id string, nonce, ciphertext []byte) error {
+	if err := os.MkdirAll(s.blobDir(id), 0o700); err != nil {
+		return err
+	}
 	f, err := os.OpenFile(s.blobPath(id, nonce), os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
@@ -1029,7 +1133,7 @@ func (s *Store) writeBlob(id string, nonce, ciphertext []byte) error {
 // correctness.
 func (s *Store) removeStaleBlobs(id string, keepNonce []byte) {
 	keep := s.blobPath(id, keepNonce)
-	matches, _ := filepath.Glob(filepath.Join(s.blobsDir, id+".*.bin"))
+	matches, _ := filepath.Glob(filepath.Join(s.blobDir(id), id+".*.bin"))
 	for _, m := range matches {
 		if m != keep {
 			_ = os.Remove(m)

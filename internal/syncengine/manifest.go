@@ -25,6 +25,7 @@ type Entry struct {
 	Path   string         `json:"path"` // POSIX, relative to the tracked root
 	Mode   uint32         `json:"mode"`
 	Size   int64          `json:"size"`
+	MTime  int64          `json:"mtime,omitempty"` // mod time (UnixNano); drives the stat fast-path, never change detection
 	Hash   string         `json:"hash"`
 	Link   string         `json:"link,omitempty"` // symlink target; set => this entry is a symlink
 	Inline []byte         `json:"inline,omitempty"`

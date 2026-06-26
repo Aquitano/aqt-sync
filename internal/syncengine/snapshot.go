@@ -113,7 +113,7 @@ func metaEntry(n fileNode) Entry {
 	if n.symlink {
 		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: linkHash(n.target)}
 	}
-	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size()}
+	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size(), MTime: n.info.ModTime().UnixNano()}
 }
 
 // linkHash hashes a symlink's target, domain-separated from file content so a file
@@ -212,13 +212,15 @@ func Fingerprint(dir string) (string, error) {
 // key, and each sealed chunk's ciphertext is handed to sink (the pack assembler) as
 // it is produced — Take never accumulates ciphertext itself.
 //
-// When base is non-nil, a file whose content is unchanged reuses its previous entry
-// verbatim, so it is neither re-sealed nor re-uploaded. The unchanged check reads
-// the file once to hash it (the read a sync must do anyway) but skips the seal; a
-// large file that did change is the only case sealed, and it streams.
+// When base is non-nil, an unchanged file reuses its previous entry verbatim, so it
+// is neither re-read nor re-sealed: if size+mode+mtime still match the base entry the
+// content is taken as unchanged with no read at all (the same mtime-granularity
+// signal Fingerprint trusts to gate the watcher). rehash forces the authoritative
+// content hash for the rare edit that preserves all three; a file that fails the stat
+// check is hashed and only re-sealed if its content actually changed.
 //
 // sink may be nil for a manifest-only snapshot (no upload).
-func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest, sink ChunkSink) (Manifest, error) {
+func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest, sink ChunkSink, rehash bool) (Manifest, error) {
 	if sink == nil {
 		sink = nopSink{}
 	}
@@ -237,7 +239,7 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manife
 			m.Entries = append(m.Entries, e)
 			return nil
 		}
-		e, err := snapshotFile(n, reuse, conv, chunker, sink)
+		e, err := snapshotFile(n, reuse, conv, chunker, sink, rehash)
 		if err != nil {
 			return err
 		}
@@ -252,12 +254,20 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manife
 }
 
 // snapshotFile turns one regular file into an entry, reusing the base entry when
-// the content is unchanged so it is not re-sealed. Small files inline; larger ones
-// stream through the chunker into sink.
-func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink) (Entry, error) {
+// the content is unchanged so it is neither re-read nor re-sealed. Small files
+// inline; larger ones stream through the chunker into sink.
+func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink, rehash bool) (Entry, error) {
 	entry := metaEntry(n)
 	prev, inBase := reuse[n.rel]
 	size := n.info.Size()
+
+	// Stat fast-path: identical size, mode, and mtime means the content is unchanged,
+	// so reuse the base entry without opening the file. This skips the whole-tree
+	// read+hash a stable tree otherwise pays on every sync. rehash forces the content
+	// check below for the rare edit that leaves all three untouched.
+	if !rehash && inBase && unchangedStat(prev, entry) {
+		return prev, nil
+	}
 
 	// Small files are inlined into the (sealed) manifest; read fully — bounded by
 	// the inline cutoff — and hash.
@@ -268,7 +278,7 @@ func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey
 		}
 		entry.Hash = hashOf(data)
 		if inBase && prev.Hash == entry.Hash {
-			return prev, nil
+			return touchedReuse(prev, entry), nil
 		}
 		entry.Inline = data
 		return entry, nil
@@ -283,10 +293,25 @@ func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey
 			return Entry{}, err
 		}
 		if h == prev.Hash {
-			return prev, nil
+			return touchedReuse(prev, entry), nil
 		}
 	}
 	return sealFile(n, entry, conv, chunker, sink)
+}
+
+// unchangedStat reports whether cur's stat metadata matches prev so closely that the
+// content is taken as unchanged without reading it. A zero prev.MTime (an entry from
+// before mtimes were recorded, or a symlink) never matches, forcing a content hash.
+func unchangedStat(prev, cur Entry) bool {
+	return prev.MTime != 0 && prev.MTime == cur.MTime && prev.Size == cur.Size && prev.Mode == cur.Mode
+}
+
+// touchedReuse reuses prev's content (chunks/inline/hash) but adopts cur's mtime, so a
+// file touched without a content change records its new mtime in the manifest and the
+// next sync stat-fast-paths it instead of re-hashing forever.
+func touchedReuse(prev, cur Entry) Entry {
+	prev.MTime = cur.MTime
+	return prev
 }
 
 // sealFile streams a file through the chunker once, sealing each chunk into sink
