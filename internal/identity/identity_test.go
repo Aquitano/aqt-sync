@@ -3,6 +3,7 @@ package identity
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -19,6 +20,46 @@ func isolateConfigDir(t *testing.T) {
 	t.Setenv("AppData", dir)
 	t.Setenv("XDG_CONFIG_HOME", dir)
 	t.Setenv("HOME", dir)
+}
+
+func TestProfileSaveRoundTripAtomic(t *testing.T) {
+	isolateConfigDir(t)
+
+	if err := Save(&Profile{Name: "default", Server: "https://one.example", Token: "tok-1"}); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite with new content; the file must end up holding the new profile.
+	if err := Save(&Profile{Name: "default", Server: "https://two.example", Token: "tok-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := Load("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Server != "https://two.example" || got.Token != "tok-2" {
+		t.Fatalf("round-trip mismatch: %+v", got)
+	}
+
+	dir, err := configDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, "default.json")); err != nil {
+		t.Fatal(err)
+	} else if perm := fi.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("profile perms = %o, want 600", perm)
+	}
+
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range ents {
+		if strings.HasPrefix(e.Name(), ".aqt-tmp-") {
+			t.Fatalf("leftover temp file after Save: %s", e.Name())
+		}
+	}
 }
 
 func TestSessionCacheRoundTrip(t *testing.T) {

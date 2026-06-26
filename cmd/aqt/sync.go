@@ -997,12 +997,40 @@ func controlPath(root, name string) string {
 	return filepath.Join(root, syncengine.ControlDir, name)
 }
 
+// writeFileAtomic writes data to a temp file in path's directory, fsyncs it, and
+// renames it over path, so a crash mid-write leaves the old control-state file
+// intact rather than a torn one that wedges future syncs.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".aqt-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func saveState(root string, st folderState) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(controlPath(root, stateFile), b, 0o600)
+	return writeFileAtomic(controlPath(root, stateFile), b, 0o600)
 }
 
 func loadState(root string) (folderState, error) {
@@ -1019,7 +1047,7 @@ func saveBase(root string, m syncengine.Manifest) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(controlPath(root, baseFile), b, 0o600)
+	return writeFileAtomic(controlPath(root, baseFile), b, 0o600)
 }
 
 // loadBaseForSync returns the last-synced manifest and whether a usable base
