@@ -163,6 +163,13 @@ func DeriveSigningKey(mk MasterKey) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(seed)
 }
 
+// KeyFingerprint returns a stable, human-comparable fingerprint of a public key
+// in the SSH SHA256 format, so two devices can confirm they hold the same key.
+func KeyFingerprint(pub ed25519.PublicKey) string {
+	sum := sha256.Sum256(pub)
+	return "SHA256:" + base64.RawStdEncoding.EncodeToString(sum[:])
+}
+
 // GenerateContentKey returns a fresh random content key.
 func GenerateContentKey() (ContentKey, error) {
 	var ck ContentKey
