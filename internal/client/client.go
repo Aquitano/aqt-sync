@@ -188,8 +188,10 @@ func (c *Client) putRaw(path string, body []byte) error {
 }
 
 // getRange downloads [off, off+length) of an opaque body via a Range request and
-// returns the raw bytes. The server answers 206 (partial) or 200 (whole); both are
-// success.
+// returns exactly that window. The server normally answers 206 with just the range,
+// but 200 with the whole body is a valid response to a Range request; in that case the
+// window is sliced out here, so callers can rely on getRange returning the requested
+// bytes regardless of which status the server chose.
 func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
 	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
@@ -207,6 +209,17 @@ func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
 	data, _ := io.ReadAll(resp.Body)
 	if err := statusError(resp.StatusCode, path, data); err != nil {
 		return nil, err
+	}
+	if resp.StatusCode == http.StatusOK {
+		// The server ignored the Range and sent the whole body; cut out the window.
+		if off < 0 || off > int64(len(data)) {
+			return nil, fmt.Errorf("range start %d beyond %s length %d", off, path, len(data))
+		}
+		end := off + length
+		if end > int64(len(data)) {
+			end = int64(len(data))
+		}
+		return data[off:end], nil
 	}
 	return data, nil
 }

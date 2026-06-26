@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 // TestPackSyncE2E drives a pack-and-seal folder (.aqtconfig pack=true) through the
@@ -173,6 +175,34 @@ func TestPackReconcileNoBaseDiffers(t *testing.T) {
 	}
 }
 
+// TestChunkedSyncRefusesPackedFolder guards the silent tree-wipe: a pack-and-seal
+// folder whose local .aqtconfig no longer carries pack=true is routed through the
+// chunked sync path. That path must refuse it (the resource metadata says packed),
+// not read an empty manifest and delete every local file.
+func TestChunkedSyncRefusesPackedFolder(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	writePackConfig(t, dir)
+	h.init(dir)
+	writeTree(t, dir, "keep.txt", "data")
+	writeTree(t, dir, "nested/also.txt", "more")
+	h.sync(dir)
+
+	// Drop pack=true so runSync routes this packed folder through the chunked path.
+	if err := os.Remove(filepath.Join(dir, ".aqtconfig")); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSync(dir, syncOptions{}); err == nil {
+		t.Fatal("chunked sync of a packed folder did not error")
+	}
+	if got := readTree(t, dir, "keep.txt"); got != "data" {
+		t.Fatalf("keep.txt was damaged by the refused sync: %q", got)
+	}
+	if got := readTree(t, dir, "nested/also.txt"); got != "more" {
+		t.Fatalf("nested/also.txt was damaged by the refused sync: %q", got)
+	}
+}
+
 func TestDecidePack(t *testing.T) {
 	cases := []struct {
 		name          string
@@ -199,6 +229,33 @@ func TestDecidePack(t *testing.T) {
 	for _, c := range cases {
 		if got := decidePack(c.local, c.remote, c.opts); got != c.want {
 			t.Errorf("%s: decidePack(%v,%v) = %d, want %d", c.name, c.local, c.remote, got, c.want)
+		}
+	}
+}
+
+func TestPartitionDeletesByDownload(t *testing.T) {
+	downloads := []syncengine.Entry{{Path: "link/inner.txt"}, {Path: "a/b/c.txt"}, {Path: "top.txt"}}
+	deletes := []string{"link", "a/b", "top.txt", "unrelated"}
+
+	early, late := partitionDeletesByDownload(deletes, downloads)
+
+	// "link" and "a/b" are ancestors of a download path (a file/symlink became a dir),
+	// so they run first. "top.txt" equals a download path but is not an ancestor (a file
+	// replaced by a file, handled by rename), and "unrelated" matches nothing.
+	wantEarly := map[string]bool{"link": true, "a/b": true}
+	for _, p := range early {
+		if !wantEarly[p] {
+			t.Errorf("unexpected early delete %q", p)
+		}
+		delete(wantEarly, p)
+	}
+	if len(wantEarly) != 0 {
+		t.Errorf("missing early deletes: %v", wantEarly)
+	}
+	wantLate := map[string]bool{"top.txt": true, "unrelated": true}
+	for _, p := range late {
+		if !wantLate[p] {
+			t.Errorf("unexpected late delete %q", p)
 		}
 	}
 }

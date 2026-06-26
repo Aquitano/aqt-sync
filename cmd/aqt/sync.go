@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -317,6 +318,18 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return fmt.Errorf("unwrap folder key: %w", err)
 		}
+		// Route by the server's truth, not just local .aqtconfig: a pack-and-seal folder
+		// reconciled as chunked would read an empty manifest and delete the whole tree.
+		// Refuse it instead. (AAD domain separation also makes the manifest read below
+		// fail, but this gives the actionable message.)
+		meta, err := decodeMeta(res.EncryptedMeta, ck)
+		if err != nil {
+			return err
+		}
+		if meta.Packed {
+			return errors.New("this folder is pack-and-seal on the server but is being synced as chunked; " +
+				"set pack=true in .aqtconfig, or re-clone it")
+		}
 		remote, err := openRemoteManifest(cl, res.Blob, ck)
 		if errors.Is(err, client.ErrNotFound) {
 			// We read version res.Version's root, but a concurrent sync superseded it
@@ -350,6 +363,13 @@ func runSync(dir string, opts syncOptions) error {
 		}, actions)
 	}
 
+	return reconcileWithRetry(reconcile)
+}
+
+// reconcileWithRetry runs one reconcile pass, retrying against the fresh remote on a
+// version conflict (another sync committed first), up to maxSyncAttempts before giving
+// up. The conflict retry is how a concurrent write is re-planned rather than lost.
+func reconcileWithRetry(reconcile func() error) error {
 	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
 		err := reconcile()
 		if errors.Is(err, client.ErrConflict) {
@@ -463,12 +483,21 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		reclaimPacks(c.root, c.cl)
 	}
 
-	// Server is updated; now bring the local tree in line. Downloads before
-	// deletes, so local data is never removed before its replacement is on disk.
+	// Server is updated; now bring the local tree in line. A local file or symlink the
+	// remote turned into a directory must be removed before the download that creates
+	// that directory, or the download would write through the stale entry (refused) or
+	// the later delete would hit a now-populated directory. Every other delete stays
+	// after the downloads, so local data is never removed before its replacement lands.
+	earlyDeletes, lateDeletes := partitionDeletesByDownload(localDeletes, downloads)
+	for _, p := range earlyDeletes {
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return err
+		}
+	}
 	if err := runDownloads(c.cl, c.root, downloads); err != nil {
 		return err
 	}
-	for _, p := range localDeletes {
+	for _, p := range lateDeletes {
 		if err := syncengine.RemoveFile(c.root, p); err != nil {
 			return err
 		}
@@ -508,13 +537,22 @@ func runClone(ref, dir string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	meta := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return err
+	}
 
 	if dir == "" {
 		dir = id
 	}
 	abs, err := filepath.Abs(dir)
 	if err != nil {
+		return err
+	}
+	// Decrypt the resource root before creating the destination, so a wrong or corrupt
+	// key fails the clone without leaving an empty directory behind. The root blob is
+	// tiny; materializeClone re-opens it to do the actual reconstruction.
+	if err := validateCloneRoot(res.Blob, ck, meta.Packed); err != nil {
 		return err
 	}
 	if err := ensureEmptyDir(abs); err != nil {
@@ -537,6 +575,23 @@ func runClone(ref, dir string) error {
 	return nil
 }
 
+// validateCloneRoot confirms the resource's sealed root decrypts under ck, using the
+// root type meta.Packed selects. The AAD is domain-separated per type, so a packed
+// folder mis-flagged as chunked (or the reverse) fails here rather than opening as an
+// empty tree.
+func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, packed bool) error {
+	var err error
+	if packed {
+		_, err = syncengine.OpenPackRoot(blob, ck)
+	} else {
+		_, err = syncengine.OpenManifestRoot(blob, ck)
+	}
+	if err != nil {
+		return fmt.Errorf("decrypt folder root: %w", err)
+	}
+	return nil
+}
+
 // materializeClone writes a freshly cloned folder's content under abs and returns
 // the manifest to record as its base. A pack-and-seal folder is untarred from its
 // sealed segments; the chunked default streams each file from its packs.
@@ -546,11 +601,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		if err != nil {
 			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
 		}
-		src, err := newPackSource(cl, root.SegmentIDs())
-		if err != nil {
-			return syncengine.Manifest{}, err
-		}
-		base, err := syncengine.ExtractToTree(abs, root, ck, src.get)
+		base, err := extractPack(cl, abs, root, ck)
 		if err != nil {
 			return syncengine.Manifest{}, err
 		}
@@ -793,6 +844,29 @@ func (c *packCache) touch(id string) {
 		}
 	}
 	c.order = append(c.order, id)
+}
+
+// partitionDeletesByDownload splits local deletes into those that clear a path some
+// download must create a directory at (a file/symlink → directory type change; run
+// before downloads) and the rest (run after downloads, so local data is never removed
+// before its replacement lands).
+func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry) (early, late []string) {
+	for _, d := range deletes {
+		prefix := d + "/"
+		isAncestor := false
+		for _, e := range downloads {
+			if strings.HasPrefix(e.Path, prefix) {
+				isAncestor = true
+				break
+			}
+		}
+		if isAncestor {
+			early = append(early, d)
+		} else {
+			late = append(late, d)
+		}
+	}
+	return early, late
 }
 
 func distinctChunkIDs(entries []syncengine.Entry) []string {

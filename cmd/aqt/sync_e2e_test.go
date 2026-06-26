@@ -224,6 +224,42 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 	}
 }
 
+// TestSyncSymlinkBecomesDir covers the type-change transition the per-entry symlink
+// guard used to wedge: a tracked symlink is replaced on one machine by a directory of
+// files. Pulling it must remove the stale local symlink and create the directory, not
+// abort on "descends through a symlink" and leave the folder stuck.
+func TestSyncSymlinkBecomesDir(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "target.txt", "data")
+	if err := os.Symlink("target.txt", filepath.Join(origin, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	if fi, err := os.Lstat(filepath.Join(replica, "link")); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("clone did not reproduce the symlink: mode=%v err=%v", fi.Mode(), err)
+	}
+
+	// Replace the symlink with a directory containing a file, and propagate it.
+	if err := os.Remove(filepath.Join(origin, "link")); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "link/inner.txt", "inside")
+	h.sync(origin)
+	h.sync(replica)
+
+	if got := readTree(t, replica, "link/inner.txt"); got != "inside" {
+		t.Fatalf("symlink->dir did not propagate: %q", got)
+	}
+	if fi, err := os.Lstat(filepath.Join(replica, "link")); err != nil || !fi.IsDir() {
+		t.Fatalf("replica link is not a directory: mode=%v err=%v", fi.Mode(), err)
+	}
+}
+
 // --- harness ---
 
 type e2eHarness struct {

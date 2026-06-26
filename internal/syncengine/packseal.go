@@ -59,17 +59,23 @@ func (r PackRoot) SegmentIDs() []string {
 	return ids
 }
 
+// SealPackRoot seals a pack-and-seal root under a dedicated AAD, distinct from the
+// chunked manifest root's AADBlob. The two root blobs are byte-compatible JSON under
+// the same content key, so without domain separation a pack root opens cleanly as an
+// empty manifest (its segments/size fields ignored) — routing a packed folder through
+// the chunked path would then silently wipe the tree or clone nothing. The distinct
+// tag makes that cross-open fail the AEAD check instead.
 func SealPackRoot(r PackRoot, ck crypto.ContentKey) (crypto.SealedBlob, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return crypto.SealedBlob{}, err
 	}
-	return crypto.Seal(b, ck, crypto.AADBlob)
+	return crypto.Seal(b, ck, crypto.AADPackRoot)
 }
 
 func OpenPackRoot(blob crypto.SealedBlob, ck crypto.ContentKey) (PackRoot, error) {
 	var r PackRoot
-	plain, err := crypto.Open(blob, ck, crypto.AADBlob)
+	plain, err := crypto.Open(blob, ck, crypto.AADPackRoot)
 	if err != nil {
 		return r, err
 	}
@@ -240,10 +246,11 @@ func (s *segmentSink) finish() error {
 	return err
 }
 
-// ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
-// it under dir, streaming so neither the tarball nor any file is held whole in memory.
-// Returns the manifest of what it wrote, for the caller to record as base and prune by.
-func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+// segmentReader streams the reassembled tarball, fetching, verifying, and decrypting
+// each segment as it goes so neither the tarball nor any file is held whole in memory.
+// The caller drains the reader and closes it (CloseWithError on an early exit) to
+// release the producer goroutine.
+func segmentReader(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) *io.PipeReader {
 	pr, pw := io.Pipe()
 	go func() {
 		for _, seg := range root.Segments {
@@ -264,7 +271,15 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 		}
 		pw.Close()
 	}()
-	m, err := extractTar(dir, pr)
+	return pr
+}
+
+// ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
+// it under dir, streaming so neither the tarball nor any file is held whole in memory.
+// Returns the manifest of what it wrote, for the caller to record as base and prune by.
+func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+	pr := segmentReader(root, ck, fetch)
+	m, err := extractTar(newTreeWriter(dir), pr)
 	if err != nil {
 		pr.CloseWithError(err) // unblock the writer if extraction bailed early
 		return Manifest{}, err
@@ -277,11 +292,55 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 	return m, nil
 }
 
-// extractTar writes every regular file and symlink under dir and returns their
-// manifest. safeJoin guards each entry's own path; writeAtomic/WriteSymlink also
-// refuse a symlinked parent, so a hostile archive can't escape via a symlink ordered
-// ahead of a file written through it.
-func extractTar(dir string, r io.Reader) (Manifest, error) {
+// PackTreeManifest reconstructs a pack-and-seal tree's manifest (paths, sizes, hashes,
+// link targets) by streaming its segments and hashing each file in place, writing
+// nothing to disk. It is the read-only counterpart to ExtractToTree, for deciding
+// whether a remote tree equals the local one without materializing and deleting it.
+func PackTreeManifest(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+	pr := segmentReader(root, ck, fetch)
+	m, err := hashTar(pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		return Manifest{}, err
+	}
+	pr.Close()
+	sortEntries(m.Entries)
+	return m, nil
+}
+
+// hashTar reads a tar stream into the manifest of its regular files and symlinks,
+// hashing content as it streams and writing nothing; the read-only counterpart to
+// extractTar.
+func hashTar(r io.Reader) (Manifest, error) {
+	var m Manifest
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return m, nil
+		}
+		if err != nil {
+			return Manifest{}, err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeSymlink:
+			m.Entries = append(m.Entries, Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)})
+		case tar.TypeReg, tar.TypeRegA:
+			h := sha256.New()
+			if _, err := io.Copy(h, tr); err != nil {
+				return Manifest{}, err
+			}
+			m.Entries = append(m.Entries, Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size, Hash: hex.EncodeToString(h.Sum(nil))})
+		}
+	}
+}
+
+// extractTar writes every regular file and symlink the archive carries and returns
+// their manifest. safeJoin guards each entry's own path; the treeWriter also refuses a
+// parent it created as a symlink this pass, so a hostile archive can't escape via a
+// symlink ordered ahead of a file written through it, while a stale local entry a
+// remote type change replaced with a directory is cleared rather than refused.
+func extractTar(w *treeWriter, r io.Reader) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)
 	for {
@@ -295,15 +354,15 @@ func extractTar(dir string, r io.Reader) (Manifest, error) {
 		switch hdr.Typeflag {
 		case tar.TypeSymlink:
 			e := Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)}
-			if err := WriteSymlink(dir, e); err != nil {
+			if err := w.writeSymlink(e); err != nil {
 				return Manifest{}, err
 			}
 			m.Entries = append(m.Entries, e)
 		case tar.TypeReg, tar.TypeRegA:
 			e := Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size}
 			h := sha256.New()
-			if err := writeAtomic(dir, e, func(w io.Writer) error {
-				_, err := io.Copy(w, io.TeeReader(tr, h))
+			if err := w.writeFile(e, func(out io.Writer) error {
+				_, err := io.Copy(out, io.TeeReader(tr, h))
 				return err
 			}); err != nil {
 				return Manifest{}, err
@@ -312,7 +371,7 @@ func extractTar(dir string, r io.Reader) (Manifest, error) {
 			m.Entries = append(m.Entries, e)
 		default:
 			// Other types (dirs, hardlinks, ...) are not written; parent dirs come
-			// from writeAtomic.
+			// from the treeWriter.
 		}
 	}
 }

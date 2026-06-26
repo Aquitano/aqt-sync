@@ -46,18 +46,8 @@ func runPackSync(root string, opts syncOptions) error {
 		return err
 	}
 
-	c := packCtx{root: root, cl: cl, opts: opts, st: st, base: base, baseExists: baseExists, local: local, mk: mk}
-	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
-		err := reconcilePack(c)
-		if errors.Is(err, client.ErrConflict) {
-			if attempt == 0 {
-				fmt.Fprintln(os.Stderr, "remote changed during sync; re-reconciling")
-			}
-			continue
-		}
-		return err
-	}
-	return errSyncRace
+	c := packCtx{root: root, cl: cl, opts: opts, st: st, base: base, baseExists: baseExists, local: local, mk: mk, push: &packPushArtifacts{}}
+	return reconcileWithRetry(func() error { return reconcilePack(c) })
 }
 
 type packCtx struct {
@@ -69,6 +59,19 @@ type packCtx struct {
 	baseExists bool
 	local      syncengine.Manifest
 	mk         crypto.MasterKey
+	// push caches the tar+seal+upload across conflict retries (pointer so it persists
+	// when packCtx is copied per reconcile pass).
+	push *packPushArtifacts
+}
+
+// packPushArtifacts holds a push's sealed root and shipped manifest once built, so a
+// conflict retry re-PUTs the root at the new version instead of re-tarring and
+// re-uploading the whole tree. The segments are content-addressed and idempotent on
+// the server, so they need uploading only once.
+type packPushArtifacts struct {
+	root    syncengine.PackRoot
+	shipped syncengine.Manifest
+	built   bool
 }
 
 func reconcilePack(c packCtx) error {
@@ -86,7 +89,11 @@ func reconcilePack(c packCtx) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
-	if meta := decodeMeta(res.EncryptedMeta, ck); !meta.Packed {
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return err
+	}
+	if !meta.Packed {
 		return errors.New(".aqtconfig sets pack=true but this folder was created chunked; " +
 			"remove pack=true, or re-init a fresh folder to use pack-and-seal")
 	}
@@ -223,7 +230,7 @@ func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.Conte
 	case packPush:
 		return pushPack(c, res, ck)
 	case packPull:
-		return pullPack(c, res, ck)
+		return pullPackFromRoot(c, res, ck, root)
 	case packConflict:
 		fmt.Fprintln(os.Stderr, "conflict: local and remote differ and there is no base to reconcile against")
 		return errConflictsRemain
@@ -232,43 +239,62 @@ func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.Conte
 	}
 }
 
-// pushPack re-tars the whole tree, seals it into fresh segments, uploads them, and
-// commits the new root (version-checked, so a concurrent push is retried not lost).
+// pushPack tars the whole tree, seals it into fresh segments, uploads them, and commits
+// the new root (version-checked, so a concurrent push is retried not lost). The
+// tar+seal+upload runs once and is cached: a conflict retry re-PUTs the same root at
+// the new version rather than re-shipping the tree, since the segments are already on
+// the server.
 func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
-	packer := newSegmentPacker(c.cl)
-	root, shipped, err := syncengine.TarAndSeal(c.root, ck, packer)
-	if err != nil {
-		return err
+	if !c.push.built {
+		packer := newSegmentPacker(c.cl)
+		root, shipped, err := syncengine.TarAndSeal(c.root, ck, packer)
+		if err != nil {
+			return err
+		}
+		if err := packer.Flush(); err != nil {
+			return err
+		}
+		c.push.root, c.push.shipped, c.push.built = root, shipped, true
 	}
-	if err := packer.Flush(); err != nil {
-		return err
-	}
-	resp, err := putPackFolderUpdate(c.cl, c.st.ID, root, ck, c.mk, res.EncryptedMeta, res.Version)
+	resp, err := putPackFolderUpdate(c.cl, c.st.ID, c.push.root, ck, c.mk, res.EncryptedMeta, res.Version)
 	if err != nil {
 		return err
 	}
 	reclaimPacks(c.root, c.cl)
 	// Base off what was actually tarred, not the earlier c.local scan: a file changing
 	// in between would leave a base disagreeing with the shipped bytes.
-	if err := savePackBase(c.root, shipped, resp.Version); err != nil {
+	if err := savePackBase(c.root, c.push.shipped, resp.Version); err != nil {
 		return err
 	}
-	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(shipped.Entries))
+	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(c.push.shipped.Entries))
 	return nil
 }
 
-// pullPack replaces the working tree with the remote one: it untars the remote blob
-// over the tree, then removes local files the new tree no longer contains.
+// extractPack range-fetches a pack-and-seal tree's segments and untars it under dir,
+// returning the manifest of what it wrote. Shared by clone, pull, and reconcile so the
+// fetch+extract wiring lives in one place.
+func extractPack(cl *client.Client, dir string, root syncengine.PackRoot, ck crypto.ContentKey) (syncengine.Manifest, error) {
+	src, err := newPackSource(cl, root.SegmentIDs())
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	return syncengine.ExtractToTree(dir, root, ck, src.get)
+}
+
+// pullPack replaces the working tree with the remote one. It opens the root; callers
+// that already decrypted it use pullPackFromRoot to avoid a second decrypt.
 func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
 	root, err := syncengine.OpenPackRoot(res.Blob, ck)
 	if err != nil {
 		return fmt.Errorf("decrypt remote pack root: %w", err)
 	}
-	src, err := newPackSource(c.cl, root.SegmentIDs())
-	if err != nil {
-		return err
-	}
-	remote, err := syncengine.ExtractToTree(c.root, root, ck, src.get)
+	return pullPackFromRoot(c, res, ck, root)
+}
+
+// pullPackFromRoot untars the remote tree over the working tree, then removes local
+// files the new tree no longer contains.
+func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey, root syncengine.PackRoot) error {
+	remote, err := extractPack(c.cl, c.root, root, ck)
 	if err != nil {
 		// A located-but-missing segment means a concurrent push superseded this
 		// version and GC reaped it; re-reconcile against the current version.
@@ -277,17 +303,18 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 		}
 		return err
 	}
-	// Prune whatever the remote no longer carries, scanning the tree as it is now: a
+	// Prune whatever the remote no longer carries, listing the tree as it is now: a
 	// prior pull that aborted mid-stream can have left files in neither c.local nor the
-	// new remote, and those must go too so the tree ends equal to the remote.
-	postPull, err := syncengine.Scan(c.root)
+	// new remote, and those must go too so the tree ends equal to the remote. Only the
+	// paths are needed, so this is a hash-free walk.
+	postPull, err := syncengine.ListPaths(c.root)
 	if err != nil {
 		return err
 	}
 	remoteByPath := remote.ByPath()
-	for _, e := range postPull.Entries {
-		if _, ok := remoteByPath[e.Path]; !ok {
-			if err := syncengine.RemoveFile(c.root, e.Path); err != nil {
+	for _, p := range postPull {
+		if _, ok := remoteByPath[p]; !ok {
+			if err := syncengine.RemoveFile(c.root, p); err != nil {
 				return err
 			}
 		}
@@ -299,25 +326,16 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 	return nil
 }
 
-// remoteEqualsLocal extracts the remote tree to a throwaway dir and reports whether
-// it matches the working tree, so a baseless reconcile of two identical trees is not
-// flagged as a conflict. The scratch dir sits under the folder's control dir so the
-// extraction lands on the same filesystem as the tree (not a possibly tmpfs /tmp).
+// remoteEqualsLocal reports whether the remote pack tree matches the working tree, so
+// a baseless reconcile of two identical trees is not flagged as a conflict. It hashes
+// the remote tree from its segments in memory rather than materializing it to a scratch
+// dir and deleting it — no disk write, half the I/O.
 func remoteEqualsLocal(c packCtx, root syncengine.PackRoot, ck crypto.ContentKey) (bool, error) {
-	scratch := filepath.Join(c.root, syncengine.ControlDir)
-	if err := os.MkdirAll(scratch, 0o700); err != nil {
-		return false, err
-	}
-	tmp, err := os.MkdirTemp(scratch, "reconcile-")
-	if err != nil {
-		return false, err
-	}
-	defer os.RemoveAll(tmp)
 	src, err := newPackSource(c.cl, root.SegmentIDs())
 	if err != nil {
 		return false, err
 	}
-	remote, err := syncengine.ExtractToTree(tmp, root, ck, src.get)
+	remote, err := syncengine.PackTreeManifest(root, ck, src.get)
 	if err != nil {
 		return false, err
 	}

@@ -77,7 +77,10 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 
-	meta := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return err
+	}
 	if meta.Streamed {
 		return pullStream(cl, res, ck, out, meta, toStdout, force)
 	}
@@ -197,10 +200,19 @@ func parseRef(ref string) (id, fragment string) {
 	return ref, fragment
 }
 
-func decodeMeta(blob crypto.SealedBlob, ck crypto.ContentKey) api.Metadata {
-	var m api.Metadata
-	if plain, err := crypto.Open(blob, ck, crypto.AADMeta); err == nil {
-		_ = json.Unmarshal(plain, &m)
+// decodeMeta decrypts and parses a resource's sealed metadata. A decrypt or parse
+// failure is returned rather than swallowed: in an owner flow the content key is
+// correct, so a failure means corruption (or a blob/meta mix-up), and treating it as
+// a default (unpacked, unstreamed) resource silently misroutes the resource — e.g.
+// cloning a pack-and-seal folder through the chunked path and writing nothing.
+func decodeMeta(blob crypto.SealedBlob, ck crypto.ContentKey) (api.Metadata, error) {
+	plain, err := crypto.Open(blob, ck, crypto.AADMeta)
+	if err != nil {
+		return api.Metadata{}, fmt.Errorf("decrypt metadata: %w", err)
 	}
-	return m
+	var m api.Metadata
+	if err := json.Unmarshal(plain, &m); err != nil {
+		return api.Metadata{}, fmt.Errorf("parse metadata: %w", err)
+	}
+	return m, nil
 }

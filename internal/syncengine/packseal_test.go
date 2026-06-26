@@ -205,6 +205,109 @@ func TestExtractRefusesSymlinkTraversal(t *testing.T) {
 	}
 }
 
+// TestPackRootDoesNotCrossOpenAsManifest guards the silent data-loss path: before the
+// pack root got its own AAD, a sealed PackRoot decrypted cleanly as an empty
+// ManifestRoot (both used AADBlob, and PackRoot's extra fields were simply ignored).
+// Routing a packed folder through the chunked path then read an empty manifest and
+// could wipe the working tree or clone nothing. The distinct AAD must make the
+// cross-open fail while each root still opens as itself.
+func TestPackRootDoesNotCrossOpenAsManifest(t *testing.T) {
+	ck := testContentKey(t)
+
+	packBlob, err := SealPackRoot(PackRoot{Version: PackRootVersion, Size: 123, Segments: []Segment{{ID: "abc", Len: 10}}}, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestBlob, err := SealManifestRoot(ManifestRoot{Version: 1}, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := OpenManifestRoot(packBlob, ck); err == nil {
+		t.Fatal("a sealed pack root opened as a manifest root; AAD domain separation missing")
+	}
+	if _, err := OpenPackRoot(manifestBlob, ck); err == nil {
+		t.Fatal("a sealed manifest root opened as a pack root; AAD domain separation missing")
+	}
+	if _, err := OpenPackRoot(packBlob, ck); err != nil {
+		t.Fatalf("pack root did not open as itself: %v", err)
+	}
+	if _, err := OpenManifestRoot(manifestBlob, ck); err != nil {
+		t.Fatalf("manifest root did not open as itself: %v", err)
+	}
+}
+
+// TestPackTreeManifestMatchesScan verifies the in-memory compare path: hashing a
+// sealed tree straight from its segments yields the same manifest a direct Scan of the
+// source does, so remoteEqualsLocal can decide tree equality without materializing the
+// remote to disk and deleting it.
+func TestPackTreeManifestMatchesScan(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "a.txt", []byte("hello"))
+	writeFile(t, src, "nested/b.txt", []byte("nested body"))
+	big := make([]byte, segTarget+777) // spans more than one segment
+	for i := range big {
+		big[i] = byte(i)
+	}
+	writeFile(t, src, "big.bin", big)
+	if err := os.Symlink("a.txt", filepath.Join(src, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	ck := testContentKey(t)
+	store := memObjects{}
+	root, _, err := TarAndSeal(src, ck, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hashed, err := PackTreeManifest(root, ck, store.get)
+	if err != nil {
+		t.Fatalf("PackTreeManifest: %v", err)
+	}
+	scan, err := Scan(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertManifestHashesEqual(t, scan, hashed)
+}
+
+// TestExtractReplacesStaleParent covers a remote type change: a path that was a
+// regular file or a symlink locally is now a directory. The stale local entry must be
+// cleared so extraction can create the directory, instead of aborting on MkdirAll
+// (ENOTDIR for a file) or refuseSymlinkParents (for a symlink).
+func TestExtractReplacesStaleParent(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "data/inner.txt", []byte("hello"))
+	ck := testContentKey(t)
+	store := memObjects{}
+	root, _, err := TarAndSeal(src, ck, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stale := range []string{"file", "symlink"} {
+		t.Run(stale, func(t *testing.T) {
+			dst := t.TempDir()
+			switch stale {
+			case "file":
+				writeFile(t, dst, "data", []byte("stale file where a dir must go"))
+			case "symlink":
+				if err := os.Symlink("somewhere", filepath.Join(dst, "data")); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
+			if _, err := ExtractToTree(dst, root, ck, store.get); err != nil {
+				t.Fatalf("extract over stale %s: %v", stale, err)
+			}
+			got, err := os.ReadFile(filepath.Join(dst, "data", "inner.txt"))
+			if err != nil || string(got) != "hello" {
+				t.Fatalf("inner.txt not extracted over stale %s: got=%q err=%v", stale, got, err)
+			}
+		})
+	}
+}
+
 func assertManifestHashesEqual(t *testing.T, want, got Manifest) {
 	t.Helper()
 	wp, gp := want.byPath(), got.byPath()
