@@ -146,6 +146,18 @@ func Scan(dir string) (Manifest, error) {
 	return m, err
 }
 
+// ListPaths returns the relative slash path of every tracked file and symlink under
+// dir, honoring .aqtignore. It is the hash-free walk a prune needs: unlike Scan it
+// reads no file content, so it is cheap on a large tree.
+func ListPaths(dir string) ([]string, error) {
+	var paths []string
+	err := walkFiles(dir, func(n fileNode) error {
+		paths = append(paths, n.rel)
+		return nil
+	})
+	return paths, err
+}
+
 // Fingerprint summarizes the tracked tree from metadata only — path, size,
 // mtime, mode, and symlink target — without reading any file contents. It is the
 // watch daemon's cheap change detector: one lstat per file instead of a full

@@ -237,6 +237,41 @@ func TestPackRootDoesNotCrossOpenAsManifest(t *testing.T) {
 	}
 }
 
+// TestPackTreeManifestMatchesScan verifies the in-memory compare path: hashing a
+// sealed tree straight from its segments yields the same manifest a direct Scan of the
+// source does, so remoteEqualsLocal can decide tree equality without materializing the
+// remote to disk and deleting it.
+func TestPackTreeManifestMatchesScan(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "a.txt", []byte("hello"))
+	writeFile(t, src, "nested/b.txt", []byte("nested body"))
+	big := make([]byte, segTarget+777) // spans more than one segment
+	for i := range big {
+		big[i] = byte(i)
+	}
+	writeFile(t, src, "big.bin", big)
+	if err := os.Symlink("a.txt", filepath.Join(src, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	ck := testContentKey(t)
+	store := memObjects{}
+	root, _, err := TarAndSeal(src, ck, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	hashed, err := PackTreeManifest(root, ck, store.get)
+	if err != nil {
+		t.Fatalf("PackTreeManifest: %v", err)
+	}
+	scan, err := Scan(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertManifestHashesEqual(t, scan, hashed)
+}
+
 // TestExtractReplacesStaleParent covers a remote type change: a path that was a
 // regular file or a symlink locally is now a directory. The stale local entry must be
 // cleared so extraction can create the directory, instead of aborting on MkdirAll

@@ -353,6 +353,13 @@ func runSync(dir string, opts syncOptions) error {
 		}, actions)
 	}
 
+	return reconcileWithRetry(reconcile)
+}
+
+// reconcileWithRetry runs one reconcile pass, retrying against the fresh remote on a
+// version conflict (another sync committed first), up to maxSyncAttempts before giving
+// up. The conflict retry is how a concurrent write is re-planned rather than lost.
+func reconcileWithRetry(reconcile func() error) error {
 	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
 		err := reconcile()
 		if errors.Is(err, client.ErrConflict) {
@@ -582,11 +589,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		if err != nil {
 			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
 		}
-		src, err := newPackSource(cl, root.SegmentIDs())
-		if err != nil {
-			return syncengine.Manifest{}, err
-		}
-		base, err := syncengine.ExtractToTree(abs, root, ck, src.get)
+		base, err := extractPack(cl, abs, root, ck)
 		if err != nil {
 			return syncengine.Manifest{}, err
 		}

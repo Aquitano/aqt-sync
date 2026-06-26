@@ -246,10 +246,11 @@ func (s *segmentSink) finish() error {
 	return err
 }
 
-// ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
-// it under dir, streaming so neither the tarball nor any file is held whole in memory.
-// Returns the manifest of what it wrote, for the caller to record as base and prune by.
-func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+// segmentReader streams the reassembled tarball, fetching, verifying, and decrypting
+// each segment as it goes so neither the tarball nor any file is held whole in memory.
+// The caller drains the reader and closes it (CloseWithError on an early exit) to
+// release the producer goroutine.
+func segmentReader(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) *io.PipeReader {
 	pr, pw := io.Pipe()
 	go func() {
 		for _, seg := range root.Segments {
@@ -270,6 +271,14 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 		}
 		pw.Close()
 	}()
+	return pr
+}
+
+// ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
+// it under dir, streaming so neither the tarball nor any file is held whole in memory.
+// Returns the manifest of what it wrote, for the caller to record as base and prune by.
+func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+	pr := segmentReader(root, ck, fetch)
 	m, err := extractTar(newTreeWriter(dir), pr)
 	if err != nil {
 		pr.CloseWithError(err) // unblock the writer if extraction bailed early
@@ -281,6 +290,49 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 	pr.Close()
 	sortEntries(m.Entries)
 	return m, nil
+}
+
+// PackTreeManifest reconstructs a pack-and-seal tree's manifest (paths, sizes, hashes,
+// link targets) by streaming its segments and hashing each file in place, writing
+// nothing to disk. It is the read-only counterpart to ExtractToTree, for deciding
+// whether a remote tree equals the local one without materializing and deleting it.
+func PackTreeManifest(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+	pr := segmentReader(root, ck, fetch)
+	m, err := hashTar(pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		return Manifest{}, err
+	}
+	pr.Close()
+	sortEntries(m.Entries)
+	return m, nil
+}
+
+// hashTar reads a tar stream into the manifest of its regular files and symlinks,
+// hashing content as it streams and writing nothing; the read-only counterpart to
+// extractTar.
+func hashTar(r io.Reader) (Manifest, error) {
+	var m Manifest
+	tr := tar.NewReader(r)
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return m, nil
+		}
+		if err != nil {
+			return Manifest{}, err
+		}
+		switch hdr.Typeflag {
+		case tar.TypeSymlink:
+			m.Entries = append(m.Entries, Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)})
+		case tar.TypeReg, tar.TypeRegA:
+			h := sha256.New()
+			if _, err := io.Copy(h, tr); err != nil {
+				return Manifest{}, err
+			}
+			m.Entries = append(m.Entries, Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size, Hash: hex.EncodeToString(h.Sum(nil))})
+		}
+	}
 }
 
 // extractTar writes every regular file and symlink the archive carries and returns
