@@ -25,8 +25,7 @@ type lsRow struct {
 }
 
 func lsCmd() *cobra.Command {
-	var asJSON bool
-	cmd := &cobra.Command{
+	return &cobra.Command{
 		Use:   "ls",
 		Short: "List your resources with decrypted names and sizes",
 		Args:  cobra.NoArgs,
@@ -45,7 +44,7 @@ func lsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if asJSON {
+			if flagJSON {
 				return printJSON(rows)
 			}
 			if len(rows) == 0 {
@@ -60,8 +59,6 @@ func lsCmd() *cobra.Command {
 			return w.Flush()
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "output as JSON")
-	return cmd
 }
 
 // collectResources lists the owner's resources and decrypts each one's metadata

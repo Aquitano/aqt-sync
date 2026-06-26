@@ -50,7 +50,6 @@ func pushCmd() *cobra.Command {
 	f.StringVarP(&opts.password, "password", "P", "", "password-gate a public link (implies --public)")
 	f.StringVarP(&opts.name, "name", "n", "", "label shown in `aqt ls` (encrypted)")
 	f.BoolVar(&opts.noClip, "no-clip", false, "do not copy the result to the clipboard")
-	f.BoolVarP(&opts.quiet, "quiet", "q", false, "print only the resulting ref/URL")
 	return cmd
 }
 
@@ -220,7 +219,9 @@ func buildRef(server, id string, vis api.Visibility, ck crypto.ContentKey, passw
 }
 
 func printResult(ref, name string, size int64, vis api.Visibility, opts pushOptions) {
-	if opts.quiet {
+	// The global -q/--quiet drives the CLI; opts.quiet keeps programmatic callers
+	// (the bare-path push, tests) able to request it directly.
+	if flagQuiet || opts.quiet {
 		fmt.Println(ref)
 		return
 	}

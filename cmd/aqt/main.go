@@ -23,6 +23,10 @@ import (
 
 const defaultServer = "http://localhost:8080"
 
+// version is reported by `aqt --version` / `-V`, overridable at build time via
+// -ldflags "-X main.version=...".
+var version = "0.1.0-dev"
+
 // defaultSessionTTL bounds how long the unlocked master key stays cached after a
 // passphrase prompt. `aqt login --ttl` overrides it; `aqt logout` clears it.
 const defaultSessionTTL = 8 * time.Hour
@@ -40,6 +44,9 @@ var errSessionRequired = errors.New("no unlocked session and no passphrase provi
 var (
 	flagServer  string
 	flagProfile string
+	flagJSON    bool
+	flagQuiet   bool
+	flagVerbose bool
 )
 
 func main() {
@@ -96,9 +103,19 @@ func rootCmd() *cobra.Command {
 	}
 	root.PersistentFlags().StringVar(&flagServer, "server", "", "server URL override")
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
+	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "output as JSON")
+	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
+	// Accepted on every command; verbose diagnostics are currently minimal.
+	root.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "verbose output")
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
+
+	// root.Version makes cobra print the version when the flag is set; we register
+	// the flag ourselves so it carries the documented -V shorthand (cobra's own
+	// default has no shorthand once --verbose has claimed -v).
+	root.Version = version
+	root.Flags().BoolP("version", "V", false, "version for aqt")
 	return root
 }
 
