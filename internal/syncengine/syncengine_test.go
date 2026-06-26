@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -159,6 +160,11 @@ func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
 // content re-read, and the planner must surface it as an Upload despite an unchanged
 // content hash.
 func TestModeOnlyChangeSnapshottedAndPlanned(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// Windows file modes carry no exec/group permission bits, so chmod cannot
+		// move a file's recorded mode here; mode propagation is a Unix-only concern.
+		t.Skip("file mode bits are not represented on Windows")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.bin")
 	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("chmodme"), 32<<10)) // large -> chunked
