@@ -51,6 +51,34 @@ func configDir() (string, error) {
 	return filepath.Join(base, "aqt"), nil
 }
 
+// writeFileAtomic writes data to a temp file in path's directory, fsyncs it, and
+// renames it over path, so a crash mid-write leaves the old profile or session
+// cache intact rather than a torn one that breaks auth.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".aqt-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Load reads a profile by name (empty means the default).
 func Load(name string) (*Profile, error) {
 	if name == "" {
@@ -90,7 +118,7 @@ func Save(p *Profile) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, p.Name+".json"), b, 0o600)
+	return writeFileAtomic(filepath.Join(dir, p.Name+".json"), b, 0o600)
 }
 
 // --- session cache ---
@@ -201,7 +229,7 @@ func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o600)
+	return writeFileAtomic(path, b, 0o600)
 }
 
 // LoadSession returns the cached master key if present and unexpired. An expired
