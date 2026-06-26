@@ -33,6 +33,7 @@ type Profile struct {
 	OwnerHandle string           `json:"ownerHandle"`
 	DeviceID    string           `json:"deviceId"`
 	Token       string           `json:"token"`
+	Fingerprint string           `json:"fingerprint,omitempty"`
 	Kdf         crypto.KdfParams `json:"kdf"`
 }
 

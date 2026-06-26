@@ -21,6 +21,22 @@ func isolateConfigDir(t *testing.T) {
 	t.Setenv("HOME", dir)
 }
 
+func TestProfileRoundTripPreservesFingerprint(t *testing.T) {
+	isolateConfigDir(t)
+
+	want := &Profile{Email: "a@example.com", DeviceID: "dev1", Fingerprint: "SHA256:abc123"}
+	if err := Save(want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fingerprint != want.Fingerprint {
+		t.Fatalf("fingerprint not preserved: got %q want %q", got.Fingerprint, want.Fingerprint)
+	}
+}
+
 func TestSessionCacheRoundTrip(t *testing.T) {
 	isolateConfigDir(t)
 

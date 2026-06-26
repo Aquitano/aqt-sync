@@ -3,6 +3,7 @@ package crypto
 import (
 	"bytes"
 	"crypto/ed25519"
+	"strings"
 	"testing"
 )
 
@@ -32,6 +33,27 @@ func TestDeriveSigningKeyDeterministicAndVerifiable(t *testing.T) {
 	other := DeriveSigningKey(mustDerive(t, "different passphrase", params))
 	if ed25519.Verify(other.Public().(ed25519.PublicKey), msg, sig) {
 		t.Fatal("signature must not verify under a different key")
+	}
+}
+
+func TestKeyFingerprintStableAndKeyDependent(t *testing.T) {
+	params, err := NewKdfParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub := DeriveSigningKey(mustDerive(t, "first passphrase", params)).Public().(ed25519.PublicKey)
+
+	fp := KeyFingerprint(pub)
+	if fp != KeyFingerprint(pub) {
+		t.Fatal("same key must produce the same fingerprint")
+	}
+	if !strings.HasPrefix(fp, "SHA256:") {
+		t.Fatalf("fingerprint must carry the SHA256: prefix, got %q", fp)
+	}
+
+	other := DeriveSigningKey(mustDerive(t, "second passphrase", params)).Public().(ed25519.PublicKey)
+	if KeyFingerprint(other) == fp {
+		t.Fatal("different keys must produce different fingerprints")
 	}
 }
 
