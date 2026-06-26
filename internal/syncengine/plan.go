@@ -101,8 +101,9 @@ func PlanReconcile(local, remote Manifest) []Action {
 	return actions
 }
 
-// changed reports whether an entry differs from its base (added, removed, or
-// content-changed).
+// changed reports whether an entry differs from its base (added, removed,
+// content-changed, or mode-changed). Mode is a synced attribute, so a
+// permission-only edit is a real change even when the content hash matches.
 func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 	if curOK != baseOK {
 		return true
@@ -110,5 +111,5 @@ func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 	if !curOK {
 		return false
 	}
-	return cur.Hash != base.Hash
+	return cur.Hash != base.Hash || cur.Mode != base.Mode
 }
