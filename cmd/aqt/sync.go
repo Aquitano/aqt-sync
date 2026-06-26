@@ -846,21 +846,24 @@ func (c *packCache) touch(id string) {
 	c.order = append(c.order, id)
 }
 
-// partitionDeletesByDownload splits local deletes into those that clear a path some
-// download must create a directory at (a file/symlink → directory type change; run
-// before downloads) and the rest (run after downloads, so local data is never removed
-// before its replacement lands).
+// partitionDeletesByDownload splits local deletes into those a download must clear
+// out of its way (run before downloads) and the rest (run after, so local data is
+// never removed before its replacement lands). A delete races a download when their
+// paths nest either way: the delete is an ancestor of a download (a file/symlink the
+// remote turned into a directory, so the directory cannot be created until it is
+// gone), or the delete is a descendant of a download (a directory the remote turned
+// into a file, so the file cannot be materialized until the directory is emptied).
 func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry) (early, late []string) {
 	for _, d := range deletes {
-		prefix := d + "/"
-		isAncestor := false
+		deletePrefix := d + "/"
+		races := false
 		for _, e := range downloads {
-			if strings.HasPrefix(e.Path, prefix) {
-				isAncestor = true
+			if strings.HasPrefix(e.Path, deletePrefix) || strings.HasPrefix(d, e.Path+"/") {
+				races = true
 				break
 			}
 		}
-		if isAncestor {
+		if races {
 			early = append(early, d)
 		} else {
 			late = append(late, d)
