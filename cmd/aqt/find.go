@@ -38,10 +38,7 @@ type findEntry struct {
 }
 
 func findCmd() *cobra.Command {
-	var (
-		asJSON bool
-		noFzf  bool
-	)
+	var noFzf bool
 	cmd := &cobra.Command{
 		Use:   "find [query]",
 		Short: "Fuzzy-search all your files and folder contents (via fzf)",
@@ -51,10 +48,9 @@ func findCmd() *cobra.Command {
 			"Without a terminal or fzf, the index is printed as a table instead.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runFind(strings.Join(args, " "), asJSON, noFzf)
+			return runFind(strings.Join(args, " "), flagJSON, noFzf)
 		},
 	}
-	cmd.Flags().BoolVar(&asJSON, "json", false, "print the index as JSON instead of opening fzf")
 	cmd.Flags().BoolVar(&noFzf, "no-fzf", false, "print the index as a table instead of opening fzf")
 	return cmd
 }
