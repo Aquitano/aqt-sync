@@ -423,6 +423,28 @@ func TestWriteFileReplacesStaleSymlinkInsteadOfFollowing(t *testing.T) {
 	}
 }
 
+func TestWriteFileReplacesEmptyDirectoryWithFile(t *testing.T) {
+	root := t.TempDir()
+	// The remote turned a directory into a regular file at the same path; once its
+	// children are deleted an empty directory remains, and Rename cannot replace it.
+	if err := os.MkdirAll(filepath.Join(root, "foo"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteFile(root, Entry{Path: "foo", Mode: 0o600}, []byte("now a file")); err != nil {
+		t.Fatalf("write over empty dir: %v", err)
+	}
+	fi, err := os.Lstat(filepath.Join(root, "foo"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fi.Mode().IsRegular() {
+		t.Fatalf("foo is %v, want a regular file", fi.Mode())
+	}
+	if got, _ := os.ReadFile(filepath.Join(root, "foo")); string(got) != "now a file" {
+		t.Fatalf("foo content = %q, want now a file", got)
+	}
+}
+
 func TestWriteFileLeavesNoTempBehind(t *testing.T) {
 	dir := t.TempDir()
 	if err := WriteFile(dir, Entry{Path: "nested/file.txt", Mode: 0o640}, []byte("payload")); err != nil {
