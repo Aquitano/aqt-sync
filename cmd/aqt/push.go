@@ -51,8 +51,6 @@ func pushCmd() *cobra.Command {
 	f.StringVarP(&opts.password, "password", "P", "", "password-gate a public link (implies --public)")
 	f.StringVarP(&opts.name, "name", "n", "", "label shown in `aqt ls` (encrypted)")
 	f.BoolVar(&opts.noClip, "no-clip", false, "do not copy the result to the clipboard")
-	f.BoolVarP(&opts.quiet, "quiet", "q", false, "print only the resulting ref/URL")
-	f.BoolVar(&opts.json, "json", false, "output as JSON")
 	return cmd
 }
 
@@ -248,11 +246,13 @@ func buildPushJSON(id, link, name string, size int64, vis api.Visibility) pushJS
 }
 
 func printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) {
-	if opts.json {
+	// The global --json/-q drive the CLI; the opts fields keep programmatic callers
+	// (the bare-path push, tests) able to request them directly.
+	if flagJSON || opts.json {
 		printJSON(buildPushJSON(id, ref, name, size, vis))
 		return
 	}
-	if opts.quiet {
+	if flagQuiet || opts.quiet {
 		fmt.Println(ref)
 		return
 	}
