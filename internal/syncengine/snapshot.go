@@ -318,11 +318,14 @@ func unchangedStat(prev, cur Entry) bool {
 	return prev.MTime != 0 && prev.MTime == cur.MTime && prev.Size == cur.Size && prev.Mode == cur.Mode
 }
 
-// touchedReuse reuses prev's content (chunks/inline/hash) but adopts cur's mtime, so a
-// file touched without a content change records its new mtime in the manifest and the
-// next sync stat-fast-paths it instead of re-hashing forever.
+// touchedReuse reuses prev's content (chunks/inline/hash) but adopts cur's mtime and
+// mode, so a file touched without a content change records its new mtime in the manifest
+// and the next sync stat-fast-paths it instead of re-hashing forever. Mode is a synced
+// attribute, so a permission-only change (e.g. chmod +x) must carry through here even
+// though the content read was skipped — otherwise the new mode is lost before upload.
 func touchedReuse(prev, cur Entry) Entry {
 	prev.MTime = cur.MTime
+	prev.Mode = cur.Mode
 	return prev
 }
 
