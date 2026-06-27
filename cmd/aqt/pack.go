@@ -89,6 +89,7 @@ func reconcilePack(c packCtx) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
+	defer ck.Wipe()
 	meta, err := decodeMeta(res.EncryptedMeta, ck)
 	if err != nil {
 		return err

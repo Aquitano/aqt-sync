@@ -76,6 +76,7 @@ func runPush(path string, opts pushOptions) error {
 	if err != nil {
 		return err
 	}
+	defer ck.Wipe()
 	blob, err := crypto.Seal(data, ck, crypto.AADBlob)
 	if err != nil {
 		return err
@@ -145,6 +146,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return err
 	}
+	defer ck.Wipe()
 
 	f, err := os.Open(path)
 	if err != nil {

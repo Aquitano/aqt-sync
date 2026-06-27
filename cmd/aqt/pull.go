@@ -77,6 +77,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	if err != nil {
 		return err
 	}
+	defer ck.Wipe()
 
 	meta, err := decodeMeta(res.EncryptedMeta, ck)
 	if err != nil {

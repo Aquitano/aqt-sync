@@ -47,6 +47,13 @@ func (k *MasterKey) Wipe() {
 	}
 }
 
+// Wipe best-effort zeroes the content key (see MasterKey.Wipe for the caveats).
+func (k *ContentKey) Wipe() {
+	for i := range k {
+		k[i] = 0
+	}
+}
+
 // KdfParams are the Argon2id inputs. They are public: the salt and cost
 // parameters are stored server-side (per account) and embedded in gated share
 // links so the same key can be re-derived on any machine from the passphrase.

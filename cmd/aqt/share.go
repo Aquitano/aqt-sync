@@ -59,6 +59,7 @@ func runShare(idArg, password string, noClip bool) error {
 	if err != nil {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
+	defer ck.Wipe()
 	// A streamed file's objects live in the owner-only pack store, so a public reader
 	// could not fetch them even with the link key.
 	meta, err := decodeMeta(res.EncryptedMeta, ck)
@@ -123,6 +124,7 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
+	defer oldCK.Wipe()
 	plaintext, err := crypto.Open(res.Blob, oldCK, crypto.AADBlob)
 	if err != nil {
 		return fmt.Errorf("decrypt: %w", err)
@@ -138,6 +140,7 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
+	defer newCK.Wipe()
 	blob, err := crypto.Seal(plaintext, newCK, crypto.AADBlob)
 	if err != nil {
 		return err
