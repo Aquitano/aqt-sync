@@ -234,15 +234,16 @@ func TestDecidePack(t *testing.T) {
 }
 
 func TestPartitionDeletesByDownload(t *testing.T) {
-	downloads := []syncengine.Entry{{Path: "link/inner.txt"}, {Path: "a/b/c.txt"}, {Path: "top.txt"}}
-	deletes := []string{"link", "a/b", "top.txt", "unrelated"}
+	downloads := []syncengine.Entry{{Path: "link/inner.txt"}, {Path: "a/b/c.txt"}, {Path: "top.txt"}, {Path: "foo"}}
+	deletes := []string{"link", "a/b", "top.txt", "unrelated", "foo/x", "foo/y"}
 
 	early, late := partitionDeletesByDownload(deletes, downloads)
 
 	// "link" and "a/b" are ancestors of a download path (a file/symlink became a dir),
-	// so they run first. "top.txt" equals a download path but is not an ancestor (a file
-	// replaced by a file, handled by rename), and "unrelated" matches nothing.
-	wantEarly := map[string]bool{"link": true, "a/b": true}
+	// and "foo/x"/"foo/y" are descendants of the download "foo" (a directory became a
+	// file), so all run first. "top.txt" equals a download path but does not nest with
+	// it (a file replaced by a file, handled by rename), and "unrelated" matches nothing.
+	wantEarly := map[string]bool{"link": true, "a/b": true, "foo/x": true, "foo/y": true}
 	for _, p := range early {
 		if !wantEarly[p] {
 			t.Errorf("unexpected early delete %q", p)

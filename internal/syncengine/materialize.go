@@ -170,6 +170,15 @@ func materializeAt(full string, mode os.FileMode, prepare func() error, write fu
 	if err := os.Chmod(tmpName, mode); err != nil {
 		return err
 	}
+	// A remote directory->file replacement leaves an emptied directory at full once
+	// its children are deleted; Rename refuses to replace a directory (EISDIR/ENOTEMPTY)
+	// even an empty one, so drop it first. Only an empty directory is removed, so a
+	// directory still holding data is never silently destroyed.
+	if fi, err := os.Lstat(full); err == nil && fi.IsDir() {
+		if err := os.Remove(full); err != nil {
+			return err
+		}
+	}
 	return os.Rename(tmpName, full)
 }
 
