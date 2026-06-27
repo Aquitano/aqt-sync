@@ -139,6 +139,7 @@ func runInit(dir string) error {
 	if err != nil {
 		return err
 	}
+	defer ck.Wipe()
 	manifest := syncengine.Manifest{Version: 1}
 	var resp api.PutResourceResponse
 	if cfg.Pack {
@@ -318,6 +319,7 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return fmt.Errorf("unwrap folder key: %w", err)
 		}
+		defer ck.Wipe()
 		// Route by the server's truth, not just local .aqtconfig: a pack-and-seal folder
 		// reconciled as chunked would read an empty manifest and delete the whole tree.
 		// Refuse it instead. (AAD domain separation also makes the manifest read below
@@ -537,6 +539,7 @@ func runClone(ref, dir string) error {
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
+	defer ck.Wipe()
 	meta, err := decodeMeta(res.EncryptedMeta, ck)
 	if err != nil {
 		return err

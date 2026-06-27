@@ -2,7 +2,11 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
+
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
 func convKey(t *testing.T, pass string) ConvergenceKey {
@@ -102,5 +106,32 @@ func TestOpenChunkRejectsWrongKey(t *testing.T) {
 	ch.Key = wrong.Key // valid-length key, wrong value
 	if _, err := OpenChunk(ct, ch); err == nil {
 		t.Fatal("wrong key must fail the AEAD tag check")
+	}
+}
+
+// OpenChunk must reject a ciphertext sealed under the same key+nonce but without the
+// chunk AAD, proving the domain-separation tag is actually bound (a chunk's bytes
+// cannot be reinterpreted as another sealed role).
+func TestOpenChunkRejectsMissingAAD(t *testing.T) {
+	conv := convKey(t, "aad account")
+	plaintext := []byte("bytes sealed without the chunk aad")
+
+	// Re-derive the exact chunk key SealChunk would use, then seal with nil AAD.
+	_, ch, err := SealChunk(plaintext, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := chacha20poly1305.NewX(ch.Key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	noAAD := aead.Seal(nil, chunkNonce[:], plaintext, nil)
+
+	// Address the crafted ciphertext so it passes the id check and the AEAD tag is the
+	// only thing left to reject it.
+	sum := sha256.Sum256(noAAD)
+	id := hex.EncodeToString(sum[:])
+	if _, err := OpenChunk(noAAD, Chunk{ID: id, Key: ch.Key, Len: len(plaintext)}); err == nil {
+		t.Fatal("a chunk sealed without the domain-separation AAD must not open")
 	}
 }

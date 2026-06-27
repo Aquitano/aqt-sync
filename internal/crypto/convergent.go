@@ -54,6 +54,13 @@ type Chunk struct {
 // encrypts the same bytes, so no two distinct messages share a key+nonce.
 var chunkNonce [NonceSize]byte
 
+// aadChunk domain-separates a convergent chunk's AEAD from the other ciphertext
+// roles (AADBlob/AADMeta/key wraps), the same way those tags do, so a chunk's bytes
+// can never be reinterpreted as another kind of sealed payload. It is a constant, so
+// it does not disturb convergence: the same plaintext still seals to the same
+// ciphertext (and thus the same dedup id).
+var aadChunk = []byte("aqt-chunk-aad-v1")
+
 // deriveChunkKey binds the plaintext and the account secret into a unique key.
 func deriveChunkKey(conv ConvergenceKey, plaintext []byte) [KeySize]byte {
 	salt := sha256.Sum256(plaintext)
@@ -73,7 +80,7 @@ func SealChunk(plaintext []byte, conv ConvergenceKey) (ciphertext []byte, ch Chu
 	if err != nil {
 		return nil, Chunk{}, err
 	}
-	ciphertext = aead.Seal(nil, chunkNonce[:], plaintext, nil)
+	ciphertext = aead.Seal(nil, chunkNonce[:], plaintext, aadChunk)
 	sum := sha256.Sum256(ciphertext)
 	return ciphertext, Chunk{
 		ID:  hex.EncodeToString(sum[:]),
@@ -96,7 +103,7 @@ func OpenChunk(ciphertext []byte, ch Chunk) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := aead.Open(nil, chunkNonce[:], ciphertext, nil)
+	plaintext, err := aead.Open(nil, chunkNonce[:], ciphertext, aadChunk)
 	if err != nil {
 		return nil, err
 	}

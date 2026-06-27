@@ -21,6 +21,7 @@ func openMetadata(it api.ResourceListItem, mk crypto.MasterKey) (m api.Metadata,
 	if err != nil {
 		return api.Metadata{}, false
 	}
+	defer ck.Wipe()
 	plain, err := crypto.Open(it.EncryptedMeta, ck, crypto.AADMeta)
 	if err != nil {
 		return api.Metadata{}, false

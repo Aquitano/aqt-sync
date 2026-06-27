@@ -216,6 +216,17 @@ func TestWrapUnwrapRoundTrip(t *testing.T) {
 	}
 }
 
+func TestContentKeyWipe(t *testing.T) {
+	ck, err := GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck.Wipe()
+	if ck != (ContentKey{}) {
+		t.Fatal("Wipe must zero the content key")
+	}
+}
+
 func TestFragmentPublicRoundTrip(t *testing.T) {
 	ck, _ := GenerateContentKey()
 	frag, err := EncodeFragment(ck, "")
