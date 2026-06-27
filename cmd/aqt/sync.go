@@ -1220,13 +1220,16 @@ func reclaimPacks(root string, cl *client.Client) {
 	if stateOK && st.LastGC > 0 && time.Since(time.Unix(st.LastGC, 0)) < gcMinInterval {
 		return
 	}
-	n, freed, err := cl.GC()
+	r, err := cl.GC()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: pack GC failed: %v\n", err)
 		return
 	}
-	if n > 0 {
-		fmt.Fprintf(os.Stderr, "reclaimed %d packs (%d bytes)\n", n, freed)
+	if r.DeletedPacks > 0 {
+		fmt.Fprintf(os.Stderr, "reclaimed %d packs (%d bytes)\n", r.DeletedPacks, r.FreedBytes)
+	}
+	if r.RepackedPacks > 0 {
+		fmt.Fprintf(os.Stderr, "compacted %d packs (%d bytes)\n", r.RepackedPacks, r.ReclaimedBytes)
 	}
 	// Only record the sweep if state was readable, so a transient read error GCs
 	// unthrottled next time rather than clobbering state.json with a partial record.

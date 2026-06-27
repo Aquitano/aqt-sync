@@ -151,11 +151,14 @@ type PutPackResponse struct {
 	StoredObjects int `json:"storedObjects"`
 }
 
-// GCResponse reports a pack-level sweep: how many fully-dead packs were deleted and
-// how many bytes that reclaimed.
+// GCResponse reports a pack maintenance run: how many fully-dead packs were swept
+// (DeletedPacks/FreedBytes) and how many partially-dead packs were compacted by
+// copying their live objects into fresh packs (RepackedPacks/ReclaimedBytes).
 type GCResponse struct {
-	DeletedPacks int   `json:"deletedPacks"`
-	FreedBytes   int64 `json:"freedBytes"`
+	DeletedPacks   int   `json:"deletedPacks"`
+	FreedBytes     int64 `json:"freedBytes"`
+	RepackedPacks  int   `json:"repackedPacks,omitempty"`
+	ReclaimedBytes int64 `json:"reclaimedBytes,omitempty"`
 }
 
 type PutResourceResponse struct {
