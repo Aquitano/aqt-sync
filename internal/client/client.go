@@ -159,12 +159,12 @@ func (c *Client) GetPackRange(packID string, off, length int64) ([]byte, error) 
 	return c.getRange("/v1/packs/"+url.PathEscape(packID), off, length)
 }
 
-// GC asks the server to sweep the owner's fully-dead packs, returning the pack
-// count and bytes reclaimed.
-func (c *Client) GC() (deletedPacks int, freedBytes int64, err error) {
+// GC asks the server to sweep the owner's fully-dead packs and compact the dead
+// objects trapped in still-live ones, returning what each step reclaimed.
+func (c *Client) GC() (api.GCResponse, error) {
 	var r api.GCResponse
-	err = c.do(http.MethodPost, "/v1/gc", nil, &r)
-	return r.DeletedPacks, r.FreedBytes, err
+	err := c.do(http.MethodPost, "/v1/gc", nil, &r)
+	return r, err
 }
 
 // putRaw uploads an opaque body as application/octet-stream (the pack transport),

@@ -151,8 +151,28 @@ func TestPackStoreRoundTripAndGC(t *testing.T) {
 	}
 }
 
-// A pack whose objects are partly referenced survives entirely (v1 keeps dead
-// objects inside a live pack), and the pack file remains readable.
+// readLocated resolves an object to its current pack and returns the bytes that pack
+// holds for it, so a test can confirm a moved object's ciphertext survived intact.
+func (s *Store) readLocated(t *testing.T, owner, id string) []byte {
+	t.Helper()
+	locs, err := s.LocateObjects(owner, []string{id})
+	if err != nil || len(locs) != 1 {
+		t.Fatalf("locate %s: %+v err=%v", id, locs, err)
+	}
+	loc := locs[0]
+	data, err := os.ReadFile(s.packPath(owner, loc.PackID))
+	if err != nil {
+		t.Fatalf("read pack %s: %v", loc.PackID, err)
+	}
+	if loc.Off < 0 || loc.Off+loc.Len > int64(len(data)) {
+		t.Fatalf("located slice [%d,%d) escapes pack of %d bytes", loc.Off, loc.Off+loc.Len, len(data))
+	}
+	return data[loc.Off : loc.Off+loc.Len]
+}
+
+// GCPacks alone keeps dead objects inside a still-live pack; RepackOwner is what
+// reclaims them (see TestRepackCompactsPartiallyDeadPack). The pack file stays
+// readable here because only GCPacks runs.
 func TestPartiallyReferencedPackSurvives(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "partial@example.com")
@@ -171,6 +191,92 @@ func TestPartiallyReferencedPackSurvives(t *testing.T) {
 	// The dead object is still locatable (dead space, not yet repacked).
 	if locs, _ := s.LocateObjects(owner, []string{ids[1]}); len(locs) != 1 {
 		t.Fatal("dead object inside a live pack should still resolve")
+	}
+}
+
+// RepackOwner compacts a pack that mixes live and dead objects: the live object is
+// copied into a fresh pack and still decrypts, the dead object is dropped, and the
+// old pack file is removed.
+func TestRepackCompactsPartiallyDeadPack(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "repack@example.com")
+	livePayload := "live-object-keep"
+	deadPayload := strings.Repeat("dead", 64) // 256 bytes of soon-to-be-reclaimed space
+	packID, data, ids := packOf(livePayload, deadPayload)
+	if _, err := s.PutPack(owner, packID, data); err != nil {
+		t.Fatal(err)
+	}
+	s.rootResource(t, owner, []string{ids[0]}) // only the first object is live
+
+	// GC alone cannot reclaim the dead bytes: the pack is still partly live.
+	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 0 {
+		t.Fatalf("gc deleted %d err=%v, want 0", deleted, err)
+	}
+
+	repacked, reclaimed, err := s.RepackOwner(owner, forceGC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repacked != 1 || reclaimed <= 0 {
+		t.Fatalf("repack = %d packs / %d bytes, want 1 / >0", repacked, reclaimed)
+	}
+
+	// The live object survives and still decrypts to its original ciphertext, so the
+	// resource that roots it still resolves.
+	if got := s.readLocated(t, owner, ids[0]); string(got) != livePayload {
+		t.Fatalf("live object after repack = %q, want %q", got, livePayload)
+	}
+	if missing, _ := s.MissingChunks(owner, []string{ids[0]}); len(missing) != 0 {
+		t.Fatal("rooted object must survive repack")
+	}
+	// The dead object is dropped.
+	if missing, _ := s.MissingChunks(owner, []string{ids[1]}); len(missing) != 1 {
+		t.Fatal("dead object must be dropped by repack")
+	}
+	// The old sparse pack file is gone.
+	if _, err := os.Stat(s.packPath(owner, packID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("old pack file should be removed, stat err=%v", err)
+	}
+	// The compacted pack carries no dead objects, so a second pass is a no-op.
+	if r2, _, err := s.RepackOwner(owner, forceGC); err != nil || r2 != 0 {
+		t.Fatalf("second repack = %d err=%v, want 0 (pack is dense now)", r2, err)
+	}
+}
+
+// A pack with no dead objects is never rewritten, even with the age guard disabled.
+func TestRepackLeavesFullyLivePack(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "dense@example.com")
+	packID, data, ids := packOf("aaaa", "bbbb")
+	if _, err := s.PutPack(owner, packID, data); err != nil {
+		t.Fatal(err)
+	}
+	s.rootResource(t, owner, ids) // both objects live
+
+	if repacked, _, err := s.RepackOwner(owner, forceGC); err != nil || repacked != 0 {
+		t.Fatalf("repack = %d err=%v, want 0 (no dead objects)", repacked, err)
+	}
+	if _, err := os.Stat(s.packPath(owner, packID)); err != nil {
+		t.Fatalf("fully-live pack must remain: %v", err)
+	}
+}
+
+// Repack honors the same age guard as the sweep, so a pack uploaded moments ago (its
+// manifest may still be committing) is left untouched.
+func TestRepackHonorsAgeGuard(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "young@example.com")
+	packID, data, ids := packOf("keep", strings.Repeat("dead", 64))
+	if _, err := s.PutPack(owner, packID, data); err != nil {
+		t.Fatal(err)
+	}
+	s.rootResource(t, owner, []string{ids[0]})
+
+	if repacked, _, err := s.RepackOwner(owner, gcMinAge); err != nil || repacked != 0 {
+		t.Fatalf("repack = %d err=%v, want 0 (pack younger than the guard)", repacked, err)
+	}
+	if _, err := os.Stat(s.packPath(owner, packID)); err != nil {
+		t.Fatalf("young pack must be left intact: %v", err)
 	}
 }
 

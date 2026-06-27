@@ -1083,6 +1083,299 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 	return len(dead), freed, nil
 }
 
+// repackMaxLiveFraction bounds which packs RepackOwner rewrites: a pack whose live
+// bytes are more than this fraction of its size is left alone, since rewriting a
+// nearly-full pack to reclaim a sliver of dead space costs more IO than it frees.
+const repackMaxLiveFraction = 0.5
+
+// repackBudgetBytes caps the live bytes RepackOwner copies per call, so one GC (a
+// sync triggers it) never rewrites an unbounded amount of data; the next call picks
+// up where this one stopped.
+const repackBudgetBytes = 64 << 20
+
+// liveObj is one root-referenced object inside a pack: its content id and its byte
+// slice in that pack.
+type liveObj struct {
+	id          string
+	off, length int64
+}
+
+// repackCand is a pack worth compacting: it holds both live and dead objects, so
+// GCPacks (which only sweeps fully-dead packs) cannot reclaim its dead bytes.
+type repackCand struct {
+	packID    string
+	length    int64
+	liveBytes int64
+	live      []liveObj // in ascending offset order
+}
+
+// RepackOwner compacts the owner's partially-dead packs. GCPacks reclaims a pack only
+// when none of its objects is rooted; a pack that mixes live and dead objects stays
+// whole, so its dead bytes leak. RepackOwner copies just the live objects of such a
+// pack into a fresh dense pack, re-points them, and drops the old pack with its dead
+// bytes. Candidates are older than minAge (so an in-flight upload's packs are not
+// disturbed) and at most repackMaxLiveFraction live; at most repackBudgetBytes of
+// live data moves per call. Returns the packs rewritten and the bytes reclaimed.
+//
+// Planning (the SELECTs and the slow pack-file reads) runs outside any transaction;
+// the swap re-validates the pack's age and live set inside one, so a concurrent root
+// or age-guard touch that lands mid-call makes the swap skip that pack rather than
+// strand a now-live object or a reader mid-fetch.
+func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, reclaimed int64, err error) {
+	cutoff := time.Now().Add(-minAge).Unix()
+	candidates, err := s.repackCandidates(owner, cutoff)
+	if err != nil {
+		return 0, 0, err
+	}
+	var movedBytes int64
+	for _, cand := range candidates {
+		if movedBytes >= repackBudgetBytes {
+			break
+		}
+		oldBytes, err := os.ReadFile(s.packPath(owner, cand.packID))
+		if err != nil {
+			// A missing/unreadable pack file is left for a later pass rather than
+			// failing the whole sweep; skip it.
+			continue
+		}
+		newID, newPack, newIndex := buildLivePack(oldBytes, cand.live)
+		if newID == cand.packID {
+			continue // no dead bytes to reclaim (a candidate should always have some)
+		}
+		if err := s.writePack(owner, newID, newPack); err != nil {
+			return repacked, reclaimed, err
+		}
+		ok, freed, err := s.commitRepack(owner, cutoff, cand, newID, len(newPack), newIndex)
+		if err != nil {
+			return repacked, reclaimed, err
+		}
+		if !ok {
+			// The plan went stale (the pack was touched, rooted differently, or
+			// vanished); the new file is now an orphan, so drop it best-effort.
+			_ = os.Remove(s.packPath(owner, newID))
+			continue
+		}
+		_ = os.Remove(s.packPath(owner, cand.packID))
+		repacked++
+		reclaimed += freed
+		movedBytes += cand.liveBytes
+	}
+	return repacked, reclaimed, nil
+}
+
+// repackCandidates returns the owner's compaction-worthy packs (see repackCand),
+// reading every object once and grouping by pack. Objects come back ordered by pack
+// and offset, so each candidate's live slice is already offset-sorted.
+func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, error) {
+	packLen := map[string]int64{}
+	prows, err := s.db.Query(`SELECT pack_id, length FROM packs WHERE owner_handle = ? AND created_at < ?`, owner, cutoff)
+	if err != nil {
+		return nil, err
+	}
+	for prows.Next() {
+		var id string
+		var length int64
+		if err := prows.Scan(&id, &length); err != nil {
+			prows.Close()
+			return nil, err
+		}
+		packLen[id] = length
+	}
+	if err := prows.Err(); err != nil {
+		prows.Close()
+		return nil, err
+	}
+	prows.Close()
+	if len(packLen) == 0 {
+		return nil, nil
+	}
+
+	cands := map[string]*repackCand{}
+	deadSeen := map[string]bool{}
+	var order []string
+	rows, err := s.db.Query(
+		`SELECT o.pack_id, o.chunk_id, o."offset", o.length,
+		        EXISTS(SELECT 1 FROM resource_chunks rc
+		               WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+		 FROM objects o WHERE o.owner_handle = ?
+		 ORDER BY o.pack_id, o."offset"`,
+		owner,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var (
+			pack, id    string
+			off, length int64
+			live        bool
+		)
+		if err := rows.Scan(&pack, &id, &off, &length, &live); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		plen, ok := packLen[pack]
+		if !ok {
+			continue // a pack younger than the age guard, not a candidate
+		}
+		c := cands[pack]
+		if c == nil {
+			c = &repackCand{packID: pack, length: plen}
+			cands[pack] = c
+			order = append(order, pack)
+		}
+		if live {
+			c.live = append(c.live, liveObj{id: id, off: off, length: length})
+			c.liveBytes += length
+		} else {
+			deadSeen[pack] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	var out []repackCand
+	for _, pid := range order {
+		c := cands[pid]
+		switch {
+		case !deadSeen[pid]: // nothing to reclaim
+		case c.liveBytes == 0: // fully dead — GCPacks handles it
+		case float64(c.liveBytes) > repackMaxLiveFraction*float64(c.length): // too full to bother
+		default:
+			out = append(out, *c)
+		}
+	}
+	return out, nil
+}
+
+// buildLivePack assembles a fresh pack from the live slices of an old pack's bytes,
+// mirroring the [objects][index json][uint32 len] wire format the client writes and
+// PutPack verifies. The returned index carries each object's new offset in the dense
+// pack.
+func buildLivePack(oldBytes []byte, live []liveObj) (id string, pack []byte, index []api.PackIndexEntry) {
+	var buf []byte
+	index = make([]api.PackIndexEntry, 0, len(live))
+	for _, o := range live {
+		off := len(buf)
+		buf = append(buf, oldBytes[o.off:o.off+o.length]...)
+		index = append(index, api.PackIndexEntry{ID: o.id, Off: off, Len: int(o.length)})
+	}
+	indexJSON, err := json.Marshal(index)
+	if err != nil {
+		panic("server: marshal pack index: " + err.Error()) // a []PackIndexEntry always marshals
+	}
+	buf = append(buf, indexJSON...)
+	var lenbuf [4]byte
+	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(indexJSON)))
+	buf = append(buf, lenbuf[:]...)
+	sum := sha256.Sum256(buf)
+	return hex.EncodeToString(sum[:]), buf, index
+}
+
+// commitRepack performs the row swap for one compacted pack under a single
+// transaction, re-checking the old pack's age and live set first. It returns ok=false
+// (and makes no change) when the plan has gone stale: the pack vanished, its age guard
+// was re-armed by an in-flight read, or its set of rooted objects changed since
+// planning. freed is the bytes the swap reclaimed (old pack size minus new).
+func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID string, newLen int, newIndex []api.PackIndexEntry) (ok bool, freed int64, err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, 0, err
+	}
+	var curCreated, curLen int64
+	err = tx.QueryRow(`SELECT created_at, length FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID).Scan(&curCreated, &curLen)
+	if errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		return false, 0, nil
+	}
+	if err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	if curCreated >= cutoff {
+		tx.Rollback()
+		return false, 0, nil // re-armed age guard: an in-flight read may still use this pack
+	}
+	liveNow := map[string]bool{}
+	lrows, err := tx.Query(
+		`SELECT o.chunk_id FROM objects o
+		 WHERE o.owner_handle = ? AND o.pack_id = ?
+		   AND EXISTS(SELECT 1 FROM resource_chunks rc
+		             WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)`,
+		owner, cand.packID,
+	)
+	if err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	for lrows.Next() {
+		var id string
+		if err := lrows.Scan(&id); err != nil {
+			lrows.Close()
+			tx.Rollback()
+			return false, 0, err
+		}
+		liveNow[id] = true
+	}
+	if err := lrows.Err(); err != nil {
+		lrows.Close()
+		tx.Rollback()
+		return false, 0, err
+	}
+	lrows.Close()
+
+	// The new pack was built from the planned live set; if the rooted set changed,
+	// the new pack no longer matches the objects to move, so abandon this pack.
+	if len(liveNow) != len(newIndex) {
+		tx.Rollback()
+		return false, 0, nil
+	}
+	for _, e := range newIndex {
+		if !liveNow[e.ID] {
+			tx.Rollback()
+			return false, 0, nil
+		}
+	}
+
+	now := time.Now().Unix()
+	if _, err := tx.Exec(
+		`INSERT INTO packs(owner_handle, pack_id, length, created_at) VALUES(?,?,?,?)
+		 ON CONFLICT(owner_handle, pack_id) DO UPDATE SET created_at = excluded.created_at`,
+		owner, newID, newLen, now,
+	); err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	// Re-point each live object onto the new pack before deleting the old one, so the
+	// objects FK never dangles. chunk_id is unchanged, so resource_chunks stays valid.
+	for _, e := range newIndex {
+		if _, err := tx.Exec(
+			`UPDATE objects SET pack_id = ?, "offset" = ?, length = ? WHERE owner_handle = ? AND chunk_id = ?`,
+			newID, e.Off, e.Len, owner, e.ID,
+		); err != nil {
+			tx.Rollback()
+			return false, 0, err
+		}
+	}
+	// The old pack now holds only dead objects (the live ones moved); remove them and
+	// the pack row.
+	if _, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	return true, curLen - int64(newLen), nil
+}
+
 // --- blob store ---
 //
 // A resource's blob is stored as one immutable file per nonce
