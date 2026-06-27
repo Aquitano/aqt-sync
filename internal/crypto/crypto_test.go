@@ -227,6 +227,53 @@ func TestContentKeyWipe(t *testing.T) {
 	}
 }
 
+func TestWrapUnwrapRoot(t *testing.T) {
+	params, _ := NewKdfParams()
+	rk, err := GenerateMasterKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	uk, err := DeriveUnlockKey("the account passphrase", params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrapped, err := WrapRoot(rk, uk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnwrapRoot(wrapped, uk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != rk {
+		t.Fatal("unwrapped root key does not match the original")
+	}
+
+	// A different passphrase derives a different unlock key and fails the AEAD tag,
+	// so a wrong passphrase is caught at unwrap rather than yielding a wrong key.
+	wrongUK, _ := DeriveUnlockKey("not the passphrase", params)
+	if _, err := UnwrapRoot(wrapped, wrongUK); err == nil {
+		t.Fatal("a wrong passphrase must fail to unwrap the root")
+	}
+}
+
+func TestDeriveAuthVerifier(t *testing.T) {
+	params, _ := NewKdfParams()
+	uk, _ := DeriveUnlockKey("passphrase one", params)
+	v1 := DeriveAuthVerifier(uk)
+	if len(v1) != KeySize {
+		t.Fatalf("verifier length = %d, want %d", len(v1), KeySize)
+	}
+	// Deterministic for the same unlock key, distinct for a different one.
+	if !bytes.Equal(v1, DeriveAuthVerifier(uk)) {
+		t.Fatal("verifier must be deterministic for a given unlock key")
+	}
+	other, _ := DeriveUnlockKey("passphrase two", params)
+	if bytes.Equal(v1, DeriveAuthVerifier(other)) {
+		t.Fatal("a different passphrase must yield a different verifier")
+	}
+}
+
 func TestFragmentPublicRoundTrip(t *testing.T) {
 	ck, _ := GenerateContentKey()
 	frag, err := EncodeFragment(ck, "")

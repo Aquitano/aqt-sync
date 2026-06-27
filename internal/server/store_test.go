@@ -67,7 +67,7 @@ func packOf(payloads ...string) (packID string, pack []byte, ids []string) {
 func (s *Store) mustAccount(t *testing.T, email string) string {
 	t.Helper()
 	kdf, _ := crypto.NewKdfParams()
-	acc, err := s.CreateAccount(email, kdf, make([]byte, 32))
+	acc, err := s.CreateAccount(email, kdf, make([]byte, 32), crypto.SealedBlob{Nonce: make([]byte, 1), Ciphertext: make([]byte, 1)}, make([]byte, 32))
 	if err != nil {
 		t.Fatalf("create account: %v", err)
 	}

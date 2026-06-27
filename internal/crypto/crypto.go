@@ -32,11 +32,20 @@ const (
 	saltSize  = 16
 )
 
-// Key is a 32-byte symmetric key. MasterKey and ContentKey are distinct types so
-// the compiler stops us from passing one where the other is meant.
+// Key is a 32-byte symmetric key. The distinct types stop the compiler from
+// passing one where another is meant.
+//
+//   - MasterKey is the account's random root key: it wraps content keys and derives
+//     the signing and convergence keys. It is minted once at signup and never
+//     changes for the account's life (changing a passphrase does not change it).
+//   - ContentKey seals a single resource's bytes.
+//   - UnlockKey is the passphrase-derived key (Argon2id) whose only job is to wrap
+//     the master key. Changing the passphrase re-derives it and re-wraps the master
+//     key — no resource is re-encrypted.
 type (
 	MasterKey  [KeySize]byte
 	ContentKey [KeySize]byte
+	UnlockKey  [KeySize]byte
 )
 
 // Wipe best-effort zeroes the key material. Go gives no guarantee the value was
@@ -54,6 +63,23 @@ func (k *ContentKey) Wipe() {
 	}
 }
 
+// Wipe best-effort zeroes the unlock key (see MasterKey.Wipe for the caveats).
+func (k *UnlockKey) Wipe() {
+	for i := range k {
+		k[i] = 0
+	}
+}
+
+// GenerateMasterKey returns a fresh random root key. It is wrapped under the
+// passphrase-derived unlock key (WrapRoot) and stored as ciphertext; the passphrase
+// guards the wrap, not the key itself, so a passphrase change re-wraps it cheaply.
+func GenerateMasterKey() (MasterKey, error) {
+	var mk MasterKey
+	if _, err := rand.Read(mk[:]); err != nil {
+		return mk, fmt.Errorf("generate master key: %w", err)
+	}
+	return mk, nil
+}
 // KdfParams are the Argon2id inputs. They are public: the salt and cost
 // parameters are stored server-side (per account) and embedded in gated share
 // links so the same key can be re-derived on any machine from the passphrase.
@@ -156,6 +182,60 @@ func DeriveMasterKey(passphrase string, p KdfParams) (MasterKey, error) {
 	return mk, nil
 }
 
+// DeriveUnlockKey derives the passphrase-based unlock key (Argon2id over the
+// account's KDF params). It is deterministic, so the same passphrase and params
+// reproduce it on any machine — which is what lets a new device fetch the account's
+// params + wrapped root and recover the master key. The params are clamped first
+// (they may come from a hostile server).
+func DeriveUnlockKey(passphrase string, p KdfParams) (UnlockKey, error) {
+	var uk UnlockKey
+	if err := p.validate(); err != nil {
+		return uk, err
+	}
+	out := argon2.IDKey([]byte(passphrase), p.Salt, p.Time, p.Memory, p.Threads, KeySize)
+	copy(uk[:], out)
+	return uk, nil
+}
+
+// WrapRoot wraps the master (root) key under the passphrase-derived unlock key.
+// The result is the account's wrappedRoot: stored as opaque ciphertext server-side
+// (so the server stays zero-knowledge) and cached locally so a working device
+// re-derives the master key from its passphrase with no server round-trip.
+func WrapRoot(rk MasterKey, uk UnlockKey) (SealedBlob, error) {
+	return Seal(rk[:], ContentKey(uk), aadRootWrap)
+}
+
+// UnwrapRoot reverses WrapRoot. A wrong passphrase derives a wrong unlock key and
+// fails the AEAD tag here, so an incorrect passphrase is caught at unlock rather
+// than producing a silently-wrong key.
+func UnwrapRoot(w SealedBlob, uk UnlockKey) (MasterKey, error) {
+	var rk MasterKey
+	plain, err := Open(w, ContentKey(uk), aadRootWrap)
+	if err != nil {
+		return rk, err
+	}
+	if len(plain) != KeySize {
+		return rk, errors.New("unwrapped root key has wrong length")
+	}
+	copy(rk[:], plain)
+	return rk, nil
+}
+
+// DeriveAuthVerifier derives a credential that proves possession of the current
+// passphrase (via its unlock key), independent of the master key. A device presents
+// it when attaching; the server stores only its hash and checks it alongside the
+// Ed25519 signature, so re-attaching needs the current passphrase — a cached root
+// key or an old passphrase alone cannot attach a new device after a passphrase
+// change. It is one-way (HKDF), so it leaks nothing about the passphrase.
+func DeriveAuthVerifier(uk UnlockKey) []byte {
+	r := hkdf.New(sha256.New, uk[:], nil, []byte("aqt-auth-verifier-v1"))
+	out := make([]byte, KeySize)
+	if _, err := io.ReadFull(r, out); err != nil {
+		panic("hkdf auth verifier: " + err.Error()) // unreachable for an in-memory reader
+	}
+	return out
+}
+
 // DeriveSigningKey derives the account's Ed25519 signing key from the master key
 // via HKDF. The public half is registered with the server at signup; a device
 // then proves ownership by signing a server-issued challenge. No secret is ever
@@ -214,6 +294,7 @@ var (
 	AADPackRoot = []byte("aqt-packroot-v1") // a pack-and-seal folder's sealed root blob
 	aadKeyWrap  = []byte("aqt-keywrap-v1")  // content key wrapped under the master key
 	aadGated    = []byte("aqt-gated-v1")    // content key wrapped under a link password
+	aadRootWrap = []byte("aqt-rootwrap-v1") // master (root) key wrapped under the unlock key
 )
 
 // Seal encrypts plaintext under a content key, binding aad as additional

@@ -4,13 +4,18 @@ package server
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
+	"crypto/subtle"
 	"errors"
+	"io"
 	"net/http"
 	"strings"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/crypto/hkdf"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 type Server struct {
@@ -86,6 +91,10 @@ func (s *Server) Router() *gin.Engine {
 			authed.GET("/devices", s.listDevices)
 			authed.DELETE("/devices/:id", s.deleteDevice)
 
+			// Re-wrap the account's root key under a new passphrase. Small body
+			// (KDF params + a wrapped key + verifiers), so it keeps the control cap.
+			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.changePassphrase)
+
 			// Folder-sync packed object store: opaque, content-addressed,
 			// owner-scoped. Objects ship inside raw packs; check/locate negotiate
 			// which objects to up/download by id.
@@ -111,7 +120,10 @@ func limitBody(n int64) gin.HandlerFunc {
 
 // --- auth ---
 
-const ownerContextKey = "ownerHandle"
+const (
+	ownerContextKey  = "ownerHandle"
+	deviceContextKey = "deviceId"
+)
 
 func (s *Server) authMiddleware(c *gin.Context) {
 	token, ok := bearerToken(c)
@@ -119,9 +131,11 @@ func (s *Server) authMiddleware(c *gin.Context) {
 		abort(c, http.StatusUnauthorized, "missing bearer token")
 		return
 	}
-	owner, err := s.store.OwnerByToken(token)
+	owner, deviceID, err := s.store.AuthByToken(token)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusUnauthorized, "invalid token")
+		// Either an unknown token or one issued before a passphrase change bumped the
+		// account epoch; both mean "re-authenticate".
+		abort(c, http.StatusUnauthorized, "invalid or expired token")
 		return
 	}
 	if err != nil {
@@ -129,6 +143,7 @@ func (s *Server) authMiddleware(c *gin.Context) {
 		return
 	}
 	c.Set(ownerContextKey, owner)
+	c.Set(deviceContextKey, deviceID)
 	c.Next()
 }
 
@@ -152,7 +167,11 @@ func (s *Server) createAccount(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "email and a valid public key are required")
 		return
 	}
-	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey)
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.AuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "wrapped root and auth verifier are required")
+		return
+	}
+	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier)
 	if errors.Is(err, ErrConflict) {
 		abort(c, http.StatusConflict, "account already exists")
 		return
@@ -161,16 +180,20 @@ func (s *Server) createAccount(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "create account failed")
 		return
 	}
-	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName))
+	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName), 1)
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "create device failed")
 		return
 	}
 	c.JSON(http.StatusCreated, api.AuthResponse{
-		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token,
+		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token, Epoch: 1,
 	})
 }
 
+// accountSalt is the new-device bootstrap: it returns the KDF params and wrapped
+// root key for an email. An unknown email gets a deterministic decoy (200, not 404)
+// so the endpoint does not reveal which emails have accounts; only someone who knows
+// the passphrase can tell a decoy from a real account (the decoy never unwraps).
 func (s *Server) accountSalt(c *gin.Context) {
 	email := c.Query("email")
 	if email == "" {
@@ -179,14 +202,53 @@ func (s *Server) accountSalt(c *gin.Context) {
 	}
 	acc, err := s.store.AccountByEmail(email)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "no such account")
+		decoy, derr := s.decoyBootstrap(email)
+		if derr != nil {
+			abort(c, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		c.JSON(http.StatusOK, decoy)
 		return
 	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf})
+	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot})
+}
+
+// decoyBootstrap synthesizes a bootstrap response for an unknown email,
+// deterministically from the server secret so the same email always yields the same
+// decoy. The salt and wrapped-root bytes are indistinguishable from a real account's
+// to anyone without the passphrase, so a registered and an unregistered email look
+// identical on the wire.
+func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
+	secret, err := s.store.ServerSecret()
+	if err != nil {
+		return api.SaltResponse{}, err
+	}
+	stream := func(label string, n int) []byte {
+		out := make([]byte, n)
+		r := hkdf.New(sha256.New, secret, []byte(email), []byte(label))
+		if _, err := io.ReadFull(r, out); err != nil {
+			panic("hkdf decoy: " + err.Error()) // unreachable for an in-memory reader
+		}
+		return out
+	}
+	def, err := crypto.NewKdfParams()
+	if err != nil {
+		return api.SaltResponse{}, err
+	}
+	def.Salt = stream("aqt-decoy-salt", len(def.Salt))
+	// A real wrapped root is a 32-byte key sealed with XChaCha20-Poly1305: a 24-byte
+	// nonce and 48 bytes of ciphertext+tag. Match those lengths exactly.
+	return api.SaltResponse{
+		Kdf: def,
+		WrappedRoot: crypto.SealedBlob{
+			Nonce:      stream("aqt-decoy-nonce", crypto.NonceSize),
+			Ciphertext: stream("aqt-decoy-ct", crypto.KeySize+16),
+		},
+	}, nil
 }
 
 func (s *Server) authChallenge(c *gin.Context) {
@@ -221,15 +283,20 @@ func (s *Server) attachDevice(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "challenge lookup failed")
 		return
 	}
-	owner, pub, err := s.store.AccountForAuth(req.Email)
-	// A missing account and a bad signature return the same 401: no oracle.
-	if err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature) {
-		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName))
+	owner, pub, verifierHash, epoch, err := s.store.AccountForAuth(req.Email)
+	// Attaching needs both the signing key (proves the master key) and the passphrase
+	// verifier (proves the current passphrase), so a stale passphrase or a cached
+	// master key alone cannot attach. A missing account, a bad signature, and a bad
+	// verifier all return the same 401: no oracle.
+	sigOK := err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature)
+	verifierOK := err == nil && verifierMatches(req.AuthVerifier, verifierHash)
+	if sigOK && verifierOK {
+		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch)
 		if err != nil {
 			abort(c, http.StatusInternalServerError, "create device failed")
 			return
 		}
-		c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token})
+		c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
 		return
 	}
 	if err != nil && !errors.Is(err, ErrNotFound) {
@@ -237,6 +304,49 @@ func (s *Server) attachDevice(c *gin.Context) {
 		return
 	}
 	abort(c, http.StatusUnauthorized, "invalid credentials")
+}
+
+// verifierMatches reports whether the presented auth verifier hashes to the stored
+// hash, in constant time.
+func verifierMatches(verifier, storedHash []byte) bool {
+	if len(verifier) == 0 || len(storedHash) != sha256.Size {
+		return false
+	}
+	h := sha256.Sum256(verifier)
+	return subtle.ConstantTimeCompare(h[:], storedHash) == 1
+}
+
+// changePassphrase re-wraps the account's root key under a new passphrase. The store
+// verifies the caller knows the current passphrase and bumps the account epoch, so
+// every other device's token stops authenticating (they re-login with the new
+// passphrase); the calling device keeps working.
+func (s *Server) changePassphrase(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	deviceID := c.GetString(deviceContextKey)
+	var req api.PassphraseChangeRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "wrapped root and both verifiers are required")
+		return
+	}
+	newEpoch, err := s.store.ChangePassphrase(owner, deviceID, req.Kdf, req.WrappedRoot, req.OldAuthVerifier, req.NewAuthVerifier, req.ExpectedEpoch)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusForbidden, "current passphrase proof did not match")
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abort(c, http.StatusConflict, "the passphrase changed on another device; re-run with the current one")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "passphrase change failed")
+		return
+	}
+	// The calling device's token is unchanged (its epoch was advanced with the
+	// account's), so no new token is issued; the client keeps using it.
+	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Epoch: newEpoch})
 }
 
 func (s *Server) listDevices(c *gin.Context) {

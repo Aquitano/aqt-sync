@@ -203,6 +203,23 @@ First-run auth is lazy: a push on a fresh machine prompts to create the account.
 Because a typo'd first passphrase is **unrecoverable** (zero-knowledge), first run
 requires a confirm prompt and an explicit "this cannot be reset" warning.
 
+**Wrapped-root key model (implemented).** The account's *master key* is a random
+root key (`RK`), minted once at signup and never changed; it wraps content keys and
+derives the signing and convergence keys. The passphrase derives an *unlock key*
+(`UK = Argon2id(passphrase, salt)`) whose only job is to wrap `RK` — `wrappedRoot =
+seal(RK, UK)`, stored server-side (opaque, zero-knowledge) and cached locally. So a
+passphrase change is cheap: re-derive `UK`, re-wrap `RK`, upload one record — **no
+resource is re-encrypted** (the master key is unchanged). It also bumps an
+**auth-epoch**, which invalidates every other device's token (the server rejects a
+token whose epoch is behind), and rotates a passphrase **verifier** the server stores
+hashed. A device re-attaches by presenting both an Ed25519 challenge signature (proves
+`RK`) *and* the verifier (proves the *current* passphrase), so a stale passphrase or a
+cached root key alone cannot re-attach after a change. The new-device bootstrap
+(`GET /account/salt`) returns `{kdf, wrappedRoot}` and serves an **indistinguishable
+decoy** for an unknown email, so it no longer reveals which emails have accounts. True
+root-key rotation (re-wrap every resource, for compromise recovery) is a separate,
+deferred operation.
+
 ---
 
 ## 3a. Project layout & status
@@ -499,7 +516,7 @@ function currentSession(): Session | null;                                 // fo
 - **Repack** — pack-level GC v1 deletes only fully-dead packs, leaving dead objects inside still-live packs; reclaiming that space needs a repack pass (copy live objects into a fresh pack), deferred.
 - **Public whole-folder sharing** — v1 tracked folders are private, so the object store is uniformly owner-scoped. Sharing a folder publicly needs its objects under the folder key (not the account convergence key) in a publicly-readable space — deferred.
 - **Argon2id tuning** (`time`/`memory`) per machine.
-- **Account-enumeration oracle** — `GET /account/salt` confirms which emails are registered, and auth endpoints have no rate limiting.
+- **Account-enumeration oracle** — *resolved:* unauthenticated auth routes are rate-limited, and `GET /account/salt` now returns an indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 404, so it no longer confirms which emails are registered.
 - **Defense-in-depth crypto** — AEAD additional-data domain separation across blob/wrap/gated-wrap; complete key wiping (`ContentKey` has no `Wipe`).
 - **Session cache at rest** — the cached master key is a plaintext 0600 file (bounded by `--ttl`, cleared by `logout`). An OS-keychain backend or an in-memory agent would remove the on-disk plaintext.
 - **Conflict copies** — write `name.conflict-<device>` like Dropbox, or just report and block?

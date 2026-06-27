@@ -108,7 +108,7 @@ func rootCmd() *cobra.Command {
 	// Accepted on every command; verbose diagnostics are currently minimal.
 	root.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "verbose output")
 
-	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
+	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 
 	// root.Version makes cobra print the version when the flag is set; we register
@@ -192,6 +192,12 @@ func promptLine(label string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(line), nil
+}
+
+// interactiveStdin reports whether stdin is a terminal, so prompts that must not
+// block a scripted run (e.g. the first-run "create account?" confirm) can be skipped.
+func interactiveStdin() bool {
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // promptYesNo asks a yes/no question and returns def when the answer is empty.
