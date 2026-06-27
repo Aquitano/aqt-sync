@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"unicode/utf8"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
@@ -67,6 +68,15 @@ func walkFiles(dir string, fn func(fileNode) error) error {
 		}
 		if ig.Match(rel, false) {
 			return nil
+		}
+		// Only paths that survive the ignore filter are sealed into the manifest, and
+		// json.Marshal silently coerces invalid UTF-8 to U+FFFD — which would restore
+		// the file under a corrupted name and collapse two siblings differing only in
+		// invalid bytes into one, losing a file. Refuse the tree, naming the offender.
+		// Ignored paths are skipped above, so a non-UTF-8 name in an ignored cache or
+		// build dir never wedges the sync.
+		if !utf8.ValidString(rel) {
+			return fmt.Errorf("path %q is not valid UTF-8; rename it to sync this folder", rel)
 		}
 		info, err := d.Info()
 		if err != nil {

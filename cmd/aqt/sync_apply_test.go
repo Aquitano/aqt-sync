@@ -1,12 +1,22 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
+
+// contentHash mirrors how the sync engine hashes a regular file's bytes, so a test
+// manifest entry can carry the same hash applySync re-verifies against disk.
+func contentHash(s string) string {
+	sum := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(sum[:])
+}
 
 // TestApplySyncReplacesDirectoryWithFile pulls a remote change that swaps a
 // directory foo/ (holding foo/a, foo/b) for a regular file at foo. Plan emits
@@ -22,10 +32,13 @@ func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
 	writeTree(t, root, "foo/a", "a")
 	writeTree(t, root, "foo/b", "b")
 
-	child := func(p string) syncengine.Entry {
-		return syncengine.Entry{Path: p, Hash: p, Inline: []byte(p)}
+	// Base hashes must match the on-disk bytes: applySync re-verifies a delete target
+	// against disk before removing it, so a stale hash would (correctly) be read as a
+	// window edit and the delete skipped.
+	child := func(p, content string) syncengine.Entry {
+		return syncengine.Entry{Path: p, Hash: contentHash(content), Inline: []byte(content)}
 	}
-	base := syncengine.Manifest{Entries: []syncengine.Entry{child("foo/a"), child("foo/b")}}
+	base := syncengine.Manifest{Entries: []syncengine.Entry{child("foo/a", "a"), child("foo/b", "b")}}
 	const fileContent = "foo is a regular file now"
 	remote := syncengine.Manifest{Entries: []syncengine.Entry{{Path: "foo", Hash: "foo-file", Inline: []byte(fileContent)}}}
 
@@ -49,5 +62,77 @@ func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(root, child)); err == nil {
 			t.Fatalf("%s still present after sync", child)
 		}
+	}
+}
+
+// applyTestCtx builds the apply context plus the actions for a pull-only reconcile,
+// creating the control dir saveBase needs.
+func applyTestCtx(t *testing.T, root string, base, local, remote syncengine.Manifest) (applyCtx, []syncengine.Action) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, syncengine.ControlDir), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	actions := syncengine.Plan(local, base, remote)
+	return applyCtx{root: root, opts: syncOptions{pullOnly: true}, base: base, local: local, remote: remote}, actions
+}
+
+// A file edited in the snapshot->apply window must not be deleted by a remote delete:
+// the on-disk bytes no longer match what the snapshot saw, so the delete is downgraded
+// to a conflict and the local edit survives.
+func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, "f", "edited in the window") // what is actually on disk now
+
+	// The snapshot (and base) recorded the pre-edit content; the remote dropped the file.
+	orig := syncengine.Entry{Path: "f", Hash: contentHash("orig"), Inline: []byte("orig")}
+	base := syncengine.Manifest{Entries: []syncengine.Entry{orig}}
+	apply, actions := applyTestCtx(t, root, base, base, syncengine.Manifest{})
+
+	if err := applySync(apply, actions); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("applySync = %v, want errConflictsRemain", err)
+	}
+	if got := readTree(t, root, "f"); got != "edited in the window" {
+		t.Fatalf("window-edited file was clobbered by the delete: %q", got)
+	}
+}
+
+// A file edited in the window must not be overwritten by a remote download either.
+func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, "g", "edited in the window")
+
+	orig := syncengine.Entry{Path: "g", Hash: contentHash("orig"), Inline: []byte("orig")}
+	base := syncengine.Manifest{Entries: []syncengine.Entry{orig}}
+	remote := syncengine.Manifest{Entries: []syncengine.Entry{
+		{Path: "g", Hash: contentHash("from remote"), Inline: []byte("from remote")},
+	}}
+	apply, actions := applyTestCtx(t, root, base, base, remote)
+
+	if err := applySync(apply, actions); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("applySync = %v, want errConflictsRemain", err)
+	}
+	if got := readTree(t, root, "g"); got != "edited in the window" {
+		t.Fatalf("window-edited file was overwritten by the download: %q", got)
+	}
+}
+
+// The guard must not over-fire: a download whose target still holds the bytes the
+// snapshot saw is applied normally.
+func TestApplySyncOverwritesUnchangedFile(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, "g", "orig") // on disk == snapshot
+
+	orig := syncengine.Entry{Path: "g", Hash: contentHash("orig"), Inline: []byte("orig")}
+	base := syncengine.Manifest{Entries: []syncengine.Entry{orig}}
+	remote := syncengine.Manifest{Entries: []syncengine.Entry{
+		{Path: "g", Hash: contentHash("from remote"), Inline: []byte("from remote")},
+	}}
+	apply, actions := applyTestCtx(t, root, base, base, remote)
+
+	if err := applySync(apply, actions); err != nil {
+		t.Fatalf("applySync = %v, want nil", err)
+	}
+	if got := readTree(t, root, "g"); got != "from remote" {
+		t.Fatalf("unchanged file = %q, want the remote content", got)
 	}
 }

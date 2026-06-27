@@ -3,11 +3,13 @@ package syncengine
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
@@ -271,6 +273,48 @@ func (w *treeWriter) prepareParents(full string) error {
 		return nil
 	}
 	return nil
+}
+
+// HashOnDisk returns the content hash of dir/relPath as Take/Scan would record it (a
+// regular file's streamed sha256, a symlink's domain-separated linkHash), plus whether
+// the path exists and whether it is a directory. The apply guard uses it to re-verify
+// a file still holds the bytes the snapshot saw before a destructive download or delete
+// overwrites it. A directory (a remote dir->file replacement target) is reported as
+// such so the caller lets materialize handle it instead of trying to hash it; a special
+// file (device/socket/fifo) is reported as present with an empty hash, which never
+// matches a real content hash, so the guard refuses to clobber it.
+func HashOnDisk(dir, relPath string) (hash string, exists, isDir bool, err error) {
+	full, err := safeJoin(dir, relPath)
+	if err != nil {
+		return "", false, false, err
+	}
+	fi, err := os.Lstat(full)
+	if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+		// Absent, or unreachable because a parent component is a file or stale symlink
+		// the apply will replace: nothing exists at this exact path to destroy.
+		return "", false, false, nil
+	}
+	if err != nil {
+		return "", false, false, err
+	}
+	switch {
+	case fi.Mode()&os.ModeSymlink != 0:
+		target, err := os.Readlink(full)
+		if err != nil {
+			return "", false, false, err
+		}
+		return linkHash(target), true, false, nil
+	case fi.IsDir():
+		return "", true, true, nil
+	case fi.Mode().IsRegular():
+		h, err := streamHash(full)
+		if err != nil {
+			return "", false, false, err
+		}
+		return h, true, false, nil
+	default:
+		return "", true, false, nil
+	}
 }
 
 // RemoveFile deletes dir/relPath, pruning now-empty parent directories up to (but

@@ -125,6 +125,20 @@ func runPrivate(idArg string) error {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
 	defer oldCK.Wipe()
+	// A streamed file or tracked folder is object-backed: its blob is a root pointer
+	// over chunk objects, and the resource's ChunkRefs are the sole GC liveness roots
+	// for those objects. Rotating re-seals the blob and re-PUTs it; carrying no
+	// ChunkRefs would drop those roots, so the next GC unlinks the still-referenced
+	// objects — unrecoverable loss. Such resources are private-only anyway (their
+	// objects are never publicly fetchable, and `share` already refuses streamed
+	// files), so there is no public link to rotate. Refuse rather than destroy.
+	meta, err := decodeMeta(res.EncryptedMeta, oldCK)
+	if err != nil {
+		return err
+	}
+	if meta.Streamed || meta.Kind == api.KindFolder {
+		return errors.New("cannot rotate the key of a streamed file or tracked folder; it is private-only and has no public link to rotate")
+	}
 	plaintext, err := crypto.Open(res.Blob, oldCK, crypto.AADBlob)
 	if err != nil {
 		return fmt.Errorf("decrypt: %w", err)
