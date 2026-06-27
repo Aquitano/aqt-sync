@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +12,12 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
 // This file is an end-to-end stress suite: it spins up a real in-process server,
@@ -26,9 +33,19 @@ import (
 // CI fast while a full run exercises hundreds of files and thousands of chunks.
 func stressScale(t *testing.T) int {
 	if testing.Short() {
-		return 8
+		return 10
 	}
-	return 40
+	return 44
+}
+
+// fleetScale sizes the shared tree the multi-device test clones onto every device.
+// It is a fraction of stressScale: the tree is cloned and reconciled several times
+// over (once per device), so it stays smaller to keep the wall clock down.
+func fleetScale(t *testing.T) int {
+	if testing.Short() {
+		return 3
+	}
+	return 12
 }
 
 // resetCLIFlags clears the package-global flag state. Cobra binds the global
@@ -56,10 +73,11 @@ func randText(rng *rand.Rand, n int) string {
 	return string(b)
 }
 
-// genHugeTree writes a deterministic tree of varied files under root: tiny inline
-// text, chunked binaries, a large multi-chunk file per module, a block of content
-// duplicated across every module (so dedup has something to collapse), and a deep
-// path. It returns the number of files written.
+// genHugeTree writes a deterministic tree of varied files under root: many tiny
+// inline text files, an inline JSON config, three chunked binaries of escalating
+// size (one of them multi-chunk), a block of content duplicated across every module
+// (so dedup has something to collapse), and a couple of deeply nested paths. It
+// returns the number of files written.
 func genHugeTree(t *testing.T, root string, modules int) int {
 	t.Helper()
 	rng := rand.New(rand.NewSource(20260626))
@@ -71,14 +89,21 @@ func genHugeTree(t *testing.T, root string, modules int) int {
 	}
 	for m := 0; m < modules; m++ {
 		d := fmt.Sprintf("mod%03d", m)
-		for f := 0; f < 6; f++ { // inline (< 2 KiB cutoff)
+		for f := 0; f < 8; f++ { // inline (< 2 KiB cutoff)
 			put(fmt.Sprintf("%s/small/file%02d.txt", d, f),
 				[]byte(fmt.Sprintf("module %d file %d\n%s\n", m, f, randText(rng, 120))))
 		}
+		put(fmt.Sprintf("%s/config/app.json", d),
+			[]byte(fmt.Sprintf("{\"module\":%d,\"name\":%q,\"nonce\":%q}\n", m, d, randText(rng, 48))))
 		put(fmt.Sprintf("%s/data/blob.bin", d), randBytes(rng, 3<<10+rng.Intn(9<<10)))     // chunked
+		put(fmt.Sprintf("%s/data/medium.bin", d), randBytes(rng, 20<<10+rng.Intn(24<<10))) // chunked
 		put(fmt.Sprintf("%s/data/large.bin", d), randBytes(rng, 120<<10+rng.Intn(40<<10))) // multi-chunk
 		put(fmt.Sprintf("%s/shared/dup.bin", d), dup)                                      // dedups across modules
 		put(fmt.Sprintf("%s/a/b/c/d/deep.txt", d), []byte(fmt.Sprintf("deep %d\n", m)))
+		for l := 0; l < 2; l++ { // a couple of deeply nested leaves
+			put(fmt.Sprintf("%s/nested/x/y/z/leaf%02d.txt", d, l),
+				[]byte(fmt.Sprintf("leaf %d-%d\n%s\n", m, l, randText(rng, 64))))
+		}
 	}
 	return count
 }
@@ -529,5 +554,298 @@ func TestStressPullPathTraversalConfined(t *testing.T) {
 	escaped := filepath.Join(filepath.Dir(filepath.Dir(work)), "evil")
 	if _, err := os.Stat(escaped); err == nil {
 		t.Fatalf("path traversal wrote outside CWD at %s", escaped)
+	}
+}
+
+// --- a fleet of simulated devices on one account ---
+//
+// The folder-sync tests above model "two machines" as two working copies under a
+// single device identity. This one models a real fleet: several devices, each
+// attached to the same account through the genuine challenge/sign handshake, each
+// with its own server-issued device id + bearer token but the same master key.
+//
+// We host one profile per device in the shared config dir and select the active one
+// with flagProfile — the same seam `--profile` drives per process in production.
+// Because the server authenticates every request by device token, an attach mints a
+// real device and a revoke kills that device's access for real (the token row is
+// gone), not as a client-side fiction.
+
+type deviceFleet struct {
+	h     *e2eHarness
+	mk    crypto.MasterKey
+	email string
+	kdf   crypto.KdfParams
+}
+
+// newFleet bootstraps from the primary device newE2E already created: it recovers
+// the account's master key from the cached session (so it can derive the signing key
+// that authorizes further attaches) and remembers the email + KDF params every
+// device profile shares.
+func newFleet(t *testing.T, h *e2eHarness) *deviceFleet {
+	t.Helper()
+	mk, ok := identity.LoadSession(identity.DefaultProfile)
+	if !ok {
+		t.Fatal("newE2E should have cached the primary device session")
+	}
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatalf("load primary profile: %v", err)
+	}
+	return &deviceFleet{h: h, mk: mk, email: prof.Email, kdf: prof.Kdf}
+}
+
+// device is one machine in the fleet, pinned to its own profile (its device id +
+// token live in that profile; its cached key in that profile's session).
+type device struct {
+	t       *testing.T
+	profile string
+	id      string // server-issued device id
+}
+
+// primary returns the account's first device, created by newE2E as the default
+// profile.
+func (f *deviceFleet) primary() *device {
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		f.h.t.Fatalf("load primary profile: %v", err)
+	}
+	return &device{t: f.h.t, profile: identity.DefaultProfile, id: prof.DeviceID}
+}
+
+// attach runs the real challenge -> sign -> AttachDevice handshake against the
+// server, then stores the new device as its own profile + cached session so the
+// run* commands can act as it by setting flagProfile.
+func (f *deviceFleet) attach(name string) *device {
+	t := f.h.t
+	t.Helper()
+	signing := crypto.DeriveSigningKey(f.mk)
+	cl := client.New(f.h.url, "")
+	ch, err := cl.Challenge(f.email)
+	if err != nil {
+		t.Fatalf("challenge for %s: %v", name, err)
+	}
+	resp, err := cl.AttachDevice(api.AttachDeviceRequest{
+		Email:       f.email,
+		ChallengeID: ch.ChallengeID,
+		Signature:   ed25519.Sign(signing, ch.Nonce),
+		DeviceName:  name,
+	})
+	if err != nil {
+		t.Fatalf("attach %s: %v", name, err)
+	}
+	if err := identity.Save(&identity.Profile{
+		Name: name, Server: f.h.url, Email: f.email,
+		OwnerHandle: resp.OwnerHandle, DeviceID: resp.DeviceID, Token: resp.Token, Kdf: f.kdf,
+	}); err != nil {
+		t.Fatalf("save profile %s: %v", name, err)
+	}
+	if err := identity.SaveSession(name, f.mk, time.Hour); err != nil {
+		t.Fatalf("cache session %s: %v", name, err)
+	}
+	return &device{t: t, profile: name, id: resp.DeviceID}
+}
+
+// as runs fn with this device's profile active, restoring the previous flagProfile
+// afterward (even on a fatal failure, since the defer runs on Goexit). flagProfile
+// is the package global the run* functions resolve their token + session through.
+func (d *device) as(fn func() error) error {
+	prev := flagProfile
+	flagProfile = d.profile
+	defer func() { flagProfile = prev }()
+	return fn()
+}
+
+func (d *device) must(op string, fn func() error) {
+	d.t.Helper()
+	if err := d.as(fn); err != nil {
+		d.t.Fatalf("%s as %s: %v", op, d.profile, err)
+	}
+}
+
+func (d *device) init(dir string)      { d.must("init", func() error { return runInit(dir) }) }
+func (d *device) clone(id, dir string) { d.must("clone", func() error { return runClone(id, dir) }) }
+func (d *device) sync(dir string)      { d.syncOpts(dir, syncOptions{}) }
+
+func (d *device) syncOpts(dir string, o syncOptions) {
+	d.must("sync", func() error { return runSync(dir, o) })
+}
+
+// trySync runs a sync expected to fail (a conflict to inspect, or a revoked token)
+// and returns the error rather than failing the test.
+func (d *device) trySync(dir string, o syncOptions) error {
+	return d.as(func() error { return runSync(dir, o) })
+}
+
+func (d *device) tryPull(ref, out string) error {
+	return d.as(func() error { return runPull(ref, out, "", false, false) })
+}
+
+// pushPrivate uploads a private file as this device and returns the printed ref.
+func (d *device) pushPrivate(path string) string {
+	d.t.Helper()
+	var ref string
+	d.must("push", func() error {
+		var perr error
+		out := captureStdout(d.t, func() { perr = runPush(path, pushOptions{quiet: true}) })
+		ref = strings.TrimSpace(out)
+		return perr
+	})
+	return ref
+}
+
+func (d *device) listDevices() []api.Device {
+	d.t.Helper()
+	var out []api.Device
+	d.must("devices", func() error {
+		cl, _, err := authedClient()
+		if err != nil {
+			return err
+		}
+		out, err = cl.ListDevices()
+		return err
+	})
+	return out
+}
+
+func (d *device) revoke(ids ...string) {
+	d.must("revoke", func() error { return runDevicesRemove(ids) })
+}
+func (d *device) revokeOthers() { d.must("revoke-others", revokeOtherDevices) }
+
+func TestStressMultiDeviceFleet(t *testing.T) {
+	resetCLIFlags()
+	h := newE2E(t)
+	fleet := newFleet(t, h)
+	laptop := fleet.primary()
+
+	// The laptop inits and syncs a multi-module tree; a fresh account has one device.
+	laptopDir := t.TempDir()
+	laptop.init(laptopDir)
+	nfiles := genHugeTree(t, laptopDir, fleetScale(t))
+	t.Logf("fleet tree: %d files", nfiles)
+	laptop.sync(laptopDir)
+	folder := h.folderID(laptopDir)
+	if got := laptop.listDevices(); len(got) != 1 {
+		t.Fatalf("fresh account should have 1 device, got %d", len(got))
+	}
+
+	// Two more devices attach to the same account and clone the folder byte-for-byte.
+	desktop := fleet.attach("desktop")
+	phone := fleet.attach("phone")
+	if got := laptop.listDevices(); len(got) != 3 {
+		t.Fatalf("after two attaches, want 3 devices, got %d", len(got))
+	}
+	desktopDir, phoneDir := t.TempDir(), t.TempDir()
+	desktop.clone(folder, desktopDir)
+	phone.clone(folder, phoneDir)
+	assertTreeEqual(t, laptopDir, desktopDir)
+	assertTreeEqual(t, laptopDir, phoneDir)
+
+	// Independent edits made on two different devices converge on all three.
+	writeTree(t, laptopDir, "mod000/small/file00.txt", "edited on laptop")
+	laptop.sync(laptopDir)
+	writeTree(t, desktopDir, "mod001/small/file00.txt", "edited on desktop")
+	desktop.sync(desktopDir) // pulls laptop's edit, pushes its own
+	laptop.sync(laptopDir)   // pulls desktop's edit
+	phone.sync(phoneDir)     // pulls both
+	assertTreeEqual(t, laptopDir, desktopDir)
+	assertTreeEqual(t, laptopDir, phoneDir)
+	if got := readTree(t, phoneDir, "mod000/small/file00.txt"); got != "edited on laptop" {
+		t.Fatalf("phone missing laptop edit: %q", got)
+	}
+	if got := readTree(t, phoneDir, "mod001/small/file00.txt"); got != "edited on desktop" {
+		t.Fatalf("phone missing desktop edit: %q", got)
+	}
+
+	// Two devices edit the same file: the later sync aborts, --force resolves it
+	// local-wins, and the winning content propagates to the whole fleet.
+	writeTree(t, laptopDir, "mod002/small/file00.txt", "laptop version")
+	laptop.sync(laptopDir)
+	writeTree(t, desktopDir, "mod002/small/file00.txt", "desktop version")
+	if err := desktop.trySync(desktopDir, syncOptions{}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("expected a cross-device conflict abort, got %v", err)
+	}
+	desktop.syncOpts(desktopDir, syncOptions{force: true})
+	laptop.sync(laptopDir)
+	phone.sync(phoneDir)
+	for _, wc := range []struct{ name, dir string }{
+		{"laptop", laptopDir}, {"desktop", desktopDir}, {"phone", phoneDir},
+	} {
+		if got := readTree(t, wc.dir, "mod002/small/file00.txt"); got != "desktop version" {
+			t.Fatalf("%s did not converge on the forced winner: %q", wc.name, got)
+		}
+	}
+
+	// A private single-file push on one device is pullable on another device of the
+	// same account: one master key, distinct device tokens.
+	secretPath := filepath.Join(t.TempDir(), "fleet.env")
+	if err := os.WriteFile(secretPath, []byte("TOKEN=fleet-secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	secretRef := laptop.pushPrivate(secretPath)
+	if !strings.HasPrefix(secretRef, "aqt://") {
+		t.Fatalf("private push ref = %q", secretRef)
+	}
+	desktopSecret := filepath.Join(t.TempDir(), "from-laptop.env")
+	if err := desktop.tryPull(secretRef, desktopSecret); err != nil {
+		t.Fatalf("desktop should pull a same-account private push: %v", err)
+	}
+	if got := mustRead(t, desktopSecret); got != "TOKEN=fleet-secret\n" {
+		t.Fatalf("cross-device private pull mismatch: %q", got)
+	}
+
+	// Revoke the phone from the laptop. The fleet drops to two devices; the revoked
+	// device loses server access while its already-synced local files stay intact.
+	laptop.revoke(phone.id)
+	if got := laptop.listDevices(); len(got) != 2 {
+		t.Fatalf("after revoking phone, want 2 devices, got %d", len(got))
+	}
+	assertTreeEqual(t, laptopDir, phoneDir) // local data survives revocation
+	// A push attempt from the revoked phone fails: its token no longer authenticates.
+	writeTree(t, phoneDir, "mod000/small/phone-after-revoke.txt", "should not upload")
+	if err := phone.trySync(phoneDir, syncOptions{}); err == nil {
+		t.Fatal("a revoked device must not be able to sync")
+	}
+	// And it can no longer pull the account's private resources.
+	if err := phone.tryPull(secretRef, filepath.Join(t.TempDir(), "denied.env")); err == nil {
+		t.Fatal("a revoked device must not be able to pull private resources")
+	}
+
+	// `devices --json` from the laptop marks itself current and no longer lists the
+	// phone.
+	var rows []api.Device
+	out := captureStdout(t, func() { _ = laptop.as(func() error { return runDevicesList(true) }) })
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("devices --json not valid JSON: %v (%q)", err, out)
+	}
+	var sawCurrent bool
+	for _, r := range rows {
+		if r.ID == phone.id {
+			t.Fatal("revoked phone still listed by devices --json")
+		}
+		if r.ID == laptop.id {
+			sawCurrent = r.Current
+		}
+	}
+	if !sawCurrent || len(rows) != 2 {
+		t.Fatalf("devices --json wrong after revoke: current=%v rows=%+v", sawCurrent, rows)
+	}
+
+	// The surviving devices still sync and converge, and the revoked phone's change
+	// never reached the server.
+	desktop.sync(desktopDir)
+	laptop.sync(laptopDir)
+	assertTreeEqual(t, laptopDir, desktopDir)
+	assertAbsent(t, desktopDir, "mod000/small/phone-after-revoke.txt")
+
+	// Bulk revoke (the `logout --all-devices` path): the laptop revokes every other
+	// device, leaving only itself, and the desktop then loses access too.
+	laptop.revokeOthers()
+	if got := laptop.listDevices(); len(got) != 1 {
+		t.Fatalf("after revoking all others, want 1 device, got %d", len(got))
+	}
+	writeTree(t, desktopDir, "mod001/small/desktop-after-revoke.txt", "should not upload")
+	if err := desktop.trySync(desktopDir, syncOptions{}); err == nil {
+		t.Fatal("a bulk-revoked device must not be able to sync")
 	}
 }
