@@ -80,6 +80,7 @@ func GenerateMasterKey() (MasterKey, error) {
 	}
 	return mk, nil
 }
+
 // KdfParams are the Argon2id inputs. They are public: the salt and cost
 // parameters are stored server-side (per account) and embedded in gated share
 // links so the same key can be re-derived on any machine from the passphrase.
