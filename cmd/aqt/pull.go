@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -108,10 +109,7 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	}
 	dest := out
 	if dest == "" {
-		dest = meta.Name
-		if dest == "" || dest == "stdin" {
-			dest = "aqt-download"
-		}
+		dest = safeOutputName(meta.Name)
 	}
 	if !force {
 		if _, err := os.Stat(dest); err == nil {
@@ -161,16 +159,24 @@ func contentKey(res api.GetResourceResponse, fragment, password string, prof *id
 	return crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
 }
 
+// safeOutputName reduces an attacker-controlled metadata name to a bare basename
+// inside the current directory, so a malicious link cannot steer a default
+// destination to "../" or an absolute path and write outside CWD.
+func safeOutputName(name string) string {
+	base := filepath.Base(name)
+	if base == "" || base == "." || base == ".." || base == string(filepath.Separator) || base == "stdin" {
+		return "aqt-download"
+	}
+	return base
+}
+
 func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, force bool) error {
 	if toStdout {
 		_, err := os.Stdout.Write(plaintext)
 		return err
 	}
 	if out == "" {
-		out = meta.Name
-		if out == "" || out == "stdin" {
-			out = "aqt-download"
-		}
+		out = safeOutputName(meta.Name)
 	}
 	if !force {
 		if _, err := os.Stat(out); err == nil {
