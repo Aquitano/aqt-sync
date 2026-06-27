@@ -27,20 +27,31 @@ const DefaultProfile = "default"
 var ErrNoProfile = errors.New("no aqt profile found; run `aqt login` first")
 
 type Profile struct {
-	Name        string           `json:"name"`
-	Server      string           `json:"server"`
-	Email       string           `json:"email"`
-	OwnerHandle string           `json:"ownerHandle"`
-	DeviceID    string           `json:"deviceId"`
-	Token       string           `json:"token"`
-	Fingerprint string           `json:"fingerprint,omitempty"`
-	Kdf         crypto.KdfParams `json:"kdf"`
+	Name        string            `json:"name"`
+	Server      string            `json:"server"`
+	Email       string            `json:"email"`
+	OwnerHandle string            `json:"ownerHandle"`
+	DeviceID    string            `json:"deviceId"`
+	Token       string            `json:"token"`
+	Fingerprint string            `json:"fingerprint,omitempty"`
+	Kdf         crypto.KdfParams  `json:"kdf"`
+	WrappedRoot crypto.SealedBlob `json:"wrappedRoot"`
+	// AuthEpoch is the account auth epoch this device's token was issued under. A
+	// passphrase change bumps it; the server rejects a token whose epoch is behind.
+	AuthEpoch int `json:"authEpoch,omitempty"`
 }
 
-// Unlock derives the master key from the passphrase using the profile's stored
-// KDF params.
+// Unlock recovers the account's master (root) key from the passphrase: it derives
+// the unlock key from the stored KDF params and uses it to unwrap the locally-cached
+// wrapped root, so no server round-trip is needed. A wrong passphrase fails the
+// unwrap's AEAD tag rather than yielding a silently-wrong key.
 func (p *Profile) Unlock(passphrase string) (crypto.MasterKey, error) {
-	return crypto.DeriveMasterKey(passphrase, p.Kdf)
+	uk, err := crypto.DeriveUnlockKey(passphrase, p.Kdf)
+	if err != nil {
+		return crypto.MasterKey{}, err
+	}
+	defer uk.Wipe()
+	return crypto.UnwrapRoot(p.WrappedRoot, uk)
 }
 
 func configDir() (string, error) {

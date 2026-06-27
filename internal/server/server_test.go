@@ -70,28 +70,50 @@ func (h *harness) get(path string) *httptest.ResponseRecorder {
 	return rec
 }
 
-// signup creates an account from a passphrase and returns its token + master key.
+// signup creates an account and returns its first device token plus the random
+// root (master) key. The root key wraps content keys; the passphrase only wraps the
+// root key (wrappedRoot) and derives the attach verifier.
 func (h *harness) signup(email, passphrase string) (token string, mk crypto.MasterKey) {
 	h.t.Helper()
 	kdf, err := crypto.NewKdfParams()
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	mk, err = crypto.DeriveMasterKey(passphrase, kdf)
+	mk, err = crypto.GenerateMasterKey()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	uk, err := crypto.DeriveUnlockKey(passphrase, kdf)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	wrappedRoot, err := crypto.WrapRoot(mk, uk)
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	var resp api.AuthResponse
 	code := h.do(http.MethodPost, "/v1/account", "", api.CreateAccountRequest{
-		Email:      email,
-		Kdf:        kdf,
-		PublicKey:  crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
-		DeviceName: "test-device",
+		Email:        email,
+		Kdf:          kdf,
+		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		WrappedRoot:  wrappedRoot,
+		AuthVerifier: crypto.DeriveAuthVerifier(uk),
+		DeviceName:   "test-device",
 	}, &resp)
 	if code != http.StatusCreated {
 		h.t.Fatalf("signup: got status %d", code)
 	}
 	return resp.Token, mk
+}
+
+// bootstrap fetches the new-device bootstrap (KDF params + wrapped root) for an email.
+func (h *harness) bootstrap(email string) api.SaltResponse {
+	h.t.Helper()
+	var boot api.SaltResponse
+	if code := h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, &boot); code != http.StatusOK {
+		h.t.Fatalf("bootstrap: status %d", code)
+	}
+	return boot
 }
 
 func TestPrivatePushPullRoundTrip(t *testing.T) {
@@ -191,14 +213,11 @@ func TestPublicResourceReadableWithoutAuth(t *testing.T) {
 	}
 }
 
-// attachWith fetches a challenge and attaches a device by signing the nonce with
-// the signing key derived from passphrase. Returns the HTTP status.
-func (h *harness) attachWith(email, passphrase string, kdf crypto.KdfParams, out *api.AuthResponse) int {
+// attachRaw fetches a challenge and posts a device attach with caller-supplied
+// signature and verifier, so a test can drive both the honest path and the rejection
+// paths. Returns the HTTP status.
+func (h *harness) attachRaw(email string, sign func(nonce []byte) []byte, verifier []byte, out *api.AuthResponse) int {
 	h.t.Helper()
-	mk, err := crypto.DeriveMasterKey(passphrase, kdf)
-	if err != nil {
-		h.t.Fatal(err)
-	}
 	var ch api.ChallengeResponse
 	if code := h.do(http.MethodPost, "/v1/auth/challenge", "", api.ChallengeRequest{Email: email}, &ch); code != http.StatusOK {
 		h.t.Fatalf("challenge: status %d", code)
@@ -208,31 +227,61 @@ func (h *harness) attachWith(email, passphrase string, kdf crypto.KdfParams, out
 		target = out
 	}
 	return h.do(http.MethodPost, "/v1/devices", "", api.AttachDeviceRequest{
-		Email:       email,
-		ChallengeID: ch.ChallengeID,
-		Signature:   ed25519.Sign(crypto.DeriveSigningKey(mk), ch.Nonce),
-		DeviceName:  "device-2",
+		Email:        email,
+		ChallengeID:  ch.ChallengeID,
+		Signature:    sign(ch.Nonce),
+		AuthVerifier: verifier,
+		DeviceName:   "device-2",
 	}, target)
 }
 
-func TestDeviceAttachVerifiesSignature(t *testing.T) {
+// attachWith runs the honest new-device flow: fetch the bootstrap, recover the root
+// key with the passphrase, and present both the challenge signature and the verifier.
+func (h *harness) attachWith(email, passphrase string, out *api.AuthResponse) int {
+	h.t.Helper()
+	boot := h.bootstrap(email)
+	uk, err := crypto.DeriveUnlockKey(passphrase, boot.Kdf)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	rk, err := crypto.UnwrapRoot(boot.WrappedRoot, uk)
+	if err != nil {
+		h.t.Fatalf("unwrap root: %v", err)
+	}
+	signing := crypto.DeriveSigningKey(rk)
+	return h.attachRaw(email, func(n []byte) []byte { return ed25519.Sign(signing, n) }, crypto.DeriveAuthVerifier(uk), out)
+}
+
+func TestDeviceAttachRequiresSignatureAndVerifier(t *testing.T) {
 	h := newHarness(t)
 	const email, pass = "multi@example.com", "shared passphrase"
 	h.signup(email, pass)
 
-	var salt api.SaltResponse
-	if code := h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, &salt); code != http.StatusOK {
-		t.Fatalf("salt: status %d", code)
+	boot := h.bootstrap(email)
+	uk, _ := crypto.DeriveUnlockKey(pass, boot.Kdf)
+	rk, err := crypto.UnwrapRoot(boot.WrappedRoot, uk)
+	if err != nil {
+		t.Fatal(err)
 	}
+	goodSign := func(n []byte) []byte { return ed25519.Sign(crypto.DeriveSigningKey(rk), n) }
+	goodVerifier := crypto.DeriveAuthVerifier(uk)
 
+	// Both factors present: attaches.
 	var resp api.AuthResponse
-	if code := h.attachWith(email, pass, salt.Kdf, &resp); code != http.StatusCreated || resp.Token == "" {
-		t.Fatalf("attach with correct passphrase: status %d, token=%q", code, resp.Token)
+	if code := h.attachRaw(email, goodSign, goodVerifier, &resp); code != http.StatusCreated || resp.Token == "" {
+		t.Fatalf("attach with both factors: status %d, token=%q", code, resp.Token)
 	}
-
-	// Wrong passphrase derives a different signing key, so the signature fails.
-	if code := h.attachWith(email, "not the passphrase", salt.Kdf, nil); code != http.StatusUnauthorized {
-		t.Fatalf("attach with wrong passphrase: got %d, want 401", code)
+	// Correct signature but a verifier from a different passphrase: rejected. Holding
+	// the root key alone (without the current passphrase) cannot attach.
+	otherUK, _ := crypto.DeriveUnlockKey("a different passphrase", boot.Kdf)
+	if code := h.attachRaw(email, goodSign, crypto.DeriveAuthVerifier(otherUK), nil); code != http.StatusUnauthorized {
+		t.Fatalf("wrong verifier: got %d, want 401", code)
+	}
+	// Correct verifier but a signature from the wrong key: rejected.
+	wrongKey, _ := crypto.GenerateMasterKey()
+	badSign := func(n []byte) []byte { return ed25519.Sign(crypto.DeriveSigningKey(wrongKey), n) }
+	if code := h.attachRaw(email, badSign, goodVerifier, nil); code != http.StatusUnauthorized {
+		t.Fatalf("wrong signature: got %d, want 401", code)
 	}
 }
 
@@ -240,16 +289,22 @@ func TestChallengeIsSingleUse(t *testing.T) {
 	h := newHarness(t)
 	const email, pass = "replay@example.com", "a passphrase"
 	h.signup(email, pass)
-	mk, _ := crypto.DeriveMasterKey(pass, mustSalt(h, email))
+	boot := h.bootstrap(email)
+	uk, _ := crypto.DeriveUnlockKey(pass, boot.Kdf)
+	rk, err := crypto.UnwrapRoot(boot.WrappedRoot, uk)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	var ch api.ChallengeResponse
 	if code := h.do(http.MethodPost, "/v1/auth/challenge", "", api.ChallengeRequest{Email: email}, &ch); code != http.StatusOK {
 		t.Fatalf("challenge: status %d", code)
 	}
-	sig := ed25519.Sign(crypto.DeriveSigningKey(mk), ch.Nonce)
+	sig := ed25519.Sign(crypto.DeriveSigningKey(rk), ch.Nonce)
+	verifier := crypto.DeriveAuthVerifier(uk)
 	attach := func(out any) int {
 		return h.do(http.MethodPost, "/v1/devices", "", api.AttachDeviceRequest{
-			Email: email, ChallengeID: ch.ChallengeID, Signature: sig, DeviceName: "d",
+			Email: email, ChallengeID: ch.ChallengeID, Signature: sig, AuthVerifier: verifier, DeviceName: "d",
 		}, out)
 	}
 	var resp api.AuthResponse
@@ -259,6 +314,83 @@ func TestChallengeIsSingleUse(t *testing.T) {
 	// Replaying the same challenge + signature must be rejected.
 	if code := attach(nil); code != http.StatusUnauthorized {
 		t.Fatalf("challenge replay: got %d, want 401", code)
+	}
+}
+
+func TestBootstrapDecoyForUnknownEmail(t *testing.T) {
+	h := newHarness(t)
+	h.signup("real@example.com", "the real passphrase")
+
+	// An unknown email returns 200 with a decoy (not 404), so registered and
+	// unregistered emails are indistinguishable on the wire.
+	a := h.bootstrap("ghost@example.com")
+	if len(a.WrappedRoot.Ciphertext) == 0 || len(a.Kdf.Salt) == 0 {
+		t.Fatal("decoy bootstrap must look like a real one (non-empty salt + wrapped root)")
+	}
+	// The decoy is deterministic per email, so probing twice cannot reveal it.
+	b := h.bootstrap("ghost@example.com")
+	if !bytes.Equal(a.WrappedRoot.Ciphertext, b.WrappedRoot.Ciphertext) || !bytes.Equal(a.Kdf.Salt, b.Kdf.Salt) {
+		t.Fatal("decoy must be stable across probes")
+	}
+	// A different unknown email yields a different decoy.
+	c := h.bootstrap("other-ghost@example.com")
+	if bytes.Equal(a.WrappedRoot.Ciphertext, c.WrappedRoot.Ciphertext) {
+		t.Fatal("decoy must vary by email")
+	}
+	// And the decoy never unwraps (it wraps no real key).
+	uk, _ := crypto.DeriveUnlockKey("any passphrase at all", a.Kdf)
+	if _, err := crypto.UnwrapRoot(a.WrappedRoot, uk); err == nil {
+		t.Fatal("a decoy wrapped root must not unwrap")
+	}
+}
+
+func TestPassphraseChangeInvalidatesOtherDevices(t *testing.T) {
+	h := newHarness(t)
+	const email, oldPass, newPass = "rotate@example.com", "old passphrase here", "new passphrase here"
+	token1, rk := h.signup(email, oldPass)
+
+	// A second device attaches under the old passphrase.
+	var dev2 api.AuthResponse
+	if code := h.attachWith(email, oldPass, &dev2); code != http.StatusCreated {
+		t.Fatalf("attach device 2: %d", code)
+	}
+
+	// Device 1 changes the passphrase: the root key is unchanged, only re-wrapped.
+	boot := h.bootstrap(email)
+	oldUK, _ := crypto.DeriveUnlockKey(oldPass, boot.Kdf)
+	newKdf, _ := crypto.NewKdfParams()
+	newUK, _ := crypto.DeriveUnlockKey(newPass, newKdf)
+	newWrapped, _ := crypto.WrapRoot(rk, newUK)
+	var chResp api.AuthResponse
+	if code := h.do(http.MethodPut, "/v1/account/passphrase", token1, api.PassphraseChangeRequest{
+		Kdf:             newKdf,
+		WrappedRoot:     newWrapped,
+		OldAuthVerifier: crypto.DeriveAuthVerifier(oldUK),
+		NewAuthVerifier: crypto.DeriveAuthVerifier(newUK),
+		ExpectedEpoch:   1,
+	}, &chResp); code != http.StatusOK {
+		t.Fatalf("passphrase change: %d", code)
+	}
+	if chResp.Epoch != 2 {
+		t.Fatalf("epoch after change = %d, want 2", chResp.Epoch)
+	}
+
+	// The initiating device keeps working; every other device's token is invalidated.
+	if code := h.do(http.MethodGet, "/v1/devices", token1, nil, nil); code != http.StatusOK {
+		t.Fatalf("initiator token after change: got %d, want 200", code)
+	}
+	if code := h.do(http.MethodGet, "/v1/devices", dev2.Token, nil, nil); code != http.StatusUnauthorized {
+		t.Fatalf("other device token after change: got %d, want 401", code)
+	}
+
+	// Re-attach now needs the new passphrase.
+	if code := h.attachWith(email, newPass, nil); code != http.StatusCreated {
+		t.Fatalf("re-attach with new passphrase: %d", code)
+	}
+	// The old passphrase's verifier no longer attaches, even with the real root key.
+	sign := func(n []byte) []byte { return ed25519.Sign(crypto.DeriveSigningKey(rk), n) }
+	if code := h.attachRaw(email, sign, crypto.DeriveAuthVerifier(oldUK), nil); code != http.StatusUnauthorized {
+		t.Fatalf("attach with old passphrase verifier: got %d, want 401", code)
 	}
 }
 
@@ -582,7 +714,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 
 	// Attach a second device to the same account.
 	var second api.AuthResponse
-	if code := h.attachWith(email, pass, mustSalt(h, email), &second); code != http.StatusCreated {
+	if code := h.attachWith(email, pass, &second); code != http.StatusCreated {
 		t.Fatalf("attach second device: %d", code)
 	}
 
@@ -667,13 +799,4 @@ func TestListResourcesReturnsWrappedKey(t *testing.T) {
 	if got.Name != "secret.env" || got.Kind != api.KindFile {
 		t.Fatalf("decrypted meta = %+v, want name=secret.env kind=file", got)
 	}
-}
-
-func mustSalt(h *harness, email string) crypto.KdfParams {
-	h.t.Helper()
-	var salt api.SaltResponse
-	if code := h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, &salt); code != http.StatusOK {
-		h.t.Fatalf("salt: status %d", code)
-	}
-	return salt.Kdf
 }

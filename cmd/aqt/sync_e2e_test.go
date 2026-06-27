@@ -318,22 +318,33 @@ func (h *e2eHarness) signup(email, pass string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	mk, err := crypto.DeriveMasterKey(pass, kdf)
+	mk, err := crypto.GenerateMasterKey()
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	uk, err := crypto.DeriveUnlockKey(pass, kdf)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	wrappedRoot, err := crypto.WrapRoot(mk, uk)
 	if err != nil {
 		h.t.Fatal(err)
 	}
 	resp, err := client.New(h.url, "").CreateAccount(api.CreateAccountRequest{
-		Email:      email,
-		Kdf:        kdf,
-		PublicKey:  crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
-		DeviceName: "e2e",
+		Email:        email,
+		Kdf:          kdf,
+		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		WrappedRoot:  wrappedRoot,
+		AuthVerifier: crypto.DeriveAuthVerifier(uk),
+		DeviceName:   "e2e",
 	})
 	if err != nil {
 		h.t.Fatalf("signup: %v", err)
 	}
 	if err := identity.Save(&identity.Profile{
 		Name: identity.DefaultProfile, Server: h.url, Email: email,
-		OwnerHandle: resp.OwnerHandle, DeviceID: resp.DeviceID, Token: resp.Token, Kdf: kdf,
+		OwnerHandle: resp.OwnerHandle, DeviceID: resp.DeviceID, Token: resp.Token,
+		Kdf: kdf, WrappedRoot: wrappedRoot, AuthEpoch: resp.Epoch,
 	}); err != nil {
 		h.t.Fatalf("save profile: %v", err)
 	}

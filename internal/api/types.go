@@ -40,13 +40,17 @@ type Metadata struct {
 
 // CreateAccountRequest registers a new account and attaches the first device.
 // PublicKey is the Ed25519 public half of the account's signing key (derived
-// client-side from the master key); the server stores it and never sees the
-// passphrase, master key, or private key.
+// client-side from the random master key). WrappedRoot is that master key sealed
+// under the passphrase-derived unlock key, and AuthVerifier proves possession of
+// the passphrase. The server stores all three but never sees the passphrase, the
+// master key, or the private key.
 type CreateAccountRequest struct {
-	Email      string           `json:"email"`
-	Kdf        crypto.KdfParams `json:"kdf"`
-	PublicKey  []byte           `json:"publicKey"`
-	DeviceName string           `json:"deviceName"`
+	Email        string            `json:"email"`
+	Kdf          crypto.KdfParams  `json:"kdf"`
+	PublicKey    []byte            `json:"publicKey"`
+	WrappedRoot  crypto.SealedBlob `json:"wrappedRoot"`
+	AuthVerifier []byte            `json:"authVerifier"`
+	DeviceName   string            `json:"deviceName"`
 }
 
 // ChallengeRequest asks the server for a fresh nonce to sign when attaching a
@@ -61,26 +65,50 @@ type ChallengeResponse struct {
 	Nonce       []byte `json:"nonce"`
 }
 
-// AttachDeviceRequest logs in an additional device by returning a signature over
-// the challenge nonce, proving possession of the account's signing key.
+// AttachDeviceRequest logs in an additional device. The signature over the
+// challenge nonce proves possession of the account's signing key (so the master
+// key); AuthVerifier proves possession of the current passphrase. The server
+// requires both, so after a passphrase change a device cannot re-attach without
+// the new passphrase.
 type AttachDeviceRequest struct {
-	Email       string `json:"email"`
-	ChallengeID string `json:"challengeId"`
-	Signature   []byte `json:"signature"`
-	DeviceName  string `json:"deviceName"`
+	Email        string `json:"email"`
+	ChallengeID  string `json:"challengeId"`
+	Signature    []byte `json:"signature"`
+	AuthVerifier []byte `json:"authVerifier"`
+	DeviceName   string `json:"deviceName"`
 }
 
-// AuthResponse is returned by account creation and device attach.
+// AuthResponse is returned by account creation, device attach, and passphrase
+// change. Epoch is the device token's auth epoch; a passphrase change bumps the
+// account epoch, invalidating every token issued under an older one.
 type AuthResponse struct {
 	OwnerHandle string `json:"ownerHandle"`
 	DeviceID    string `json:"deviceId"`
 	Token       string `json:"token"`
+	Epoch       int    `json:"epoch,omitempty"`
 }
 
-// SaltResponse carries the KDF parameters a new machine needs to re-derive the
-// master key from the passphrase.
+// SaltResponse is the new-device bootstrap: the KDF params and the wrapped master
+// key a fresh machine needs to turn the passphrase into the master key. The server
+// returns an indistinguishable decoy for an unknown email, so this endpoint does
+// not reveal which emails have accounts.
 type SaltResponse struct {
-	Kdf crypto.KdfParams `json:"kdf"`
+	Kdf         crypto.KdfParams  `json:"kdf"`
+	WrappedRoot crypto.SealedBlob `json:"wrappedRoot"`
+}
+
+// PassphraseChangeRequest re-wraps the account's master key under a new passphrase.
+// The master key itself does not change, so no resource is re-encrypted. OldAuthVerifier
+// proves the caller knows the current passphrase (not just holds a token);
+// ExpectedEpoch pins the change to the epoch the caller last saw (optimistic
+// concurrency). On success the server stores the new Kdf/WrappedRoot/verifier and
+// bumps the account epoch, invalidating every other device's token.
+type PassphraseChangeRequest struct {
+	Kdf             crypto.KdfParams  `json:"kdf"`
+	WrappedRoot     crypto.SealedBlob `json:"wrappedRoot"`
+	OldAuthVerifier []byte            `json:"oldAuthVerifier"`
+	NewAuthVerifier []byte            `json:"newAuthVerifier"`
+	ExpectedEpoch   int               `json:"expectedEpoch"`
 }
 
 // PutResourceRequest creates a resource (ID empty) or replaces an existing one

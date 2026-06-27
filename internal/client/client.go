@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
@@ -70,18 +69,23 @@ func (c *Client) DeleteDevice(id string) error {
 	return c.do(http.MethodDelete, "/v1/devices/"+url.PathEscape(id), nil, nil)
 }
 
-// Salt fetches an account's KDF params. found is false if the account does not
-// exist, which `login` uses to branch between signup and device attach.
-func (c *Client) Salt(email string) (params crypto.KdfParams, found bool, err error) {
+// Bootstrap fetches the new-device bootstrap for an email: the KDF params and the
+// wrapped root key. The server returns an indistinguishable decoy for an unknown
+// email (not a 404), so the caller cannot read account existence off the response;
+// it derives the unlock key and tries to unwrap the root, and a failure means either
+// no account exists or the passphrase is wrong.
+func (c *Client) Bootstrap(email string) (api.SaltResponse, error) {
 	var r api.SaltResponse
-	err = c.do(http.MethodGet, "/v1/account/salt?email="+url.QueryEscape(email), nil, &r)
-	if errors.Is(err, ErrNotFound) {
-		return crypto.KdfParams{}, false, nil
-	}
-	if err != nil {
-		return crypto.KdfParams{}, false, err
-	}
-	return r.Kdf, true, nil
+	err := c.do(http.MethodGet, "/v1/account/salt?email="+url.QueryEscape(email), nil, &r)
+	return r, err
+}
+
+// ChangePassphrase re-wraps the account's root key under a new passphrase, returning
+// the new auth epoch. The master key is unchanged, so no resource is re-encrypted.
+func (c *Client) ChangePassphrase(req api.PassphraseChangeRequest) (api.AuthResponse, error) {
+	var r api.AuthResponse
+	err := c.do(http.MethodPut, "/v1/account/passphrase", req, &r)
+	return r, err
 }
 
 func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceResponse, error) {

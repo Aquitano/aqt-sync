@@ -3,6 +3,7 @@ package server
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/binary"
@@ -148,6 +149,18 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// 2: index the device-token lookup authMiddleware runs on every request, and
 	// enforce token uniqueness.
 	`CREATE UNIQUE INDEX IF NOT EXISTS idx_devices_token_hash ON devices(token_hash);`,
+	// 3: wrapped-root identity. The master key is now a random root key wrapped under
+	// the passphrase-derived unlock key (wrapped_root), so a passphrase change re-wraps
+	// it without re-encrypting data. auth_verifier is the hash of the passphrase proof a
+	// device must present to attach; auth_epoch invalidates every token issued before
+	// the latest passphrase change (a device's token is valid only while its epoch
+	// matches its account's). server_meta holds the secret that makes an unknown-email
+	// bootstrap return an indistinguishable decoy.
+	`ALTER TABLE accounts ADD COLUMN wrapped_root TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE accounts ADD COLUMN auth_verifier BLOB NOT NULL DEFAULT x'';
+	 ALTER TABLE accounts ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 1;
+	 ALTER TABLE devices ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 1;
+	 CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -233,19 +246,27 @@ type Account struct {
 	OwnerHandle string
 	Email       string
 	Kdf         crypto.KdfParams
+	WrappedRoot crypto.SealedBlob
 }
 
-// CreateAccount registers an account with its Ed25519 public key and returns it.
-// Returns ErrConflict if the email is already taken.
-func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte) (Account, error) {
+// CreateAccount registers an account with its Ed25519 public key, wrapped root key,
+// and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
+// already taken. The new account starts at auth epoch 1.
+func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier []byte) (Account, error) {
 	handle := newID(12)
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
 		return Account{}, err
 	}
+	rootJSON, err := json.Marshal(wrappedRoot)
+	if err != nil {
+		return Account{}, err
+	}
+	vh := sha256.Sum256(authVerifier)
 	_, err = s.db.Exec(
-		`INSERT INTO accounts(owner_handle, email, kdf, public_key) VALUES(?,?,?,?)`,
-		handle, email, string(kdfJSON), publicKey,
+		`INSERT INTO accounts(owner_handle, email, kdf, public_key, wrapped_root, auth_verifier, auth_epoch)
+		 VALUES(?,?,?,?,?,?,1)`,
+		handle, email, string(kdfJSON), publicKey, string(rootJSON), vh[:],
 	)
 	if err != nil {
 		if isUnique(err) {
@@ -253,17 +274,19 @@ func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []by
 		}
 		return Account{}, err
 	}
-	return Account{OwnerHandle: handle, Email: email, Kdf: kdf}, nil
+	return Account{OwnerHandle: handle, Email: email, Kdf: kdf, WrappedRoot: wrappedRoot}, nil
 }
 
+// AccountByEmail returns the account's bootstrap fields (KDF params + wrapped root)
+// or ErrNotFound.
 func (s *Store) AccountByEmail(email string) (Account, error) {
 	var (
-		acc     Account
-		kdfJSON string
+		acc               Account
+		kdfJSON, rootJSON string
 	)
 	err := s.db.QueryRow(
-		`SELECT owner_handle, email, kdf FROM accounts WHERE email = ?`, email,
-	).Scan(&acc.OwnerHandle, &acc.Email, &kdfJSON)
+		`SELECT owner_handle, email, kdf, wrapped_root FROM accounts WHERE email = ?`, email,
+	).Scan(&acc.OwnerHandle, &acc.Email, &kdfJSON, &rootJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -273,22 +296,114 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 	if err := json.Unmarshal([]byte(kdfJSON), &acc.Kdf); err != nil {
 		return Account{}, err
 	}
+	if rootJSON != "" {
+		if err := json.Unmarshal([]byte(rootJSON), &acc.WrappedRoot); err != nil {
+			return Account{}, err
+		}
+	}
 	return acc, nil
 }
 
-// AccountForAuth returns the owner handle and Ed25519 public key for an email,
-// or ErrNotFound. Used to verify a device-attach signature.
-func (s *Store) AccountForAuth(email string) (ownerHandle string, publicKey []byte, err error) {
+// AccountForAuth returns the fields needed to authenticate a device attach: the
+// owner handle, the Ed25519 public key (to verify the challenge signature), the
+// stored auth-verifier hash (to check the passphrase proof), and the current auth
+// epoch (which the new device's token is tagged with). ErrNotFound if no account.
+func (s *Store) AccountForAuth(email string) (ownerHandle string, publicKey, verifierHash []byte, epoch int, err error) {
 	err = s.db.QueryRow(
-		`SELECT owner_handle, public_key FROM accounts WHERE email = ?`, email,
-	).Scan(&ownerHandle, &publicKey)
+		`SELECT owner_handle, public_key, auth_verifier, auth_epoch FROM accounts WHERE email = ?`, email,
+	).Scan(&ownerHandle, &publicKey, &verifierHash, &epoch)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil, ErrNotFound
+		return "", nil, nil, 0, ErrNotFound
 	}
 	if err != nil {
-		return "", nil, err
+		return "", nil, nil, 0, err
 	}
-	return ownerHandle, publicKey, nil
+	return ownerHandle, publicKey, verifierHash, epoch, nil
+}
+
+// ServerSecret returns the persistent per-server secret used to synthesize a decoy
+// bootstrap response for unknown emails, creating it on first use. Stable across
+// restarts so the same unknown email always yields the same decoy.
+func (s *Store) ServerSecret() ([]byte, error) {
+	if _, err := s.db.Exec(
+		`INSERT OR IGNORE INTO server_meta(key, value) VALUES('bootstrap-decoy-secret', ?)`,
+		randomBytes(32),
+	); err != nil {
+		return nil, err
+	}
+	var secret []byte
+	if err := s.db.QueryRow(
+		`SELECT value FROM server_meta WHERE key = 'bootstrap-decoy-secret'`,
+	).Scan(&secret); err != nil {
+		return nil, err
+	}
+	return secret, nil
+}
+
+// ChangePassphrase re-wraps the account's root key under a new passphrase. It
+// verifies the caller knows the current passphrase (oldVerifier) and that no other
+// device changed it first (expectedEpoch), then stores the new KDF/wrapped-root/
+// verifier, bumps the account epoch (invalidating every other device's token), and
+// re-tags the calling device's token with the new epoch so it stays valid. Returns
+// the new epoch. ErrNotFound if the verifier is wrong, ErrVersionConflict on a stale
+// epoch.
+func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, wrappedRoot crypto.SealedBlob, oldVerifier, newVerifier []byte, expectedEpoch int) (int, error) {
+	kdfJSON, err := json.Marshal(kdf)
+	if err != nil {
+		return 0, err
+	}
+	rootJSON, err := json.Marshal(wrappedRoot)
+	if err != nil {
+		return 0, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	var (
+		curEpoch    int
+		curVerifier []byte
+	)
+	if err := tx.QueryRow(
+		`SELECT auth_epoch, auth_verifier FROM accounts WHERE owner_handle = ?`, owner,
+	).Scan(&curEpoch, &curVerifier); err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		return 0, err
+	}
+	oldHash := sha256.Sum256(oldVerifier)
+	if subtle.ConstantTimeCompare(oldHash[:], curVerifier) != 1 {
+		tx.Rollback()
+		return 0, ErrNotFound // wrong current passphrase
+	}
+	if expectedEpoch != curEpoch {
+		tx.Rollback()
+		return 0, ErrVersionConflict
+	}
+	newEpoch := curEpoch + 1
+	newHash := sha256.Sum256(newVerifier)
+	if _, err := tx.Exec(
+		`UPDATE accounts SET kdf = ?, wrapped_root = ?, auth_verifier = ?, auth_epoch = ? WHERE owner_handle = ?`,
+		string(kdfJSON), string(rootJSON), newHash[:], newEpoch, owner,
+	); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	// Keep the initiating device usable; every other device stays on the old epoch
+	// and its token now fails the epoch check.
+	if _, err := tx.Exec(
+		`UPDATE devices SET auth_epoch = ? WHERE owner_handle = ? AND device_id = ?`,
+		newEpoch, owner, deviceID,
+	); err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return newEpoch, nil
 }
 
 // challengeTTL bounds how long an issued nonce remains valid.
@@ -338,15 +453,15 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 	return nonce, nil
 }
 
-// CreateDevice issues a device token. It returns the plaintext token once; only
-// its hash is stored.
-func (s *Store) CreateDevice(ownerHandle, name string) (deviceID, token string, err error) {
+// CreateDevice issues a device token tagged with the account's current auth epoch.
+// It returns the plaintext token once; only its hash is stored.
+func (s *Store) CreateDevice(ownerHandle, name string, epoch int) (deviceID, token string, err error) {
 	deviceID = newID(10)
 	token = newID(32)
 	h := sha256.Sum256([]byte(token))
 	_, err = s.db.Exec(
-		`INSERT INTO devices(device_id, owner_handle, name, token_hash) VALUES(?,?,?,?)`,
-		deviceID, ownerHandle, name, h[:],
+		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
+		deviceID, ownerHandle, name, h[:], epoch,
 	)
 	if err != nil {
 		return "", "", err
@@ -354,15 +469,28 @@ func (s *Store) CreateDevice(ownerHandle, name string) (deviceID, token string, 
 	return deviceID, token, nil
 }
 
-// OwnerByToken resolves a bearer token to its owning account handle.
+// OwnerByToken resolves a bearer token to its owning account handle, but only while
+// the token's epoch still matches its account's — a passphrase change bumps the
+// account epoch, so every token issued before it stops authenticating (ErrNotFound).
 func (s *Store) OwnerByToken(token string) (string, error) {
-	h := sha256.Sum256([]byte(token))
-	var owner string
-	err := s.db.QueryRow(`SELECT owner_handle FROM devices WHERE token_hash = ?`, h[:]).Scan(&owner)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
+	owner, _, err := s.AuthByToken(token)
 	return owner, err
+}
+
+// AuthByToken resolves a bearer token to its owner handle and device id, enforcing
+// the same epoch check as OwnerByToken. The device id lets a passphrase change keep
+// the calling device's token alive while invalidating the rest.
+func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
+	h := sha256.Sum256([]byte(token))
+	err = s.db.QueryRow(
+		`SELECT d.owner_handle, d.device_id FROM devices d
+		   JOIN accounts a ON a.owner_handle = d.owner_handle
+		 WHERE d.token_hash = ? AND d.auth_epoch = a.auth_epoch`, h[:],
+	).Scan(&owner, &deviceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
+	}
+	return owner, deviceID, err
 }
 
 // ListDevices returns the owner's attached devices (id + name). Token hashes never
