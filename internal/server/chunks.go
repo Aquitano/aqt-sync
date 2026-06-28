@@ -102,22 +102,13 @@ func (s *Server) locateChunks(c *gin.Context) {
 
 func (s *Server) runGC(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	deleted, freed, err := s.store.GCPacks(owner, gcMinAge)
+	// GC sweeps fully-dead packs first, then compacts the dead objects trapped in
+	// still-live ones; both honor the same age guard, and the whole sequence is
+	// serialized per owner inside the store.
+	res, err := s.store.GC(owner, gcMinAge)
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "gc failed")
 		return
 	}
-	// Sweep fully-dead packs first, then compact the dead objects trapped in
-	// still-live ones. Both honor the same age guard.
-	repacked, reclaimed, err := s.store.RepackOwner(owner, gcMinAge)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "repack failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.GCResponse{
-		DeletedPacks:   deleted,
-		FreedBytes:     freed,
-		RepackedPacks:  repacked,
-		ReclaimedBytes: reclaimed,
-	})
+	c.JSON(http.StatusOK, res)
 }

@@ -33,6 +33,12 @@ var ErrConflict = errors.New("conflict")
 // matches the stored version: another writer got there first.
 var ErrVersionConflict = errors.New("version conflict")
 
+// ErrDropsRoots is returned when a replace would clear every GC root of a resource
+// that still has some: an object-backed resource (folder/streamed file) re-PUT with
+// no ChunkRefs. Committing it would orphan the still-referenced objects for the next
+// GC, so the store refuses it rather than lose data.
+var ErrDropsRoots = errors.New("replace drops all chunk roots")
+
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs and packs on the filesystem. It holds no plaintext and no live
 // keys.
@@ -40,6 +46,11 @@ type Store struct {
 	db       *sql.DB
 	blobsDir string
 	packsDir string
+	// gcLocks serializes the GC/repack sequence per owner. The single DB connection
+	// serializes the transactions, but not the pack-file writes and removes around
+	// them, so two concurrent passes could double-handle a repack candidate; this lock
+	// closes that window. See GC.
+	gcLocks *keyedMutex
 }
 
 func OpenStore(dataDir string) (*Store, error) {
@@ -66,7 +77,7 @@ func OpenStore(dataDir string) (*Store, error) {
 	// connection serializes every write in-process. This suits the v1
 	// single-instance server; horizontal scaling would need real row locks.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, blobsDir: blobsDir, packsDir: packsDir}
+	s := &Store{db: db, blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -651,6 +662,25 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 		tx.Rollback()
 		return "", 0, ErrVersionConflict
 	}
+	// Defense-in-depth against a client re-PUTting an object-backed resource without
+	// its roots (e.g. a buggy key rotation): clearing every ChunkRef while the prior
+	// version had some would orphan the still-referenced objects for the next GC. No
+	// legitimate replace does this — a folder/streamed update always carries at least
+	// its manifest/root objects — so reject it rather than commit the unrooting. The
+	// per-resource lock makes this count-then-replace atomic.
+	if len(req.ChunkRefs) == 0 {
+		var existing int
+		if err := tx.QueryRow(
+			`SELECT count(*) FROM resource_chunks WHERE resource_id = ?`, req.ID,
+		).Scan(&existing); err != nil {
+			tx.Rollback()
+			return "", 0, err
+		}
+		if existing > 0 {
+			tx.Rollback()
+			return "", 0, ErrDropsRoots
+		}
+	}
 	// Replace the GC roots to match the new manifest; chunks only this version
 	// referenced become unreferenced and eligible for a later sweep.
 	if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
@@ -1126,6 +1156,49 @@ func (s *Store) PackFileForOwner(owner, packID string) (string, error) {
 	return s.packPath(owner, packID), nil
 }
 
+// packExists reports whether the owner has a committed pack row for id. RepackOwner
+// uses it before deleting a stale new-pack file, so a content-addressed id that
+// coincides with a live pack is never removed out from under a committed swap.
+func (s *Store) packExists(owner, id string) (bool, error) {
+	var one int
+	err := s.db.QueryRow(
+		`SELECT 1 FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, id,
+	).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// GC reclaims the owner's dead pack space under one owner-scoped lock: it sweeps
+// fully-dead packs (GCPacks), then compacts the dead objects trapped in still-live
+// ones (RepackOwner). The lock serializes the whole sequence so two concurrent passes
+// — two folders syncing at once, two devices, or a manual sync racing the watch
+// daemon, each of which triggers a GC — cannot both pick the same repack candidate and
+// have the loser's stale-plan branch delete the winner's now-live compacted pack. The
+// single DB connection serializes the transactions, but not the pack-file writes and
+// removes around them, so this lock is what makes the swap safe.
+func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
+	defer s.gcLocks.lock(owner)()
+	deleted, freed, err := s.GCPacks(owner, minAge)
+	if err != nil {
+		return api.GCResponse{}, err
+	}
+	repacked, reclaimed, err := s.RepackOwner(owner, minAge)
+	if err != nil {
+		return api.GCResponse{}, err
+	}
+	return api.GCResponse{
+		DeletedPacks:   deleted,
+		FreedBytes:     freed,
+		RepackedPacks:  repacked,
+		ReclaimedBytes: reclaimed,
+	}, nil
+}
+
 // GCPacks deletes the owner's packs none of whose objects any live resource
 // references and that were uploaded longer ago than minAge. The age guard keeps an
 // in-flight push's freshly uploaded packs from being reaped before its manifest
@@ -1279,8 +1352,12 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 		}
 		if !ok {
 			// The plan went stale (the pack was touched, rooted differently, or
-			// vanished); the new file is now an orphan, so drop it best-effort.
-			_ = os.Remove(s.packPath(owner, newID))
+			// vanished). The new file is normally an orphan we just wrote, but a
+			// content address can coincide with a pack a prior swap already committed,
+			// so drop it only when no row references it — never a live pack's file.
+			if exists, cerr := s.packExists(owner, newID); cerr == nil && !exists {
+				_ = os.Remove(s.packPath(owner, newID))
+			}
 			continue
 		}
 		_ = os.Remove(s.packPath(owner, cand.packID))
@@ -1546,7 +1623,12 @@ func (s *Store) writeBlob(id string, nonce, ciphertext []byte) error {
 		f.Close()
 		return err
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return err
+	}
+	// Flush the directory entry so the new blob file's name is durable before the
+	// referencing row commits, not just its bytes (see fsyncDir).
+	return fsyncDir(s.blobDir(id))
 }
 
 // removeStaleBlobs deletes every blob file of id except the one for keepNonce
@@ -1608,7 +1690,10 @@ func (s *Store) writePack(owner, id string, data []byte) error {
 		_ = os.Remove(tmp)
 		return err
 	}
-	return nil
+	// Flush the directory entry too: the renamed file's data is durable, but the
+	// rename itself (the entry pointing at it) is not until the dir is fsynced, so a
+	// committed manifest could otherwise reference a pack the kernel loses on a crash.
+	return fsyncDir(filepath.Dir(path))
 }
 
 // newID returns a URL-safe random identifier encoding nBytes of entropy.

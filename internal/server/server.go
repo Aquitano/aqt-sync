@@ -405,6 +405,10 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusConflict, "resource changed since you last fetched it; re-sync")
 		return
 	}
+	if errors.Is(err, ErrDropsRoots) {
+		abort(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss")
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		// Update targeting an id the caller doesn't own (or that doesn't exist).
 		abort(c, http.StatusNotFound, "not found")

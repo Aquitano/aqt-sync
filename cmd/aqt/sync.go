@@ -485,6 +485,74 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		reclaimPacks(c.root, c.cl)
 	}
 
+	// Re-verify the on-disk bytes of every file we are about to overwrite or delete
+	// still match what the snapshot saw. A mtime-preserving edit (cp -p, touch -r,
+	// archive extract) or any edit landing in the snapshot->apply window would
+	// otherwise be silently clobbered by a remote download or delete. A target whose
+	// content drifted is downgraded to a conflict: its destructive op is skipped and
+	// its base entry left untouched, so the next sync re-plans it as a both-sides
+	// change to resolve (or --force to take local).
+	baseByPath := c.base.ByPath()
+	checkSafe := func(path string, isDownload bool) (bool, error) {
+		h, exists, isDir, err := syncengine.HashOnDisk(c.root, path)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return true, nil // nothing on disk to destroy
+		}
+		if isDir {
+			// A download onto a directory is the dir->file replacement materialize
+			// performs once its children are deleted; a delete whose target became a
+			// directory is a window change and is not safe to remove.
+			return isDownload, nil
+		}
+		if prev, ok := localByPath[path]; ok && h == prev.Hash {
+			return true, nil // unchanged since the snapshot
+		}
+		if isDownload {
+			if re, ok := remoteByPath[path]; ok && h == re.Hash {
+				return true, nil // already converged to the remote content
+			}
+		}
+		return false, nil // drifted in the snapshot->apply window
+	}
+	var conflicts []string
+	restore := func(path string) {
+		if e, ok := baseByPath[path]; ok {
+			newBase[path] = e
+		} else {
+			delete(newBase, path)
+		}
+		conflicts = append(conflicts, path)
+	}
+	keptDownloads := make([]syncengine.Entry, 0, len(downloads))
+	for _, e := range downloads {
+		safe, err := checkSafe(e.Path, true)
+		if err != nil {
+			return err
+		}
+		if safe {
+			keptDownloads = append(keptDownloads, e)
+		} else {
+			restore(e.Path)
+		}
+	}
+	downloads = keptDownloads
+	keptDeletes := make([]string, 0, len(localDeletes))
+	for _, p := range localDeletes {
+		safe, err := checkSafe(p, false)
+		if err != nil {
+			return err
+		}
+		if safe {
+			keptDeletes = append(keptDeletes, p)
+		} else {
+			restore(p)
+		}
+	}
+	localDeletes = keptDeletes
+
 	// Server is updated; now bring the local tree in line. A local file or symlink the
 	// remote turned into a directory must be removed before the download that creates
 	// that directory, or the download would write through the stale entry (refused) or
@@ -509,6 +577,11 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		return err
 	}
 	summarize(uploads, downloads, localDeletes, remoteChanged)
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		printPaths("conflict", conflicts)
+		return errConflictsRemain
+	}
 	return nil
 }
 

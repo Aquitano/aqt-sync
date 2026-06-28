@@ -747,3 +747,123 @@ func TestGCDoesNotCrossOwners(t *testing.T) {
 		t.Fatal("my pack must survive another owner's gc")
 	}
 }
+
+// A replace that clears every GC root of a resource that still has some is the
+// `aqt private` data-loss bug: re-sealing an object-backed resource's root blob
+// without its ChunkRefs would orphan the still-referenced objects for the next GC.
+// The store refuses it and leaves the resource untouched.
+func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "roots@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	packID, data, ids := packOf("obj-one", "obj-two")
+	if _, err := s.PutPack(owner, packID, data); err != nil {
+		t.Fatal(err)
+	}
+	mkReq := func(id string, expected int, body string, refs []string) api.PutResourceRequest {
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+		return api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+			WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expected,
+		}
+	}
+
+	id, _, err := s.PutResource(owner, mkReq("", 0, "v1", ids))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The root-dropping replace is rejected.
+	if _, _, err := s.PutResource(owner, mkReq(id, 1, "v2", nil)); !errors.Is(err, ErrDropsRoots) {
+		t.Fatalf("replace dropping all roots = %v, want ErrDropsRoots", err)
+	}
+
+	// And it changed nothing: version, roots, and the pack all survive a GC.
+	got, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Version != 1 {
+		t.Fatalf("version = %d after a refused replace, want 1", got.Version)
+	}
+	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 0 {
+		t.Fatalf("gc deleted %d err=%v, want 0 (roots intact)", deleted, err)
+	}
+	if missing, _ := s.MissingChunks(owner, ids); len(missing) != 0 {
+		t.Fatal("rooted objects must survive a refused root-dropping replace")
+	}
+
+	// A replace that keeps the roots is unaffected (no false positive).
+	if _, v, err := s.PutResource(owner, mkReq(id, 1, "v2", ids)); err != nil || v != 2 {
+		t.Fatalf("replace keeping roots = v%d err=%v, want v2 nil", v, err)
+	}
+}
+
+// The drop-roots guard only fires when the prior version actually had roots, so the
+// legitimate `aqt private` on an inline file (which never had any ChunkRefs) still
+// replaces in place with none.
+func TestUpdateAllowsEmptyRootsWhenNoneExisted(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "inline@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	mkReq := func(id string, expected int, body string) api.PutResourceRequest {
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+		return api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+			WrappedKey: &wrapped, ExpectedVersion: expected,
+		}
+	}
+	id, _, err := s.PutResource(owner, mkReq("", 0, "v1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, v, err := s.PutResource(owner, mkReq(id, 1, "v2")); err != nil || v != 2 {
+		t.Fatalf("inline replace with no roots = v%d err=%v, want v2 nil", v, err)
+	}
+}
+
+// Two GC passes for one owner race in production (two folders syncing at once, two
+// devices, or a manual sync racing the watch daemon — each triggers a GC). Without
+// the per-owner lock both would pick the same repack candidate, write the same
+// content-addressed new pack, and the loser's stale-plan branch would delete the
+// now-live new pack file, losing the live object. With it, the live object always
+// survives a burst of concurrent GCs.
+func TestConcurrentGCKeepsLivePack(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "racegc@example.com")
+	livePayload := "live-object-keep"
+	deadPayload := strings.Repeat("dead", 64) // enough dead space to make a repack candidate
+	packID, data, ids := packOf(livePayload, deadPayload)
+	if _, err := s.PutPack(owner, packID, data); err != nil {
+		t.Fatal(err)
+	}
+	s.rootResource(t, owner, []string{ids[0]}) // only the first object is live
+
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = s.GC(owner, forceGC)
+		}(i)
+	}
+	wg.Wait()
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent GC %d: %v", i, err)
+		}
+	}
+
+	// The live object survived the burst and still decrypts to its original bytes.
+	if got := s.readLocated(t, owner, ids[0]); string(got) != livePayload {
+		t.Fatalf("live object after concurrent GC = %q, want %q", got, livePayload)
+	}
+	if missing, _ := s.MissingChunks(owner, []string{ids[0]}); len(missing) != 0 {
+		t.Fatal("rooted object must survive concurrent GC")
+	}
+}
