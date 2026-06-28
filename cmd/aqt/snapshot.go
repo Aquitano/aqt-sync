@@ -569,18 +569,67 @@ func snapshotExportCmd() *cobra.Command {
 // --- prune ---
 
 func snapshotPruneCmd() *cobra.Command {
-	var yes bool
+	var (
+		id        string
+		dir       string
+		keepLast  int
+		olderThan string
+		dryRun    bool
+		yes       bool
+	)
 	cmd := &cobra.Command{
-		Use:   "prune <snapshot-id>...",
-		Short: "Delete snapshots; objects no other snapshot or resource needs are reclaimed",
-		Args:  cobra.MinimumNArgs(1),
+		Use:   "prune [snapshot-id...]",
+		Short: "Delete snapshots by id, or by retention (--keep-last/--older-than)",
+		Long: "Delete snapshots and let GC reclaim any objects no other snapshot or resource\n" +
+			"needs. Pass explicit ids, or select by retention with --keep-last / --older-than.\n" +
+			"A retention run spans every snapshot unless scoped to one resource with --dir or\n" +
+			"--id; --keep-last is applied per resource. Use --dry-run to preview.",
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, _, err := authedClient()
+			byRetention := keepLast > 0 || olderThan != ""
+			cl, prof, err := authedClient()
 			if err != nil {
 				return err
 			}
+
+			var targets []string
+			if byRetention {
+				if len(args) > 0 {
+					return errors.New("with --keep-last/--older-than, scope with --dir/--id; positional ids are not allowed")
+				}
+				cutoff, err := parseOlderThan(olderThan)
+				if err != nil {
+					return err
+				}
+				resourceID := id
+				if resourceID == "" && dir != "" {
+					if resourceID, err = resolveResourceID(dir, ""); err != nil {
+						return err
+					}
+				}
+				snaps, err := cl.ListSnapshots(resourceID)
+				if err != nil {
+					return err
+				}
+				targets = selectSnapshotsToPrune(snaps, keepLast, cutoff, time.Now())
+				if len(targets) == 0 {
+					fmt.Fprintln(os.Stderr, "nothing to prune")
+					return nil
+				}
+				// --dry-run/--json inspect the selection without deleting, so a scripted
+				// retention sweep can be reviewed before it runs for real.
+				if dryRun || flagJSON {
+					return reportPruneTargets(snaps, targets, prof)
+				}
+			} else {
+				if len(args) == 0 {
+					return errors.New("specify snapshot ids, or use --keep-last/--older-than")
+				}
+				targets = args
+			}
+
 			if !yes {
-				ok, err := promptYesNo(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(args)), false)
+				ok, err := promptYesNo(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(targets)), false)
 				if err != nil {
 					return err
 				}
@@ -588,19 +637,98 @@ func snapshotPruneCmd() *cobra.Command {
 					return errors.New("aborted")
 				}
 			}
-			for _, id := range args {
-				if err := cl.DeleteSnapshot(id); errors.Is(err, client.ErrNotFound) {
-					return fmt.Errorf("snapshot %s not found (or not yours)", id)
+			for _, t := range targets {
+				if err := cl.DeleteSnapshot(t); errors.Is(err, client.ErrNotFound) {
+					return fmt.Errorf("snapshot %s not found (or not yours)", t)
 				} else if err != nil {
 					return err
 				}
-				fmt.Printf("pruned %s\n", id)
+				fmt.Printf("pruned %s\n", t)
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&id, "id", "", "scope a retention prune to this resource id")
+	cmd.Flags().StringVar(&dir, "dir", "", "scope a retention prune to this tracked dir")
+	cmd.Flags().IntVar(&keepLast, "keep-last", 0, "keep the N newest snapshots per resource, prune the rest")
+	cmd.Flags().StringVar(&olderThan, "older-than", "", "prune snapshots older than this duration (e.g. 720h)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be pruned without deleting")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	return cmd
+}
+
+func parseOlderThan(s string) (time.Duration, error) {
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid --older-than: %w", err)
+	}
+	return d, nil
+}
+
+// selectSnapshotsToPrune chooses which snapshots a retention policy deletes. snaps
+// must be newest-first (as ListSnapshots returns). keepLast > 0 keeps that many newest
+// per resource; olderThan > 0 selects snapshots created before now-olderThan. When
+// both are set, only snapshots beyond the keep-last window AND older than the cutoff
+// are selected (the conservative intersection). It returns the ids to prune.
+func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, olderThan time.Duration, now time.Time) []string {
+	var cutoff int64
+	if olderThan > 0 {
+		cutoff = now.Add(-olderThan).Unix()
+	}
+	perResource := map[string]int{}
+	var prune []string
+	for _, s := range snaps {
+		perResource[s.ResourceID]++ // newest-first, so this rank rises going back in time
+		beyondKeep := keepLast > 0 && perResource[s.ResourceID] > keepLast
+		olderThanCutoff := olderThan > 0 && s.CreatedAt < cutoff
+
+		var selected bool
+		switch {
+		case keepLast > 0 && olderThan > 0:
+			selected = beyondKeep && olderThanCutoff
+		case keepLast > 0:
+			selected = beyondKeep
+		case olderThan > 0:
+			selected = olderThanCutoff
+		}
+		if selected {
+			prune = append(prune, s.ID)
+		}
+	}
+	return prune
+}
+
+// reportPruneTargets prints the snapshots a retention prune selected, for --dry-run
+// or --json inspection, decrypting names locally like `snapshot list`.
+func reportPruneTargets(snaps []api.SnapshotInfo, targets []string, prof *identity.Profile) error {
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	want := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		want[t] = true
+	}
+	rows := make([]snapshotRow, 0, len(targets))
+	for _, r := range snapshotRows(snaps, mk) {
+		if want[r.ID] {
+			rows = append(rows, r)
+		}
+	}
+	if flagJSON {
+		return printJSON(rows)
+	}
+	fmt.Fprintf(os.Stderr, "would prune %d snapshot(s):\n", len(rows))
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tVERSION\tSNAPSHOT-ID\tRESOURCE")
+	for _, r := range rows {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, r.Version, r.ID, r.ResourceID)
+	}
+	return w.Flush()
 }
 
 // --- auto (scheduled opt-out) ---
@@ -608,28 +736,39 @@ func snapshotPruneCmd() *cobra.Command {
 func snapshotAutoCmd() *cobra.Command {
 	var (
 		id  string
+		on  bool
 		off bool
 	)
 	cmd := &cobra.Command{
 		Use:   "auto [dir]",
-		Short: "Toggle whether the scheduled job snapshots a tracked root (default: on)",
-		Args:  cobra.MaximumNArgs(1),
+		Short: "Show or toggle whether the scheduled job snapshots tracked roots (default: on)",
+		Long: "With no target, prints whether the scheduled snapshot job covers each of your\n" +
+			"resources. With a tracked dir or --id, toggles coverage for that one root.",
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, _, err := authedClient()
+			if on && off {
+				return errors.New("--on and --off are mutually exclusive")
+			}
+			cl, prof, err := authedClient()
 			if err != nil {
 				return err
+			}
+			// No target and no toggle intent: report coverage rather than change it.
+			if len(args) == 0 && id == "" && !on && !off {
+				return printAutoStatus(cl, prof)
 			}
 			resourceID, err := resolveResourceID(dirArg(args), id)
 			if err != nil {
 				return err
 			}
-			if err := cl.SetAutoSnapshot(resourceID, !off); errors.Is(err, client.ErrNotFound) {
+			enabled := !off
+			if err := cl.SetAutoSnapshot(resourceID, enabled); errors.Is(err, client.ErrNotFound) {
 				return fmt.Errorf("resource %s not found (or not yours)", resourceID)
 			} else if err != nil {
 				return err
 			}
 			state := "enabled"
-			if off {
+			if !enabled {
 				state = "disabled"
 			}
 			fmt.Printf("scheduled snapshots %s for %s\n", state, resourceID)
@@ -637,8 +776,57 @@ func snapshotAutoCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "target this resource id instead of a tracked dir")
+	cmd.Flags().BoolVar(&on, "on", false, "include this root in the scheduled job (the default)")
 	cmd.Flags().BoolVar(&off, "off", false, "exclude this root from the scheduled job")
 	return cmd
+}
+
+// autoRow is one resource's scheduled-snapshot coverage, as shown by a bare
+// `aqt snapshot auto`.
+type autoRow struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Auto    bool   `json:"auto"`
+	Version int    `json:"version"`
+}
+
+// printAutoStatus lists every resource and whether the scheduled job covers it,
+// decrypting names locally the same way `ls`/`find` do.
+func printAutoStatus(cl *client.Client, prof *identity.Profile) error {
+	items, err := cl.ListResources()
+	if err != nil {
+		return err
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	rows := make([]autoRow, 0, len(items))
+	for _, it := range items {
+		name := "(unreadable)"
+		if m, ok := openMetadata(it, mk); ok && m.Name != "" {
+			name = m.Name
+		}
+		rows = append(rows, autoRow{ID: it.ID, Name: name, Auto: it.AutoSnapshot, Version: it.Version})
+	}
+	if flagJSON {
+		return printJSON(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(os.Stderr, "no resources yet")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tAUTO\tVERSION\tID")
+	for _, r := range rows {
+		state := "off"
+		if r.Auto {
+			state = "on"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", r.Name, state, r.Version, r.ID)
+	}
+	return w.Flush()
 }
 
 // --- shared ---
