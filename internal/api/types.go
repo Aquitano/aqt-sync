@@ -220,6 +220,9 @@ type ResourceListItem struct {
 	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	Version       int                `json:"version"`
+	// AutoSnapshot reports whether the server's scheduled snapshot job covers this
+	// resource, so `snapshot auto` can show coverage without a per-resource fetch.
+	AutoSnapshot bool `json:"autoSnapshot"`
 }
 
 type ListResourcesResponse struct {
