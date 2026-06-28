@@ -51,6 +51,13 @@ type Store struct {
 	// them, so two concurrent passes could double-handle a repack candidate; this lock
 	// closes that window. See GC.
 	gcLocks *keyedMutex
+	// resLocks serializes mutations of a single resource (update, visibility change,
+	// delete) against each other and against a snapshot capturing that resource. It
+	// lives in the store rather than the HTTP layer so the keyless scheduled snapshot
+	// job (RunAutoSnapshots, which never goes through a handler) is serialized the same
+	// way a manual snapshot is; otherwise it could capture a torn (blob, chunk-roots)
+	// pair from a concurrent sync.
+	resLocks *keyedMutex
 }
 
 func OpenStore(dataDir string) (*Store, error) {
@@ -77,7 +84,7 @@ func OpenStore(dataDir string) (*Store, error) {
 	// connection serializes every write in-process. This suits the v1
 	// single-instance server; horizontal scaling would need real row locks.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex()}
+	s := &Store{db: db, blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -640,6 +647,7 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 }
 
 func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
+	defer s.resLocks.lock(req.ID)()
 	var current int
 	err := s.db.QueryRow(
 		`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
@@ -651,8 +659,8 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 		return "", 0, err
 	}
 	// Optimistic concurrency: a client that based its update on an older version
-	// is rejected so a concurrent write is never lost. (The per-resource server
-	// lock makes this check-then-update atomic; the WHERE version=? on the UPDATE
+	// is rejected so a concurrent write is never lost. (The per-resource lock above
+	// makes this check-then-update atomic; the WHERE version=? on the UPDATE
 	// is a second line of defense.)
 	if req.ExpectedVersion > 0 && current != req.ExpectedVersion {
 		return "", 0, ErrVersionConflict
@@ -698,7 +706,7 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 	// version had some would orphan the still-referenced objects for the next GC. No
 	// legitimate replace does this — a folder/streamed update always carries at least
 	// its manifest/root objects — so reject it rather than commit the unrooting. The
-	// per-resource lock makes this count-then-replace atomic.
+	// per-resource lock above makes this count-then-replace atomic.
 	if len(req.ChunkRefs) == 0 {
 		var existing int
 		if err := tx.QueryRow(
@@ -799,6 +807,7 @@ func (s *Store) ResourceVisibility(id string) (api.Visibility, error) {
 // SetVisibility flips a resource public/private in place (owner-checked, version
 // bumped) without touching the blob or its wrapped key.
 func (s *Store) SetVisibility(owner, id string, vis api.Visibility) (int, error) {
+	defer s.resLocks.lock(id)()
 	res, err := s.db.Exec(
 		`UPDATE resources SET visibility = ?, version = version + 1 WHERE id = ? AND owner_handle = ?`,
 		string(vis), id, owner,
@@ -856,6 +865,7 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 }
 
 func (s *Store) DeleteResource(owner, id string) error {
+	defer s.resLocks.lock(id)()
 	res, err := s.db.Exec(`DELETE FROM resources WHERE id = ? AND owner_handle = ?`, id, owner)
 	if err != nil {
 		return err
@@ -919,6 +929,11 @@ func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
 // existing chunk roots, decrypting nothing. label, when non-nil, is the client-
 // sealed user label stored opaquely alongside.
 func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
+	// Serialize against a concurrent update/delete of the same resource so the
+	// snapshot copies a consistent (blob, chunk-roots) pair, not a torn mix of two
+	// versions. Held in the store so the keyless scheduled job is serialized too, not
+	// only the manual path that comes through the handler.
+	defer s.resLocks.lock(resourceID)()
 	var (
 		visibility, metaJSON string
 		wrappedJSON          sql.NullString
@@ -1136,9 +1151,13 @@ func (s *Store) SetAutoSnapshot(owner, resourceID string, enabled bool) error {
 // Version-dedup keeps the scheduled job's cost proportional to actual change rather
 // than to how often it ticks.
 func (s *Store) RunAutoSnapshots() (int, error) {
+	// wrapped_key IS NOT NULL skips public resources: their content key only lives in
+	// a share URL fragment, so a keyless snapshot of one could never be restored, yet
+	// would pin its chunks forever. A manual snapshot stays the owner's call.
 	rows, err := s.db.Query(
 		`SELECT r.owner_handle, r.id FROM resources r
 		 WHERE r.auto_snapshot = 1
+		   AND r.wrapped_key IS NOT NULL
 		   AND NOT EXISTS (
 		     SELECT 1 FROM snapshots s
 		     WHERE s.resource_id = r.id AND s.version_captured = r.version

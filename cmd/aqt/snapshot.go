@@ -315,31 +315,66 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 }
 
 // swapTree replaces root's contents (everything but the .aqt control dir) with
-// staging's, then removes the now-empty staging dir. Both live under the same parent
-// so the renames stay on one filesystem.
+// staging's. It moves the live entries aside into a sibling backup dir first, then
+// moves the staged entries in, so a rename that fails partway can be rolled back to
+// the original tree rather than left half-replaced. Backup, staging, and root share
+// a parent, so every rename stays on one filesystem (and is atomic).
 func swapTree(root, staging string) error {
-	entries, err := os.ReadDir(root)
+	backup, err := os.MkdirTemp(filepath.Dir(root), ".aqt-backup-*")
 	if err != nil {
 		return err
+	}
+
+	// On any failure, undo the moves in reverse: staged entries back to staging, live
+	// entries back to root. A clean rollback drops the backup dir; an incomplete one
+	// keeps it (it still holds the original contents) so a partial swap never loses
+	// data, and reports where it is.
+	var movedOut, movedIn []string
+	fail := func(cause error) error {
+		ok := true
+		for i := len(movedIn) - 1; i >= 0; i-- {
+			if e := os.Rename(filepath.Join(root, movedIn[i]), filepath.Join(staging, movedIn[i])); e != nil {
+				ok = false
+			}
+		}
+		for i := len(movedOut) - 1; i >= 0; i-- {
+			if e := os.Rename(filepath.Join(backup, movedOut[i]), filepath.Join(root, movedOut[i])); e != nil {
+				ok = false
+			}
+		}
+		if !ok {
+			return fmt.Errorf("%w (rolled back partially; original contents preserved in %s)", cause, backup)
+		}
+		os.RemoveAll(backup)
+		return cause
+	}
+
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return fail(err)
 	}
 	for _, e := range entries {
 		if e.Name() == syncengine.ControlDir {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(root, e.Name())); err != nil {
-			return err
+		if err := os.Rename(filepath.Join(root, e.Name()), filepath.Join(backup, e.Name())); err != nil {
+			return fail(err)
 		}
+		movedOut = append(movedOut, e.Name())
 	}
+
 	staged, err := os.ReadDir(staging)
 	if err != nil {
-		return err
+		return fail(err)
 	}
 	for _, e := range staged {
 		if err := os.Rename(filepath.Join(staging, e.Name()), filepath.Join(root, e.Name())); err != nil {
-			return err
+			return fail(err)
 		}
+		movedIn = append(movedIn, e.Name())
 	}
-	return nil
+
+	return os.RemoveAll(backup)
 }
 
 // --- export ---

@@ -21,16 +21,14 @@ import (
 )
 
 type Server struct {
-	store    *Store
-	resLocks *keyedMutex
-	limiter  *ipRateLimiter
+	store   *Store
+	limiter *ipRateLimiter
 }
 
 func New(store *Store) *Server {
 	return &Server{
-		store:    store,
-		resLocks: newKeyedMutex(),
-		limiter:  newIPRateLimiter(unauthRatePerSec, unauthBurst),
+		store:   store,
+		limiter: newIPRateLimiter(unauthRatePerSec, unauthBurst),
 	}
 }
 
@@ -405,11 +403,6 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	// Serialize updates to an existing resource so two concurrent syncs cannot
-	// interleave their writes. A create (no id) targets a fresh id, so no lock.
-	if req.ID != "" {
-		defer s.resLocks.lock(req.ID)()
-	}
 	id, version, err := s.store.PutResource(owner, req)
 	if errors.Is(err, ErrVersionConflict) {
 		abort(c, http.StatusConflict, "resource changed since you last fetched it; re-sync")
@@ -477,7 +470,6 @@ func (s *Server) setVisibility(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	defer s.resLocks.lock(c.Param("id"))()
 	version, err := s.store.SetVisibility(owner, c.Param("id"), req.Visibility)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
@@ -492,7 +484,6 @@ func (s *Server) setVisibility(c *gin.Context) {
 
 func (s *Server) deleteResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	defer s.resLocks.lock(c.Param("id"))()
 	err := s.store.DeleteResource(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
@@ -517,9 +508,6 @@ func (s *Server) createSnapshot(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "resourceId is required")
 		return
 	}
-	// Serialize against a concurrent update of the same resource so the snapshot
-	// copies a consistent (blob, chunk-roots) pair, not a torn mix of two versions.
-	defer s.resLocks.lock(req.ResourceID)()
 	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
