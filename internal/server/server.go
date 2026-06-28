@@ -8,8 +8,10 @@ import (
 	"crypto/subtle"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/hkdf"
@@ -19,16 +21,14 @@ import (
 )
 
 type Server struct {
-	store    *Store
-	resLocks *keyedMutex
-	limiter  *ipRateLimiter
+	store   *Store
+	limiter *ipRateLimiter
 }
 
 func New(store *Store) *Server {
 	return &Server{
-		store:    store,
-		resLocks: newKeyedMutex(),
-		limiter:  newIPRateLimiter(unauthRatePerSec, unauthBurst),
+		store:   store,
+		limiter: newIPRateLimiter(unauthRatePerSec, unauthBurst),
 	}
 }
 
@@ -103,6 +103,14 @@ func (s *Server) Router() *gin.Engine {
 			authed.PUT("/packs/:id", limitBody(maxPackBody), s.putPack)
 			authed.GET("/packs/:id", s.getPack)
 			authed.POST("/gc", s.runGC)
+
+			// Snapshots: immutable, GC-pinned copies of a resource version. Owner-only;
+			// a snapshot is never public, so unlike a resource there is no unauth read.
+			authed.POST("/snapshots", limitBody(maxControlBody), s.createSnapshot)
+			authed.GET("/snapshots", s.listSnapshots)
+			authed.GET("/snapshots/:id", s.getSnapshot)
+			authed.DELETE("/snapshots/:id", s.deleteSnapshot)
+			authed.POST("/resources/:id/auto-snapshot", limitBody(maxControlBody), s.setAutoSnapshot)
 		}
 	}
 	return r
@@ -395,11 +403,6 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	// Serialize updates to an existing resource so two concurrent syncs cannot
-	// interleave their writes. A create (no id) targets a fresh id, so no lock.
-	if req.ID != "" {
-		defer s.resLocks.lock(req.ID)()
-	}
 	id, version, err := s.store.PutResource(owner, req)
 	if errors.Is(err, ErrVersionConflict) {
 		abort(c, http.StatusConflict, "resource changed since you last fetched it; re-sync")
@@ -467,7 +470,6 @@ func (s *Server) setVisibility(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	defer s.resLocks.lock(c.Param("id"))()
 	version, err := s.store.SetVisibility(owner, c.Param("id"), req.Visibility)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
@@ -482,7 +484,6 @@ func (s *Server) setVisibility(c *gin.Context) {
 
 func (s *Server) deleteResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	defer s.resLocks.lock(c.Param("id"))()
 	err := s.store.DeleteResource(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
@@ -493,6 +494,108 @@ func (s *Server) deleteResource(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// --- snapshot handlers ---
+
+func (s *Server) createSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.CreateSnapshotRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.ResourceID == "" {
+		abort(c, http.StatusBadRequest, "resourceId is required")
+		return
+	}
+	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "snapshot failed")
+		return
+	}
+	c.JSON(http.StatusCreated, info)
+}
+
+func (s *Server) listSnapshots(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	snaps, err := s.store.ListSnapshots(owner, c.Query("resource"))
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "list snapshots failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ListSnapshotsResponse{Snapshots: snaps})
+}
+
+func (s *Server) getSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	resp, err := s.store.GetSnapshot(owner, c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "fetch snapshot failed")
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) deleteSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	if err := s.store.DeleteSnapshot(owner, c.Param("id")); errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		abort(c, http.StatusInternalServerError, "delete snapshot failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) setAutoSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.SetAutoSnapshotRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if err := s.store.SetAutoSnapshot(owner, c.Param("id"), req.Enabled); errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	} else if err != nil {
+		abort(c, http.StatusInternalServerError, "update failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// StartAutoSnapshot runs the scheduled snapshot job every interval until stop is
+// closed (a non-positive interval disables it). A snapshot is keyless — the server
+// copies already-sealed ciphertext — so the job needs no client online; version
+// dedup keeps a tick that finds no changes nearly free.
+func (s *Server) StartAutoSnapshot(interval time.Duration, stop <-chan struct{}) {
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if n, err := s.store.RunAutoSnapshots(); err != nil {
+					log.Printf("auto-snapshot: %v", err)
+				} else if n > 0 {
+					log.Printf("auto-snapshot: created %d snapshot(s)", n)
+				}
+			}
+		}
+	}()
 }
 
 // --- helpers ---

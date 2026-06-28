@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
@@ -169,6 +170,50 @@ func (c *Client) GC() (api.GCResponse, error) {
 	var r api.GCResponse
 	err := c.do(http.MethodPost, "/v1/gc", nil, &r)
 	return r, err
+}
+
+// --- snapshots ---
+
+// CreateSnapshot pins the current version of a resource the caller owns, returning
+// the new snapshot's metadata. label, when non-nil, is the client-sealed user label
+// stored opaquely alongside (the client does the sealing; this package holds no
+// keys).
+func (c *Client) CreateSnapshot(resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
+	var r api.SnapshotInfo
+	err := c.do(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, EncryptedLabel: label}, &r)
+	return r, err
+}
+
+// ListSnapshots returns the caller's snapshots, newest first. A non-empty
+// resourceID restricts the list to that resource's history.
+func (c *Client) ListSnapshots(resourceID string) ([]api.SnapshotInfo, error) {
+	path := "/v1/snapshots"
+	if resourceID != "" {
+		path += "?resource=" + url.QueryEscape(resourceID)
+	}
+	var r api.ListSnapshotsResponse
+	err := c.do(http.MethodGet, path, nil, &r)
+	return r.Snapshots, err
+}
+
+// GetSnapshot fetches a snapshot's sealed root blob plus the copied meta and
+// wrapped key; the client reconstructs and decrypts it locally.
+func (c *Client) GetSnapshot(id string) (api.GetSnapshotResponse, error) {
+	var r api.GetSnapshotResponse
+	err := c.do(http.MethodGet, "/v1/snapshots/"+url.PathEscape(id), nil, &r)
+	return r, err
+}
+
+// DeleteSnapshot prunes a snapshot. Objects no live resource or other snapshot
+// still roots are reclaimed by a later GC.
+func (c *Client) DeleteSnapshot(id string) error {
+	return c.do(http.MethodDelete, "/v1/snapshots/"+url.PathEscape(id), nil, nil)
+}
+
+// SetAutoSnapshot toggles whether the server's scheduled job snapshots a resource.
+func (c *Client) SetAutoSnapshot(resourceID string, enabled bool) error {
+	return c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(resourceID)+"/auto-snapshot",
+		api.SetAutoSnapshotRequest{Enabled: enabled}, nil)
 }
 
 // putRaw uploads an opaque body as application/octet-stream (the pack transport),

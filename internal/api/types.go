@@ -238,6 +238,57 @@ type ListDevicesResponse struct {
 	Devices []Device `json:"devices"`
 }
 
+// --- snapshots ---
+
+// SnapshotInfo describes one retained snapshot: a frozen, GC-pinned copy of a
+// resource version. EncryptedMeta and WrappedKey are copied from the resource at
+// snapshot time, so a browse can decrypt the resource's name without touching the
+// live resource (which may since have changed or been deleted). The server holds
+// all of it opaquely; it never reads the meta or the key.
+type SnapshotInfo struct {
+	ID         string `json:"id"`
+	ResourceID string `json:"resourceId"`
+	Version    int    `json:"version"`
+	CreatedAt  int64  `json:"createdAt"`
+	// EncryptedLabel is the optional user label, sealed by the client under the
+	// resource content key (AADSnapshotLabel). Absent on scheduled snapshots, which
+	// the keyless server creates without a key to seal one. The server never reads it.
+	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
+	EncryptedMeta  crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey     *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+}
+
+// CreateSnapshotRequest pins the current version of a resource the caller owns.
+// The server reads the resource's live blob and chunk roots and copies both into
+// an immutable snapshot; no plaintext or key is sent (the snapshot reuses the
+// already-stored ciphertext). EncryptedLabel, when set, is the client-sealed label
+// stored opaquely alongside.
+type CreateSnapshotRequest struct {
+	ResourceID     string             `json:"resourceId"`
+	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
+}
+
+type ListSnapshotsResponse struct {
+	Snapshots []SnapshotInfo `json:"snapshots"`
+}
+
+// GetSnapshotResponse carries everything the client needs to reconstruct a
+// snapshot: the sealed root blob plus the copied meta and wrapped key. The chunk
+// objects are fetched from the owner's object store by id, exactly as a normal
+// pull does, so restore reuses the existing materialize path. All decryption
+// happens on the client; the server returns only ciphertext.
+type GetSnapshotResponse struct {
+	Snapshot SnapshotInfo      `json:"snapshot"`
+	Blob     crypto.SealedBlob `json:"blob"`
+}
+
+// SetAutoSnapshotRequest toggles whether the server's scheduled snapshot job
+// covers a resource. Tracked roots are covered by default; this is the per-root
+// opt-out.
+type SetAutoSnapshotRequest struct {
+	Enabled bool `json:"enabled"`
+}
+
 type ErrorResponse struct {
 	Error string `json:"error"`
 }
