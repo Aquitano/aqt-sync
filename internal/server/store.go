@@ -199,6 +199,10 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	);
 	CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_chunk ON snapshot_chunks(chunk_id);
 	ALTER TABLE resources ADD COLUMN auto_snapshot INTEGER NOT NULL DEFAULT 1;`,
+	// 5: optional snapshot label, sealed by the client under the resource content key
+	// (NULL on scheduled snapshots, which the keyless server cannot seal). Stored
+	// opaquely; the server never reads it.
+	`ALTER TABLE snapshots ADD COLUMN encrypted_label TEXT;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -897,10 +901,24 @@ func decodeMetaKey(metaJSON string, wrappedJSON sql.NullString, meta *crypto.Sea
 	return nil
 }
 
+// decodeLabel parses a snapshot's optional JSON-encoded sealed label, returning nil
+// when the column is null (no label, or a scheduled snapshot).
+func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
+	if !labelJSON.Valid {
+		return nil, nil
+	}
+	var b crypto.SealedBlob
+	if err := json.Unmarshal([]byte(labelJSON.String), &b); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
 // CreateSnapshot pins the owner's current version of a resource, returning the new
 // snapshot's metadata. It is keyless: it copies the already-sealed blob and the
-// existing chunk roots, decrypting nothing.
-func (s *Store) CreateSnapshot(owner, resourceID string) (api.SnapshotInfo, error) {
+// existing chunk roots, decrypting nothing. label, when non-nil, is the client-
+// sealed user label stored opaquely alongside.
+func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
 	var (
 		visibility, metaJSON string
 		wrappedJSON          sql.NullString
@@ -939,15 +957,24 @@ func (s *Store) CreateSnapshot(owner, resourceID string) (api.SnapshotInfo, erro
 		return api.SnapshotInfo{}, err
 	}
 
+	var labelJSON sql.NullString
+	if label != nil {
+		b, err := json.Marshal(label)
+		if err != nil {
+			return api.SnapshotInfo{}, err
+		}
+		labelJSON = sql.NullString{String: string(b), Valid: true}
+	}
+
 	createdAt := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, wrapped_key, blob_nonce, version_captured, created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?)`,
-		snapID, owner, resourceID, visibility, metaJSON, wrappedJSON, nonce, version, createdAt,
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt,
 	); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -969,7 +996,7 @@ func (s *Store) CreateSnapshot(owner, resourceID string) (api.SnapshotInfo, erro
 	}
 	committed = true
 
-	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt}
+	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
 		return api.SnapshotInfo{}, err
 	}
@@ -979,7 +1006,7 @@ func (s *Store) CreateSnapshot(owner, resourceID string) (api.SnapshotInfo, erro
 // ListSnapshots returns the owner's snapshots, newest first. A non-empty
 // resourceID restricts the list to one resource's history.
 func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, error) {
-	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, wrapped_key
+	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key
 	          FROM snapshots WHERE owner_handle = ?`
 	args := []any{owner}
 	if resourceID != "" {
@@ -998,12 +1025,16 @@ func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, err
 		var (
 			info        api.SnapshotInfo
 			metaJSON    string
+			labelJSON   sql.NullString
 			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &wrappedJSON); err != nil {
+		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON); err != nil {
 			return nil, err
 		}
 		if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+			return nil, err
+		}
+		if info.EncryptedLabel, err = decodeLabel(labelJSON); err != nil {
 			return nil, err
 		}
 		out = append(out, info)
@@ -1018,14 +1049,15 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 	var (
 		out         api.GetSnapshotResponse
 		metaJSON    string
+		labelJSON   sql.NullString
 		wrappedJSON sql.NullString
 		nonce       []byte
 	)
 	info := api.SnapshotInfo{ID: snapshotID}
 	err := s.db.QueryRow(
-		`SELECT resource_id, version_captured, created_at, encrypted_meta, wrapped_key, blob_nonce
+		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, blob_nonce
 		 FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
-	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &wrappedJSON, &nonce)
+	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &nonce)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -1033,6 +1065,9 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 		return out, err
 	}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+		return out, err
+	}
+	if info.EncryptedLabel, err = decodeLabel(labelJSON); err != nil {
 		return out, err
 	}
 	ciphertext, err := s.readBlob(snapshotID, nonce)
@@ -1135,7 +1170,7 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 	created := 0
 	var firstErr error
 	for _, r := range due {
-		if _, err := s.CreateSnapshot(r.owner, r.id); err != nil {
+		if _, err := s.CreateSnapshot(r.owner, r.id, nil); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("auto-snapshot %s: %w", r.id, err)
 			}

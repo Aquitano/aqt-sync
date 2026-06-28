@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
@@ -174,10 +175,12 @@ func (c *Client) GC() (api.GCResponse, error) {
 // --- snapshots ---
 
 // CreateSnapshot pins the current version of a resource the caller owns, returning
-// the new snapshot's metadata.
-func (c *Client) CreateSnapshot(resourceID string) (api.SnapshotInfo, error) {
+// the new snapshot's metadata. label, when non-nil, is the client-sealed user label
+// stored opaquely alongside (the client does the sealing; this package holds no
+// keys).
+func (c *Client) CreateSnapshot(resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
 	var r api.SnapshotInfo
-	err := c.do(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID}, &r)
+	err := c.do(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, EncryptedLabel: label}, &r)
 	return r, err
 }
 

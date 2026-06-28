@@ -25,7 +25,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := cl.CreateSnapshot(h.folderID(src))
+	snap, err := cl.CreateSnapshot(h.folderID(src), nil)
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
@@ -60,6 +60,45 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	assertAbsent(t, dest, "c.txt")
 }
 
+// A label set on create is sealed client-side and reads back decrypted on browse,
+// without the server ever seeing the plaintext.
+func TestSnapshotLabelEndToEnd(t *testing.T) {
+	h := newE2E(t)
+	src := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.init(src)
+	writeTree(t, src, "a.txt", "hi")
+	h.sync(src)
+
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rid := h.folderID(src)
+	sealed, err := sealSnapshotLabel(cl, prof, rid, "milestone-1")
+	if err != nil {
+		t.Fatalf("seal label: %v", err)
+	}
+	if _, err := cl.CreateSnapshot(rid, sealed); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	snaps, err := cl.ListSnapshots(rid)
+	if err != nil || len(snaps) != 1 {
+		t.Fatalf("list = %d err=%v, want 1", len(snaps), err)
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	if _, label := snapshotNameLabel(snaps[0], mk); label != "milestone-1" {
+		t.Fatalf("label = %q, want 'milestone-1'", label)
+	}
+}
+
 // Pruning a snapshot deletes it; a subsequent fetch is a not-found.
 func TestSnapshotPrune(t *testing.T) {
 	h := newE2E(t)
@@ -75,7 +114,7 @@ func TestSnapshotPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := cl.CreateSnapshot(h.folderID(src))
+	snap, err := cl.CreateSnapshot(h.folderID(src), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

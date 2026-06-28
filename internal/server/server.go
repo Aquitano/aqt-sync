@@ -520,7 +520,7 @@ func (s *Server) createSnapshot(c *gin.Context) {
 	// Serialize against a concurrent update of the same resource so the snapshot
 	// copies a consistent (blob, chunk-roots) pair, not a torn mix of two versions.
 	defer s.resLocks.lock(req.ResourceID)()
-	info, err := s.store.CreateSnapshot(owner, req.ResourceID)
+	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
 		return

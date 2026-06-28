@@ -246,20 +246,26 @@ type ListDevicesResponse struct {
 // live resource (which may since have changed or been deleted). The server holds
 // all of it opaquely; it never reads the meta or the key.
 type SnapshotInfo struct {
-	ID            string             `json:"id"`
-	ResourceID    string             `json:"resourceId"`
-	Version       int                `json:"version"`
-	CreatedAt     int64              `json:"createdAt"`
-	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
-	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	ID         string `json:"id"`
+	ResourceID string `json:"resourceId"`
+	Version    int    `json:"version"`
+	CreatedAt  int64  `json:"createdAt"`
+	// EncryptedLabel is the optional user label, sealed by the client under the
+	// resource content key (AADSnapshotLabel). Absent on scheduled snapshots, which
+	// the keyless server creates without a key to seal one. The server never reads it.
+	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
+	EncryptedMeta  crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey     *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 }
 
 // CreateSnapshotRequest pins the current version of a resource the caller owns.
 // The server reads the resource's live blob and chunk roots and copies both into
 // an immutable snapshot; no plaintext or key is sent (the snapshot reuses the
-// already-stored ciphertext).
+// already-stored ciphertext). EncryptedLabel, when set, is the client-sealed label
+// stored opaquely alongside.
 type CreateSnapshotRequest struct {
-	ResourceID string `json:"resourceId"`
+	ResourceID     string             `json:"resourceId"`
+	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
 }
 
 type ListSnapshotsResponse struct {

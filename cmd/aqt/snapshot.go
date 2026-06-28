@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -32,13 +33,16 @@ func snapshotCmd() *cobra.Command {
 // --- create ---
 
 func snapshotCreateCmd() *cobra.Command {
-	var id string
+	var (
+		id    string
+		label string
+	)
 	cmd := &cobra.Command{
 		Use:   "create [dir]",
 		Short: "Snapshot a tracked folder's (or a resource's) current state",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, _, err := authedClient()
+			cl, prof, err := authedClient()
 			if err != nil {
 				return err
 			}
@@ -46,7 +50,15 @@ func snapshotCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			info, err := cl.CreateSnapshot(resourceID)
+			// A label is sealed under the resource content key here, so the server stores
+			// only ciphertext; this needs the key, so it is the one path that unlocks.
+			var sealed *crypto.SealedBlob
+			if label != "" {
+				if sealed, err = sealSnapshotLabel(cl, prof, resourceID, label); err != nil {
+					return err
+				}
+			}
+			info, err := cl.CreateSnapshot(resourceID, sealed)
 			if errors.Is(err, client.ErrNotFound) {
 				return fmt.Errorf("resource %s not found (or not yours)", resourceID)
 			}
@@ -61,7 +73,40 @@ func snapshotCreateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "snapshot this resource id directly (e.g. a pushed file) instead of a tracked dir")
+	cmd.Flags().StringVarP(&label, "label", "l", "", "attach a label, encrypted on this machine before upload")
 	return cmd
+}
+
+// sealSnapshotLabel encrypts a snapshot label under the resource's content key, so
+// the server stores it as opaque ciphertext that a later browse decrypts the same
+// way it decrypts the name. It fetches the resource to recover its wrapped key, then
+// unwraps it with the master key.
+func sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, label string) (*crypto.SealedBlob, error) {
+	res, err := cl.GetResource(resourceID)
+	if errors.Is(err, client.ErrNotFound) {
+		return nil, fmt.Errorf("resource %s not found (or not yours)", resourceID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if res.WrappedKey == nil {
+		return nil, errors.New("cannot label this snapshot: the resource is public (no owner key to seal under)")
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return nil, err
+	}
+	defer mk.Wipe()
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return nil, fmt.Errorf("unwrap resource key: %w", err)
+	}
+	defer ck.Wipe()
+	sealed, err := crypto.Seal([]byte(label), ck, crypto.AADSnapshotLabel)
+	if err != nil {
+		return nil, err
+	}
+	return &sealed, nil
 }
 
 // --- list ---
@@ -103,9 +148,9 @@ func snapshotListCmd() *cobra.Command {
 				return nil
 			}
 			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "CREATED\tNAME\tVERSION\tSNAPSHOT-ID\tRESOURCE")
+			fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tVERSION\tSNAPSHOT-ID\tRESOURCE")
 			for _, r := range snapshotRows(snaps, mk) {
-				fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Version, r.ID, r.ResourceID)
+				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, r.Version, r.ID, r.ResourceID)
 			}
 			return w.Flush()
 		},
@@ -120,6 +165,7 @@ type snapshotRow struct {
 	ID         string `json:"id"`
 	ResourceID string `json:"resourceId"`
 	Name       string `json:"name"`
+	Label      string `json:"label,omitempty"`
 	Version    int    `json:"version"`
 	Created    string `json:"created"`
 	CreatedAt  int64  `json:"createdAt"`
@@ -128,28 +174,43 @@ type snapshotRow struct {
 func snapshotRows(snaps []api.SnapshotInfo, mk crypto.MasterKey) []snapshotRow {
 	rows := make([]snapshotRow, 0, len(snaps))
 	for _, s := range snaps {
-		name := snapshotName(s, mk)
+		name, label := snapshotNameLabel(s, mk)
 		rows = append(rows, snapshotRow{
-			ID: s.ID, ResourceID: s.ResourceID, Name: name, Version: s.Version,
+			ID: s.ID, ResourceID: s.ResourceID, Name: name, Label: label, Version: s.Version,
 			Created: formatTime(s.CreatedAt), CreatedAt: s.CreatedAt,
 		})
 	}
 	return rows
 }
 
-// snapshotName decrypts the resource name copied into the snapshot, reusing the
-// same unwrap-and-open path as `aqt ls`. A snapshot that cannot be decrypted is
-// still listed, with a placeholder.
-func snapshotName(s api.SnapshotInfo, mk crypto.MasterKey) string {
-	meta, ok := openMetadata(api.ResourceListItem{EncryptedMeta: s.EncryptedMeta, WrappedKey: s.WrappedKey}, mk)
-	switch {
-	case !ok:
-		return "(unreadable)"
-	case meta.Name == "":
-		return "(unnamed)"
-	default:
-		return meta.Name
+// snapshotNameLabel decrypts the resource name and the optional user label a
+// snapshot carries, unwrapping the content key once for both (the same key both
+// were sealed under). A snapshot that cannot be decrypted is still listed, with a
+// placeholder name and no label.
+func snapshotNameLabel(s api.SnapshotInfo, mk crypto.MasterKey) (name, label string) {
+	name = "(unreadable)"
+	if s.WrappedKey == nil {
+		return name, ""
 	}
+	ck, err := crypto.UnwrapKey(*s.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return name, ""
+	}
+	defer ck.Wipe()
+	if plain, err := crypto.Open(s.EncryptedMeta, ck, crypto.AADMeta); err == nil {
+		var m api.Metadata
+		if json.Unmarshal(plain, &m) == nil {
+			if name = m.Name; name == "" {
+				name = "(unnamed)"
+			}
+		}
+	}
+	if s.EncryptedLabel != nil {
+		if plain, err := crypto.Open(*s.EncryptedLabel, ck, crypto.AADSnapshotLabel); err == nil {
+			label = string(plain)
+		}
+	}
+	return name, label
 }
 
 // --- restore ---

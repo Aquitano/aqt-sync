@@ -45,7 +45,7 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	}
 
 	rid := s.rootResource(t, owner, []string{idsA[0]})
-	snap, err := s.CreateSnapshot(owner, rid)
+	snap, err := s.CreateSnapshot(owner, rid, nil)
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestSnapshotSurvivesResourceDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
-	snap, err := s.CreateSnapshot(owner, rid)
+	snap, err := s.CreateSnapshot(owner, rid, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +186,11 @@ func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
 
-	if _, err := s.CreateSnapshot(owner, "nosuchid"); !errors.Is(err, ErrNotFound) {
+	if _, err := s.CreateSnapshot(owner, "nosuchid", nil); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("snapshot of missing resource = %v, want ErrNotFound", err)
 	}
 
-	snap, err := s.CreateSnapshot(owner, rid)
+	snap, err := s.CreateSnapshot(owner, rid, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,5 +217,65 @@ func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	}
 	if _, err := s.GetSnapshot(owner, snap.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("get after delete = %v, want ErrNotFound", err)
+	}
+}
+
+// A client-sealed label survives the round trip through create, list, and get as
+// opaque ciphertext and decrypts back; a scheduled (keyless) snapshot carries none.
+func TestSnapshotLabelRoundTrip(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "label@example.com")
+	packA, dataA, idsA := packOf("obj")
+	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+		t.Fatal(err)
+	}
+	rid := s.rootResource(t, owner, []string{idsA[0]})
+
+	// Seal a label under a content key, as the CLI does before upload.
+	ck, _ := crypto.GenerateContentKey()
+	sealedLabel, err := crypto.Seal([]byte("before refactor"), ck, crypto.AADSnapshotLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap, err := s.CreateSnapshot(owner, rid, &sealedLabel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap.EncryptedLabel == nil {
+		t.Fatal("create did not echo the label")
+	}
+
+	got, err := s.GetSnapshot(owner, snap.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Snapshot.EncryptedLabel == nil {
+		t.Fatal("get returned no label")
+	}
+	plain, err := crypto.Open(*got.Snapshot.EncryptedLabel, ck, crypto.AADSnapshotLabel)
+	if err != nil {
+		t.Fatalf("open label: %v", err)
+	}
+	if string(plain) != "before refactor" {
+		t.Fatalf("label = %q, want 'before refactor'", plain)
+	}
+
+	// A scheduled snapshot of the next version is keyless, so it has no label.
+	s.supersede(t, owner, rid, []string{idsA[0]})
+	if _, err := s.RunAutoSnapshots(); err != nil {
+		t.Fatal(err)
+	}
+	all, err := s.ListSnapshots(owner, rid)
+	if err != nil || len(all) != 2 {
+		t.Fatalf("list = %d err=%v, want 2", len(all), err)
+	}
+	labeled := 0
+	for _, sn := range all {
+		if sn.EncryptedLabel != nil {
+			labeled++
+		}
+	}
+	if labeled != 1 {
+		t.Fatalf("labeled snapshots = %d, want 1 (manual labeled, scheduled unlabeled)", labeled)
 	}
 }
