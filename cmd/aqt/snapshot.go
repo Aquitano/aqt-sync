@@ -1,15 +1,19 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -26,7 +30,7 @@ func snapshotCmd() *cobra.Command {
 			"pinned server-side so a later sync (or a mistaken delete) cannot reclaim them. " +
 			"They are account-global: any of your devices can browse and restore them.",
 	}
-	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAutoCmd())
+	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAutoCmd())
 	return cmd
 }
 
@@ -112,7 +116,12 @@ func sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, la
 // --- list ---
 
 func snapshotListCmd() *cobra.Command {
-	var id string
+	var (
+		id     string
+		limit  int
+		since  time.Duration
+		before time.Duration
+	)
 	cmd := &cobra.Command{
 		Use:     "list [dir]",
 		Aliases: []string{"ls"},
@@ -135,6 +144,7 @@ func snapshotListCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			snaps = filterSnapshots(snaps, limit, since, before, time.Now())
 			mk, err := unlockMaster(prof)
 			if err != nil {
 				return err
@@ -144,19 +154,52 @@ func snapshotListCmd() *cobra.Command {
 				return printJSON(snapshotRows(snaps, mk))
 			}
 			if len(snaps) == 0 {
-				fmt.Fprintln(os.Stderr, "no snapshots yet")
+				if limit > 0 || since > 0 || before > 0 {
+					fmt.Fprintln(os.Stderr, "no snapshots match these filters")
+				} else {
+					fmt.Fprintln(os.Stderr, "no snapshots yet")
+				}
 				return nil
 			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tVERSION\tSNAPSHOT-ID\tRESOURCE")
-			for _, r := range snapshotRows(snaps, mk) {
-				fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, r.Version, r.ID, r.ResourceID)
-			}
-			return w.Flush()
+			return printSnapshotTable(snapshotRows(snaps, mk))
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "list snapshots of this resource id")
+	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N snapshots (0 = all)")
+	cmd.Flags().DurationVar(&since, "since", 0, "only snapshots created within this window (e.g. 168h)")
+	cmd.Flags().DurationVar(&before, "before", 0, "only snapshots older than this (e.g. 720h)")
 	return cmd
+}
+
+// filterSnapshots applies the list view filters to a newest-first snapshot list,
+// preserving order. since keeps snapshots created within that window; before keeps
+// those older than it; limit caps the count. A zero duration or limit disables that
+// bound.
+func filterSnapshots(snaps []api.SnapshotInfo, limit int, since, before time.Duration, now time.Time) []api.SnapshotInfo {
+	out := make([]api.SnapshotInfo, 0, len(snaps))
+	for _, s := range snaps {
+		age := now.Sub(time.Unix(s.CreatedAt, 0))
+		if since > 0 && age > since {
+			continue
+		}
+		if before > 0 && age < before {
+			continue
+		}
+		out = append(out, s)
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out
+}
+
+func printSnapshotTable(rows []snapshotRow) error {
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tVERSION\tSNAPSHOT-ID\tRESOURCE")
+	for _, r := range rows {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, r.Version, r.ID, r.ResourceID)
+	}
+	return w.Flush()
 }
 
 // snapshotRow is one snapshot as shown by `aqt snapshot list`, with its name
@@ -211,6 +254,109 @@ func snapshotNameLabel(s api.SnapshotInfo, mk crypto.MasterKey) (name, label str
 		}
 	}
 	return name, label
+}
+
+// --- find (fzf search) ---
+
+func snapshotFindCmd() *cobra.Command {
+	var (
+		id    string
+		noFzf bool
+	)
+	cmd := &cobra.Command{
+		Use:   "find [query]",
+		Short: "Fuzzy-search your snapshots (via fzf) and print the selected id",
+		Long: "Open your snapshots in fzf and print the selected snapshot id, so it composes:\n" +
+			"`aqt snapshot restore \"$(aqt snapshot find)\"`.\n\n" +
+			"Without a terminal or fzf, the index is printed as a table instead.",
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSnapshotFind(strings.Join(args, " "), id, flagJSON, noFzf)
+		},
+	}
+	cmd.Flags().StringVar(&id, "id", "", "scope to this resource id instead of all snapshots")
+	cmd.Flags().BoolVar(&noFzf, "no-fzf", false, "print the index as a table instead of opening fzf")
+	return cmd
+}
+
+func runSnapshotFind(query, resourceID string, asJSON, noFzf bool) error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	snaps, err := cl.ListSnapshots(resourceID)
+	if err != nil {
+		return err
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	rows := snapshotRows(snaps, mk)
+	// --json emits the index (even an empty []) before the human "nothing here" path,
+	// so a script always gets valid JSON.
+	if asJSON {
+		return printJSON(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(os.Stderr, "no snapshots yet")
+		return nil
+	}
+	fzfPath, _ := exec.LookPath("fzf")
+	interactive := term.IsTerminal(int(os.Stdout.Fd()))
+	if noFzf || fzfPath == "" || !interactive {
+		if fzfPath == "" && interactive && !noFzf {
+			fmt.Fprintln(os.Stderr, "fzf not found; printing the index (install fzf for interactive search)")
+		}
+		return printSnapshotTable(rows)
+	}
+	return snapshotFzfSelect(fzfPath, query, rows)
+}
+
+// snapshotFzfSelect feeds the snapshot index to fzf and prints the chosen snapshot
+// id. The id is the last, hidden column (--with-nth shows the rest) so it survives
+// the round trip without cluttering the view. Cancelling fzf exits quietly. This
+// mirrors find.go's fzfSelect; it is kept self-contained rather than refactoring the
+// sibling command for one shared exec.
+func snapshotFzfSelect(fzfPath, query string, rows []snapshotRow) error {
+	var input strings.Builder
+	for _, r := range rows {
+		label := r.Label
+		if label == "" {
+			label = "-"
+		}
+		fmt.Fprintf(&input, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, label, r.Version, r.ResourceID, r.ID)
+	}
+	args := []string{
+		"--delimiter", "\t",
+		"--with-nth", "1,2,3,4,5",
+		"--header", "Enter prints the snapshot id · Esc cancels",
+	}
+	if query != "" {
+		args = append(args, "--query", query)
+	}
+	cmd := exec.Command(fzfPath, args...)
+	cmd.Stdin = strings.NewReader(input.String())
+	cmd.Stderr = os.Stderr
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	if err := cmd.Run(); err != nil {
+		var ee *exec.ExitError
+		// fzf exits 130 when interrupted (Esc/Ctrl-C) and 1 when nothing matched; both
+		// mean "no selection", not a failure.
+		if errors.As(err, &ee) && (ee.ExitCode() == 130 || ee.ExitCode() == 1) {
+			return nil
+		}
+		return fmt.Errorf("fzf: %w", err)
+	}
+	line := strings.TrimRight(out.String(), "\n")
+	if line == "" {
+		return nil
+	}
+	fields := strings.Split(line, "\t")
+	fmt.Println(fields[len(fields)-1])
+	return nil
 }
 
 // --- restore ---
