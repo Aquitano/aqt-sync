@@ -1,11 +1,16 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"text/tabwriter"
 	"time"
 
@@ -26,7 +31,7 @@ func snapshotCmd() *cobra.Command {
 			"pinned server-side so a later sync (or a mistaken delete) cannot reclaim them. " +
 			"They are account-global: any of your devices can browse and restore them.",
 	}
-	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAutoCmd())
+	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotDiffCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAutoCmd())
 	return cmd
 }
 
@@ -420,6 +425,243 @@ func snapshotExportCmd() *cobra.Command {
 	return cmd
 }
 
+// --- diff ---
+
+func snapshotDiffCmd() *cobra.Command {
+	var against string
+	cmd := &cobra.Command{
+		Use:   "diff <snapshot-id>",
+		Short: "Show what changed between a snapshot and the live tree (or another snapshot)",
+		Long: "Reconstructs both sides on this machine and compares them by file path and " +
+			"content. By default the snapshot is compared against the current live state of " +
+			"its resource; --against compares it to a second snapshot instead. Added (+), " +
+			"removed (-), and modified (~) files are listed.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, prof, err := authedClient()
+			if err != nil {
+				return err
+			}
+			return runSnapshotDiff(cl, prof, args[0], against)
+		},
+	}
+	cmd.Flags().StringVar(&against, "against", "", "compare against this second snapshot instead of the live resource")
+	return cmd
+}
+
+// diffSide labels one side of a diff for the header and the JSON output.
+type diffSide struct {
+	Label   string `json:"label"`
+	Version int    `json:"version"`
+}
+
+type snapshotDiffResult struct {
+	Left     diffSide `json:"left"`
+	Right    diffSide `json:"right"`
+	Added    []string `json:"added"`
+	Removed  []string `json:"removed"`
+	Modified []string `json:"modified"`
+}
+
+func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
+	result, err := computeSnapshotDiff(cl, prof, leftID, against)
+	if err != nil {
+		return err
+	}
+	if flagJSON {
+		return printJSON(result)
+	}
+	printSnapshotDiff(result)
+	return nil
+}
+
+func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) (snapshotDiffResult, error) {
+	var zero snapshotDiffResult
+	left, err := cl.GetSnapshot(leftID)
+	if errors.Is(err, client.ErrNotFound) {
+		return zero, fmt.Errorf("snapshot %s not found (or not yours)", leftID)
+	}
+	if err != nil {
+		return zero, err
+	}
+
+	// The right side is either a second snapshot or the resource's current live state.
+	var (
+		rightRes   api.GetResourceResponse
+		rightLabel string
+		rightVer   int
+	)
+	if against != "" {
+		r, err := cl.GetSnapshot(against)
+		if errors.Is(err, client.ErrNotFound) {
+			return zero, fmt.Errorf("snapshot %s not found (or not yours)", against)
+		}
+		if err != nil {
+			return zero, err
+		}
+		rightRes = snapshotAsResource(r)
+		rightLabel = "snapshot " + against
+		rightVer = r.Snapshot.Version
+	} else {
+		r, err := cl.GetResource(left.Snapshot.ResourceID)
+		if errors.Is(err, client.ErrNotFound) {
+			return zero, fmt.Errorf("resource %s no longer exists; use --against to diff two snapshots", left.Snapshot.ResourceID)
+		}
+		if err != nil {
+			return zero, err
+		}
+		rightRes = r
+		rightLabel = "live"
+		rightVer = r.Version
+	}
+
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return zero, err
+	}
+	defer mk.Wipe()
+
+	leftDir, err := os.MkdirTemp("", "aqt-diff-old-*")
+	if err != nil {
+		return zero, err
+	}
+	defer os.RemoveAll(leftDir)
+	rightDir, err := os.MkdirTemp("", "aqt-diff-new-*")
+	if err != nil {
+		return zero, err
+	}
+	defer os.RemoveAll(rightDir)
+
+	if _, err := materializeWithMaster(cl, mk, snapshotAsResource(left), leftDir); err != nil {
+		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
+	}
+	if _, err := materializeWithMaster(cl, mk, rightRes, rightDir); err != nil {
+		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
+	}
+
+	added, removed, modified, err := diffTrees(leftDir, rightDir)
+	if err != nil {
+		return zero, err
+	}
+	return snapshotDiffResult{
+		Left:     diffSide{Label: "snapshot " + leftID, Version: left.Snapshot.Version},
+		Right:    diffSide{Label: rightLabel, Version: rightVer},
+		Added:    nonNil(added),
+		Removed:  nonNil(removed),
+		Modified: nonNil(modified),
+	}, nil
+}
+
+func printSnapshotDiff(r snapshotDiffResult) {
+	fmt.Printf("%s (v%d)  ->  %s (v%d)\n", r.Left.Label, r.Left.Version, r.Right.Label, r.Right.Version)
+	total := len(r.Added) + len(r.Removed) + len(r.Modified)
+	if total == 0 {
+		fmt.Println("no differences")
+		return
+	}
+	type line struct{ mark, path string }
+	lines := make([]line, 0, total)
+	for _, p := range r.Added {
+		lines = append(lines, line{"+", p})
+	}
+	for _, p := range r.Removed {
+		lines = append(lines, line{"-", p})
+	}
+	for _, p := range r.Modified {
+		lines = append(lines, line{"~", p})
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i].path < lines[j].path })
+	for _, l := range lines {
+		fmt.Printf("%s %s\n", l.mark, l.path)
+	}
+	fmt.Printf("%d changed: %d added, %d removed, %d modified\n", total, len(r.Added), len(r.Removed), len(r.Modified))
+}
+
+// diffTrees compares the file trees at oldDir and newDir by relative path and
+// content, returning the paths only in newDir (added), only in oldDir (removed), and
+// present in both with differing bytes (modified). The .aqt control dir is ignored.
+func diffTrees(oldDir, newDir string) (added, removed, modified []string, err error) {
+	oldFiles, err := hashTree(oldDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	newFiles, err := hashTree(newDir)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for path, h := range newFiles {
+		oh, ok := oldFiles[path]
+		switch {
+		case !ok:
+			added = append(added, path)
+		case oh != h:
+			modified = append(modified, path)
+		}
+	}
+	for path := range oldFiles {
+		if _, ok := newFiles[path]; !ok {
+			removed = append(removed, path)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	sort.Strings(modified)
+	return added, removed, modified, nil
+}
+
+// hashTree maps each regular file under root (by slash-separated relative path) to
+// the hex sha256 of its contents, skipping the .aqt control dir.
+func hashTree(root string) (map[string]string, error) {
+	out := map[string]string{}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == syncengine.ControlDir {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !d.Type().IsRegular() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		sum, err := hashFile(p)
+		if err != nil {
+			return err
+		}
+		out[filepath.ToSlash(rel)] = sum
+		return nil
+	})
+	return out, err
+}
+
+func hashFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// nonNil returns an empty slice for a nil one, so the diff marshals "added": []
+// rather than null.
+func nonNil(s []string) []string {
+	if s == nil {
+		return []string{}
+	}
+	return s
+}
+
 // --- prune ---
 
 func snapshotPruneCmd() *cobra.Command {
@@ -516,17 +758,30 @@ func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.Get
 		return api.Metadata{}, fmt.Errorf("unwrap snapshot key: %w", err)
 	}
 	defer ck.Wipe()
-	meta, err := decodeMeta(info.EncryptedMeta, ck)
-	if err != nil {
-		return api.Metadata{}, err
-	}
-	res := api.GetResourceResponse{
+	return materializeResource(cl, snapshotAsResource(snap), ck, destDir)
+}
+
+// snapshotAsResource adapts a fetched snapshot to the resource shape the materialize
+// path expects; the server returned the snapshot's own sealed blob, meta and key.
+func snapshotAsResource(snap api.GetSnapshotResponse) api.GetResourceResponse {
+	info := snap.Snapshot
+	return api.GetResourceResponse{
 		ID:            info.ResourceID,
 		Visibility:    api.Private,
 		Blob:          snap.Blob,
 		EncryptedMeta: info.EncryptedMeta,
 		WrappedKey:    info.WrappedKey,
 		Version:       info.Version,
+	}
+}
+
+// materializeResource decrypts a resource's sealed root under the content key ck and
+// writes its plaintext tree under destDir: a folder is untarred or streamed from its
+// objects, a single file is written by its name. The caller owns ck's lifetime.
+func materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string) (api.Metadata, error) {
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return api.Metadata{}, err
 	}
 	if meta.Kind == api.KindFolder {
 		if err := ensureEmptyDir(destDir); err != nil {
@@ -567,6 +822,21 @@ func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.Get
 		return meta, fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
 	return meta, os.WriteFile(dest, plain, 0o600)
+}
+
+// materializeWithMaster unwraps res's content key under the master key, then writes
+// its plaintext tree under destDir. Used by diff, which materializes both sides under
+// one unlocked master key.
+func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetResourceResponse, destDir string) (api.Metadata, error) {
+	if res.WrappedKey == nil {
+		return api.Metadata{}, errors.New("resource has no owner key (public); cannot decrypt")
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return api.Metadata{}, fmt.Errorf("unwrap key: %w", err)
+	}
+	defer ck.Wipe()
+	return materializeResource(cl, res, ck, destDir)
 }
 
 // resolveResourceID maps a tracked-folder path (or an explicit --id) to a resource
