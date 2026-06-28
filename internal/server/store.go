@@ -172,6 +172,33 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	 ALTER TABLE accounts ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 1;
 	 ALTER TABLE devices ADD COLUMN auth_epoch INTEGER NOT NULL DEFAULT 1;
 	 CREATE TABLE IF NOT EXISTS server_meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);`,
+	// 4: snapshots. A snapshot is a frozen copy of a resource version: its sealed
+	// root blob (stored as a snapshot-owned blob file, so a later resource update or
+	// delete cannot reclaim it) plus the chunk roots it referenced at snapshot time.
+	// snapshot_chunks mirrors resource_chunks and is unioned into the GC root set, so
+	// the objects a snapshot needs survive the sweep that drops the live resource's
+	// own roots. auto_snapshot is the per-resource opt-out for the scheduled job.
+	`CREATE TABLE IF NOT EXISTS snapshots (
+	    snapshot_id      TEXT PRIMARY KEY,
+	    owner_handle     TEXT NOT NULL,
+	    resource_id      TEXT NOT NULL,
+	    visibility       TEXT NOT NULL,
+	    encrypted_meta   TEXT NOT NULL,
+	    wrapped_key      TEXT,
+	    blob_nonce       BLOB NOT NULL,
+	    version_captured INTEGER NOT NULL,
+	    created_at       INTEGER NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_snapshots_owner ON snapshots(owner_handle, resource_id);
+	CREATE TABLE IF NOT EXISTS snapshot_chunks (
+	    snapshot_id  TEXT NOT NULL,
+	    owner_handle TEXT NOT NULL,
+	    chunk_id     TEXT NOT NULL,
+	    PRIMARY KEY(snapshot_id, chunk_id),
+	    FOREIGN KEY(owner_handle, chunk_id) REFERENCES objects(owner_handle, chunk_id)
+	);
+	CREATE INDEX IF NOT EXISTS idx_snapshot_chunks_chunk ON snapshot_chunks(chunk_id);
+	ALTER TABLE resources ADD COLUMN auto_snapshot INTEGER NOT NULL DEFAULT 1;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -842,6 +869,283 @@ func (s *Store) DeleteResource(owner, id string) error {
 	return nil
 }
 
+// --- snapshots ---
+//
+// A snapshot freezes a resource version against the in-place overwrite the next
+// sync performs: updateResource replaces the blob and the resource's GC roots and
+// removeStaleBlobs drops the superseded blob file, so without a snapshot the prior
+// state is gone. CreateSnapshot copies the root blob to a snapshot-owned file and
+// the chunk roots into snapshot_chunks, which the GC root queries union in (see
+// GCPacks/repackCandidates/commitRepack), so the objects a snapshot needs stay
+// live. Snapshots are owner-scoped and never public; all decryption is the
+// client's, so the server copies only ciphertext and never sees a key.
+
+// decodeMetaKey parses a stored resource/snapshot's JSON-encoded sealed metadata
+// and optional wrapped key into the api shapes. The wrapped key stays nil when the
+// column is null (a public resource without a recovery key).
+func decodeMetaKey(metaJSON string, wrappedJSON sql.NullString, meta *crypto.SealedBlob, wk **crypto.WrappedKey) error {
+	if err := json.Unmarshal([]byte(metaJSON), meta); err != nil {
+		return err
+	}
+	if wrappedJSON.Valid {
+		var k crypto.WrappedKey
+		if err := json.Unmarshal([]byte(wrappedJSON.String), &k); err != nil {
+			return err
+		}
+		*wk = &k
+	}
+	return nil
+}
+
+// CreateSnapshot pins the owner's current version of a resource, returning the new
+// snapshot's metadata. It is keyless: it copies the already-sealed blob and the
+// existing chunk roots, decrypting nothing.
+func (s *Store) CreateSnapshot(owner, resourceID string) (api.SnapshotInfo, error) {
+	var (
+		visibility, metaJSON string
+		wrappedJSON          sql.NullString
+		nonce                []byte
+		version              int
+	)
+	err := s.db.QueryRow(
+		`SELECT visibility, encrypted_meta, wrapped_key, blob_nonce, version
+		 FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner,
+	).Scan(&visibility, &metaJSON, &wrappedJSON, &nonce, &version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return api.SnapshotInfo{}, ErrNotFound
+	}
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+
+	blob, err := s.readBlob(resourceID, nonce)
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+
+	snapID := newID(8)
+	// Copy the root blob to the snapshot's own nonce-addressed file before the row
+	// commits, mirroring createResource: a crash only orphans this new file, never
+	// leaves a snapshot row pointing at missing bytes. removeStaleBlobs globs by the
+	// resource id and the snapshot's file is named by snapID, so a later update or
+	// delete of the source resource never touches it.
+	committed := false
+	defer func() {
+		if !committed {
+			s.removeStaleBlobs(snapID, nil)
+		}
+	}()
+	if err := s.writeBlob(snapID, nonce, blob); err != nil {
+		return api.SnapshotInfo{}, err
+	}
+
+	createdAt := time.Now().Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, wrapped_key, blob_nonce, version_captured, created_at)
+		 VALUES(?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, wrappedJSON, nonce, version, createdAt,
+	); err != nil {
+		tx.Rollback()
+		return api.SnapshotInfo{}, err
+	}
+	// Pin every object the live resource references now. The FK to objects holds
+	// because the resource still roots them, and copying inside the tx makes the pin
+	// atomic against a concurrent GC (the single writer connection serializes the two
+	// transactions).
+	if _, err := tx.Exec(
+		`INSERT INTO snapshot_chunks(snapshot_id, owner_handle, chunk_id)
+		 SELECT ?, owner_handle, chunk_id FROM resource_chunks WHERE resource_id = ?`,
+		snapID, resourceID,
+	); err != nil {
+		tx.Rollback()
+		return api.SnapshotInfo{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	committed = true
+
+	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt}
+	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	return info, nil
+}
+
+// ListSnapshots returns the owner's snapshots, newest first. A non-empty
+// resourceID restricts the list to one resource's history.
+func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, error) {
+	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, wrapped_key
+	          FROM snapshots WHERE owner_handle = ?`
+	args := []any{owner}
+	if resourceID != "" {
+		query += ` AND resource_id = ?`
+		args = append(args, resourceID)
+	}
+	query += ` ORDER BY created_at DESC, snapshot_id`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []api.SnapshotInfo
+	for rows.Next() {
+		var (
+			info        api.SnapshotInfo
+			metaJSON    string
+			wrappedJSON sql.NullString
+		)
+		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &wrappedJSON); err != nil {
+			return nil, err
+		}
+		if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+			return nil, err
+		}
+		out = append(out, info)
+	}
+	return out, rows.Err()
+}
+
+// GetSnapshot returns one snapshot's sealed root blob plus the copied meta and
+// wrapped key, so the client can reconstruct it; the chunk objects are fetched by
+// id through the normal object-store path.
+func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, error) {
+	var (
+		out         api.GetSnapshotResponse
+		metaJSON    string
+		wrappedJSON sql.NullString
+		nonce       []byte
+	)
+	info := api.SnapshotInfo{ID: snapshotID}
+	err := s.db.QueryRow(
+		`SELECT resource_id, version_captured, created_at, encrypted_meta, wrapped_key, blob_nonce
+		 FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
+	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &wrappedJSON, &nonce)
+	if errors.Is(err, sql.ErrNoRows) {
+		return out, ErrNotFound
+	}
+	if err != nil {
+		return out, err
+	}
+	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+		return out, err
+	}
+	ciphertext, err := s.readBlob(snapshotID, nonce)
+	if err != nil {
+		return out, err
+	}
+	out.Snapshot = info
+	out.Blob = crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext}
+	return out, nil
+}
+
+// DeleteSnapshot removes a snapshot and its chunk roots. Objects it pinned that no
+// live resource or other snapshot still roots become unreferenced and are reclaimed
+// by a later GC sweep/repack; the snapshot's own blob copy is dropped here.
+func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
+	var nonce []byte
+	err := s.db.QueryRow(
+		`SELECT blob_nonce FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
+	).Scan(&nonce)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.removeStaleBlobs(snapshotID, nil)
+	return nil
+}
+
+// SetAutoSnapshot toggles whether the scheduled job covers a resource (the per-root
+// opt-out). Owner-checked.
+func (s *Store) SetAutoSnapshot(owner, resourceID string, enabled bool) error {
+	v := 0
+	if enabled {
+		v = 1
+	}
+	res, err := s.db.Exec(
+		`UPDATE resources SET auto_snapshot = ? WHERE id = ? AND owner_handle = ?`, v, resourceID, owner,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// RunAutoSnapshots snapshots every auto-snapshot resource whose current version is
+// not already snapshotted, across all owners, and returns the count created.
+// Version-dedup keeps the scheduled job's cost proportional to actual change rather
+// than to how often it ticks.
+func (s *Store) RunAutoSnapshots() (int, error) {
+	rows, err := s.db.Query(
+		`SELECT r.owner_handle, r.id FROM resources r
+		 WHERE r.auto_snapshot = 1
+		   AND NOT EXISTS (
+		     SELECT 1 FROM snapshots s
+		     WHERE s.resource_id = r.id AND s.version_captured = r.version
+		   )`,
+	)
+	if err != nil {
+		return 0, err
+	}
+	type ref struct{ owner, id string }
+	var due []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.owner, &r.id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		due = append(due, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close() // the single writer connection can't take CreateSnapshot's writes with this cursor open
+
+	// Snapshot each due resource independently: a per-resource failure (e.g. the rare
+	// row/blob race a concurrent update can cause, which GetResource also tolerates)
+	// must not block the rest of the batch. The first error is returned for logging
+	// after the loop has done what it could.
+	created := 0
+	var firstErr error
+	for _, r := range due {
+		if _, err := s.CreateSnapshot(r.owner, r.id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("auto-snapshot %s: %w", r.id, err)
+			}
+			continue
+		}
+		created++
+	}
+	return created, firstErr
+}
+
 // --- packed object store ---
 //
 // Objects are opaque, content-addressed chunks (chunk_id = hex sha256 of the
@@ -1219,15 +1523,22 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 	if err != nil {
 		return 0, 0, err
 	}
+	// A pack is dead only if none of its objects are rooted by a live resource OR a
+	// snapshot. snapshot_chunks is unioned in so a snapshot pinning a chunk in this
+	// pack keeps the whole pack from being swept.
 	rows, err := tx.Query(
 		`SELECT pack_id, length FROM packs
 		 WHERE owner_handle = ? AND created_at < ?
 		   AND pack_id NOT IN (
-		     SELECT DISTINCT o.pack_id FROM objects o
+		     SELECT o.pack_id FROM objects o
 		     JOIN resource_chunks rc ON rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id
 		     WHERE o.owner_handle = ?
+		     UNION
+		     SELECT o.pack_id FROM objects o
+		     JOIN snapshot_chunks sc ON sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id
+		     WHERE o.owner_handle = ?
 		   )`,
-		owner, cutoff, owner,
+		owner, cutoff, owner, owner,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -1398,10 +1709,14 @@ func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, erro
 	cands := map[string]*repackCand{}
 	deadSeen := map[string]bool{}
 	var order []string
+	// An object is live if a resource OR a snapshot roots it; a repack must copy every
+	// live object forward, so snapshot_chunks is unioned into the liveness test.
 	rows, err := s.db.Query(
 		`SELECT o.pack_id, o.chunk_id, o."offset", o.length,
-		        EXISTS(SELECT 1 FROM resource_chunks rc
-		               WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+		        (EXISTS(SELECT 1 FROM resource_chunks rc
+		                WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+		         OR EXISTS(SELECT 1 FROM snapshot_chunks sc
+		                   WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))
 		 FROM objects o WHERE o.owner_handle = ?
 		 ORDER BY o.pack_id, o."offset"`,
 		owner,
@@ -1508,8 +1823,10 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	lrows, err := tx.Query(
 		`SELECT o.chunk_id FROM objects o
 		 WHERE o.owner_handle = ? AND o.pack_id = ?
-		   AND EXISTS(SELECT 1 FROM resource_chunks rc
-		             WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)`,
+		   AND (EXISTS(SELECT 1 FROM resource_chunks rc
+		              WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+		        OR EXISTS(SELECT 1 FROM snapshot_chunks sc
+		                 WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))`,
 		owner, cand.packID,
 	)
 	if err != nil {

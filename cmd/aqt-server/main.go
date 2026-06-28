@@ -26,9 +26,23 @@ func main() {
 	}
 	defer store.Close()
 
+	api := server.New(store)
+
+	// Scheduled snapshots. A snapshot is keyless (it copies already-sealed
+	// ciphertext), so the server runs the job itself; AQT_SNAPSHOT_INTERVAL=0 disables
+	// it. Default daily.
+	interval, err := time.ParseDuration(envOr("AQT_SNAPSHOT_INTERVAL", "24h"))
+	if err != nil {
+		log.Fatalf("invalid AQT_SNAPSHOT_INTERVAL: %v", err)
+	}
+	if interval > 0 {
+		log.Printf("scheduled snapshots every %s", interval)
+		api.StartAutoSnapshot(interval, nil)
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           server.New(store).Router(),
+		Handler:           api.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      60 * time.Second,
