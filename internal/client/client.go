@@ -30,12 +30,49 @@ type Client struct {
 	http    *http.Client
 }
 
-func New(baseURL, token string) *Client {
+// ErrInsecureScheme is returned by New when a bearer token would be sent over a
+// non-HTTPS URL. Loopback hosts (localhost, 127.0.0.1, ::1) are exempted so the
+// documented http://localhost:8080 dev workflow keeps working without credentials
+// leaking onto the network.
+var ErrInsecureScheme = errors.New("aqt: refusing to send bearer token over non-HTTPS URL (use https://, or http://localhost for local dev)")
+
+// New builds a Client. When token is non-empty the base URL must be HTTPS (or a
+// loopback host), since every authenticated request carries the bearer token on
+// the wire — a plaintext scheme would expose the only device credential to any
+// on-path observer. The HTTP client also drops Authorization on any redirect to a
+// non-HTTPS, non-loopback target, so an https→http downgrade on the same host
+// (which Go's default CheckRedirect would forward the header to) cannot leak it.
+func New(baseURL, token string) (*Client, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("aqt: invalid server URL: %w", err)
+	}
+	if token != "" && u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+		return nil, ErrInsecureScheme
+	}
 	return &Client{
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
-		http:    &http.Client{Timeout: 30 * time.Second},
+		http: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if req.URL.Scheme != "https" && !isLoopbackHost(req.URL.Hostname()) {
+					req.Header.Del("Authorization")
+				}
+				return nil
+			},
+		},
+	}, nil
+}
+
+// isLoopbackHost reports whether host is a loopback address, the only non-HTTPS
+// host permitted to carry a bearer token: traffic to it never leaves the machine.
+func isLoopbackHost(host string) bool {
+	switch host {
+	case "localhost", "127.0.0.1", "::1":
+		return true
 	}
+	return false
 }
 
 func (c *Client) CreateAccount(req api.CreateAccountRequest) (api.AuthResponse, error) {

@@ -37,7 +37,10 @@ func runInfo(ref, password string, asJSON bool) error {
 	if prof != nil {
 		token = prof.Token
 	}
-	cl := client.New(serverURL(), token)
+	cl, err := client.New(serverURL(), token)
+	if err != nil {
+		return err
+	}
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {

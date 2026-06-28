@@ -63,7 +63,10 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	if prof != nil {
 		token = prof.Token
 	}
-	cl := client.New(serverURL(), token)
+	cl, err := client.New(serverURL(), token)
+	if err != nil {
+		return err
+	}
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
@@ -117,16 +120,9 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 			return fmt.Errorf("%s already exists (use --force to overwrite)", dest)
 		}
 	}
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return err
-	}
-	if err := syncengine.WriteFileRoot(f, root, src.get); err != nil {
-		f.Close()
-		_ = os.Remove(dest)
-		return err
-	}
-	if err := f.Close(); err != nil {
+	if err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+		return syncengine.WriteFileRoot(f, root, src.get)
+	}); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, root.Size)
@@ -184,11 +180,40 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 			return fmt.Errorf("%s already exists (use --force to overwrite)", out)
 		}
 	}
-	if err := os.WriteFile(out, plaintext, 0o600); err != nil {
+	if err := writeFileAtomic(out, plaintext, 0o600); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", out, len(plaintext))
 	return nil
+}
+
+// writeStreamAtomic streams bytes into a sibling temp file via fn, then fsyncs
+// and renames it over dest on success, so a failure or crash mid-stream leaves
+// any existing dest untouched rather than truncating it. Mirrors writeFileAtomic
+// for writers that cannot hold the whole file in memory (pullStream).
+func writeStreamAtomic(dest string, perm os.FileMode, fn func(*os.File) error) error {
+	f, err := os.CreateTemp(filepath.Dir(dest), ".aqt-tmp-*")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if err := fn(f); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, dest)
 }
 
 // parseRef extracts the resource id and optional fragment from any ref form:
