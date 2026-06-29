@@ -279,3 +279,34 @@ func TestSnapshotLabelRoundTrip(t *testing.T) {
 		t.Fatalf("labeled snapshots = %d, want 1 (manual labeled, scheduled unlabeled)", labeled)
 	}
 }
+
+// ListResources surfaces each resource's scheduled-snapshot coverage so the CLI can
+// show it without a per-resource fetch; SetAutoSnapshot flips it.
+func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "auto-list@example.com")
+	packA, dataA, idsA := packOf("obj")
+	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+		t.Fatal(err)
+	}
+	rid := s.rootResource(t, owner, []string{idsA[0]})
+
+	items, err := s.ListResources(owner)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("list = %d err=%v, want 1", len(items), err)
+	}
+	if !items[0].AutoSnapshot {
+		t.Fatal("auto_snapshot should default to true")
+	}
+
+	if err := s.SetAutoSnapshot(owner, rid, false); err != nil {
+		t.Fatal(err)
+	}
+	items, err = s.ListResources(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if items[0].AutoSnapshot {
+		t.Fatal("auto_snapshot should be false after opt-out")
+	}
+}
