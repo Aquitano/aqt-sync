@@ -1,10 +1,11 @@
 // Package identity manages the local profile: server, account handle, device
 // token, and the KDF params needed to re-derive the master key from a passphrase.
 //
-// The profile holds the device token (for API auth) but never the master key or
-// passphrase. The master key is derived on demand and kept only in memory.
-// Persisting the token in a 0600 file rather than the OS keychain is a v1
-// simplification (DESIGN.md section 5).
+// The profile never holds the master key or passphrase; the master key is derived
+// on demand and kept only in memory. The device token and the key that seals the
+// cached session are kept in the OS keychain when one is available, so the on-disk
+// files hold no usable credential; on a host with no keychain backend (e.g. a
+// headless server) both fall back to the machine-bound 0600 file.
 package identity
 
 import (
@@ -110,10 +111,18 @@ func Load(name string) (*Profile, error) {
 	if err := json.Unmarshal(b, &p); err != nil {
 		return nil, err
 	}
+	if p.Token == "" {
+		if tok, ok := keychainLoadToken(name); ok {
+			p.Token = tok
+		}
+	}
 	return &p, nil
 }
 
-// Save writes the profile with owner-only (0600) permissions.
+// Save writes the profile with owner-only (0600) permissions. When a keychain is
+// available the device token is moved into it and omitted from the file, so a
+// readable profile carries no usable credential; without a keychain the token
+// stays in the 0600 file.
 func Save(p *Profile) error {
 	if p.Name == "" {
 		p.Name = DefaultProfile
@@ -125,7 +134,12 @@ func Save(p *Profile) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	b, err := json.MarshalIndent(p, "", "  ")
+
+	stored := *p
+	if stored.Token != "" && keychainStoreToken(stored.Name, stored.Token) {
+		stored.Token = ""
+	}
+	b, err := json.MarshalIndent(&stored, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -136,14 +150,16 @@ func Save(p *Profile) error {
 //
 // The session cache holds the derived master key so a working session does not
 // re-prompt for the passphrase on every command. The key is encrypted at rest
-// under a machine-bound key (see sessionKey) before being written to a 0600 file,
-// so a copied or backed-up session file is useless on any other machine — closing
-// the home-dir-backup / cloud-sync exposure.
+// before being written to a 0600 file. The sealing key is a random per-profile key
+// kept in the OS keychain (saveSealingKey); on a host with no keychain backend it
+// falls back to a machine-bound key (machineBoundKey). Either way a copied or
+// backed-up session file is useless on another machine — closing the
+// home-dir-backup / cloud-sync exposure.
 //
-// SECURITY TRADE-OFF: this does not defend against another process running as the
-// same user on this machine, which can re-derive the same machine key. The full
-// fix is the OS keychain / an in-memory agent (DESIGN.md section 5). Exposure is
-// otherwise bounded by the TTL and cleared by `aqt logout`.
+// SECURITY TRADE-OFF: a process running as the same user can still reach the
+// keychain (or re-derive the machine key) and open the cache. Fully closing that
+// needs a passphrase/biometric-gated agent or hardware enclave; see DESIGN.md
+// section 5. Exposure is otherwise bounded by the TTL and cleared by `aqt logout`.
 
 type session struct {
 	Sealed    crypto.SealedBlob `json:"sealed"`
@@ -156,9 +172,10 @@ const sessionAAD = "aqt-session-at-rest-v1"
 // machineSecretFn is overridable in tests to simulate a different machine.
 var machineSecretFn = machineSecret
 
-// sessionKey derives the at-rest encryption key from a stable per-machine secret,
-// so the sealed session can only be opened on the machine that wrote it.
-func sessionKey() crypto.ContentKey {
+// machineBoundKey derives an at-rest encryption key from a stable per-machine
+// secret, so a sealed session can only be opened on the machine that wrote it. It
+// is the fallback when no OS keychain backend is available.
+func machineBoundKey() crypto.ContentKey {
 	sum := sha256.Sum256(append([]byte(sessionAAD+"\x00"), machineSecretFn()...))
 	return crypto.ContentKey(sum)
 }
@@ -217,6 +234,9 @@ func sessionPath(name string) (string, error) {
 // SaveSession caches the master key for ttl. A non-positive ttl caches it with
 // no expiry (until logout).
 func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
+	if name == "" {
+		name = DefaultProfile
+	}
 	dir, err := configDir()
 	if err != nil {
 		return err
@@ -224,7 +244,7 @@ func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	sealed, err := crypto.Seal(mk[:], sessionKey(), []byte(sessionAAD))
+	sealed, err := crypto.Seal(mk[:], saveSealingKey(name), []byte(sessionAAD))
 	if err != nil {
 		return err
 	}
@@ -246,6 +266,9 @@ func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
 // LoadSession returns the cached master key if present and unexpired. An expired
 // or malformed cache is removed and reported as a miss.
 func LoadSession(name string) (crypto.MasterKey, bool) {
+	if name == "" {
+		name = DefaultProfile
+	}
 	var mk crypto.MasterKey
 	path, err := sessionPath(name)
 	if err != nil {
@@ -264,19 +287,25 @@ func LoadSession(name string) (crypto.MasterKey, bool) {
 		os.Remove(path)
 		return mk, false
 	}
-	// A failure here means a wrong/absent machine key (the file was copied from
-	// another machine) or the legacy plaintext format — treat both as a miss.
-	plain, err := crypto.Open(s.Sealed, sessionKey(), []byte(sessionAAD))
-	if err != nil || len(plain) != crypto.KeySize {
-		os.Remove(path)
-		return mk, false
+	// Try the keychain sealing key, then the machine-bound fallback. A failure on
+	// all candidates means the file was copied from another machine, the keychain
+	// entry is gone, or it predates this format — treat any of them as a miss.
+	for _, ck := range loadSealingKeys(name) {
+		if plain, err := crypto.Open(s.Sealed, ck, []byte(sessionAAD)); err == nil && len(plain) == crypto.KeySize {
+			copy(mk[:], plain)
+			return mk, true
+		}
 	}
-	copy(mk[:], plain)
-	return mk, true
+	os.Remove(path)
+	return mk, false
 }
 
-// ClearSession removes any cached master key.
+// ClearSession removes any cached master key and its keychain sealing key. The
+// device stays attached (the token is left in place), it is just locked again.
 func ClearSession(name string) error {
+	if name == "" {
+		name = DefaultProfile
+	}
 	path, err := sessionPath(name)
 	if err != nil {
 		return err
@@ -284,5 +313,6 @@ func ClearSession(name string) error {
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	keychainDropSealingKey(name) // best-effort; the sealed file is already gone
 	return nil
 }
