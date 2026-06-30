@@ -56,6 +56,13 @@ func New(baseURL, token string) (*Client, error) {
 		http: &http.Client{
 			Timeout: 30 * time.Second,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// Preserve Go's default 10-redirect cap, which a custom
+				// CheckRedirect would otherwise replace, leaving a hostile
+				// server free to loop the client forever (and re-send the
+				// bearer token on every same-host https hop).
+				if len(via) >= 10 {
+					return errors.New("aqt: stopped after 10 redirects")
+				}
 				if req.URL.Scheme != "https" && !isLoopbackHost(req.URL.Hostname()) {
 					req.Header.Del("Authorization")
 				}
@@ -65,11 +72,13 @@ func New(baseURL, token string) (*Client, error) {
 	}, nil
 }
 
-// isLoopbackHost reports whether host is a loopback address, the only non-HTTPS
-// host permitted to carry a bearer token: traffic to it never leaves the machine.
+// isLoopbackHost reports whether host is a loopback or wildcard-bind address, the
+// only non-HTTPS hosts permitted to carry a bearer token: a connection to any of
+// them never leaves the machine. 0.0.0.0 dials to localhost, so a local dev server
+// bound to the wildcard is reachable over http without leaking the credential.
 func isLoopbackHost(host string) bool {
 	switch host {
-	case "localhost", "127.0.0.1", "::1":
+	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
 		return true
 	}
 	return false

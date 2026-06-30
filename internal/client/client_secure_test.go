@@ -21,6 +21,7 @@ func TestNewRejectsInsecureSchemeWithToken(t *testing.T) {
 		{"http localhost with token", "http://localhost:8080", "tok", false},
 		{"http 127.0.0.1 with token", "http://127.0.0.1:8080", "tok", false},
 		{"http ::1 with token", "http://[::1]:8080", "tok", false},
+		{"http 0.0.0.0 with token", "http://0.0.0.0:8080", "tok", false},
 		{"http non-loopback with token", "http://api.example.com", "tok", true},
 		{"https loopback with token", "https://localhost", "tok", false},
 		{"invalid url", "://bad", "tok", true},
@@ -86,6 +87,32 @@ func TestCheckRedirectDropsAuthOnInsecureTarget(t *testing.T) {
 			t.Fatalf("Authorization dropped on loopback redirect: %q", got)
 		}
 	})
+}
+
+// TestCheckRedirectKeepsRedirectCap guards against the custom CheckRedirect
+// silently dropping Go's default 10-redirect limit: a hostile server that
+// redirects to itself would otherwise loop forever (and re-send the bearer
+// token on every same-host https hop). The 11th hop must error out.
+func TestCheckRedirectKeepsRedirectCap(t *testing.T) {
+	cl, err := New("https://api.example.com", "tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := cl.http.CheckRedirect
+	req := mustReq("https://api.example.com/loop")
+
+	via := make([]*http.Request, 9)
+	for i := range via {
+		via[i] = mustReq("https://api.example.com/loop")
+	}
+	if err := check(req, via); err != nil {
+		t.Fatalf("CheckRedirect errored at hop 10: %v", err)
+	}
+
+	via = append(via, mustReq("https://api.example.com/loop"))
+	if err := check(req, via); err == nil {
+		t.Fatal("CheckRedirect: want error after 10 redirects, got nil")
+	}
 }
 
 func mustReq(u string) *http.Request {
