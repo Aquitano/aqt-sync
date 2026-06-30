@@ -147,6 +147,9 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 		}
 		manifest.Entries = append(manifest.Entries, e)
 		return nil
+	}, func(rel string, info fs.FileInfo) error {
+		manifest.Dirs = append(manifest.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
+		return nil
 	})
 	if err != nil {
 		return PackRoot{}, Manifest{}, err
@@ -158,6 +161,7 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 		return PackRoot{}, Manifest{}, err
 	}
 	sortEntries(manifest.Entries)
+	sortDirs(manifest.Dirs)
 	return PackRoot{Version: PackRootVersion, Size: ss.size, Segments: ss.segments}, manifest, nil
 }
 

@@ -134,7 +134,7 @@ func runInit(dir string) error {
 
 	// Register an empty private folder resource; the first `sync` fills it. A
 	// pack-and-seal folder (.aqtconfig pack=true) is created with an empty PackRoot;
-	// the chunked default with an empty manifest.
+	// the chunked default with an empty Merkle-DAG tree root.
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
 		return err
@@ -145,6 +145,7 @@ func runInit(dir string) error {
 	if cfg.Pack {
 		resp, err = putPackFolderCreate(cl, syncengine.PackRoot{Version: syncengine.PackRootVersion}, ck, mk, abs)
 	} else {
+		manifest.Version = syncengine.TreeManifestVersion
 		conv := crypto.DeriveConvergenceKey(mk)
 		resp, err = putFolder(cl, conv, "", manifest, ck, mk, abs)
 		conv.Wipe()
@@ -332,12 +333,15 @@ func runSync(dir string, opts syncOptions) error {
 			return errors.New("this folder is pack-and-seal on the server but is being synced as chunked; " +
 				"set pack=true in .aqtconfig, or re-clone it")
 		}
-		remote, err := openRemoteManifest(cl, res.Blob, ck)
+		if !meta.Tree {
+			return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
+		}
+		remote, err := openRemoteTree(cl, res.Blob, ck)
 		if errors.Is(err, client.ErrNotFound) {
 			// We read version res.Version's root, but a concurrent sync superseded it
-			// and GC reaped its now-unreferenced manifest objects before we fetched
-			// them. Re-reconcile against the current version (same path the server's
-			// own version conflict takes), rather than hard-failing the sync.
+			// and GC reaped its now-unreferenced tree objects before we fetched them.
+			// Re-reconcile against the current version (same path the server's own
+			// version conflict takes), rather than hard-failing the sync.
 			return client.ErrConflict
 		}
 		if err != nil {
@@ -346,10 +350,13 @@ func runSync(dir string, opts syncOptions) error {
 		// With no trusted base, reconcile from scratch: one-sided differences are
 		// ambiguous and become conflicts to review rather than silent adds/deletes.
 		var actions []syncengine.Action
+		var dirActions []syncengine.DirAction
 		if baseExists {
 			actions = syncengine.Plan(local, base, remote)
+			dirActions = syncengine.PlanDirs(local, base, remote)
 		} else {
 			actions = syncengine.PlanReconcile(local, remote)
+			dirActions = syncengine.PlanDirsReconcile(local, remote)
 		}
 		if opts.dryRun {
 			return printPlan(actions)
@@ -362,7 +369,7 @@ func runSync(dir string, opts syncOptions) error {
 			base: base, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			version: res.Version, id: st.ID,
-		}, actions)
+		}, actions, dirActions)
 	}
 
 	return reconcileWithRetry(reconcile)
@@ -401,7 +408,7 @@ type applyCtx struct {
 	id      string
 }
 
-func applySync(c applyCtx, actions []syncengine.Action) error {
+func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
 	push := !c.opts.pullOnly
 	pull := !c.opts.pushOnly
 	localByPath := c.local.ByPath()
@@ -459,6 +466,53 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		}
 	}
 
+	// Reconcile tracked directories (empty dirs and modes) alongside files. The file
+	// apply path is untouched; directory filesystem ops run in a dedicated pass after
+	// files (below). A directory mode conflict resolves local-wins — it is only
+	// permission metadata, not worth blocking a sync.
+	mergedDirs := c.remote.DirsByPath() // new server dirs
+	newBaseDirs := c.base.DirsByPath()
+	localDirs := c.local.DirsByPath()
+	remoteDirs := c.remote.DirsByPath()
+	var dirDownloads []syncengine.DirEntry
+	var dirRemovals []string
+	for _, a := range dirActions {
+		switch a.Kind {
+		case syncengine.Upload, syncengine.Conflict:
+			if !push {
+				continue
+			}
+			if d, ok := localDirs[a.Path]; ok {
+				mergedDirs[a.Path] = d
+				newBaseDirs[a.Path] = d
+			} else { // a conflict resolved local-wins where the dir is gone locally
+				delete(mergedDirs, a.Path)
+				delete(newBaseDirs, a.Path)
+			}
+			remoteChanged = true
+		case syncengine.DeleteRemote:
+			if !push {
+				continue
+			}
+			delete(mergedDirs, a.Path)
+			delete(newBaseDirs, a.Path)
+			remoteChanged = true
+		case syncengine.Download:
+			if !pull {
+				continue
+			}
+			d := remoteDirs[a.Path]
+			dirDownloads = append(dirDownloads, d)
+			newBaseDirs[a.Path] = d
+		case syncengine.DeleteLocal:
+			if !pull {
+				continue
+			}
+			dirRemovals = append(dirRemovals, a.Path)
+			delete(newBaseDirs, a.Path)
+		}
+	}
+
 	// Fold paths that converged to identical content on both sides into the new
 	// base. Plan emits no action for them (there is nothing to transfer), so without
 	// this they stay "changed on both sides" forever: a later remote-only delete is
@@ -479,6 +533,7 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 	// here we only commit the merged manifest that roots them.
 	if push && remoteChanged {
 		manifest := manifestFrom(merged, c.version+1)
+		manifest.Dirs = dirsFrom(mergedDirs)
 		if _, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
@@ -573,7 +628,18 @@ func applySync(c applyCtx, actions []syncengine.Action) error {
 		}
 	}
 
-	if err := saveBase(c.root, manifestFrom(newBase, c.version+1)); err != nil {
+	// Directories last: create/chmod after files land (so a directory exists and gets
+	// its mode), and remove emptied directories after file deletes.
+	if err := materializeDirs(c.root, dirDownloads); err != nil {
+		return err
+	}
+	if err := removeDirs(c.root, dirRemovals); err != nil {
+		return err
+	}
+
+	newBaseManifest := manifestFrom(newBase, c.version+1)
+	newBaseManifest.Dirs = dirsFrom(newBaseDirs)
+	if err := saveBase(c.root, newBaseManifest); err != nil {
 		return err
 	}
 	summarize(uploads, downloads, localDeletes, remoteChanged)
@@ -628,7 +694,7 @@ func runClone(ref, dir string) error {
 	// Decrypt the resource root before creating the destination, so a wrong or corrupt
 	// key fails the clone without leaving an empty directory behind. The root blob is
 	// tiny; materializeClone re-opens it to do the actual reconstruction.
-	if err := validateCloneRoot(res.Blob, ck, meta.Packed); err != nil {
+	if err := validateCloneRoot(res.Blob, ck, meta); err != nil {
 		return err
 	}
 	if err := ensureEmptyDir(abs); err != nil {
@@ -652,15 +718,18 @@ func runClone(ref, dir string) error {
 }
 
 // validateCloneRoot confirms the resource's sealed root decrypts under ck, using the
-// root type meta.Packed selects. The AAD is domain-separated per type, so a packed
-// folder mis-flagged as chunked (or the reverse) fails here rather than opening as an
-// empty tree.
-func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, packed bool) error {
+// root type the metadata selects. The AAD is domain-separated per type, so a folder
+// mis-flagged fails here rather than opening as an empty tree. A folder with neither
+// flag predates the v2 tree format and is no longer supported.
+func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, meta api.Metadata) error {
 	var err error
-	if packed {
+	switch {
+	case meta.Packed:
 		_, err = syncengine.OpenPackRoot(blob, ck)
-	} else {
-		_, err = syncengine.OpenManifestRoot(blob, ck)
+	case meta.Tree:
+		_, err = syncengine.OpenTreeRoot(blob, ck)
+	default:
+		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 	}
 	if err != nil {
 		return fmt.Errorf("decrypt folder root: %w", err)
@@ -670,7 +739,8 @@ func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, packed bool
 
 // materializeClone writes a freshly cloned folder's content under abs and returns
 // the manifest to record as its base. A pack-and-seal folder is untarred from its
-// sealed segments; the chunked default streams each file from its packs.
+// sealed segments; the chunked default reassembles its Merkle DAG, streams each
+// file from its packs, and materializes (empty) directories with their modes.
 func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse, ck crypto.ContentKey, meta api.Metadata) (syncengine.Manifest, error) {
 	if meta.Packed {
 		root, err := syncengine.OpenPackRoot(res.Blob, ck)
@@ -684,11 +754,14 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		base.Version = res.Version
 		return base, nil
 	}
-	manifest, err := openRemoteManifest(cl, res.Blob, ck)
+	manifest, err := openRemoteTree(cl, res.Blob, ck)
 	if err != nil {
 		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)
 	}
 	if err := runDownloads(cl, abs, manifest.Entries); err != nil {
+		return syncengine.Manifest{}, err
+	}
+	if err := materializeDirs(abs, manifest.Dirs); err != nil {
 		return syncengine.Manifest{}, err
 	}
 	return manifest, nil
@@ -964,63 +1037,72 @@ func distinctChunkIDs(entries []syncengine.Entry) []string {
 
 // --- folder resource helpers ---
 
-// uploadManifestObjects chunks the manifest through the convergence key, uploads
-// the objects the server lacks (via the same pack pipeline as file content), and
-// returns the root pointer plus the resource's full GC roots: every file-chunk id
-// the manifest references unioned with the manifest's own object ids. The manifest
-// objects must be on the server before the resource PUT roots them, hence the flush.
-func uploadManifestObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.ManifestRoot, []string, error) {
+// uploadTreeObjects seals a folder's Merkle DAG, uploading the node objects the
+// server lacks (via the same pack pipeline as file content), and returns the tree
+// root plus the resource's full GC roots: every directory-node id unioned with every
+// file-chunk id reachable from the root. The objects must be on the server before
+// the resource PUT roots them, hence the flush.
+func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.TreeRoot, []string, error) {
 	up := newPackUploader(cl)
-	chunks, err := syncengine.ChunkManifest(m, conv, syncengine.DefaultChunker(), up)
+	root, refs, err := syncengine.SealTree(m, conv, up)
 	if err != nil {
-		return syncengine.ManifestRoot{}, nil, err
+		return syncengine.TreeRoot{}, nil, err
 	}
 	if err := up.Flush(); err != nil {
-		return syncengine.ManifestRoot{}, nil, err
+		return syncengine.TreeRoot{}, nil, err
 	}
-	refs := m.ChunkIDs()
-	for _, ch := range chunks {
-		refs = append(refs, ch.ID)
-	}
-	return syncengine.ManifestRoot{Version: m.Version, Chunks: chunks}, refs, nil
+	return root, refs, nil
 }
 
-// openRemoteManifest reconstructs a folder's manifest from its root pointer: it
-// decrypts the tiny root, then fetches and reassembles the manifest objects from
-// their packs. The inverse of uploadManifestObjects.
-func openRemoteManifest(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
-	root, err := syncengine.OpenManifestRoot(blob, ck)
+// openRemoteTree reconstructs a folder's manifest from its tree root: it decrypts
+// the tiny root, then walks the DAG, fetching and decrypting each directory node
+// from its pack. The inverse of uploadTreeObjects.
+func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
+	root, err := syncengine.OpenTreeRoot(blob, ck)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	if len(root.Chunks) == 0 {
-		return syncengine.Manifest{Version: root.Version}, nil
-	}
-	src, err := newPackSource(cl, manifestChunkIDs(root.Chunks))
-	if err != nil {
-		return syncengine.Manifest{}, err
-	}
-	return syncengine.OpenManifestFromRoot(root, src.get)
+	return syncengine.OpenTree(root, newNodeFetcher(cl))
 }
 
-func manifestChunkIDs(chunks []crypto.Chunk) []string {
-	ids := make([]string, len(chunks))
-	for i, ch := range chunks {
-		ids[i] = ch.ID
+// newNodeFetcher returns a fetch function for directory-node objects, locating and
+// range-fetching each by id and caching it (nodes are small and the DAG walk may
+// revisit shared subtree ids). A node the owner no longer stores — a concurrent sync
+// superseded this version and GC reaped it — surfaces as client.ErrNotFound so a
+// manifest read can retry against the current version.
+func newNodeFetcher(cl *client.Client) func(id string) ([]byte, error) {
+	cache := map[string][]byte{}
+	return func(id string) ([]byte, error) {
+		if b, ok := cache[id]; ok {
+			return b, nil
+		}
+		located, err := cl.LocateChunks([]string{id})
+		if err != nil {
+			return nil, err
+		}
+		if len(located) == 0 {
+			return nil, fmt.Errorf("server could not locate tree node %s: %w", id, client.ErrNotFound)
+		}
+		loc := located[0]
+		b, err := cl.GetPackRange(loc.PackID, loc.Off, loc.Len)
+		if err != nil {
+			return nil, err
+		}
+		cache[id] = b
+		return b, nil
 	}
-	return ids
 }
 
 func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
-	root, refs, err := uploadManifestObjects(cl, conv, m)
+	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	blob, err := syncengine.SealManifestRoot(root, ck)
+	blob, err := syncengine.SealTreeRoot(root, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	metaJSON, err := json.Marshal(api.Metadata{Name: filepath.Base(dir), Kind: api.KindFolder})
+	metaJSON, err := json.Marshal(api.Metadata{Name: filepath.Base(dir), Kind: api.KindFolder, Tree: true})
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -1043,11 +1125,11 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 // The encrypted metadata (the folder name sealed at init) is carried forward
 // unchanged, so a sync never clobbers it.
 func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
-	root, refs, err := uploadManifestObjects(cl, conv, m)
+	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	blob, err := syncengine.SealManifestRoot(root, ck)
+	blob, err := syncengine.SealTreeRoot(root, ck)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -1068,6 +1150,45 @@ func manifestFrom(byPath map[string]syncengine.Entry, version int) syncengine.Ma
 	}
 	sort.Slice(m.Entries, func(i, j int) bool { return m.Entries[i].Path < m.Entries[j].Path })
 	return m
+}
+
+func dirsFrom(byPath map[string]syncengine.DirEntry) []syncengine.DirEntry {
+	if len(byPath) == 0 {
+		return nil
+	}
+	out := make([]syncengine.DirEntry, 0, len(byPath))
+	for _, d := range byPath {
+		out = append(out, d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
+	return out
+}
+
+// materializeDirs creates each tracked directory under root with its recorded mode,
+// shallowest first so a parent exists before its children. It materializes empty
+// directories and applies directory permission changes during clone and pull.
+func materializeDirs(root string, dirs []syncengine.DirEntry) error {
+	sorted := append([]syncengine.DirEntry(nil), dirs...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
+	for _, d := range sorted {
+		if err := syncengine.MaterializeDir(root, d); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeDirs removes tracked directories deepest first (a child before its parent),
+// each only if empty, so a directory still holding data is never destroyed.
+func removeDirs(root string, paths []string) error {
+	sorted := append([]string(nil), paths...)
+	sort.Sort(sort.Reverse(sort.StringSlice(sorted)))
+	for _, p := range sorted {
+		if err := syncengine.RemoveDir(root, p); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // --- local state ---

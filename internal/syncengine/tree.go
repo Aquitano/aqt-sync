@@ -44,9 +44,9 @@ type TreeChild struct {
 	// the child node's content address (== the subtree Merkle hash).
 	Hash   string         `json:"hash,omitempty"`
 	Link   string         `json:"link,omitempty"`   // symlink target
-	Inline []byte         `json:"inline,omitempty"`  // file bytes when Size <= chunker.Min
-	Chunks []crypto.Chunk `json:"chunks,omitempty"`  // file content objects when larger
-	Node   *crypto.Chunk  `json:"node,omitempty"`    // dir: the child node object to fetch+open; Node.ID == Hash
+	Inline []byte         `json:"inline,omitempty"` // file bytes when Size <= chunker.Min
+	Chunks []crypto.Chunk `json:"chunks,omitempty"` // file content objects when larger
+	Node   *crypto.Chunk  `json:"node,omitempty"`   // dir: the child node object to fetch+open; Node.ID == Hash
 }
 
 // TreeNode is a directory: its children, name-sorted. One node seals to exactly one

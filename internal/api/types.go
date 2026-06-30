@@ -36,6 +36,10 @@ type Metadata struct {
 	// tarball of the whole tree (no chunk-level dedup), so sync/clone reconstruct it
 	// by untarring rather than per-file. A folder resource without this is chunked.
 	Packed bool `json:"packed,omitempty"`
+	// Tree marks a chunked folder whose blob is a sealed TreeRoot over a Merkle DAG of
+	// directory nodes (Phase 4), so a moved/copied subtree dedups and a diff can skip
+	// unchanged subtrees. A chunked folder created by a current client always sets it.
+	Tree bool `json:"tree,omitempty"`
 }
 
 // CreateAccountRequest registers a new account and attaches the first device.

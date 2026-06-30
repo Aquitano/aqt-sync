@@ -157,7 +157,7 @@ func folderMembers(cl *client.Client, id string, mk crypto.MasterKey) ([]synceng
 		return nil, err
 	}
 	defer ck.Wipe()
-	m, err := openRemoteManifest(cl, res.Blob, ck)
+	m, err := openRemoteTree(cl, res.Blob, ck)
 	if err != nil {
 		return nil, err
 	}
