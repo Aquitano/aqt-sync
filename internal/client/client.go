@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -74,12 +75,16 @@ func New(baseURL, token string) (*Client, error) {
 
 // isLoopbackHost reports whether host is a loopback or wildcard-bind address, the
 // only non-HTTPS hosts permitted to carry a bearer token: a connection to any of
-// them never leaves the machine. 0.0.0.0 dials to localhost, so a local dev server
-// bound to the wildcard is reachable over http without leaking the credential.
+// them never leaves the machine. net.IP.IsLoopback covers the whole 127.0.0.0/8
+// block and ::1; localhost and 0.0.0.0 are added explicitly since the former is a
+// name and the latter (the wildcard bind, which dials to localhost) is not flagged
+// loopback by the stdlib.
 func isLoopbackHost(host string) bool {
-	switch host {
-	case "localhost", "127.0.0.1", "::1", "0.0.0.0":
+	if host == "localhost" || host == "0.0.0.0" {
 		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
 	}
 	return false
 }

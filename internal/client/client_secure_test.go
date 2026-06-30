@@ -20,6 +20,7 @@ func TestNewRejectsInsecureSchemeWithToken(t *testing.T) {
 		{"http no token", "http://api.example.com", "", false},
 		{"http localhost with token", "http://localhost:8080", "tok", false},
 		{"http 127.0.0.1 with token", "http://127.0.0.1:8080", "tok", false},
+		{"http 127.0.0.2 with token", "http://127.0.0.2:8080", "tok", false},
 		{"http ::1 with token", "http://[::1]:8080", "tok", false},
 		{"http 0.0.0.0 with token", "http://0.0.0.0:8080", "tok", false},
 		{"http non-loopback with token", "http://api.example.com", "tok", true},

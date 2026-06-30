@@ -187,10 +187,11 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 	return nil
 }
 
-// writeStreamAtomic streams bytes into a sibling temp file via fn, then fsyncs
-// and renames it over dest on success, so a failure or crash mid-stream leaves
-// any existing dest untouched rather than truncating it. Mirrors writeFileAtomic
-// for writers that cannot hold the whole file in memory (pullStream).
+// writeStreamAtomic writes to a sibling temp file via fn, fsyncs it, then renames
+// it over dest, so a failure or crash mid-write leaves any existing dest untouched
+// rather than truncating it. fn gets the open temp file and may stream into it
+// without holding the whole payload in memory (pullStream); writeFileAtomic wraps
+// this for the in-memory case.
 func writeStreamAtomic(dest string, perm os.FileMode, fn func(*os.File) error) error {
 	f, err := os.CreateTemp(filepath.Dir(dest), ".aqt-tmp-*")
 	if err != nil {

@@ -1080,28 +1080,10 @@ func controlPath(root, name string) string {
 // renames it over path, so a crash mid-write leaves the old control-state file
 // intact rather than a torn one that wedges future syncs.
 func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".aqt-tmp-*")
-	if err != nil {
+	return writeStreamAtomic(path, perm, func(f *os.File) error {
+		_, err := f.Write(data)
 		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	})
 }
 
 func saveState(root string, st folderState) error {
