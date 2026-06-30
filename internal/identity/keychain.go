@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"errors"
+	"os"
+	"strings"
 
 	"github.com/zalando/go-keyring"
 
@@ -14,6 +16,15 @@ import (
 // secret store (macOS Keychain, Windows Credential Manager, or a Linux Secret
 // Service such as gnome-keyring/KWallet).
 const keychainService = "aqt"
+
+// keychainDisabled lets a headless or automated environment opt out of the OS
+// keychain and use the machine-bound file fallback instead. This avoids a
+// keychain access prompt (or, on a locked macOS keychain with no GUI, a blocking
+// `security` call) in CI, cron jobs, and other non-interactive contexts.
+func keychainDisabled() bool {
+	v := os.Getenv("AQT_NO_KEYCHAIN")
+	return v != "" && v != "0" && !strings.EqualFold(v, "false")
+}
 
 // Indirection over go-keyring so tests can mock the store or simulate a host with
 // no backend, and never touch the developer's real keychain.
@@ -33,6 +44,9 @@ func tokenID(name string) string      { return "token:" + name }
 // to the machine-bound key and keep working.
 func keychainSealingKey(name string, create bool) (crypto.ContentKey, bool) {
 	var ck crypto.ContentKey
+	if keychainDisabled() {
+		return ck, false
+	}
 	v, err := keyringGet(keychainService, sealingKeyID(name))
 	switch {
 	case err == nil:
@@ -81,16 +95,28 @@ func loadSealingKeys(name string) []crypto.ContentKey {
 	return append(keys, machineBoundKey())
 }
 
-func keychainDropSealingKey(name string) { _ = keyringDelete(keychainService, sealingKeyID(name)) }
+func keychainDropSealingKey(name string) {
+	if keychainDisabled() {
+		return
+	}
+	_ = keyringDelete(keychainService, sealingKeyID(name))
+}
 
 // keychainStoreToken stores the device token in the keychain, returning false when
-// no backend is available (the caller then keeps the token in the 0600 file).
+// the keychain is disabled or no backend is available (the caller then keeps the
+// token in the 0600 file).
 func keychainStoreToken(name, token string) bool {
+	if keychainDisabled() {
+		return false
+	}
 	return keyringSet(keychainService, tokenID(name), token) == nil
 }
 
 // keychainLoadToken returns the device token from the keychain if present.
 func keychainLoadToken(name string) (string, bool) {
+	if keychainDisabled() {
+		return "", false
+	}
 	v, err := keyringGet(keychainService, tokenID(name))
 	if err != nil {
 		return "", false
