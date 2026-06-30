@@ -47,7 +47,10 @@ func runLogin(email string, ttl time.Duration) error {
 		email = entered
 	}
 	server := serverURL()
-	cl := client.New(server, "")
+	cl, err := client.New(server, "")
+	if err != nil {
+		return err
+	}
 
 	boot, err := cl.Bootstrap(email)
 	if err != nil {

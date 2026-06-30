@@ -21,7 +21,11 @@ func TestGetPackRangeNormalizesWholeBodyResponse(t *testing.T) {
 			http.ServeContent(w, r, "pack", time.Time{}, bytes.NewReader(full))
 		}))
 		defer srv.Close()
-		got, err := New(srv.URL, "tok").GetPackRange("pack", 4, 5)
+		cl, err := New(srv.URL, "tok")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := cl.GetPackRange("pack", 4, 5)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -37,7 +41,11 @@ func TestGetPackRangeNormalizesWholeBodyResponse(t *testing.T) {
 			w.Write(full)
 		}))
 		defer srv.Close()
-		got, err := New(srv.URL, "tok").GetPackRange("pack", 4, 5)
+		cl, err := New(srv.URL, "tok")
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := cl.GetPackRange("pack", 4, 5)
 		if err != nil {
 			t.Fatal(err)
 		}

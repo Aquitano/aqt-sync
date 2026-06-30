@@ -133,13 +133,16 @@ func TestPackDirectionalFlagsConflict(t *testing.T) {
 		t.Fatalf("--push-only with both sides changed: want errConflictsRemain, got %v", err)
 	}
 
-	// --force --pull-only is the explicit opt-in: the replica takes origin's tree,
-	// dropping its own unsynced file.
+	// --force --pull-only resolves local-wins, matching the hint and the chunked
+	// path: the replica keeps its own tree and does not take origin's edit, so the
+	// unsynced local file survives.
 	h.syncOpts(replica, syncOptions{pullOnly: true, force: true})
-	if got := readTree(t, replica, "shared.txt"); got != "origin edit" {
-		t.Fatalf("--force --pull-only did not take remote: %q", got)
+	if got := readTree(t, replica, "shared.txt"); got != "v0" {
+		t.Fatalf("--force --pull-only clobbered local: %q, want %q", got, "v0")
 	}
-	assertAbsent(t, replica, "keep-local.txt")
+	if got := readTree(t, replica, "keep-local.txt"); got != "only on replica" {
+		t.Fatalf("--force --pull-only destroyed local work: %q", got)
+	}
 }
 
 // TestPackReconcileNoBaseDiffers covers the baseless --reconcile branch the existing
@@ -220,7 +223,7 @@ func TestDecidePack(t *testing.T) {
 		{"both push-only", true, true, syncOptions{pushOnly: true}, packConflict},
 		{"both pull-only", true, true, syncOptions{pullOnly: true}, packConflict},
 		{"both push-only forced", true, true, syncOptions{pushOnly: true, force: true}, packPush},
-		{"both pull-only forced", true, true, syncOptions{pullOnly: true, force: true}, packPull},
+		{"both pull-only forced", true, true, syncOptions{pullOnly: true, force: true}, packNoop},
 		{"push-only no local", false, true, syncOptions{pushOnly: true}, packNoop},
 		{"pull-only no remote", true, false, syncOptions{pullOnly: true}, packNoop},
 		{"push-only local only", true, false, syncOptions{pushOnly: true}, packPush},

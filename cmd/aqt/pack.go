@@ -137,8 +137,9 @@ const (
 // decidePack maps the two-sided change state to one whole-folder action under the
 // last-writer-wins model. --push-only/--pull-only restrict the direction, but they
 // do not waive the conflict guard: if the other side also moved, the restricted
-// action would silently discard it, so it is a conflict unless --force makes the
-// discard explicit — the same protection the chunked path applies to every sync.
+// action would silently discard it, so it is a conflict unless --force resolves
+// it local-wins (push, or skip the pull) — matching the chunked path and the
+// printed hint, so --force means the same thing across every CLI path.
 func decidePack(localChanged, remoteChanged bool, opts syncOptions) packDecision {
 	switch {
 	case opts.pushOnly:
@@ -156,6 +157,11 @@ func decidePack(localChanged, remoteChanged bool, opts syncOptions) packDecision
 			return packNoop
 		case localChanged && !opts.force:
 			return packConflict
+		case localChanged:
+			// --force resolves local-wins: keep the local edit and skip the
+			// pull, matching the chunked path (Conflict + !push skips) and
+			// the printed hint. pullOnly won't push, so local-wins is a noop.
+			return packNoop
 		default:
 			return packPull
 		}

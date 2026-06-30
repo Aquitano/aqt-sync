@@ -147,7 +147,11 @@ func authedClient() (*client.Client, *identity.Profile, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	return client.New(p.Server, p.Token), p, nil
+	c, err := client.New(p.Server, p.Token)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, p, nil
 }
 
 // serverURL resolves a server for commands that may run without a profile (e.g.

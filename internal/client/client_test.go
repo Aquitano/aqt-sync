@@ -45,7 +45,11 @@ func TestLocateChunksBatchesLargeIDSet(t *testing.T) {
 		ids[i] = fmt.Sprintf("%064x", i)
 	}
 
-	got, err := New(srv.URL, "tok").LocateChunks(ids)
+	cl, err := New(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := cl.LocateChunks(ids)
 	if err != nil {
 		t.Fatalf("LocateChunks: %v", err)
 	}
@@ -70,7 +74,11 @@ func TestLocateChunksEmptyMakesNoRequest(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := New(srv.URL, "tok").LocateChunks(nil)
+	cl, err := New(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := cl.LocateChunks(nil)
 	if err != nil {
 		t.Fatalf("LocateChunks(nil): %v", err)
 	}

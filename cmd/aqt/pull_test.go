@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,5 +65,70 @@ func TestWriteOutputConfinesToCWD(t *testing.T) {
 		if filepath.Dir(absReal) != tmpReal {
 			t.Fatalf("name %q wrote outside CWD: %s", name, absReal)
 		}
+	}
+}
+
+// TestWriteStreamAtomicLeavesOriginalOnFailure covers the H1 fix: a mid-stream
+// failure must not truncate or remove an existing destination. The original
+// bytes survive and no temp file is left behind.
+func TestWriteStreamAtomicLeavesOriginalOnFailure(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.bin")
+	original := []byte("original bytes, do not destroy")
+	if err := os.WriteFile(dest, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	streamErr := errors.New("simulated mid-write network failure")
+	err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+		if _, err := f.Write([]byte("partial")); err != nil {
+			return err
+		}
+		return streamErr
+	})
+	if !errors.Is(err, streamErr) {
+		t.Fatalf("writeStreamAtomic err = %v, want streamErr", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatalf("destination missing after failed write: %v", err)
+	}
+	if string(got) != string(original) {
+		t.Fatalf("destination corrupted: %q, want %q", got, original)
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected only dest in dir, found %d entries", len(entries))
+	}
+}
+
+// TestWriteStreamAtomicRenamesOnSuccess confirms a successful stream replaces
+// the destination atomically with the new bytes.
+func TestWriteStreamAtomicRenamesOnSuccess(t *testing.T) {
+	dir := t.TempDir()
+	dest := filepath.Join(dir, "out.bin")
+	if err := os.WriteFile(dest, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []byte("brand new contents")
+	if err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+		_, err := f.Write(want)
+		return err
+	}); err != nil {
+		t.Fatalf("writeStreamAtomic: %v", err)
+	}
+
+	got, err := os.ReadFile(dest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("destination = %q, want %q", got, want)
 	}
 }

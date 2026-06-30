@@ -330,7 +330,11 @@ func (h *e2eHarness) signup(email, pass string) {
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	resp, err := client.New(h.url, "").CreateAccount(api.CreateAccountRequest{
+	cl, err := client.New(h.url, "")
+	if err != nil {
+		h.t.Fatalf("client.New: %v", err)
+	}
+	resp, err := cl.CreateAccount(api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
 		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
