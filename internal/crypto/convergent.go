@@ -61,6 +61,14 @@ var chunkNonce [NonceSize]byte
 // ciphertext (and thus the same dedup id).
 var aadChunk = []byte("aqt-chunk-aad-v1")
 
+// aadTreeNode domain-separates a Merkle-DAG directory-node object from file-content
+// chunks. Both seal through this same convergent pipeline, so a directory node and a
+// file chunk with byte-identical plaintext would otherwise share one object id; the
+// distinct tag keeps the roles apart (identical directory nodes still dedup against
+// each other, since the tag is constant). See DESIGN.md section 5 (AEAD domain
+// separation) and docs/phase4-merkle-dag.md section 9.6.
+var aadTreeNode = []byte("aqt-treenode-v1")
+
 // deriveChunkKey binds the plaintext and the account secret into a unique key.
 func deriveChunkKey(conv ConvergenceKey, plaintext []byte) [KeySize]byte {
 	salt := sha256.Sum256(plaintext)
@@ -72,15 +80,40 @@ func deriveChunkKey(conv ConvergenceKey, plaintext []byte) [KeySize]byte {
 	return key
 }
 
-// SealChunk deterministically encrypts a chunk and returns its ciphertext plus
-// the Chunk record (address, key, length) the manifest needs to recover it.
+// SealChunk deterministically encrypts a file-content chunk and returns its
+// ciphertext plus the Chunk record (address, key, length) the manifest needs to
+// recover it.
 func SealChunk(plaintext []byte, conv ConvergenceKey) (ciphertext []byte, ch Chunk, err error) {
+	return sealConvergent(plaintext, conv, aadChunk)
+}
+
+// OpenChunk decrypts a file-content chunk's ciphertext using the key from its
+// manifest record, verifying both the content-address (ciphertext hash) and the
+// AEAD tag.
+func OpenChunk(ciphertext []byte, ch Chunk) ([]byte, error) {
+	return openConvergent(ciphertext, ch, aadChunk)
+}
+
+// SealNode seals a Merkle-DAG directory-node object through the same convergent
+// pipeline as SealChunk but under a distinct AAD, so node objects are
+// domain-separated from file chunks while identical subtrees still dedup. The
+// returned Chunk.ID is the subtree's Merkle hash.
+func SealNode(plaintext []byte, conv ConvergenceKey) (ciphertext []byte, ch Chunk, err error) {
+	return sealConvergent(plaintext, conv, aadTreeNode)
+}
+
+// OpenNode reverses SealNode, verifying the node object's address and AEAD tag.
+func OpenNode(ciphertext []byte, ch Chunk) ([]byte, error) {
+	return openConvergent(ciphertext, ch, aadTreeNode)
+}
+
+func sealConvergent(plaintext []byte, conv ConvergenceKey, aad []byte) ([]byte, Chunk, error) {
 	key := deriveChunkKey(conv, plaintext)
 	aead, err := chacha20poly1305.NewX(key[:])
 	if err != nil {
 		return nil, Chunk{}, err
 	}
-	ciphertext = aead.Seal(nil, chunkNonce[:], plaintext, aadChunk)
+	ciphertext := aead.Seal(nil, chunkNonce[:], plaintext, aad)
 	sum := sha256.Sum256(ciphertext)
 	return ciphertext, Chunk{
 		ID:  hex.EncodeToString(sum[:]),
@@ -89,9 +122,7 @@ func SealChunk(plaintext []byte, conv ConvergenceKey) (ciphertext []byte, ch Chu
 	}, nil
 }
 
-// OpenChunk decrypts a chunk's ciphertext using the key from its manifest record,
-// verifying both the content-address (ciphertext hash) and the AEAD tag.
-func OpenChunk(ciphertext []byte, ch Chunk) ([]byte, error) {
+func openConvergent(ciphertext []byte, ch Chunk, aad []byte) ([]byte, error) {
 	sum := sha256.Sum256(ciphertext)
 	if hex.EncodeToString(sum[:]) != ch.ID {
 		return nil, errors.New("chunk id mismatch: ciphertext does not match its address")
@@ -103,7 +134,7 @@ func OpenChunk(ciphertext []byte, ch Chunk) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := aead.Open(nil, chunkNonce[:], ciphertext, aadChunk)
+	plaintext, err := aead.Open(nil, chunkNonce[:], ciphertext, aad)
 	if err != nil {
 		return nil, err
 	}
