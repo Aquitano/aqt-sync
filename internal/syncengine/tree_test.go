@@ -288,9 +288,10 @@ func TestTreeRootAADSeparation(t *testing.T) {
 	if !reflect.DeepEqual(root, got) {
 		t.Fatalf("tree root round-trip mismatch: %+v vs %+v", root, got)
 	}
-	// A v1 ManifestRoot reader must not open a v2 TreeRoot (distinct AAD), or it would
-	// read an empty manifest and delete the tree.
-	if _, err := OpenManifestRoot(blob, ck); err == nil {
-		t.Fatal("a ManifestRoot open of a TreeRoot blob must fail the AEAD check")
+	// A reader using a different AAD (e.g. the generic resource-blob tag) must not open
+	// a TreeRoot blob, so a mis-routed folder fails the AEAD check loudly instead of
+	// reading an empty tree and deleting everything.
+	if _, err := crypto.Open(blob, ck, crypto.AADBlob); err == nil {
+		t.Fatal("opening a TreeRoot blob under AADBlob must fail the AEAD check")
 	}
 }
