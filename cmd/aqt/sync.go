@@ -185,18 +185,19 @@ func runStatus(dir string) error {
 	if err != nil {
 		return err
 	}
-	local, err := syncengine.Scan(root)
+	local, err := syncengine.ScanReusing(root, &base, false)
 	if err != nil {
 		return err
 	}
 
 	// status is intentionally offline: it compares the working tree to the last
 	// synced manifest. Remote-side changes and conflicts surface during `sync`.
+	baseByPath := base.ByPath()
 	var added, modified, deleted []string
 	for _, a := range syncengine.Plan(local, base, base) {
 		switch a.Kind {
 		case syncengine.Upload:
-			if _, ok := base.Lookup(a.Path); ok {
+			if _, ok := baseByPath[a.Path]; ok {
 				modified = append(modified, a.Path)
 			} else {
 				added = append(added, a.Path)
@@ -292,7 +293,11 @@ func runSync(dir string, opts syncOptions) error {
 	// dry-run pass uploads nothing, so a metadata+hash scan is enough to plan.
 	var local syncengine.Manifest
 	if opts.pullOnly || opts.dryRun {
-		local, err = syncengine.Scan(root)
+		var scanBase *syncengine.Manifest
+		if baseExists {
+			scanBase = &base
+		}
+		local, err = syncengine.ScanReusing(root, scanBase, opts.rehash)
 		if err != nil {
 			return err
 		}
