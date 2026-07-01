@@ -651,6 +651,33 @@ func TestPutPackIdempotentReArm(t *testing.T) {
 	}
 }
 
+// PutPack batches its object inserts; a pack whose object count spans several batches
+// must still store and count every chunk, and RowsAffected on a multi-row INSERT must
+// sum only the newly-stored rows. This crosses the objectInsertBatch boundary and then
+// re-uploads to confirm dedup counts nothing.
+func TestPutPackBatchesObjectInserts(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "batch@example.com")
+
+	const n = 2*objectInsertBatch + 50 // spans more than two insert batches
+	payloads := make([]string, n)
+	for i := range payloads {
+		payloads[i] = fmt.Sprintf("chunk-%05d", i)
+	}
+	packID, data, ids := packOf(payloads...)
+
+	if stored, err := s.PutPack(owner, packID, data); err != nil || stored != n {
+		t.Fatalf("PutPack stored=%d err=%v, want %d", stored, err, n)
+	}
+	if missing, err := s.MissingChunks(owner, ids); err != nil || len(missing) != 0 {
+		t.Fatalf("missing after upload = %d err=%v, want 0", len(missing), err)
+	}
+	// Re-uploading the identical pack stores nothing new (dedup on chunk_id).
+	if stored, err := s.PutPack(owner, packID, data); err != nil || stored != 0 {
+		t.Fatalf("re-put stored=%d err=%v, want 0", stored, err)
+	}
+}
+
 // An object slice that escapes the object region (into the index trailer) is
 // rejected, so a crafted pack cannot smuggle an id that points at index bytes.
 func TestPutPackRejectsSliceOutOfRange(t *testing.T) {

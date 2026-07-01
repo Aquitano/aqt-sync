@@ -1371,23 +1371,56 @@ func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
 		tx.Rollback()
 		return 0, err
 	}
-	stored := 0
-	for _, e := range index {
-		res, err := tx.Exec(
-			`INSERT INTO objects(owner_handle, chunk_id, pack_id, "offset", length) VALUES(?,?,?,?,?)
-			 ON CONFLICT(owner_handle, chunk_id) DO NOTHING`,
-			owner, e.ID, packID, e.Off, e.Len,
-		)
-		if err != nil {
-			tx.Rollback()
-			return 0, err
-		}
-		if n, _ := res.RowsAffected(); n > 0 {
-			stored++
-		}
+	stored, err := insertObjects(tx, owner, packID, index)
+	if err != nil {
+		tx.Rollback()
+		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
+	}
+	return stored, nil
+}
+
+// objectInsertBatch is how many object rows ride in one multi-row INSERT. At five
+// bound variables per row this stays far under SQLite's variable limit while cutting
+// the statement count — and its per-Exec parse/plan overhead — ~200x versus one
+// INSERT per chunk, the dominant SQLite cost when ingesting a pack of many small
+// chunks (a 16 MiB pack of 8 KiB chunks is ~2000 rows).
+const objectInsertBatch = 200
+
+// insertObjects writes a pack's object index into the objects table in batched
+// multi-row INSERTs and returns how many rows were newly stored — dedup skips the
+// rest via ON CONFLICT DO NOTHING, and RowsAffected on a multi-row INSERT counts only
+// the rows actually inserted. It runs inside the caller's transaction; rollback on
+// error is the caller's job.
+func insertObjects(tx *sql.Tx, owner, packID string, index []api.PackIndexEntry) (int, error) {
+	stored := 0
+	for start := 0; start < len(index); start += objectInsertBatch {
+		end := start + objectInsertBatch
+		if end > len(index) {
+			end = len(index)
+		}
+		group := index[start:end]
+
+		var sb strings.Builder
+		sb.WriteString(`INSERT INTO objects(owner_handle, chunk_id, pack_id, "offset", length) VALUES `)
+		args := make([]any, 0, len(group)*5)
+		for i, e := range group {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString("(?,?,?,?,?)")
+			args = append(args, owner, e.ID, packID, e.Off, e.Len)
+		}
+		sb.WriteString(` ON CONFLICT(owner_handle, chunk_id) DO NOTHING`)
+
+		res, err := tx.Exec(sb.String(), args...)
+		if err != nil {
+			return 0, err
+		}
+		n, _ := res.RowsAffected()
+		stored += int(n)
 	}
 	return stored, nil
 }

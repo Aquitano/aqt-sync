@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -8,9 +9,11 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -252,9 +255,11 @@ func runSync(dir string, opts syncOptions) error {
 		return err
 	}
 	defer release()
-	if cfg, err := syncengine.LoadConfig(root); err != nil {
+	cfg, err := syncengine.LoadConfig(root)
+	if err != nil {
 		return err
-	} else if cfg.Pack {
+	}
+	if cfg.Pack {
 		return runPackSync(root, opts)
 	}
 	st, err := loadState(root)
@@ -292,9 +297,14 @@ func runSync(dir string, opts syncOptions) error {
 			return err
 		}
 	} else {
+		chunker, cerr := cfg.Chunker()
+		if cerr != nil {
+			return cerr
+		}
 		up := newPackUploader(cl)
-		local, err = syncengine.Take(root, conv, syncengine.DefaultChunker(), &base, up, opts.rehash)
+		local, err = syncengine.Take(root, conv, chunker, &base, up, opts.rehash)
 		if err != nil {
+			up.Wait() // drain in-flight uploads before returning the snapshot error
 			return err
 		}
 		if err := up.Flush(); err != nil {
@@ -780,16 +790,28 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 // --- chunk transfer ---
 
 // packUploader is the ChunkSink Take feeds during a push. It buffers sealed chunks
-// up to ~packTarget, then asks the server which it lacks, packs only those, and
-// uploads the pack — so the have/want gate and packing fold into one streaming pass
-// and memory stays bounded by the candidate buffer. A per-run seen set dedups a
-// chunk shared by several files within the same sync.
+// up to ~packTarget, then hands the batch to a bounded pool that asks the server
+// which chunks it lacks, packs only those, and uploads the pack. Dispatching to the
+// pool instead of uploading inline overlaps chunking with the two upload round-trips,
+// so the CPU keeps sealing the next pack while earlier ones are in flight — the win
+// over a WAN, where each pack otherwise cost two sequential RTTs of pure stall.
+//
+// The pool is bounded: group.Go blocks once uploadConcurrency packs are in flight,
+// which is the backpressure that keeps push memory at O(uploadConcurrency packs)
+// rather than O(tree). A per-run seen set dedups a chunk shared by several files
+// within the same sync; it and the candidate buffer are touched only by the single
+// producer goroutine (Take calls Add sequentially), while workers touch only their
+// own batch and the concurrency-safe client, so no further synchronization is needed.
 type packUploader struct {
 	cl       *client.Client
 	target   int
 	seen     map[string]bool
 	cand     []candidate
 	candSize int
+	group    *errgroup.Group
+	ctx      context.Context
+	waitOnce sync.Once
+	waitErr  error
 }
 
 type candidate struct {
@@ -797,11 +819,20 @@ type candidate struct {
 	ct []byte
 }
 
+// uploadConcurrency bounds how many packs are checked-and-uploaded at once. Uploads
+// are IO-bound (two round-trips plus server ingest), so a small fixed fan-out hides
+// latency without a per-core thread; it also caps peak push memory at roughly this
+// many packs (each in-flight upload holds a candidate buffer plus its assembled pack,
+// both ~DefaultPackTarget).
+const uploadConcurrency = 4
+
 func newPackUploader(cl *client.Client) *packUploader {
-	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}}
+	g, ctx := errgroup.WithContext(context.Background())
+	g.SetLimit(uploadConcurrency)
+	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}, group: g, ctx: ctx}
 }
 
-// Add buffers one sealed chunk, flushing a pack once the buffer reaches the target.
+// Add buffers one sealed chunk, dispatching a pack once the buffer reaches the target.
 func (u *packUploader) Add(ch crypto.Chunk, ciphertext []byte) error {
 	if u.seen[ch.ID] {
 		return nil
@@ -810,20 +841,52 @@ func (u *packUploader) Add(ch crypto.Chunk, ciphertext []byte) error {
 	u.cand = append(u.cand, candidate{id: ch.ID, ct: ciphertext})
 	u.candSize += len(ciphertext)
 	if u.candSize >= u.target {
-		return u.flush()
+		return u.dispatch()
 	}
 	return nil
 }
 
-// Flush uploads any buffered remainder; call once after the snapshot pass.
-func (u *packUploader) Flush() error { return u.flush() }
+// Flush dispatches any buffered remainder, then waits for every in-flight upload;
+// call once after the snapshot pass. The manifest PUT that roots these objects must
+// not race ahead of them, so Flush is the barrier that guarantees they are all stored.
+func (u *packUploader) Flush() error {
+	if err := u.dispatch(); err != nil {
+		return err
+	}
+	return u.Wait()
+}
 
-func (u *packUploader) flush() error {
+// Wait blocks until all dispatched uploads finish and returns the first error. It is
+// idempotent — errgroup.Wait must not be called twice — so a caller can drain the
+// pool on a snapshot error and still have Flush return the same result on success.
+func (u *packUploader) Wait() error {
+	u.waitOnce.Do(func() { u.waitErr = u.group.Wait() })
+	return u.waitErr
+}
+
+// dispatch hands the buffered candidates to an upload worker and resets the buffer,
+// transferring ownership of the batch. group.Go blocks when uploadConcurrency uploads
+// are already running — the backpressure that bounds memory. If a prior upload already
+// failed the group context is cancelled, so stop feeding work and surface that error.
+func (u *packUploader) dispatch() error {
 	if len(u.cand) == 0 {
 		return nil
 	}
-	ids := make([]string, len(u.cand))
-	for i, c := range u.cand {
+	batch := u.cand
+	u.cand = nil
+	u.candSize = 0
+	if u.ctx.Err() != nil {
+		return u.Wait()
+	}
+	u.group.Go(func() error { return u.upload(batch) })
+	return nil
+}
+
+// upload runs one pack's have/want gate and PutPack. It owns cand exclusively (each
+// ciphertext is an independent SealChunk allocation), so it needs no locking.
+func (u *packUploader) upload(cand []candidate) error {
+	ids := make([]string, len(cand))
+	for i, c := range cand {
 		ids[i] = c.id
 	}
 	missing, err := u.cl.CheckChunks(ids)
@@ -835,13 +898,11 @@ func (u *packUploader) flush() error {
 		want[id] = true
 	}
 	pb := syncengine.NewPackBuilder()
-	for _, c := range u.cand {
+	for _, c := range cand {
 		if want[c.id] {
 			pb.Add(c.id, c.ct)
 		}
 	}
-	u.cand = u.cand[:0]
-	u.candSize = 0
 	if pb.Empty() {
 		return nil // every candidate already on the server (a re-sync)
 	}
@@ -1056,6 +1117,7 @@ func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengi
 	up := newPackUploader(cl)
 	root, refs, err := syncengine.SealTree(m, conv, up)
 	if err != nil {
+		up.Wait() // drain in-flight uploads before returning the seal error
 		return syncengine.TreeRoot{}, nil, err
 	}
 	if err := up.Flush(); err != nil {
