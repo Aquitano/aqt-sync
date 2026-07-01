@@ -19,17 +19,45 @@ func loginCmd() *cobra.Command {
 	var (
 		email string
 		ttl   time.Duration
+		kc    kdfChoice
 	)
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Create an account or attach this device, caching the unlocked key",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLogin(email, ttl)
+			return runLogin(email, ttl, kc)
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "account email")
 	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until logout)")
+	addKdfFlags(cmd, &kc) // only consulted when this login creates a new account
 	return cmd
+}
+
+// kdfChoice holds the Argon2id tuning a command exposes. With no manual override
+// it calibrates iterations to the preset's target unlock time on this machine;
+// any explicit cost flag switches to exact, reproducible params instead.
+type kdfChoice struct {
+	preset    string
+	timeCost  uint32
+	memoryMiB uint32
+	threads   uint8
+}
+
+func addKdfFlags(cmd *cobra.Command, k *kdfChoice) {
+	cmd.Flags().StringVar(&k.preset, "kdf-preset", string(crypto.DefaultPreset), "Argon2id calibration target: interactive|moderate|sensitive")
+	cmd.Flags().Uint32Var(&k.timeCost, "kdf-time", 0, "Argon2id iterations (manual override; skips calibration)")
+	cmd.Flags().Uint32Var(&k.memoryMiB, "kdf-memory", 0, "Argon2id memory in MiB (manual override; skips calibration)")
+	cmd.Flags().Uint8Var(&k.threads, "kdf-threads", 0, "Argon2id lanes (0 = auto: cores capped at 4)")
+}
+
+func (k kdfChoice) resolve() (crypto.KdfParams, error) {
+	if k.timeCost != 0 || k.memoryMiB != 0 {
+		return crypto.ManualKdfParams(k.timeCost, k.memoryMiB*1024, k.threads)
+	}
+	preset := crypto.KdfPreset(k.preset)
+	fmt.Fprintf(os.Stderr, "calibrating Argon2id (%s target)...\n", preset)
+	return crypto.CalibrateKdf(preset, k.threads)
 }
 
 // errNoUnlock is returned when the bootstrap's wrapped root will not open with the
@@ -38,7 +66,7 @@ func loginCmd() *cobra.Command {
 // for the email or the passphrase is wrong.
 var errNoUnlock = errors.New("could not unlock: no account exists for this email, or the passphrase is wrong")
 
-func runLogin(email string, ttl time.Duration) error {
+func runLogin(email string, ttl time.Duration, kc kdfChoice) error {
 	if email == "" {
 		entered, err := promptLine("email: ")
 		if err != nil {
@@ -72,7 +100,7 @@ func runLogin(email string, ttl time.Duration) error {
 		// The wrapped root did not open: no account, or wrong passphrase. Offer to
 		// create an account with this passphrase (a real account would 409).
 		uk.Wipe()
-		return confirmAndCreate(cl, server, email, pass, ttl)
+		return confirmAndCreate(cl, server, email, pass, ttl, kc)
 	}
 	defer rk.Wipe()
 	defer uk.Wipe()
@@ -131,7 +159,7 @@ func revokeOtherDevices() error {
 // passphrase becomes the account passphrase with no recovery path, so on a terminal
 // we confirm it and warn explicitly; without a terminal we proceed (a scripted
 // signup), relying on the server's 409 to catch "account already exists".
-func confirmAndCreate(cl *client.Client, server, email, pass string, ttl time.Duration) error {
+func confirmAndCreate(cl *client.Client, server, email, pass string, ttl time.Duration, kc kdfChoice) error {
 	if interactiveStdin() {
 		create, err := promptYesNo(fmt.Sprintf("No account unlocked for %s. Create a new one? (cannot be reset) [y/N] ", email), false)
 		if err != nil {
@@ -148,17 +176,17 @@ func confirmAndCreate(cl *client.Client, server, email, pass string, ttl time.Du
 			return errors.New("passphrases do not match")
 		}
 	}
-	return createAccount(cl, server, email, pass, ttl)
+	return createAccount(cl, server, email, pass, ttl, kc)
 }
 
 // createAccount mints a random root key, wraps it under the passphrase-derived
 // unlock key, and registers the account with the wrapped root, the verifier, and the
 // signing public key. The root key never leaves this machine; the passphrase change
 // later re-wraps it without touching any data.
-func createAccount(cl *client.Client, server, email, pass string, ttl time.Duration) error {
+func createAccount(cl *client.Client, server, email, pass string, ttl time.Duration, kc kdfChoice) error {
 	fmt.Fprintln(os.Stderr, "Your passphrase wraps your encryption key. We never see it and it CANNOT be reset.")
 
-	kdf, err := crypto.NewKdfParams()
+	kdf, err := kc.resolve()
 	if err != nil {
 		return err
 	}
@@ -274,20 +302,65 @@ func passphraseCmd() *cobra.Command {
 		Use:   "passphrase",
 		Short: "Manage your account passphrase",
 	}
-	cmd.AddCommand(&cobra.Command{
+
+	var changeKc kdfChoice
+	change := &cobra.Command{
 		Use:   "change",
 		Short: "Re-wrap your encryption key under a new passphrase (other devices must re-login)",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return runPassphraseChange() },
-	})
+		RunE:  func(cmd *cobra.Command, args []string) error { return runPassphraseChange(changeKc) },
+	}
+	addKdfFlags(change, &changeKc)
+	cmd.AddCommand(change)
+
+	var calibrateKc kdfChoice
+	calibrate := &cobra.Command{
+		Use:   "calibrate",
+		Short: "Re-tune Argon2id cost for this account, keeping the passphrase (other devices must re-login)",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return runPassphraseCalibrate(calibrateKc) },
+	}
+	addKdfFlags(calibrate, &calibrateKc)
+	cmd.AddCommand(calibrate)
+
 	return cmd
 }
 
-// runPassphraseChange re-wraps the account's root key under a new passphrase. The
-// root key is unchanged, so nothing is re-encrypted; the server bumps the account's
-// auth epoch, so every other device's token stops working until it re-logs in with
-// the new passphrase. This device keeps its session.
-func runPassphraseChange() error {
+// rewrapRoot re-wraps the account root key under newPass with newKdf and uploads
+// the new wrap. The root key is unchanged, so nothing is re-encrypted; the server
+// bumps the auth epoch, so every other device's token stops working until it
+// re-logs in. oldUK proves the current passphrase. This device keeps its session
+// (the root key, and so the cached master key, is untouched).
+func rewrapRoot(cl *client.Client, prof *identity.Profile, rk crypto.MasterKey, oldUK crypto.UnlockKey, newPass string, newKdf crypto.KdfParams) error {
+	newUK, err := crypto.DeriveUnlockKey(newPass, newKdf)
+	if err != nil {
+		return err
+	}
+	defer newUK.Wipe()
+	newWrapped, err := crypto.WrapRoot(rk, newUK)
+	if err != nil {
+		return err
+	}
+	resp, err := cl.ChangePassphrase(api.PassphraseChangeRequest{
+		Kdf:             newKdf,
+		WrappedRoot:     newWrapped,
+		OldAuthVerifier: crypto.DeriveAuthVerifier(oldUK),
+		NewAuthVerifier: crypto.DeriveAuthVerifier(newUK),
+		ExpectedEpoch:   prof.AuthEpoch,
+	})
+	if err != nil {
+		return err
+	}
+	prof.Kdf = newKdf
+	prof.WrappedRoot = newWrapped
+	prof.AuthEpoch = resp.Epoch
+	return identity.Save(prof)
+}
+
+// runPassphraseChange re-wraps the account's root key under a new passphrase, with
+// KDF params calibrated (or overridden) for this machine so the change never
+// silently downgrades the cost.
+func runPassphraseChange(kc kdfChoice) error {
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
@@ -328,40 +401,50 @@ func runPassphraseChange() error {
 		return errors.New("passphrases do not match")
 	}
 
-	newKdf, err := crypto.NewKdfParams()
+	newKdf, err := kc.resolve()
 	if err != nil {
 		return err
 	}
-	newUK, err := crypto.DeriveUnlockKey(newPass, newKdf)
-	if err != nil {
-		return err
-	}
-	defer newUK.Wipe()
-	newWrapped, err := crypto.WrapRoot(rk, newUK)
-	if err != nil {
-		return err
-	}
-
-	resp, err := cl.ChangePassphrase(api.PassphraseChangeRequest{
-		Kdf:             newKdf,
-		WrappedRoot:     newWrapped,
-		OldAuthVerifier: crypto.DeriveAuthVerifier(oldUK),
-		NewAuthVerifier: crypto.DeriveAuthVerifier(newUK),
-		ExpectedEpoch:   prof.AuthEpoch,
-	})
-	if err != nil {
-		return err
-	}
-
-	// The root key (and so the cached session) is unchanged; only the wrap and its
-	// params move. Persist them with the new epoch so this device's token stays valid.
-	prof.Kdf = newKdf
-	prof.WrappedRoot = newWrapped
-	prof.AuthEpoch = resp.Epoch
-	if err := identity.Save(prof); err != nil {
+	if err := rewrapRoot(cl, prof, rk, oldUK, newPass, newKdf); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "passphrase changed; other devices must re-login with the new passphrase")
+	return nil
+}
+
+// runPassphraseCalibrate re-tunes the account's Argon2id params without changing
+// the passphrase: it re-wraps the same root key under the same passphrase with
+// freshly calibrated params. Because the wrap and verifier change, the server
+// bumps the auth epoch, so other devices must re-login (they fetch the new params).
+func runPassphraseCalibrate(kc kdfChoice) error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	pass, err := promptPassphrase("Passphrase: ")
+	if err != nil {
+		return err
+	}
+	oldUK, err := crypto.DeriveUnlockKey(pass, prof.Kdf)
+	if err != nil {
+		return err
+	}
+	defer oldUK.Wipe()
+	rk, err := crypto.UnwrapRoot(prof.WrappedRoot, oldUK)
+	if err != nil {
+		return errors.New("passphrase is incorrect")
+	}
+	defer rk.Wipe()
+
+	newKdf, err := kc.resolve()
+	if err != nil {
+		return err
+	}
+	if err := rewrapRoot(cl, prof, rk, oldUK, pass, newKdf); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "argon2id re-tuned (time=%d memory=%dMiB threads=%d); other devices must re-login\n",
+		newKdf.Time, newKdf.Memory/1024, newKdf.Threads)
 	return nil
 }
 
