@@ -135,14 +135,12 @@ func buildDirTree(m Manifest) *dirBuild {
 	return root
 }
 
-// sealer seals a dirBuild bottom-up, feeding node ciphertexts to a sink, collecting
-// every reachable object id (node ids + file chunk ids) as the resource's GC roots,
-// and optionally recording each decoded node in reg for in-memory diffing.
+// sealer seals a dirBuild bottom-up, feeding node ciphertexts to a sink and collecting
+// every reachable object id (node ids + file chunk ids) as the resource's GC roots.
 type sealer struct {
 	conv crypto.ConvergenceKey
 	sink ChunkSink
 	refs map[string]struct{}
-	reg  map[string]*TreeNode
 }
 
 func (s *sealer) addRef(id string) { s.refs[id] = struct{}{} }
@@ -196,10 +194,6 @@ func (s *sealer) sealNode(d *dirBuild) (crypto.Chunk, error) {
 		return crypto.Chunk{}, err
 	}
 	s.addRef(ch.ID)
-	if s.reg != nil {
-		node := n
-		s.reg[ch.ID] = &node
-	}
 	if err := s.sink.Add(ch, ct); err != nil {
 		return crypto.Chunk{}, err
 	}
@@ -222,13 +216,27 @@ func SealTree(m Manifest, conv crypto.ConvergenceKey, sink ChunkSink) (TreeRoot,
 	return TreeRoot{Version: TreeManifestVersion, Root: root}, s.refList(), nil
 }
 
-// buildTreeRegistry seals a manifest's DAG in memory (no upload) and returns the
-// root node plus a registry mapping every node id to its decoded node, so a diff can
-// resolve local/base subtrees without any I/O.
-func buildTreeRegistry(m Manifest, conv crypto.ConvergenceKey) (crypto.Chunk, map[string]*TreeNode, error) {
-	s := &sealer{conv: conv, sink: nopSink{}, refs: map[string]struct{}{}, reg: map[string]*TreeNode{}}
-	root, err := s.sealNode(buildDirTree(m))
-	return root, s.reg, err
+// ctSink captures each sealed node's ciphertext keyed by its content address. Because
+// nodes are content-addressed, the same id always carries the same bytes, so a repeated
+// Add is a harmless overwrite.
+type ctSink map[string][]byte
+
+func (s ctSink) Add(ch crypto.Chunk, ct []byte) error {
+	s[ch.ID] = append([]byte(nil), ct...)
+	return nil
+}
+
+// SealTreeCiphertexts seals a manifest's directory DAG in memory (no upload) and returns
+// every node's ciphertext keyed by its content address. A reconcile uses it to serve any
+// remote node the base tree already contains without a server round-trip: because nodes
+// are content-addressed, a node id shared with base is byte-identical, so an unchanged
+// subtree is reconstructed entirely from memory. Memory is O(number of directory nodes).
+func SealTreeCiphertexts(m Manifest, conv crypto.ConvergenceKey) (map[string][]byte, error) {
+	sink := ctSink{}
+	if _, _, err := SealTree(m, conv, sink); err != nil {
+		return nil, err
+	}
+	return sink, nil
 }
 
 // OpenTree reassembles a flat manifest from a DAG, fetching each directory node's
@@ -284,12 +292,4 @@ func joinChild(prefix, name string) string {
 		return name
 	}
 	return prefix + "/" + name
-}
-
-func childEntry(c TreeChild, path string) Entry {
-	return Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Link: c.Link, Inline: c.Inline, Chunks: c.Chunks}
-}
-
-func childDir(c TreeChild, path string) DirEntry {
-	return DirEntry{Path: path, Mode: c.Mode}
 }

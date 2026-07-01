@@ -19,6 +19,14 @@ type Action struct {
 	Kind ActionKind
 }
 
+// DirAction is a planned change to a tracked directory (mode update, empty-dir create,
+// or removal). It is kept separate from the file/symlink Action stream so the hardened
+// file apply path is untouched; directories are applied in a dedicated pass after files.
+type DirAction struct {
+	Path string
+	Kind ActionKind
+}
+
 // Plan computes a three-way reconciliation of local and remote against base (the
 // last manifest synced from this machine). A path changed on both sides is a
 // Conflict and is never auto-resolved — the caller decides (e.g. --force).

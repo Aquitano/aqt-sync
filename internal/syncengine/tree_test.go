@@ -2,9 +2,7 @@ package syncengine
 
 import (
 	"fmt"
-	"math/rand"
 	"reflect"
-	"sort"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -132,11 +130,11 @@ func TestEditLocality(t *testing.T) {
 		{Path: "docs/readme.md", Hash: "r", Inline: []byte("r")},
 	}}
 
-	_, baseReg, err := buildTreeRegistry(base, conv)
+	baseCT, err := SealTreeCiphertexts(base, conv)
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, editReg, err := buildTreeRegistry(edited, conv)
+	editCT, err := SealTreeCiphertexts(edited, conv)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +146,12 @@ func TestEditLocality(t *testing.T) {
 	if dirNodeID(t, base, conv, "lib") == dirNodeID(t, edited, conv, "lib") {
 		t.Fatal("lib/ subtree must change when its file changes")
 	}
-	// The docs node object is shared across both registries (same id present in both).
-	if _, ok := baseReg[docsBefore]; !ok {
-		t.Fatal("docs node missing from base registry")
+	// The docs node object is byte-identical across both trees (same id present in both).
+	if _, ok := baseCT[docsBefore]; !ok {
+		t.Fatal("docs node missing from base ciphertexts")
 	}
-	if _, ok := editReg[docsAfter]; !ok {
-		t.Fatal("docs node missing from edited registry")
+	if _, ok := editCT[docsAfter]; !ok {
+		t.Fatal("docs node missing from edited ciphertexts")
 	}
 }
 
@@ -169,105 +167,69 @@ func dirNodeID(t *testing.T, m Manifest, conv crypto.ConvergenceKey, dir string)
 	return subtreeRootID(t, conv, sub)
 }
 
-func TestDiffTreeMatchesPlan(t *testing.T) {
+// TestOpenTreeReusingBaseNodes proves the reconcile's lazy remote read: because directory
+// nodes are content-addressed, serving any node id the base tree already holds from memory
+// yields exactly the manifest a full server walk would, while fetching only the nodes on a
+// changed spine. A remote identical to base fetches nothing.
+func TestOpenTreeReusingBaseNodes(t *testing.T) {
 	conv := testConv(t)
-	// Leaf paths chosen so no path is a prefix of another (no file/dir name clash).
-	pool := []string{"a", "b", "c/d", "c/e", "f/g/h", "f/g/i", "j/k", "j/l", "m"}
-	rng := rand.New(rand.NewSource(1))
+	base := Manifest{Version: TreeManifestVersion, Entries: []Entry{
+		{Path: "keep/a.txt", Hash: "a", Inline: []byte("a")},
+		{Path: "keep/deep/b.txt", Hash: "b", Inline: []byte("b")},
+		{Path: "change/c.txt", Hash: "c", Inline: []byte("c")},
+	}}
+	remote := Manifest{Version: TreeManifestVersion, Entries: []Entry{
+		{Path: "keep/a.txt", Hash: "a", Inline: []byte("a")},      // unchanged subtree
+		{Path: "keep/deep/b.txt", Hash: "b", Inline: []byte("b")}, // unchanged subtree
+		{Path: "change/c.txt", Hash: "c2", Inline: []byte("c2")},  // changed
+	}}
 
-	for iter := 0; iter < 300; iter++ {
-		base := randManifest(rng, pool)
-		local := mutate(rng, base, pool)
-		remote := mutate(rng, base, pool)
-
-		want := Plan(local, base, remote)
-
-		remoteRoot, remoteReg, err := buildTreeRegistry(remote, conv)
-		if err != nil {
-			t.Fatal(err)
-		}
-		diff, err := DiffManifests(local, base, conv, remoteRoot, registryFetch(remoteReg))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !reflect.DeepEqual(want, normActions(diff.Actions)) {
-			t.Fatalf("iter %d: DiffTree actions != Plan\n local=%v\n base=%v\n remote=%v\n want=%v\n got =%v",
-				iter, local.Entries, base.Entries, remote.Entries, want, diff.Actions)
-		}
-	}
-}
-
-func normActions(as []Action) []Action {
-	if as == nil {
-		return nil
-	}
-	sort.Slice(as, func(i, j int) bool { return as[i].Path < as[j].Path })
-	return as
-}
-
-func randManifest(rng *rand.Rand, pool []string) Manifest {
-	var m Manifest
-	m.Version = TreeManifestVersion
-	for _, p := range pool {
-		if rng.Intn(2) == 0 {
-			continue
-		}
-		m.Entries = append(m.Entries, Entry{Path: p, Mode: 0o600 + uint32(rng.Intn(2)*0o111), Hash: fmt.Sprintf("h%d", rng.Intn(3)), Inline: []byte("x")})
-	}
-	sortEntries(m.Entries)
-	return m
-}
-
-func mutate(rng *rand.Rand, base Manifest, pool []string) Manifest {
-	idx := base.ByPath()
-	out := Manifest{Version: TreeManifestVersion}
-	for _, p := range pool {
-		e, present := idx[p]
-		switch rng.Intn(4) {
-		case 0: // drop
-			continue
-		case 1: // add/keep with a fresh hash
-			out.Entries = append(out.Entries, Entry{Path: p, Mode: 0o600 + uint32(rng.Intn(2)*0o111), Hash: fmt.Sprintf("h%d", rng.Intn(4)), Inline: []byte("y")})
-		default:
-			if present {
-				out.Entries = append(out.Entries, e)
-			}
-		}
-	}
-	sortEntries(out.Entries)
-	return out
-}
-
-func TestDiffTreeDirActions(t *testing.T) {
-	conv := testConv(t)
-	base := Manifest{Version: TreeManifestVersion,
-		Entries: []Entry{{Path: "keep/f.txt", Hash: "f", Inline: []byte("f")}},
-		Dirs:    []DirEntry{{Path: "keep", Mode: 0o755}, {Path: "gone", Mode: 0o700}},
-	}
-	local := Manifest{Version: TreeManifestVersion,
-		Entries: []Entry{{Path: "keep/f.txt", Hash: "f", Inline: []byte("f")}},
-		Dirs:    []DirEntry{{Path: "keep", Mode: 0o700}, {Path: "fresh", Mode: 0o750}}, // keep chmod, gone removed, fresh added
-	}
-
-	remoteRoot, remoteReg, err := buildTreeRegistry(base, conv)
+	server := mapSink{}
+	root, _, err := SealTree(remote, conv, server)
 	if err != nil {
 		t.Fatal(err)
 	}
-	diff, err := DiffManifests(local, base, conv, remoteRoot, registryFetch(remoteReg))
+	full, err := OpenTree(root, server.get)
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := map[string]ActionKind{}
-	for _, d := range diff.DirActions {
-		got[d.Path] = d.Kind
+
+	baseCT, err := SealTreeCiphertexts(base, conv)
+	if err != nil {
+		t.Fatal(err)
 	}
-	want := map[string]ActionKind{"keep": Upload, "gone": DeleteRemote, "fresh": Upload}
-	if !reflect.DeepEqual(want, got) {
-		t.Fatalf("dir actions mismatch:\n want %v\n got  %v", want, got)
+	fetched := 0
+	hybrid := func(id string) ([]byte, error) {
+		if ct, ok := baseCT[id]; ok {
+			return ct, nil
+		}
+		fetched++
+		return server.get(id)
 	}
-	// No file actions: the only file is unchanged.
-	if len(diff.Actions) != 0 {
-		t.Fatalf("expected no file actions, got %v", diff.Actions)
+	got, err := OpenTree(root, hybrid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalize(full), normalize(got)) {
+		t.Fatalf("base-reuse read != full read:\n full %+v\n got  %+v", full, got)
+	}
+	// The "keep" subtree is identical in base and remote, so its nodes are served from
+	// memory; only the root and the changed "change" node are fetched.
+	if fetched != 2 {
+		t.Fatalf("expected 2 server fetches (root + changed node), got %d", fetched)
+	}
+
+	// A remote identical to base fetches nothing at all: every node id is already in memory.
+	sameRoot, _, err := SealTree(base, conv, mapSink{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fetched = 0
+	if _, err := OpenTree(sameRoot, hybrid); err != nil {
+		t.Fatal(err)
+	}
+	if fetched != 0 {
+		t.Fatalf("an unchanged remote must fetch no nodes, got %d", fetched)
 	}
 }
 

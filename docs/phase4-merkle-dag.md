@@ -1,8 +1,7 @@
 # Phase 4 — Merkle-DAG manifests (subtree dedup + faster diffs)
 
-Status: **implemented** in `internal/syncengine` (`tree.go`, `treediff.go`) and wired
-into `init`/`sync`/`clone`/`snapshot`/`find`. The runnable prototype this spec was
-validated against lives behind the `phase4spike` build tag in `cmd/treespike/`.
+Status: **implemented** in `internal/syncengine` (`tree.go`) and wired into
+`init`/`sync`/`clone`/`snapshot`/`find`.
 
 Decisions taken during implementation (see §9):
 - **Small files: inlined** in their parent node (Q1) — preserves the no-tiny-blobs guarantee.
@@ -10,10 +9,14 @@ Decisions taken during implementation (see §9):
 - **Node AAD: separated** (Q6) — directory nodes seal under `aqt-treenode-v1`, distinct from file chunks.
 - **Migration: clean break** — a `tree` metadata flag marks v2 folders; older folders are not read (no shim).
 - **Renames: path churn accepted** (Q3) — a move dedups its bytes but still surfaces as delete+add at the path level.
-- **Lazy `DiffTree`: implemented + tested, not yet wired.** The live reconcile still reassembles the full
-  remote tree to build the merged manifest (the data-loss-safe write path needs it), which is the same cost
-  as the pre-Phase-4 reconcile — so subtree dedup ships now, and the lazy-diff CPU/I-O win is a follow-up that
-  reuses the already-tested `DiffTree`. §2 (giant directories) remains deferred behind a single node per directory.
+- **Directory conflicts: surfaced** — a directory whose mode/existence diverged on both sides aborts a plain
+  sync exactly like a file conflict; `--force` takes local. It is not silently resolved.
+- **Lazy remote read: shipped via base-node reuse (see §5), not a separate `DiffTree`.** Because directory
+  nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares
+  with it is served from those bytes, so an unchanged subtree is reconstructed with no fetch and only the nodes
+  on a spine that changed since the base hit the network. This reuses the existing full-manifest
+  `Plan`/`applySync`/`SealTree` write path unchanged, so there is no new merged-manifest write logic to get
+  wrong. §2 (giant directories) remains deferred behind a single node per directory.
 
 ## 1. Goal
 
@@ -201,54 +204,41 @@ the server with **zero** new server logic:
 So dedup falls out of content addressing for free, at directory granularity, the same
 way it already does at file-chunk granularity.
 
-## 5. Diff algorithm (the perf win)
+## 5. Lazy remote read (the perf win)
 
-`DiffTree` is a recursive three-way walk over the local, base, and remote DAGs that
-produces the **same** `[]syncengine.Action` as `Plan` does over the equivalent flat
-manifests — just computed lazily and only over changed subtrees.
+The reconcile keeps the flat `Plan`/`applySync` write path — it is the audited,
+data-loss-safe merged-manifest construction — and makes only the *remote read* lazy. The
+read is what carried the cost: the resource blob is a tiny `TreeRoot`, so reconstructing
+the remote manifest means walking the DAG and fetching every directory node, and a sync
+does this on every run.
+
+The lever is content addressing. The last-synced manifest (`base`) is sealed into its DAG
+in memory (`SealTreeCiphertexts`), producing every base node's ciphertext keyed by its
+content address. A directory node's id **is** its subtree's Merkle hash, so any node the
+current remote shares with the base is byte-identical — same id, same bytes. `OpenTree`
+then walks the remote root through a fetch that checks the base ciphertexts first:
 
 ```
-DiffTree(localNode, baseNode, remoteNode, path) -> []Action:
-    # The whole-subtree short-circuit. This is the perf win.
-    if local, base, remote dir-hashes are all equal:
-        return nil                      # nothing changed anywhere below path; do not fetch, do not recurse
-    if local-hash == remote-hash:
-        return nil                      # converged on both sides; nothing to transfer
-
-    for name in union(children of local, base, remote):
-        l, b, r := child(local,name), child(base,name), child(remote,name)
-        if all present-and-dir entries agree they are directories:
-            if l.Hash == b.Hash == r.Hash: continue        # subtree unchanged; skip (no fetch)
-            childLocal  := fetch+open l.Node if l is a changed dir else local view
-            childBase   := fetch+open b.Node  (lazily, only because a hash differed)
-            childRemote := fetch+open r.Node  (lazily)
-            actions += DiffTree(childLocal, childBase, childRemote, path/name)
-        else:
-            # leaf (file/symlink), or a type change (dir<->file) at this name:
-            actions += leafAction(path/name, l, b, r)      # identical logic to plan.go `changed()`
-    return actions
+fetch(id):
+    if baseCiphertexts[id] exists:   return it          # unchanged subtree — served from memory, no network
+    else:                            return server.fetch(id)   # a node on a spine that changed since base
 ```
 
 Key properties:
 
-- **Equal dir hashes skip the entire subtree.** When two directory nodes have equal
-  `Hash`, every path beneath them is identical; the walk returns immediately without
-  fetching or recursing. On a huge tree where one file changed, the cost is O(depth ×
-  fan-out along the changed spine), not O(tree).
-- **Lazy fetch of base/remote nodes.** The local DAG is built in memory from the working
-  tree (the scan we already do). Base and remote node objects are fetched *only when a
-  hash differs at that level* — an unchanged subtree never round-trips to the server.
-  This is the I/O analogue of the CPU short-circuit.
-- **Same Action set at the leaf/path level.** `leafAction` applies the exact semantics
-  of `plan.go`'s `changed()` (a path changed if its hash *or* mode differs; both-sides
-  change with unequal hashes is a `Conflict`, equal hashes is a no-op). The output is
-  `[]Action` keyed by full path, so `applySync`, `abortOnConflicts`, the snapshot->apply
-  re-check, and base bookkeeping are byte-for-byte unchanged. `PlanReconcile` (no base)
-  maps the same way with `baseNode == nil` everywhere.
-
-The flat `Plan` stays in the codebase and stays correct; `DiffTree` is an equivalent
-that exploits the DAG. (For the no-DAG paths — e.g. `status` building from a flat base —
-the engine can still reconstruct a flat manifest by walking the DAG once.)
+- **Unchanged subtrees are free.** A subtree identical in base and remote has the same
+  root-node id, present in the base ciphertexts, so it (and every node beneath it, which
+  is also shared) is served from memory. Only the nodes on a spine that changed since the
+  base are fetched. A no-op sync (remote unchanged since base) fetches nothing at all.
+- **Correctness is independent of base.** `OpenTree` re-verifies every node against its
+  content address and AEAD tag whether it came from memory or the server, and produces the
+  exact same manifest either way. A stale or wrong base can only change *which* nodes are
+  fetched, never the result — it is a cache, not a source of truth. This is why the
+  approach needs no new merged-manifest write logic and reuses `Plan`/`applySync`/`SealTree`
+  verbatim.
+- **No base, no reuse.** `--reconcile` (no trusted base) and `clone`/`snapshot` (no base at
+  all) fall back to the full walk via `openRemoteTree`, which is correct but fetches every
+  node — the one-time cost of materializing a tree from scratch.
 
 ## 6. Small-file handling
 

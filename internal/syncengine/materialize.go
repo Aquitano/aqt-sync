@@ -355,6 +355,12 @@ func RemoveDir(dir, relPath string) error {
 	if os.IsNotExist(err) {
 		return nil
 	}
+	// The path is no longer a directory: a remote dir->file type change replaced it with a
+	// regular file (materialized earlier in the same apply). There is no directory to remove
+	// and the replacement file must be left alone, so treat it as done rather than failing.
+	if errors.Is(err, syscall.ENOTDIR) {
+		return nil
+	}
 	if err != nil {
 		return err
 	}

@@ -336,7 +336,17 @@ func runSync(dir string, opts syncOptions) error {
 		if !meta.Tree {
 			return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 		}
-		remote, err := openRemoteTree(cl, res.Blob, ck)
+		// Read the remote tree. With a base, reuse it: any directory node whose id the
+		// base tree already contains is byte-identical (nodes are content-addressed), so
+		// it is served from memory and only the nodes on a changed spine are fetched — an
+		// unchanged remote does zero node round-trips. Without a base (reconcile mode)
+		// there is nothing to reuse, so fall back to the full walk.
+		var remote syncengine.Manifest
+		if baseExists {
+			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, base, conv)
+		} else {
+			remote, err = openRemoteTree(cl, res.Blob, ck)
+		}
 		if errors.Is(err, client.ErrNotFound) {
 			// We read version res.Version's root, but a concurrent sync superseded it
 			// and GC reaped its now-unreferenced tree objects before we fetched them.
@@ -359,9 +369,9 @@ func runSync(dir string, opts syncOptions) error {
 			dirActions = syncengine.PlanDirsReconcile(local, remote)
 		}
 		if opts.dryRun {
-			return printPlan(actions)
+			return printPlan(actions, dirActions)
 		}
-		if err := abortOnConflicts(actions, opts.force); err != nil {
+		if err := abortOnConflicts(actions, dirActions, opts.force); err != nil {
 			return err
 		}
 		return applySync(applyCtx{
@@ -1065,6 +1075,31 @@ func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.Content
 	return syncengine.OpenTree(root, newNodeFetcher(cl))
 }
 
+// openRemoteTreeReusingBase is openRemoteTree with the last-synced manifest as a node
+// cache. It seals the base tree in memory once and serves any node the remote shares with
+// it from those bytes instead of the server: directory nodes are content-addressed, so a
+// shared id is byte-identical, an unchanged subtree is reconstructed without a single fetch,
+// and only nodes on a spine that changed since the base hit the network. The result is
+// identical to openRemoteTree — OpenNode re-verifies every node against its address either
+// way — so a stale base can only affect which nodes are fetched, never correctness.
+func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, base syncengine.Manifest, conv crypto.ConvergenceKey) (syncengine.Manifest, error) {
+	root, err := syncengine.OpenTreeRoot(blob, ck)
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	baseCT, err := syncengine.SealTreeCiphertexts(base, conv)
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	remoteFetch := newNodeFetcher(cl)
+	return syncengine.OpenTree(root, func(id string) ([]byte, error) {
+		if ct, ok := baseCT[id]; ok {
+			return ct, nil
+		}
+		return remoteFetch(id)
+	})
+}
+
 // newNodeFetcher returns a fetch function for directory-node objects, locating and
 // range-fetching each by id and caching it (nodes are small and the DAG walk may
 // revisit shared subtree ids). A node the owner no longer stores — a concurrent sync
@@ -1349,7 +1384,11 @@ func ensureEmptyDir(path string) error {
 	return nil
 }
 
-func abortOnConflicts(actions []syncengine.Action, force bool) error {
+// abortOnConflicts refuses a sync that has both-sides changes it cannot auto-resolve,
+// unless --force (local wins) was given. Directory conflicts count too: a directory mode
+// or existence that diverged on both sides is surfaced like a file conflict rather than
+// silently taking local, so the user is told before anything is applied.
+func abortOnConflicts(actions []syncengine.Action, dirActions []syncengine.DirAction, force bool) error {
 	if force {
 		return nil
 	}
@@ -1359,20 +1398,29 @@ func abortOnConflicts(actions []syncengine.Action, force bool) error {
 			conflicts = append(conflicts, a.Path)
 		}
 	}
+	for _, a := range dirActions {
+		if a.Kind == syncengine.Conflict {
+			conflicts = append(conflicts, a.Path)
+		}
+	}
 	if len(conflicts) == 0 {
 		return nil
 	}
+	sort.Strings(conflicts)
 	printPaths("conflict", conflicts)
 	return errConflictsRemain
 }
 
-func printPlan(actions []syncengine.Action) error {
-	if len(actions) == 0 {
+func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction) error {
+	if len(actions) == 0 && len(dirActions) == 0 {
 		fmt.Println("already in sync")
 		return nil
 	}
 	for _, a := range actions {
 		fmt.Printf("%-13s %s\n", a.Kind, a.Path)
+	}
+	for _, a := range dirActions {
+		fmt.Printf("%-13s %s/\n", a.Kind, a.Path) // trailing slash marks a directory
 	}
 	return nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -59,6 +60,53 @@ func TestSyncEmptyDirsAndModes(t *testing.T) {
 	h.sync(origin)
 	h.sync(replica)
 	assertAbsent(t, replica, "later")
+}
+
+// TestSyncDirModeConflictSurfaces verifies the Phase 4 behavior change: a directory whose
+// mode diverged on both sides since the last sync is surfaced as a conflict (like a file
+// conflict) rather than silently resolving local-wins, so a plain sync aborts and --force
+// is required to take local.
+func TestSyncDirModeConflictSurfaces(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits are not meaningful on Windows")
+	}
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	if err := os.MkdirAll(filepath.Join(origin, "d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "d/f.txt", "hi")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	// Both sides change d's mode away from the cloned base, to different values.
+	if err := os.Chmod(filepath.Join(origin, "d"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin) // remote d is now 0700
+	if err := os.Chmod(filepath.Join(replica, "d"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plain sync must refuse: d changed on both sides since base.
+	if err := runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("expected a directory-mode conflict to abort the sync, got %v", err)
+	}
+
+	// --force resolves it local-wins (0750) and completes.
+	if err := runSync(replica, syncOptions{force: true}); err != nil {
+		t.Fatalf("--force should resolve the dir conflict local-wins: %v", err)
+	}
+	fi, err := os.Stat(filepath.Join(replica, "d"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o750 {
+		t.Fatalf("--force should have kept local dir mode 750, got %o", fi.Mode().Perm())
+	}
 }
 
 // TestSyncSubtreeDedupOnMove covers the Phase 4 headline: moving a whole directory
