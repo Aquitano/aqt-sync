@@ -157,6 +157,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	up := newPackUploader(cl)
 	chunks, size, err := syncengine.ChunkFile(f, conv, syncengine.DefaultChunker(), up)
 	if err != nil {
+		up.Wait() // drain in-flight uploads before returning the chunking error
 		return err
 	}
 	if err := up.Flush(); err != nil {

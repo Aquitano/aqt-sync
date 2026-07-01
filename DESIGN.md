@@ -394,6 +394,19 @@ never repeats for distinct plaintext. The per-chunk `chunkKey` lives only in the
 sealed manifest; the server holds ciphertext addressed by `chunkID` and nothing
 else. Hex (not base64url) IDs avoid collisions on case-insensitive filesystems.
 
+**Chunk granularity is a per-folder tradeoff.** The default profile targets an ~8 KiB
+average chunk (min 2K / normal 8K / max 64K), tuned for source trees: fine dedup, but
+a large binary pays it in metadata — a 500 MB file is ~64,000 chunks, and every chunk
+costs a manifest entry, a server-side SHA-256 verify, and an object-index row. Folders
+of large binaries (media, datasets, VM images) can set `chunkProfile: "large"` (64K /
+256K / 1M, ~256K average) for ~32x fewer chunks per MB, trading dedup resolution for
+far less per-MB metadata and ingest CPU; a `chunk` block sets explicit sizes when
+neither preset fits. Because boundaries are derived from these sizes, the choice is
+sticky: changing a folder's profile re-chunks it once, with no dedup against the old
+profile, so it is a deliberate per-folder decision (and `.aqtconfig` syncs in-tree, so
+every clone agrees). Note the profile's `min` is also the inline cutoff, so a coarse
+profile inlines larger small files into the (sealed) manifest.
+
 **Storage layout.** Sealed-blob resources keep `blobs/<id>.bin`. Objects (chunks)
 are not one file each: they are concatenated into **packs** (~16 MiB), one
 immutable content-addressed file with a self-describing trailing index, fanned out
@@ -421,6 +434,8 @@ a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options
 ```jsonc
 {
   "pack": false,                 // pack-and-seal instead of chunked sync (see below)
+  "chunkProfile": "default",     // CDC granularity: "default" (~8K avg) or "large" (~256K avg)
+  "chunk": { "min": 65536, "normal": 262144, "max": 1048576 }, // explicit sizes; overrides chunkProfile
   "watch": {
     "interval": "5s",            // watch debounce floor; --interval overrides it
     "gitGuard": true             // hold pushes while a sub-repo is mid-operation (default true)
@@ -514,6 +529,8 @@ function currentSession(): Session | null;                                 // fo
 - **Large single files / streaming** — a private single file at or above ~8 MiB now streams: `push` chunks it (FastCDC), convergent-seals and packs it in a bounded-memory pass, and stores a tiny sealed `FileRoot` (the resource blob) naming the objects; `pull`/`cat` range-fetch the packs and materialize straight to disk. Memory is O(one pack), and the inline body cap no longer bounds private file size. Smaller files keep the one-shot inline path. Public/gated single files and stdin still seal in memory under the body cap (public streaming needs the deferred publicly-readable object store).
 - **Manifest size / subtree dedup** — *implemented (Phase 4):* a chunked folder is now a Merkle DAG of directory nodes. Each directory node lists its name-sorted children and is sealed through the convergent pipeline under a distinct `aqt-treenode-v1` AAD, so a node's content address is its subtree Merkle hash and a moved/copied/renamed directory dedups for free (its node and file chunks are already on the server). The resource blob is a tiny sealed `TreeRoot` under `AADTreeRoot`. Directories are first-class: empty directories round-trip and directory modes propagate. The format is a clean break (`tree` metadata flag, v2); older folders are not read. Spec: `docs/phase4-merkle-dag.md`. The reconcile's remote read is lazy: because directory nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares with it is served from those bytes, so an unchanged subtree is reconstructed without a fetch and only the nodes on a spine that changed since the base hit the network — a no-op sync does zero node round-trips. Directory-mode conflicts surface like file conflicts (a plain sync aborts; `--force` takes local). Rename detection is intentionally not done: a move dedups its bytes but still churns paths as delete+add.
 - **Repack** — *resolved:* `RepackOwner` compacts partially-dead packs (copies live objects into a fresh pack under a bounded byte budget, swapping atomically after a re-check of age and liveness), so dead objects inside still-live packs are now reclaimed.
+- **Push throughput / upload overlap** — *resolved:* the push no longer stalls the chunker on each pack's two upload round-trips (`CheckChunks` + `PutPack`). `packUploader` dispatches a full pack to a bounded pool (`uploadConcurrency`), so the CPU keeps sealing the next pack while earlier ones are in flight — hiding both the server ingest time and, over a WAN, the sequential RTTs. The pool bounds in-flight packs (backpressure via `errgroup.SetLimit`), so push memory stays O(a few packs); a snapshot error drains the pool before returning. Server-side, `PutPack` now writes the pack's object-index rows in batched multi-row INSERTs (was one `Exec` per chunk), cutting the dominant SQLite cost of ingesting a pack of many small chunks.
+- **Client-side crypto parallelism** — *open follow-up:* chunk sealing (`SealChunk`: XChaCha20-Poly1305 + two SHA-256s) still runs single-threaded on the walk goroutine. With the upload overlap above in place, fanning the seal across cores is the next ceiling to lift for large-file, high-bandwidth pushes. It needs an ordered worker pool: `SplitStream` reuses its emit buffer, so each piece must be copied before it crosses to a sealer, and results reassembled in file order for the manifest. Deferred as lower priority than the pipeline itself.
 - **Public whole-folder sharing** — v1 tracked folders are private, so the object store is uniformly owner-scoped. Sharing a folder publicly needs its objects under the folder key (not the account convergence key) in a publicly-readable space — deferred.
 - **Argon2id tuning** (`time`/`memory`) per machine — *resolved:* `crypto.CalibrateKdf` benchmarks the creating machine at signup (and on `passphrase change`) and scales the iteration count to a preset's target unlock time (`interactive` ~0.5s/64 MiB, `moderate` ~1s/256 MiB default, `sensitive` ~2.5s/1 GiB), stepping memory down toward a 64 MiB floor on a machine too slow to fit one pass. Params are public and travel with the account, so every device re-derives the same key; `--kdf-preset` and manual `--kdf-time/--kdf-memory/--kdf-threads` override, and `passphrase calibrate` re-tunes an existing account in place via the cheap wrapped-root re-wrap (no resource is re-encrypted; other devices re-login).
 - **Account-enumeration oracle** — *resolved:* unauthenticated auth routes are rate-limited, and `GET /account/salt` now returns an indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 404, so it no longer confirms which emails are registered.

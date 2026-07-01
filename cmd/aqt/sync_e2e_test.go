@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -488,4 +490,57 @@ func bigContent() string {
 		fmt.Fprintf(&b, "line %05d: the quick brown fox jumps over the lazy dog\n", i)
 	}
 	return b.String()
+}
+
+// TestSyncLargeMultiPackRoundTrip pushes several packs' worth of unique, incompressible
+// data so the concurrent upload pipeline dispatches multiple packs at once and Flush
+// must wait for all of them before the resource is rooted. A clone then has to
+// reconstruct every byte, which fails if any dispatched pack was lost or a wait skipped.
+func TestSyncLargeMultiPackRoundTrip(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skips the multi-pack upload test under -short")
+	}
+	h := newE2E(t)
+
+	origin := t.TempDir()
+	h.init(origin)
+
+	// 48 MiB of distinct random bytes => ~3 DefaultPackTarget-sized packs, none of
+	// which dedups against another.
+	files := map[string][]byte{
+		"a.bin": randomBytes(t, 16<<20),
+		"b.bin": randomBytes(t, 16<<20),
+		"c.bin": randomBytes(t, 16<<20),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(origin, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.sync(origin)
+
+	if n := h.countPacks(); n < 2 {
+		t.Fatalf("expected multiple packs from 48 MiB of unique data, got %d", n)
+	}
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	for name, want := range files {
+		got, err := os.ReadFile(filepath.Join(replica, name))
+		if err != nil {
+			t.Fatalf("read cloned %s: %v", name, err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("cloned %s differs from origin (%d vs %d bytes)", name, len(got), len(want))
+		}
+	}
+}
+
+func randomBytes(t *testing.T, n int) []byte {
+	t.Helper()
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatalf("random bytes: %v", err)
+	}
+	return b
 }

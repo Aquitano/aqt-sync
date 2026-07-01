@@ -2,6 +2,7 @@ package syncengine
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 )
@@ -14,9 +15,73 @@ type Config struct {
 	// dedup, so any change re-ships the entire folder. Default false.
 	Pack bool `json:"pack"`
 
+	// ChunkProfile names the content-defined chunking granularity: "" or "default"
+	// is the source-tree profile (2K/8K/64K, ~8K average); "large" is the big-binary
+	// profile (64K/256K/1M, ~256K average), which cuts ~32x fewer chunks per MB and
+	// so slashes the per-chunk metadata and server-ingest cost on media/dataset trees
+	// at the price of coarser dedup. Ignored when Chunk is set. Because boundaries are
+	// derived from these sizes, switching a folder's profile re-chunks it once with no
+	// dedup against the old profile — it is a deliberately sticky, per-folder choice.
+	ChunkProfile string `json:"chunkProfile"`
+
+	// Chunk overrides the granularity with explicit byte sizes, taking precedence over
+	// ChunkProfile. For the rare tree a named profile does not fit; must satisfy
+	// 0 < min <= normal <= max.
+	Chunk *ChunkSizes `json:"chunk"`
+
 	// Watch configures `aqt watch` for this folder, so a tree can pin its own
 	// debounce and guard behavior in-tree (like .aqtignore) rather than per-run.
 	Watch WatchConfig `json:"watch"`
+}
+
+// ChunkSizes are explicit content-defined chunking bounds in bytes. min doubles as
+// the inline cutoff (files this small skip chunking).
+type ChunkSizes struct {
+	Min    int `json:"min"`
+	Normal int `json:"normal"`
+	Max    int `json:"max"`
+}
+
+// Chunking sizes for the coarse "large" profile: ~32x fewer chunks per MB than the
+// default, tuned for trees of large binaries where chunk-level dedup buys little.
+const (
+	largeMin    = 64 << 10  // 64 KiB
+	largeNormal = 256 << 10 // 256 KiB
+	largeMax    = 1 << 20   // 1 MiB
+)
+
+// namedChunkProfiles maps ChunkProfile to its sizes. "" is treated as "default".
+var namedChunkProfiles = map[string]ChunkSizes{
+	"":        {defaultMin, defaultNormal, defaultMax},
+	"default": {defaultMin, defaultNormal, defaultMax},
+	"large":   {largeMin, largeNormal, largeMax},
+}
+
+// Chunker builds the content-defined chunker this config selects: an explicit Chunk
+// block if present, else the named ChunkProfile, else the default. Unlike NewChunker
+// (which panics on a bad ordering — a programmer error) it returns an error, since
+// these sizes come from a user-edited config file.
+func (c Config) Chunker() (*Chunker, error) {
+	sizes, err := c.chunkSizes()
+	if err != nil {
+		return nil, err
+	}
+	if !(0 < sizes.Min && sizes.Min <= sizes.Normal && sizes.Normal <= sizes.Max) {
+		return nil, fmt.Errorf("invalid chunk sizes in %s: need 0 < min (%d) <= normal (%d) <= max (%d)",
+			configFile, sizes.Min, sizes.Normal, sizes.Max)
+	}
+	return NewChunker(sizes.Min, sizes.Normal, sizes.Max), nil
+}
+
+func (c Config) chunkSizes() (ChunkSizes, error) {
+	if c.Chunk != nil {
+		return *c.Chunk, nil
+	}
+	sizes, ok := namedChunkProfiles[c.ChunkProfile]
+	if !ok {
+		return ChunkSizes{}, fmt.Errorf("unknown chunkProfile %q in %s (want \"default\" or \"large\")", c.ChunkProfile, configFile)
+	}
+	return sizes, nil
 }
 
 // WatchConfig holds the per-folder watch-daemon options. CLI flags override it.
