@@ -4,6 +4,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -59,7 +61,19 @@ func New(baseURL, token string) (*Client, error) {
 		baseURL: strings.TrimRight(baseURL, "/"),
 		token:   token,
 		http: &http.Client{
-			Timeout: 30 * time.Second,
+			// No Client.Timeout: it caps the whole exchange including body
+			// transfer, so a 16 MiB pack upload failed permanently on links
+			// below ~4-5 Mbps. Hung connections are bounded instead by the
+			// per-request stall guard (see send) plus the dial/TLS timeouts.
+			Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				DialContext:           (&net.Dialer{Timeout: 15 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+				TLSHandshakeTimeout:   15 * time.Second,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				IdleConnTimeout:       90 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			},
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				// Preserve Go's default 10-redirect cap, which a custom
 				// CheckRedirect would otherwise replace, leaving a hostile
@@ -296,6 +310,115 @@ func (c *Client) SetAutoSnapshot(resourceID string, enabled bool) error {
 		api.SetAutoSnapshotRequest{Enabled: enabled}, nil)
 }
 
+// stallTimeout aborts a request only after no request or response body bytes
+// have moved for this long. Progress resets it, so total transfer time is
+// unbounded — a multi-MiB pack completes on an arbitrarily slow link — while a
+// wedged connection (or a server that never answers) still dies. It also spans
+// the wait for response headers, so it must stay above the slowest
+// non-streaming endpoint (GC planning on a large store). Var, not const, so
+// tests can shorten it.
+var stallTimeout = 60 * time.Second
+
+func errStalled() error {
+	return fmt.Errorf("aqt: transfer stalled (no data for %s)", stallTimeout)
+}
+
+// stallGuard cancels a request's context once no progress has been observed
+// for stallTimeout. touch is called from body Read paths on any goroutine
+// (atomic store only); the timer re-arms itself from its own callback for the
+// remaining window, so Timer.Reset is never called concurrently.
+type stallGuard struct {
+	last   atomic.Int64
+	timer  *time.Timer
+	cancel context.CancelCauseFunc
+}
+
+func newStallGuard(cancel context.CancelCauseFunc) *stallGuard {
+	g := &stallGuard{cancel: cancel}
+	g.touch()
+	g.timer = time.AfterFunc(stallTimeout, g.check)
+	return g
+}
+
+func (g *stallGuard) touch() { g.last.Store(time.Now().UnixNano()) }
+
+func (g *stallGuard) check() {
+	idle := time.Since(time.Unix(0, g.last.Load()))
+	if idle >= stallTimeout {
+		g.cancel(errStalled())
+		return
+	}
+	g.timer.Reset(stallTimeout - idle)
+}
+
+func (g *stallGuard) stop() { g.timer.Stop() }
+
+// progressBody wraps a request or response body so every successful read
+// resets the stall guard.
+type progressBody struct {
+	rc    io.ReadCloser
+	touch func()
+}
+
+func (p *progressBody) Read(b []byte) (int, error) {
+	n, err := p.rc.Read(b)
+	if n > 0 {
+		p.touch()
+	}
+	return n, err
+}
+
+func (p *progressBody) Close() error { return p.rc.Close() }
+
+// send executes req under the stall guard, attaches the bearer token, fully
+// reads the response body, and maps the status via statusError. The transport
+// reports a guard-canceled request as a bare context.Canceled, which would
+// read as a user abort, so the guard's cause is surfaced instead.
+func (c *Client) send(req *http.Request, path string) (status int, data []byte, err error) {
+	ctx, cancel := context.WithCancelCause(req.Context())
+	defer cancel(nil)
+	guard := newStallGuard(cancel)
+	defer guard.stop()
+
+	if req.Body != nil {
+		req.Body = &progressBody{rc: req.Body, touch: guard.touch}
+		if getBody := req.GetBody; getBody != nil {
+			req.GetBody = func() (io.ReadCloser, error) {
+				rc, err := getBody()
+				if err != nil {
+					return nil, err
+				}
+				return &progressBody{rc: rc, touch: guard.touch}, nil
+			}
+		}
+	}
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+
+	resp, err := c.http.Do(req.WithContext(ctx))
+	if err != nil {
+		return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
+	}
+	defer resp.Body.Close()
+
+	data, readErr := io.ReadAll(&progressBody{rc: resp.Body, touch: guard.touch})
+	if err := statusError(resp.StatusCode, path, data); err != nil {
+		return resp.StatusCode, data, err
+	}
+	if readErr != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read response %s %s: %w", req.Method, path, unwrapStall(ctx, readErr))
+	}
+	return resp.StatusCode, data, nil
+}
+
+func unwrapStall(ctx context.Context, err error) error {
+	if cause := context.Cause(ctx); cause != nil && !errors.Is(cause, context.Canceled) {
+		return cause
+	}
+	return err
+}
+
 // putRaw uploads an opaque body as application/octet-stream (the pack transport),
 // mapping non-2xx responses the same way do() does.
 func (c *Client) putRaw(path string, body []byte) error {
@@ -304,16 +427,8 @@ func (c *Client) putRaw(path string, body []byte) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("request PUT %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	return statusError(resp.StatusCode, path, data)
+	_, _, err = c.send(req, path)
+	return err
 }
 
 // doRaw sends body as application/octet-stream (the raw resource/pack envelope)
@@ -354,19 +469,11 @@ func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
 		return nil, err
 	}
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, off+length-1))
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.http.Do(req)
+	status, data, err := c.send(req, path)
 	if err != nil {
-		return nil, fmt.Errorf("request GET %s: %w", path, err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if err := statusError(resp.StatusCode, path, data); err != nil {
 		return nil, err
 	}
-	if resp.StatusCode == http.StatusOK {
+	if status == http.StatusOK {
 		// The server ignored the Range and sent the whole body; cut out the window.
 		if off < 0 || off > int64(len(data)) {
 			return nil, fmt.Errorf("range start %d beyond %s length %d", off, path, len(data))
@@ -416,18 +523,9 @@ func (c *Client) do(method, path string, body, out any) error {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
 
-	resp, err := c.http.Do(req)
+	_, data, err := c.send(req, path)
 	if err != nil {
-		return fmt.Errorf("request %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-
-	data, _ := io.ReadAll(resp.Body)
-	if err := statusError(resp.StatusCode, path, data); err != nil {
 		return err
 	}
 	if out != nil && len(data) > 0 {
