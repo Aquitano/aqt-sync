@@ -317,6 +317,67 @@ func HashOnDisk(dir, relPath string) (hash string, exists, isDir bool, err error
 	}
 }
 
+// MaterializeDir creates the directory for a tracked DirEntry under dir (parents
+// included) and sets its mode. It materializes an empty tracked directory and
+// applies a directory permission change; a directory that already exists (e.g.
+// created while writing a file into it) is just chmod'd to the recorded mode.
+func MaterializeDir(dir string, d DirEntry) error {
+	full, err := safeJoin(dir, d.Path)
+	if err != nil {
+		return err
+	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(full, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(full, dirMode(d))
+}
+
+func dirMode(d DirEntry) os.FileMode {
+	if m := os.FileMode(d.Mode).Perm(); m != 0 {
+		return m
+	}
+	return 0o700
+}
+
+// RemoveDir removes a tracked directory under dir only if it is empty, then prunes
+// now-empty parents up to (but not including) the tracked root. A directory still
+// holding entries (untracked files, or tracked ones not yet deleted) is left in
+// place rather than destroyed.
+func RemoveDir(dir, relPath string) error {
+	full, err := safeJoin(dir, relPath)
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(full)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	// The path is no longer a directory: a remote dir->file type change replaced it with a
+	// regular file (materialized earlier in the same apply). There is no directory to remove
+	// and the replacement file must be left alone, so treat it as done rather than failing.
+	if errors.Is(err, syscall.ENOTDIR) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if len(entries) > 0 {
+		return nil
+	}
+	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	for parent := filepath.Dir(full); parent != dir; parent = filepath.Dir(parent) {
+		if err := os.Remove(parent); err != nil {
+			break
+		}
+	}
+	return nil
+}
+
 // RemoveFile deletes dir/relPath, pruning now-empty parent directories up to (but
 // not including) the tracked root. A missing file is not an error.
 func RemoveFile(dir, relPath string) error {

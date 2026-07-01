@@ -19,6 +19,14 @@ type Action struct {
 	Kind ActionKind
 }
 
+// DirAction is a planned change to a tracked directory (mode update, empty-dir create,
+// or removal). It is kept separate from the file/symlink Action stream so the hardened
+// file apply path is untouched; directories are applied in a dedicated pass after files.
+type DirAction struct {
+	Path string
+	Kind ActionKind
+}
+
 // Plan computes a three-way reconciliation of local and remote against base (the
 // last manifest synced from this machine). A path changed on both sides is a
 // Conflict and is never auto-resolved — the caller decides (e.g. --force).
@@ -112,4 +120,88 @@ func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 		return false
 	}
 	return cur.Hash != base.Hash || cur.Mode != base.Mode
+}
+
+// PlanDirs is the directory counterpart of Plan: a three-way reconcile of tracked
+// directories keyed by path, where the only synced attribute is the mode (a
+// directory has no content). It lets empty directories and directory permission
+// changes propagate alongside files. A directory present in base but gone on both
+// sides is a Conflict, matching Plan's handling of a file deleted on both sides.
+func PlanDirs(local, base, remote Manifest) []DirAction {
+	lp, bp, rp := local.dirsByPath(), base.dirsByPath(), remote.dirsByPath()
+	paths := map[string]struct{}{}
+	for p := range lp {
+		paths[p] = struct{}{}
+	}
+	for p := range rp {
+		paths[p] = struct{}{}
+	}
+	for p := range bp {
+		paths[p] = struct{}{}
+	}
+
+	var actions []DirAction
+	for p := range paths {
+		l, lok := lp[p]
+		b, bok := bp[p]
+		r, rok := rp[p]
+		localChanged := dirEntryChanged(l, lok, b, bok)
+		remoteChanged := dirEntryChanged(r, rok, b, bok)
+		switch {
+		case !localChanged && !remoteChanged:
+		case localChanged && !remoteChanged:
+			if lok {
+				actions = append(actions, DirAction{p, Upload})
+			} else {
+				actions = append(actions, DirAction{p, DeleteRemote})
+			}
+		case remoteChanged && !localChanged:
+			if rok {
+				actions = append(actions, DirAction{p, Download})
+			} else {
+				actions = append(actions, DirAction{p, DeleteLocal})
+			}
+		default:
+			if lok && rok && l.Mode == r.Mode {
+				break
+			}
+			actions = append(actions, DirAction{p, Conflict})
+		}
+	}
+	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
+	return actions
+}
+
+// PlanDirsReconcile reconciles directories with no trusted base: every difference
+// becomes a Conflict, mirroring PlanReconcile for files.
+func PlanDirsReconcile(local, remote Manifest) []DirAction {
+	lp, rp := local.dirsByPath(), remote.dirsByPath()
+	paths := map[string]struct{}{}
+	for p := range lp {
+		paths[p] = struct{}{}
+	}
+	for p := range rp {
+		paths[p] = struct{}{}
+	}
+	var actions []DirAction
+	for p := range paths {
+		l, lok := lp[p]
+		r, rok := rp[p]
+		if lok && rok && l.Mode == r.Mode {
+			continue
+		}
+		actions = append(actions, DirAction{p, Conflict})
+	}
+	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
+	return actions
+}
+
+func dirEntryChanged(cur DirEntry, curOK bool, base DirEntry, baseOK bool) bool {
+	if curOK != baseOK {
+		return true
+	}
+	if !curOK {
+		return false
+	}
+	return cur.Mode != base.Mode
 }

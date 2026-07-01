@@ -44,7 +44,7 @@ func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
 
 	actions := syncengine.Plan(base, base, remote)
 	apply := applyCtx{root: root, opts: syncOptions{pullOnly: true}, base: base, local: base, remote: remote}
-	if err := applySync(apply, actions); err != nil {
+	if err := applySync(apply, actions, nil); err != nil {
 		t.Fatalf("applySync: %v", err)
 	}
 
@@ -88,7 +88,7 @@ func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
 	base := syncengine.Manifest{Entries: []syncengine.Entry{orig}}
 	apply, actions := applyTestCtx(t, root, base, base, syncengine.Manifest{})
 
-	if err := applySync(apply, actions); !errors.Is(err, errConflictsRemain) {
+	if err := applySync(apply, actions, nil); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("applySync = %v, want errConflictsRemain", err)
 	}
 	if got := readTree(t, root, "f"); got != "edited in the window" {
@@ -108,7 +108,7 @@ func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
 	}}
 	apply, actions := applyTestCtx(t, root, base, base, remote)
 
-	if err := applySync(apply, actions); !errors.Is(err, errConflictsRemain) {
+	if err := applySync(apply, actions, nil); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("applySync = %v, want errConflictsRemain", err)
 	}
 	if got := readTree(t, root, "g"); got != "edited in the window" {
@@ -129,7 +129,7 @@ func TestApplySyncOverwritesUnchangedFile(t *testing.T) {
 	}}
 	apply, actions := applyTestCtx(t, root, base, base, remote)
 
-	if err := applySync(apply, actions); err != nil {
+	if err := applySync(apply, actions, nil); err != nil {
 		t.Fatalf("applySync = %v, want nil", err)
 	}
 	if got := readTree(t, root, "g"); got != "from remote" {

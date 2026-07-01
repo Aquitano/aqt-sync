@@ -38,13 +38,14 @@ type fileNode struct {
 	target  string
 }
 
-// walkFiles invokes fn for every tracked symlink and regular file under dir.
-// Ignored paths and other special files (devices, sockets, fifos) are skipped.
-// It loads each directory's .aqtignore as it descends (skipping ignored
-// directories, whose .aqtignore is therefore never consulted), so nested rules
-// apply to their subtree. Symlinks are read with Readlink — never followed — so
-// a link into an ignored or out-of-tree location is captured as its target.
-func walkFiles(dir string, fn func(fileNode) error) error {
+// walkFiles invokes fn for every tracked symlink and regular file under dir, and
+// onDir (when non-nil) for every tracked directory. Ignored paths and other special
+// files (devices, sockets, fifos) are skipped. It loads each directory's .aqtignore
+// as it descends (skipping ignored directories, whose .aqtignore is therefore never
+// consulted), so nested rules apply to their subtree. Symlinks are read with
+// Readlink — never followed — so a link into an ignored or out-of-tree location is
+// captured as its target.
+func walkFiles(dir string, fn func(fileNode) error, onDir func(rel string, info fs.FileInfo) error) error {
 	ig := newIgnore()
 	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -64,6 +65,15 @@ func walkFiles(dir string, fn func(fileNode) error) error {
 				return filepath.SkipDir
 			}
 			ig.loadDir(path, rel)
+			if onDir != nil {
+				info, err := d.Info()
+				if err != nil {
+					return err
+				}
+				if err := onDir(rel, info); err != nil {
+					return err
+				}
+			}
 			return nil
 		}
 		if ig.Match(rel, false) {
@@ -151,8 +161,12 @@ func Scan(dir string) (Manifest, error) {
 		}
 		m.Entries = append(m.Entries, e)
 		return nil
+	}, func(rel string, info fs.FileInfo) error {
+		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
+		return nil
 	})
 	sortEntries(m.Entries)
+	sortDirs(m.Dirs)
 	return m, err
 }
 
@@ -164,7 +178,7 @@ func ListPaths(dir string) ([]string, error) {
 	err := walkFiles(dir, func(n fileNode) error {
 		paths = append(paths, n.rel)
 		return nil
-	})
+	}, nil)
 	return paths, err
 }
 
@@ -267,11 +281,15 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manife
 		}
 		m.Entries = append(m.Entries, e)
 		return nil
+	}, func(rel string, info fs.FileInfo) error {
+		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
+		return nil
 	})
 	if err != nil {
 		return Manifest{}, err
 	}
 	sortEntries(m.Entries)
+	sortDirs(m.Dirs)
 	return m, nil
 }
 

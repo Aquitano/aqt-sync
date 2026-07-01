@@ -294,6 +294,7 @@ var (
 	AADSnapshotLabel = []byte("aqt-snaplabel-v1") // a snapshot's optional user label, sealed under the resource content key
 	AADPack          = []byte("aqt-pack-v1")      // a pack-and-seal tarball segment (sealed under the folder content key)
 	AADPackRoot      = []byte("aqt-packroot-v1")  // a pack-and-seal folder's sealed root blob
+	AADTreeRoot      = []byte("aqt-treeroot-v1")  // a Merkle-DAG folder's sealed root blob (distinct from AADBlob, like AADPackRoot)
 	aadKeyWrap       = []byte("aqt-keywrap-v1")   // content key wrapped under the master key
 	aadGated         = []byte("aqt-gated-v1")     // content key wrapped under a link password
 	aadRootWrap      = []byte("aqt-rootwrap-v1")  // master (root) key wrapped under the unlock key
