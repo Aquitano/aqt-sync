@@ -271,7 +271,7 @@ func walkTree(node crypto.Chunk, prefix string, fetch func(id string) ([]byte, e
 		case ChildFile:
 			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, Chunks: c.Chunks})
 		case ChildSymlink:
-			m.Entries = append(m.Entries, Entry{Path: path, Size: c.Size, Hash: c.Hash, Link: c.Link})
+			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Link: c.Link})
 		case ChildDir:
 			m.Dirs = append(m.Dirs, DirEntry{Path: path, Mode: c.Mode})
 			if c.Node == nil {
