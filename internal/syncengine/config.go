@@ -70,6 +70,12 @@ func (c Config) Chunker() (*Chunker, error) {
 		return nil, fmt.Errorf("invalid chunk sizes in %s: need 0 < min (%d) <= normal (%d) <= max (%d)",
 			configFile, sizes.Min, sizes.Normal, sizes.Max)
 	}
+	// Cap max so a mistyped size is a returned error, not an OOM: the chunker reserves
+	// a ~2*max window, and a chunk larger than one pack's target is meaningless anyway.
+	if sizes.Max > DefaultPackTarget {
+		return nil, fmt.Errorf("invalid chunk sizes in %s: max (%d) exceeds the pack target %d; a chunk must fit in one pack",
+			configFile, sizes.Max, DefaultPackTarget)
+	}
 	return NewChunker(sizes.Min, sizes.Normal, sizes.Max), nil
 }
 

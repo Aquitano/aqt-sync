@@ -68,6 +68,7 @@ func TestConfigChunkerRejectsBadConfig(t *testing.T) {
 		{"min above normal", Config{Chunk: &ChunkSizes{Min: 10, Normal: 5, Max: 20}}},
 		{"normal above max", Config{Chunk: &ChunkSizes{Min: 1, Normal: 30, Max: 20}}},
 		{"zero min", Config{Chunk: &ChunkSizes{Min: 0, Normal: 5, Max: 20}}},
+		{"max above pack target", Config{Chunk: &ChunkSizes{Min: 1, Normal: 2, Max: DefaultPackTarget + 1}}},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
