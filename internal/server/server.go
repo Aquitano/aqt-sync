@@ -20,15 +20,97 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-type Server struct {
-	store   *Store
-	limiter *ipRateLimiter
+// RegistrationMode selects how POST /v1/account handles a new signup.
+type RegistrationMode string
+
+const (
+	// RegistrationOpen (the default) lets anyone sign up. A signup for an email that
+	// already has an account returns the same success shape as a fresh one instead of
+	// a 409, so the endpoint is no longer an existence oracle; the duplicate creates
+	// nothing and the caller's next authenticated call fails, matching the
+	// wrong-passphrase ambiguity the decoy salt already presents.
+	RegistrationOpen RegistrationMode = "open"
+	// RegistrationInvite additionally requires a valid server-issued invite token on
+	// every signup, so an attacker cannot squat an unclaimed email. Tokens are
+	// deployment-configured shared secrets, compared in constant time.
+	RegistrationInvite RegistrationMode = "invite"
+)
+
+// Config tunes deployment-specific hardening. The zero value is the self-hosted
+// default: open registration (no 409 oracle), no quota, no device cap, loopback-only
+// trusted proxies.
+type Config struct {
+	// Registration selects open (default) or invite-token signup; an empty value is
+	// treated as open.
+	Registration RegistrationMode
+	// InviteTokens are the accepted invite secrets in RegistrationInvite mode.
+	InviteTokens []string
+	// QuotaBytes caps an owner's stored pack bytes — the chunked-sync object store,
+	// where bulk data lives. 0 means unlimited. (A streamed file's resource blob is
+	// bounded separately by the per-route body cap.)
+	QuotaBytes int64
+	// MaxDevices caps devices per account. 0 means unlimited.
+	MaxDevices int
+	// TrustedProxies is passed to gin.SetTrustedProxies: the CIDRs/hosts whose
+	// X-Forwarded-* headers are believed. Nil keeps gin's loopback-only default; an
+	// explicit empty slice trusts none (RemoteAddr is used verbatim).
+	TrustedProxies    []string
+	trustedProxiesSet bool
+	// AuthedRatePerSec and AuthedBurst bound per-device request rates on the
+	// authenticated routes. Zero values pick the package defaults.
+	AuthedRatePerSec float64
+	AuthedBurst      float64
 }
 
-func New(store *Store) *Server {
+// WithTrustedProxies records an explicit trusted-proxy list (including an empty one,
+// which nil cannot express) so Router applies it instead of gin's default.
+func (c Config) WithTrustedProxies(proxies []string) Config {
+	c.TrustedProxies = proxies
+	c.trustedProxiesSet = true
+	return c
+}
+
+// inviteAccepted reports whether token matches a configured invite secret, in
+// constant time over the whole list so timing does not leak which (or how many)
+// tokens exist.
+func (c Config) inviteAccepted(token string) bool {
+	ok := 0
+	for _, t := range c.InviteTokens {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(t)) == 1 {
+			ok = 1
+		}
+	}
+	return ok == 1 && token != ""
+}
+
+type Server struct {
+	store *Store
+	cfg   Config
+	// Three limiters with three keys: unauth routes by peer address (no identity
+	// yet), authed routes by device id (tokens are the identity; a NAT'd office
+	// must not share a bucket), and GC by owner (its planning cost scales with the
+	// owner's whole object table, so it gets a far smaller budget).
+	limiter     *ipRateLimiter
+	authLimiter *ipRateLimiter
+	gcLimiter   *ipRateLimiter
+}
+
+func New(store *Store) *Server { return NewWithConfig(store, Config{}) }
+
+func NewWithConfig(store *Store, cfg Config) *Server {
+	rps, burst := cfg.AuthedRatePerSec, cfg.AuthedBurst
+	if rps <= 0 {
+		rps = authedRatePerSec
+	}
+	if burst <= 0 {
+		burst = authedBurst
+	}
 	return &Server{
-		store:   store,
-		limiter: newIPRateLimiter(unauthRatePerSec, unauthBurst),
+		store:       store,
+		cfg:         cfg,
+		limiter:     newIPRateLimiter(unauthRatePerSec, unauthBurst),
+		authLimiter: newIPRateLimiter(rps, burst),
+		gcLimiter:   newIPRateLimiter(gcRatePerSec, gcBurst),
 	}
 }
 
@@ -50,6 +132,15 @@ const (
 // Router builds the Gin engine with all routes mounted.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
+	// Trust only the configured reverse proxies for X-Forwarded-* (default: gin's
+	// loopback-only). Without this, gin trusts every proxy and an attacker could spoof
+	// X-Forwarded-Proto/For; the rate-limit bucket key deliberately stays on the TCP
+	// peer regardless. An explicit empty list trusts none.
+	if s.cfg.trustedProxiesSet {
+		if err := r.SetTrustedProxies(s.cfg.TrustedProxies); err != nil {
+			log.Printf("trusted proxies: %v", err)
+		}
+	}
 	// The engine-wide cap is the loosest; stacked limiters apply the smallest, so
 	// per-route middleware below only tightens it (a forgotten route is still
 	// bounded, never unlimited).
@@ -76,11 +167,14 @@ func (s *Server) Router() *gin.Engine {
 		// decrypt key lives only in the caller's URL fragment.
 		v1.GET("/resources/:id", s.getResource)
 
-		// gzipJSON rides the authed group: it compresses the hex-id JSON of
+// gzipJSON rides the authed group: it compresses the hex-id JSON of
 		// check/locate/list, and its Content-Type guard leaves the raw pack/blob
 		// bodies (octet-stream) uncompressed. The public GET /resources/:id sits
 		// outside this group, so a raw blob download is never buffered for gzip.
-		authed := v1.Group("", s.authMiddleware, gzipJSON())
+		// authMiddleware sets the device id and owner on the context; the auth limiter
+		// then buckets per device token. A NAT'd office shares a peer address but not a
+		// token, so it is not throttled as one client.
+		authed := v1.Group("", s.authMiddleware, gzipJSON(), s.authLimiter.middlewareKeyed(deviceKey))
 		{
 			// The blob (a file's ciphertext or a folder's sealed manifest) is the one
 			// large payload; it keeps the engine-wide maxResourceBody.
@@ -106,7 +200,9 @@ func (s *Server) Router() *gin.Engine {
 			authed.POST("/chunks/locate", limitBody(maxChunkBody), s.locateChunks)
 			authed.PUT("/packs/:id", limitBody(maxPackBody), s.putPack)
 			authed.GET("/packs/:id", s.getPack)
-			authed.POST("/gc", s.runGC)
+			// GC is expensive (its planning scans the owner's object table), so it gets a
+			// second, owner-keyed limiter far tighter than the general authed budget.
+			authed.POST("/gc", s.gcLimiter.middlewareKeyed(ownerKey), s.runGC)
 
 			// Snapshots: immutable, GC-pinned copies of a resource version. Owner-only;
 			// a snapshot is never public, so unlike a resource there is no unauth read.
@@ -183,16 +279,28 @@ func (s *Server) createAccount(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "wrapped root and auth verifier are required")
 		return
 	}
+	// Invite mode gates every signup on a server-issued token, so an attacker cannot
+	// register (and thereby squat) an unclaimed email. The response is uniform whether
+	// the token is missing or wrong, so it leaks nothing about the token set.
+	if s.cfg.Registration == RegistrationInvite && !s.cfg.inviteAccepted(req.InviteToken) {
+		abort(c, http.StatusForbidden, "a valid invite token is required to register on this server")
+		return
+	}
 	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier)
 	if errors.Is(err, ErrConflict) {
-		abort(c, http.StatusConflict, "account already exists")
+		// A duplicate email must not answer differently from a fresh signup, or the
+		// endpoint becomes an existence oracle. Return the same 201 success shape with a
+		// decoy token that grants nothing: the caller's next authenticated call fails,
+		// indistinguishable from the wrong-passphrase path. The existing account is
+		// untouched — the duplicate creates no device on it.
+		c.JSON(http.StatusCreated, s.decoyAuthResponse())
 		return
 	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "create account failed")
 		return
 	}
-	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName), 1)
+	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName), 1, s.cfg.MaxDevices)
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "create device failed")
 		return
@@ -200,6 +308,19 @@ func (s *Server) createAccount(c *gin.Context) {
 	c.JSON(http.StatusCreated, api.AuthResponse{
 		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token, Epoch: 1,
 	})
+}
+
+// decoyAuthResponse builds a success-shaped auth response whose fields match a real
+// one's lengths but authenticate nothing. It backs the enumeration-safe duplicate
+// signup path: the handle/device/token are random, so the response is
+// indistinguishable on the wire from a genuine account creation.
+func (s *Server) decoyAuthResponse() api.AuthResponse {
+	return api.AuthResponse{
+		OwnerHandle: newID(12),
+		DeviceID:    newID(10),
+		Token:       newID(32),
+		Epoch:       1,
+	}
 }
 
 // accountSalt is the new-device bootstrap: it returns the KDF params and wrapped
@@ -247,7 +368,13 @@ func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
 		}
 		return out
 	}
-	def, err := crypto.NewKdfParams()
+	// Derive the decoy's Argon2id costs from the same value set a real moderate
+	// calibration produces, seeded deterministically per email. The package-default
+	// (3, 64 MiB, 4) marked every decoy identically; drawing from the realistic
+	// distribution instead means a decoy's params are indistinguishable from a
+	// calibrated account's.
+	timeCost, memoryKiB, threads := crypto.DecoyKdfCosts(stream("aqt-decoy-costs", 2))
+	def, err := crypto.ManualKdfParams(timeCost, memoryKiB, threads)
 	if err != nil {
 		return api.SaltResponse{}, err
 	}
@@ -303,7 +430,11 @@ func (s *Server) attachDevice(c *gin.Context) {
 	sigOK := err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature)
 	verifierOK := err == nil && verifierMatches(req.AuthVerifier, verifierHash)
 	if sigOK && verifierOK {
-		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch)
+		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch, s.cfg.MaxDevices)
+		if errors.Is(err, ErrDeviceLimit) {
+			abort(c, http.StatusForbidden, "device limit reached; revoke a device before attaching another")
+			return
+		}
 		if err != nil {
 			abort(c, http.StatusInternalServerError, "create device failed")
 			return

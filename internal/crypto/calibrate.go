@@ -119,6 +119,43 @@ func ManualKdfParams(timeCost, memoryKiB uint32, threads uint8) (KdfParams, erro
 	return p, nil
 }
 
+// DecoyKdfCosts maps a deterministic seed (at least two bytes, e.g. an HKDF of a
+// server secret and a queried email) onto the cost distribution real calibrated
+// accounts carry. The package-default costs never appear on a calibrated account,
+// so a decoy bootstrap built from them would mark itself; drawing from the same
+// value set CalibrateKdf produces keeps a synthesized response indistinguishable.
+// It lives next to the presets so a preset change updates both.
+func DecoyKdfCosts(seed []byte) (timeCost, memoryKiB uint32, threads uint8) {
+	var m, t byte
+	if len(seed) > 0 {
+		m = seed[0]
+	}
+	if len(seed) > 1 {
+		t = seed[1]
+	}
+	// Draw the memory budget from the values a moderate calibration actually lands
+	// on: mostly the full preset budget, sometimes the halved or floored step-downs
+	// a slower machine takes. Same three-value set CalibrateKdf can produce.
+	full := presetTargets[DefaultPreset].memory
+	memoryKiB = full
+	switch {
+	case m < 26: // ~10%
+		memoryKiB = calibrateMemoryFloor
+	case m < 77: // ~20%
+		memoryKiB = full / 2
+	}
+	// Iterations cluster where the ~1s target divides one Argon2id pass on common
+	// hardware: several passes at the full budget, fewer once memory has stepped
+	// down (a slower machine fits less work). Mirrors CalibrateKdf's memory/time
+	// coupling; both stay well inside validate()'s 1..maxKdfTime bound.
+	if memoryKiB < full {
+		timeCost = uint32(2 + t%3) // 2..4
+	} else {
+		timeCost = uint32(3 + t%6) // 3..8
+	}
+	return timeCost, memoryKiB, defaultThreads
+}
+
 // DefaultKdfThreads returns the lane count calibration uses by default: the core
 // count capped at 4, since extra lanes past a handful add little and the params
 // must derive identically on every device including smaller ones.
