@@ -4,10 +4,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 
 	"golang.org/x/crypto/chacha20poly1305"
 	"golang.org/x/crypto/hkdf"
+
+	"github.com/aquitano/aqt-sync/internal/compress"
 )
 
 // Convergent chunk encryption underpins folder sync. A chunk is sealed with a key
@@ -42,11 +45,14 @@ func DeriveConvergenceKey(mk MasterKey) ConvergenceKey {
 // Chunk identifies one sealed chunk: ID is the server storage address (hash of
 // the ciphertext, hex so it is safe on case-insensitive filesystems), Key is the
 // per-chunk decryption key kept only in the sealed manifest, and Len is the
-// plaintext length (a cheap tamper check on open).
+// plaintext length (a cheap tamper check on open). Alg names the compression
+// applied to the sealed payload; absence means raw, so chunks sealed before
+// compression existed stay readable.
 type Chunk struct {
 	ID  string `json:"id"`
 	Key []byte `json:"key"`
 	Len int    `json:"len"`
+	Alg string `json:"alg,omitempty"`
 }
 
 // chunkNonce is a fixed all-zero nonce. Reusing it is safe precisely because the
@@ -108,17 +114,23 @@ func OpenNode(ciphertext []byte, ch Chunk) ([]byte, error) {
 }
 
 func sealConvergent(plaintext []byte, conv ConvergenceKey, aad []byte) ([]byte, Chunk, error) {
+	// The key stays bound to the raw plaintext, so compression never changes
+	// dedup identity, and the zero nonce stays safe: the sealed payload is a
+	// deterministic function of the plaintext the key derives from, so one
+	// (key, nonce) pair still only ever encrypts one message.
 	key := deriveChunkKey(conv, plaintext)
 	aead, err := chacha20poly1305.NewX(key[:])
 	if err != nil {
 		return nil, Chunk{}, err
 	}
-	ciphertext := aead.Seal(nil, chunkNonce[:], plaintext, aad)
+	payload, alg := compress.Encode(plaintext)
+	ciphertext := aead.Seal(nil, chunkNonce[:], payload, aad)
 	sum := sha256.Sum256(ciphertext)
 	return ciphertext, Chunk{
 		ID:  hex.EncodeToString(sum[:]),
 		Key: append([]byte(nil), key[:]...),
 		Len: len(plaintext),
+		Alg: alg,
 	}, nil
 }
 
@@ -134,12 +146,13 @@ func openConvergent(ciphertext []byte, ch Chunk, aad []byte) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	plaintext, err := aead.Open(nil, chunkNonce[:], ciphertext, aad)
+	payload, err := aead.Open(nil, chunkNonce[:], ciphertext, aad)
 	if err != nil {
 		return nil, err
 	}
-	if len(plaintext) != ch.Len {
-		return nil, errors.New("chunk length mismatch")
+	plaintext, err := compress.Decode(payload, ch.Alg, ch.Len)
+	if err != nil {
+		return nil, fmt.Errorf("chunk %s: %w", ch.ID, err)
 	}
 	return plaintext, nil
 }
