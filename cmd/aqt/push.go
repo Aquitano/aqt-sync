@@ -154,17 +154,30 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	}
 	defer f.Close()
 
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
 	up := newPackUploader(cl)
-	chunks, size, err := syncengine.ChunkFile(f, conv, syncengine.DefaultChunker(), up)
+	chunker := syncengine.DefaultChunkSelector().ChunkerFor(info.Size())
+	chunks, size, err := syncengine.ChunkFile(f, conv, chunker, up)
 	if err != nil {
 		up.Wait() // drain in-flight uploads before returning the chunking error
+		return err
+	}
+	// A large file's chunk list would itself overflow the resource blob, so above a
+	// threshold BuildFileRoot seals it as convergent segments (uploaded via up) and
+	// refs carries both the content chunks and those segments as GC roots.
+	root, refs, err := syncengine.BuildFileRoot(chunks, size, conv, up)
+	if err != nil {
+		up.Wait()
 		return err
 	}
 	if err := up.Flush(); err != nil {
 		return err
 	}
 
-	root := syncengine.FileRoot{Version: syncengine.FileRootVersion, Size: size, Chunks: chunks}
 	blob, err := syncengine.SealFileRoot(root, ck)
 	if err != nil {
 		return err
@@ -187,7 +200,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
-		ChunkRefs:     root.ChunkIDs(),
+		ChunkRefs:     refs,
 	})
 	if err != nil {
 		return err

@@ -320,12 +320,12 @@ func runSync(dir string, opts syncOptions) error {
 			return err
 		}
 	} else {
-		chunker, cerr := cfg.Chunker()
+		selector, cerr := cfg.ChunkSelector()
 		if cerr != nil {
 			return cerr
 		}
 		up := newPackUploader(cl)
-		local, err = syncengine.Take(root, conv, chunker, &base, up, opts.rehash)
+		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
 			up.Wait() // drain in-flight uploads before returning the snapshot error
 			return err
