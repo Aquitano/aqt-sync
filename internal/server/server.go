@@ -598,6 +598,35 @@ func (s *Server) StartAutoSnapshot(interval time.Duration, stop <-chan struct{})
 	}()
 }
 
+// StartGC runs the scheduled GC sweep every interval until stop is closed (a
+// non-positive interval disables it). Client-triggered POST /v1/gc stays available
+// as a manual path, but reclamation no longer depends on a device syncing: an
+// account whose devices go quiet still gets its dead packs swept. Both paths use
+// the same age guard, and the store's per-owner lock serializes them if they
+// collide.
+func (s *Server) StartGC(interval time.Duration, stop <-chan struct{}) {
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if res, err := s.store.RunGCAll(gcMinAge); err != nil {
+					log.Printf("scheduled gc: %v", err)
+				} else if res.DeletedPacks > 0 || res.RepackedPacks > 0 {
+					log.Printf("scheduled gc: swept %d pack(s) / %d bytes, repacked %d / %d bytes",
+						res.DeletedPacks, res.FreedBytes, res.RepackedPacks, res.ReclaimedBytes)
+				}
+			}
+		}
+	}()
+}
+
 // --- helpers ---
 
 func bindJSON(c *gin.Context, v any) bool {

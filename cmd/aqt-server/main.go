@@ -40,6 +40,18 @@ func main() {
 		api.StartAutoSnapshot(interval, nil)
 	}
 
+	// Scheduled GC. Clients trigger a sweep after a sync, but an account whose
+	// devices stop syncing would otherwise never reclaim space; the server-side
+	// timer covers that. AQT_GC_INTERVAL=0 disables it. Default 6h.
+	gcInterval, err := time.ParseDuration(envOr("AQT_GC_INTERVAL", "6h"))
+	if err != nil {
+		log.Fatalf("invalid AQT_GC_INTERVAL: %v", err)
+	}
+	if gcInterval > 0 {
+		log.Printf("scheduled gc every %s", gcInterval)
+		api.StartGC(gcInterval, nil)
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           api.Router(),
