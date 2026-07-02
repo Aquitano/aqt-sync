@@ -318,6 +318,18 @@ func runSync(dir string, opts syncOptions) error {
 		}
 	}
 
+	// Seal the base tree's node ciphertexts once, up front, and reuse them across every
+	// reconcile attempt. This is the base-serving map the reuse read consults so an
+	// unchanged remote subtree costs no fetch; sealing it here (rather than inside the
+	// retry closure) stops a conflict retry from re-sealing the whole DAG each pass (3.3).
+	var baseCT map[string][]byte
+	if baseExists {
+		baseCT, err = syncengine.SealTreeCiphertexts(base, conv)
+		if err != nil {
+			return err
+		}
+	}
+
 	// reconcile runs one pass against the current remote. It returns
 	// client.ErrConflict if another sync committed first; the loop below then
 	// re-plans against the new remote, so a concurrent write is never lost.
@@ -359,7 +371,7 @@ func runSync(dir string, opts syncOptions) error {
 		// there is nothing to reuse, so fall back to the full walk.
 		var remote syncengine.Manifest
 		if baseExists {
-			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, base, conv)
+			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, baseCT)
 		} else {
 			remote, err = openRemoteTree(cl, res.Blob, ck)
 		}
@@ -1189,19 +1201,16 @@ func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.Content
 	return syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, nil))
 }
 
-// openRemoteTreeReusingBase is openRemoteTree with the last-synced manifest as a node
-// cache. It seals the base tree in memory once and serves any node the remote shares with
-// it from those bytes instead of the server: directory nodes are content-addressed, so a
-// shared id is byte-identical, an unchanged subtree is reconstructed without a single fetch,
-// and only nodes on a spine that changed since the base hit the network. The result is
-// identical to openRemoteTree — OpenNode re-verifies every node against its address either
-// way — so a stale base can only affect which nodes are fetched, never correctness.
-func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, base syncengine.Manifest, conv crypto.ConvergenceKey) (syncengine.Manifest, error) {
+// openRemoteTreeReusingBase is openRemoteTree seeded with the base tree's node
+// ciphertexts (baseCT, sealed once by the caller and reused across retries). It serves
+// any node the remote shares with the base from those bytes instead of the server:
+// directory nodes are content-addressed, so a shared id is byte-identical, an unchanged
+// subtree is reconstructed without a single fetch, and only nodes on a spine that
+// changed since the base hit the network. The result is identical to openRemoteTree —
+// OpenNode re-verifies every node against its address either way — so a stale base can
+// only affect which nodes are fetched, never correctness.
+func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, baseCT map[string][]byte) (syncengine.Manifest, error) {
 	root, err := syncengine.OpenTreeRoot(blob, ck)
-	if err != nil {
-		return syncengine.Manifest{}, err
-	}
-	baseCT, err := syncengine.SealTreeCiphertexts(base, conv)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
