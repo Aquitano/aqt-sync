@@ -21,12 +21,66 @@ import (
 
 const (
 	defaultInterval = 2 * time.Second
+	// maxWatchInterval caps the adaptive poll backoff: while a folder stays idle the
+	// watcher doubles its interval toward this, so a quiet tree is lstat-walked every
+	// ~30s instead of every 2s, cutting the O(tree) background scan (3.7). A change
+	// snaps it back to the base interval.
+	maxWatchInterval = 30 * time.Second
 	// gitIdleWaitOnce bounds how long `--once` waits for an in-progress git
 	// operation before it skips, so a cron run can't block forever on a stale lock.
 	gitIdleWaitOnce = 30 * time.Second
 	agentPIDFile    = "agent.pid"
 	agentLogFile    = "agent.log"
 )
+
+// backoffInterval returns the poll interval for a watcher that has seen idleStreak
+// consecutive quiet ticks: the base interval while the tree is active, doubling toward
+// max as it stays idle. step resets the streak to 0 on any change, snapping the
+// interval back to base. A base already >= max disables backoff.
+func backoffInterval(base, max time.Duration, idleStreak int) time.Duration {
+	if base >= max || idleStreak <= 0 {
+		return base
+	}
+	d := base
+	for i := 0; i < idleStreak; i++ {
+		d *= 2
+		if d >= max {
+			return max
+		}
+	}
+	return d
+}
+
+// waiter is the watcher loop's tick source, abstracted so tests can drive ticks
+// deterministically while the production path uses a resettable timer for the
+// adaptive backoff.
+type waiter interface {
+	C() <-chan time.Time
+	Reset(d time.Duration)
+	Stop()
+}
+
+type realWaiter struct{ t *time.Timer }
+
+func newRealWaiter(d time.Duration) *realWaiter {
+	t := time.NewTimer(d)
+	t.Stop()
+	return &realWaiter{t: t}
+}
+
+func (r *realWaiter) C() <-chan time.Time { return r.t.C }
+
+func (r *realWaiter) Reset(d time.Duration) {
+	if !r.t.Stop() {
+		select {
+		case <-r.t.C:
+		default:
+		}
+	}
+	r.t.Reset(d)
+}
+
+func (r *realWaiter) Stop() { r.t.Stop() }
 
 // errWatchSkipped reports that `--once` declined to sync because git stayed busy
 // past the wait cap. It maps to a dedicated exit code so cron can tell "synced"
@@ -157,10 +211,9 @@ func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 		sync:    func() error { return runSync(root, syncOptions{}) },
 		logf:    logger.Printf,
 	}
-	logger.Printf("watching %s (interval %s, git-guard %s)", root, interval, onOff(gitGuard))
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	if err := w.run(ctx, ticker.C); err != nil {
+	logger.Printf("watching %s (interval %s, backing off to %s while idle, git-guard %s)", root, interval, maxWatchInterval, onOff(gitGuard))
+	wait := newRealWaiter(interval)
+	if err := w.run(ctx, wait, interval, maxWatchInterval); err != nil {
 		logger.Printf("stopping: %v", err)
 		return err
 	}
@@ -208,28 +261,35 @@ type watcher struct {
 }
 
 // watchState is the loop state threaded between ticks, kept separate so a single
-// step is testable without running the loop.
+// step is testable without running the loop. idle counts consecutive quiet ticks and
+// drives the adaptive poll backoff; step resets it to 0 on any activity.
 type watchState struct {
 	sig     string
 	pending bool
 	primed  bool
+	idle    int
 }
 
 // run drives the loop until the context is cancelled, or returns a fatal error
-// (e.g. the session can no longer be unlocked) so the caller can stop the agent.
-func (w *watcher) run(ctx context.Context, ticks <-chan time.Time) error {
+// (e.g. the session can no longer be unlocked) so the caller can stop the agent. After
+// each step it rearms wait with the backoff interval for the current idle streak, so a
+// settled tree is polled less often while any change snaps the interval back to base.
+func (w *watcher) run(ctx context.Context, wait waiter, base, max time.Duration) error {
+	defer wait.Stop()
 	var st watchState
 	if err := w.step(&st); err != nil { // prime the baseline + queue initial sync
 		return err
 	}
+	wait.Reset(backoffInterval(base, max, st.idle))
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-ticks:
+		case <-wait.C():
 			if err := w.step(&st); err != nil {
 				return err
 			}
+			wait.Reset(backoffInterval(base, max, st.idle))
 		}
 	}
 }
@@ -252,10 +312,11 @@ func (w *watcher) step(st *watchState) error {
 		if !st.pending {
 			w.logf("change detected")
 		}
-		st.sig, st.pending = sig, true
+		st.sig, st.pending, st.idle = sig, true, 0
 		return nil
 	}
 	if !st.pending {
+		st.idle++ // a quiet tick with nothing to do: let the poll interval back off
 		return nil
 	}
 	synced := st.sig
@@ -263,6 +324,7 @@ func (w *watcher) step(st *watchState) error {
 	if fatal != nil {
 		return fatal
 	}
+	st.idle = 0 // a sync attempt is activity; keep polling at the base interval to follow up
 	if !ok {
 		return nil // deferred or failed: stay pending, retry next tick
 	}
