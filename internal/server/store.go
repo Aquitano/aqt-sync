@@ -210,6 +210,10 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// (NULL on scheduled snapshots, which the keyless server cannot seal). Stored
 	// opaquely; the server never reads it.
 	`ALTER TABLE snapshots ADD COLUMN encrypted_label TEXT;`,
+	// 6: mark snapshots the scheduled job created, so server-side retention prunes
+	// only those and never a user's manual snapshot. Pre-existing rows cannot be
+	// classified and stay manual (never auto-pruned).
+	`ALTER TABLE snapshots ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -929,6 +933,12 @@ func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
 // existing chunk roots, decrypting nothing. label, when non-nil, is the client-
 // sealed user label stored opaquely alongside.
 func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
+	return s.createSnapshot(owner, resourceID, label, false)
+}
+
+// createSnapshot is CreateSnapshot plus the scheduled marker: the scheduled job's
+// snapshots are tagged so retention can prune them without touching manual ones.
+func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled bool) (api.SnapshotInfo, error) {
 	// Serialize against a concurrent update/delete of the same resource so the
 	// snapshot copies a consistent (blob, chunk-roots) pair, not a torn mix of two
 	// versions. Held in the store so the keyless scheduled job is serialized too, not
@@ -981,15 +991,19 @@ func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		labelJSON = sql.NullString{String: string(b), Valid: true}
 	}
 
+	sched := 0
+	if scheduled {
+		sched = 1
+	}
 	createdAt := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt,
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched,
 	); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -1189,7 +1203,7 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 	created := 0
 	var firstErr error
 	for _, r := range due {
-		if _, err := s.CreateSnapshot(r.owner, r.id, nil); err != nil {
+		if _, err := s.createSnapshot(r.owner, r.id, nil, true); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("auto-snapshot %s: %w", r.id, err)
 			}
@@ -1198,6 +1212,57 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 		created++
 	}
 	return created, firstErr
+}
+
+// PruneAutoSnapshots deletes scheduled snapshots beyond the newest keepLast per
+// (owner, resource), oldest first; manual snapshots are never touched. This is the
+// retention cap that keeps the scheduled job's storage bounded: without it every
+// version ever auto-snapshotted stays pinned forever. keepLast <= 0 disables it.
+func (s *Store) PruneAutoSnapshots(keepLast int) (int, error) {
+	if keepLast <= 0 {
+		return 0, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT snapshot_id, owner_handle FROM snapshots s
+		 WHERE s.scheduled = 1
+		   AND (SELECT COUNT(*) FROM snapshots n
+		        WHERE n.owner_handle = s.owner_handle AND n.resource_id = s.resource_id
+		          AND n.scheduled = 1
+		          AND (n.created_at > s.created_at
+		               OR (n.created_at = s.created_at AND n.snapshot_id > s.snapshot_id))) >= ?`,
+		keepLast,
+	)
+	if err != nil {
+		return 0, err
+	}
+	type ref struct{ id, owner string }
+	var due []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.id, &r.owner); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		due = append(due, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close() // the single writer connection can't take DeleteSnapshot's writes with this cursor open
+
+	pruned := 0
+	var firstErr error
+	for _, r := range due {
+		if err := s.DeleteSnapshot(r.owner, r.id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("prune snapshot %s: %w", r.id, err)
+			}
+			continue
+		}
+		pruned++
+	}
+	return pruned, firstErr
 }
 
 // --- packed object store ---

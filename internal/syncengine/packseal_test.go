@@ -74,7 +74,7 @@ func TestPackRoundTrip(t *testing.T) {
 	}
 
 	dst := t.TempDir()
-	manifest, err := ExtractToTree(dst, root, ck, store.get)
+	manifest, err := ExtractToTree(dst, root, ck, store.get, nil)
 	if err != nil {
 		t.Fatalf("ExtractToTree: %v", err)
 	}
@@ -142,7 +142,7 @@ func TestPackSegmentTamperRejected(t *testing.T) {
 	// Corrupt the first segment's stored bytes.
 	id := root.Segments[0].ID
 	store[id][0] ^= 0xff
-	if _, err := ExtractToTree(t.TempDir(), root, ck, store.get); err == nil {
+	if _, err := ExtractToTree(t.TempDir(), root, ck, store.get, nil); err == nil {
 		t.Fatal("extract accepted a tampered segment")
 	}
 }
@@ -156,7 +156,7 @@ func TestPackWrongKeyRejected(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ExtractToTree(t.TempDir(), root, testContentKey(t), store.get); err == nil {
+	if _, err := ExtractToTree(t.TempDir(), root, testContentKey(t), store.get, nil); err == nil {
 		t.Fatal("extract accepted the wrong content key")
 	}
 }
@@ -197,7 +197,7 @@ func TestExtractRefusesSymlinkTraversal(t *testing.T) {
 	}
 	root := PackRoot{Version: PackRootVersion, Size: int64(tarBuf.Len()), Segments: ss.segments}
 
-	if _, err := ExtractToTree(t.TempDir(), root, ck, store.get); err == nil {
+	if _, err := ExtractToTree(t.TempDir(), root, ck, store.get, nil); err == nil {
 		t.Fatal("extract accepted a symlink-traversal archive")
 	}
 	if _, err := os.Stat(filepath.Join(outside, "payload")); err == nil {
@@ -297,7 +297,7 @@ func TestExtractReplacesStaleParent(t *testing.T) {
 					t.Skipf("symlinks unsupported: %v", err)
 				}
 			}
-			if _, err := ExtractToTree(dst, root, ck, store.get); err != nil {
+			if _, err := ExtractToTree(dst, root, ck, store.get, nil); err != nil {
 				t.Fatalf("extract over stale %s: %v", stale, err)
 			}
 			got, err := os.ReadFile(filepath.Join(dst, "data", "inner.txt"))
@@ -305,6 +305,61 @@ func TestExtractReplacesStaleParent(t *testing.T) {
 				t.Fatalf("inner.txt not extracted over stale %s: got=%q err=%v", stale, got, err)
 			}
 		})
+	}
+}
+
+// TestExtractSafeSkipsVetoedEntry is the drift-guard mechanism the pack pull relies
+// on: an entry the safe callback rejects is not written to disk (its local bytes
+// survive), but is still hashed from the archive and recorded in the returned
+// manifest, so the caller's base always describes the full remote tree.
+func TestExtractSafeSkipsVetoedEntry(t *testing.T) {
+	src := t.TempDir()
+	writeFile(t, src, "keep.txt", []byte("remote keep"))
+	writeFile(t, src, "guarded.txt", []byte("remote body"))
+
+	ck := testContentKey(t)
+	store := memObjects{}
+	root, _, err := TarAndSeal(src, ck, store)
+	if err != nil {
+		t.Fatalf("TarAndSeal: %v", err)
+	}
+
+	dst := t.TempDir()
+	writeFile(t, dst, "guarded.txt", []byte("local edit")) // drifted bytes the guard must keep
+
+	var seen []string
+	safe := func(path string) (bool, error) {
+		seen = append(seen, path)
+		return path != "guarded.txt", nil
+	}
+	m, err := ExtractToTree(dst, root, ck, store.get, safe)
+	if err != nil {
+		t.Fatalf("ExtractToTree: %v", err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("safe consulted %d times, want 2 (both regular files)", len(seen))
+	}
+
+	// The vetoed file keeps its local bytes; the accepted one is written from the archive.
+	if got, _ := os.ReadFile(filepath.Join(dst, "guarded.txt")); string(got) != "local edit" {
+		t.Fatalf("guarded.txt = %q, want the local bytes preserved", got)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dst, "keep.txt")); string(got) != "remote keep" {
+		t.Fatalf("keep.txt = %q, want the remote bytes written", got)
+	}
+
+	// The returned manifest still describes the whole remote tree, including the entry
+	// that was not written, carrying the remote hash.
+	scan, err := Scan(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, ok := m.ByPath()["guarded.txt"]
+	if !ok {
+		t.Fatal("vetoed entry missing from the returned manifest")
+	}
+	if e.Hash != scan.ByPath()["guarded.txt"].Hash {
+		t.Fatalf("recorded hash %q != remote hash %q", e.Hash, scan.ByPath()["guarded.txt"].Hash)
 	}
 }
 

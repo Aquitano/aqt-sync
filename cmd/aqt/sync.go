@@ -767,7 +767,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		if err != nil {
 			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
 		}
-		base, err := extractPack(cl, abs, root, ck)
+		base, err := extractPack(cl, abs, root, ck, nil)
 		if err != nil {
 			return syncengine.Manifest{}, err
 		}

@@ -575,8 +575,10 @@ func (s *Server) setAutoSnapshot(c *gin.Context) {
 // StartAutoSnapshot runs the scheduled snapshot job every interval until stop is
 // closed (a non-positive interval disables it). A snapshot is keyless — the server
 // copies already-sealed ciphertext — so the job needs no client online; version
-// dedup keeps a tick that finds no changes nearly free.
-func (s *Server) StartAutoSnapshot(interval time.Duration, stop <-chan struct{}) {
+// dedup keeps a tick that finds no changes nearly free. keepLast caps how many
+// scheduled snapshots each resource retains (0 keeps all; manual snapshots are
+// never pruned).
+func (s *Server) StartAutoSnapshot(interval time.Duration, keepLast int, stop <-chan struct{}) {
 	if interval <= 0 {
 		return
 	}
@@ -592,6 +594,11 @@ func (s *Server) StartAutoSnapshot(interval time.Duration, stop <-chan struct{})
 					log.Printf("auto-snapshot: %v", err)
 				} else if n > 0 {
 					log.Printf("auto-snapshot: created %d snapshot(s)", n)
+				}
+				if n, err := s.store.PruneAutoSnapshots(keepLast); err != nil {
+					log.Printf("auto-snapshot prune: %v", err)
+				} else if n > 0 {
+					log.Printf("auto-snapshot: pruned %d snapshot(s)", n)
 				}
 			}
 		}
