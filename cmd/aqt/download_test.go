@@ -146,6 +146,33 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 	}
 }
 
+// TestPackSourceSpanSplitting checks 3.5: needed objects close together share one span
+// (one range), but a gap wider than spanSplitGap opens a new span so the dead bytes
+// between them are never downloaded.
+func TestPackSourceSpanSplitting(t *testing.T) {
+	s := &packSource{objSpan: map[string]packSpan{}}
+	bEnd := int64(100 + 1000 + 100)  // a: [0,100), b: [1100,1200); gap 1000 < threshold
+	cBase := bEnd + spanSplitGap + 1 // c starts a fresh span (gap beyond threshold)
+	s.assignSpans([]api.ObjectLocation{
+		{ID: "a", PackID: "p", Off: 0, Len: 100},
+		{ID: "b", PackID: "p", Off: 1100, Len: 100},
+		{ID: "c", PackID: "p", Off: cBase, Len: 100},
+	})
+
+	if s.objSpan["a"] != s.objSpan["b"] {
+		t.Fatal("objects within the gap threshold must share a span")
+	}
+	if s.objSpan["a"] == s.objSpan["c"] {
+		t.Fatal("an object beyond the gap threshold must open its own span")
+	}
+	if ab := s.objSpan["a"]; ab.base != 0 || ab.end != bEnd {
+		t.Fatalf("a/b span = %+v, want base 0 end %d", ab, bEnd)
+	}
+	if c := s.objSpan["c"]; c.base != cBase || c.end != cBase+100 {
+		t.Fatalf("c span = %+v, want base %d end %d", c, cBase, cBase+100)
+	}
+}
+
 var errUnexpectedBytes = errBytes("unexpected object bytes")
 
 type errBytes string

@@ -960,13 +960,21 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) er
 	return g.Wait()
 }
 
-// packSpan is the byte range of a pack covering every object a download needs from
-// it — fetched in one Range request, never the whole pack when only a few objects
-// are wanted.
+// packSpan is a contiguous byte range of a pack covering a run of objects a download
+// needs — fetched in one Range request. A pack may map to several spans when its
+// needed objects are far apart (see spanSplitGap), so a few KiB at opposite ends of a
+// large pack never drags the whole pack down.
 type packSpan struct {
 	base int64
 	end  int64
 }
+
+// spanSplitGap bounds wasted read-ahead within a pack: two needed objects more than
+// this many bytes apart are fetched as separate ranges rather than one span swallowing
+// the dead bytes between them. Needing 2 objects at opposite ends of a 16 MiB pack thus
+// costs two small ranges instead of the whole pack (3.5); below the gap, one range
+// still wins (one request, and the skipped bytes are cheap).
+const spanSplitGap = 256 << 10
 
 // packSource resolves chunk ids to pack byte ranges (one locate up front) and
 // serves their ciphertext, fetching each pack's covering span on demand and keeping
@@ -976,20 +984,23 @@ type packSpan struct {
 // immutable after construction (read-only), the LRU is guarded by mu, and sf
 // collapses a stampede of workers that all miss the same pack into one GetPackRange.
 type packSource struct {
-	cl    *client.Client
-	locs  map[string]api.ObjectLocation
-	spans map[string]packSpan
-	mu    sync.Mutex // guards cache
-	cache *packCache
-	sf    singleflight.Group
+	cl   *client.Client
+	locs map[string]api.ObjectLocation
+	// objSpan maps each object to the covering span its bytes fall in. A pack with
+	// widely-separated needed objects has several spans, so get fetches only the
+	// window around each object rather than min..max across the whole pack.
+	objSpan map[string]packSpan
+	mu      sync.Mutex // guards cache
+	cache   *packCache
+	sf      singleflight.Group
 }
 
 func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	s := &packSource{
-		cl:    cl,
-		locs:  make(map[string]api.ObjectLocation, len(ids)),
-		spans: map[string]packSpan{},
-		cache: newPackCache(packCacheBytes),
+		cl:      cl,
+		locs:    make(map[string]api.ObjectLocation, len(ids)),
+		objSpan: make(map[string]packSpan, len(ids)),
+		cache:   newPackCache(packCacheBytes),
 	}
 	if len(ids) == 0 {
 		return s, nil
@@ -998,22 +1009,42 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	if err != nil {
 		return nil, err
 	}
+	byPack := map[string][]api.ObjectLocation{}
 	for _, loc := range located {
 		s.locs[loc.ID] = loc
-		span, ok := s.spans[loc.PackID]
-		if !ok {
-			s.spans[loc.PackID] = packSpan{base: loc.Off, end: loc.Off + loc.Len}
-			continue
-		}
-		if loc.Off < span.base {
-			span.base = loc.Off
-		}
-		if loc.Off+loc.Len > span.end {
-			span.end = loc.Off + loc.Len
-		}
-		s.spans[loc.PackID] = span
+		byPack[loc.PackID] = append(byPack[loc.PackID], loc)
+	}
+	for _, objs := range byPack {
+		s.assignSpans(objs)
 	}
 	return s, nil
+}
+
+// assignSpans groups one pack's needed objects into covering spans, opening a new span
+// whenever the gap to the next object exceeds spanSplitGap, and records each object's
+// span so get range-fetches just that window. Objects within a pack never overlap.
+func (s *packSource) assignSpans(objs []api.ObjectLocation) {
+	sort.Slice(objs, func(i, j int) bool { return objs[i].Off < objs[j].Off })
+	start := 0
+	base := objs[0].Off
+	end := objs[0].Off + objs[0].Len
+	flush := func(hi int) {
+		span := packSpan{base: base, end: end}
+		for _, o := range objs[start:hi] {
+			s.objSpan[o.ID] = span
+		}
+	}
+	for i := 1; i < len(objs); i++ {
+		o := objs[i]
+		if o.Off-end > spanSplitGap {
+			flush(i)
+			start, base = i, o.Off
+		}
+		if o.Off+o.Len > end {
+			end = o.Off + o.Len
+		}
+	}
+	flush(len(objs))
 }
 
 func (s *packSource) get(id string) ([]byte, error) {
@@ -1024,8 +1055,8 @@ func (s *packSource) get(id string) ([]byte, error) {
 		// ErrNotFound so a manifest read can retry against the current version.
 		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
 	}
-	span := s.spans[loc.PackID]
-	data, err := s.fetchPack(loc.PackID, span)
+	span := s.objSpan[id]
+	data, err := s.fetchSpan(loc.PackID, span)
 	if err != nil {
 		return nil, err
 	}
@@ -1033,21 +1064,23 @@ func (s *packSource) get(id string) ([]byte, error) {
 	return data[start : start+loc.Len], nil
 }
 
-// fetchPack returns a pack's covering-span bytes, fetching it at most once even
-// under the concurrent download pool: the LRU is consulted under mu, and
-// singleflight collapses concurrent misses of the same pack into a single
-// GetPackRange. The returned bytes are never mutated after the fetch, so a later
-// eviction cannot disturb a caller still slicing its object out of them.
-func (s *packSource) fetchPack(packID string, span packSpan) ([]byte, error) {
+// fetchSpan returns one span's bytes, fetching it at most once even under the
+// concurrent download pool: the LRU is consulted under mu, and singleflight collapses
+// concurrent misses of the same span into a single GetPackRange. The cache key is the
+// pack plus the span base, since a pack now holds several spans. The returned bytes are
+// never mutated after the fetch, so a later eviction cannot disturb a caller still
+// slicing its object out of them.
+func (s *packSource) fetchSpan(packID string, span packSpan) ([]byte, error) {
+	key := fmt.Sprintf("%s@%d", packID, span.base)
 	s.mu.Lock()
-	data, ok := s.cache.get(packID)
+	data, ok := s.cache.get(key)
 	s.mu.Unlock()
 	if ok {
 		return data, nil
 	}
-	v, err, _ := s.sf.Do(packID, func() (any, error) {
+	v, err, _ := s.sf.Do(key, func() (any, error) {
 		s.mu.Lock()
-		if data, ok := s.cache.get(packID); ok {
+		if data, ok := s.cache.get(key); ok {
 			s.mu.Unlock()
 			return data, nil
 		}
@@ -1060,7 +1093,7 @@ func (s *packSource) fetchPack(packID string, span packSpan) ([]byte, error) {
 			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", packID, len(data), span.end-span.base)
 		}
 		s.mu.Lock()
-		s.cache.put(packID, data)
+		s.cache.put(key, data)
 		s.mu.Unlock()
 		return data, nil
 	})
