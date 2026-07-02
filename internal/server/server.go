@@ -76,7 +76,11 @@ func (s *Server) Router() *gin.Engine {
 		// decrypt key lives only in the caller's URL fragment.
 		v1.GET("/resources/:id", s.getResource)
 
-		authed := v1.Group("", s.authMiddleware)
+		// gzipJSON rides the authed group: it compresses the hex-id JSON of
+		// check/locate/list, and its Content-Type guard leaves the raw pack/blob
+		// bodies (octet-stream) uncompressed. The public GET /resources/:id sits
+		// outside this group, so a raw blob download is never buffered for gzip.
+		authed := v1.Group("", s.authMiddleware, gzipJSON())
 		{
 			// The blob (a file's ciphertext or a folder's sealed manifest) is the one
 			// large payload; it keeps the engine-wide maxResourceBody.
@@ -385,8 +389,8 @@ func (s *Server) deleteDevice(c *gin.Context) {
 
 func (s *Server) putResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	var req api.PutResourceRequest
-	if !bindJSON(c, &req) {
+	req, ok := decodePutResource(c)
+	if !ok {
 		return
 	}
 	switch req.Visibility {
@@ -447,7 +451,54 @@ func (s *Server) getResource(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "fetch failed")
 		return
 	}
+	// A raw-envelope client (Accept: octet-stream) gets the blob verbatim, no
+	// base64 tax; anything else keeps the legacy JSON shape.
+	if acceptsOctetStream(c) {
+		body, err := api.EncodeResourceDownload(res)
+		if err != nil {
+			abort(c, http.StatusInternalServerError, "encode failed")
+			return
+		}
+		c.Data(http.StatusOK, "application/octet-stream", body)
+		return
+	}
 	c.JSON(http.StatusOK, res)
+}
+
+// decodePutResource reads a resource upload by content negotiation: an
+// octet-stream body is the raw envelope (blob ciphertext single-buffered, never
+// JSON-decoded); anything else is the legacy JSON body, so old clients keep
+// working. Both paths sit behind the same maxResourceBody cap.
+func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
+	if !isOctetStream(c.ContentType()) {
+		var req api.PutResourceRequest
+		if !bindJSON(c, &req) {
+			return api.PutResourceRequest{}, false
+		}
+		return req, true
+	}
+	req, err := api.DecodeResourceUpload(c.Request.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			abort(c, http.StatusRequestEntityTooLarge, "resource body exceeds limit")
+		} else {
+			abort(c, http.StatusBadRequest, "invalid resource body")
+		}
+		return api.PutResourceRequest{}, false
+	}
+	return req, true
+}
+
+// isOctetStream reports whether a Content-Type selects the raw envelope path.
+func isOctetStream(contentType string) bool {
+	return contentType == "application/octet-stream"
+}
+
+// acceptsOctetStream reports whether the caller asked for the raw envelope
+// response rather than legacy JSON.
+func acceptsOctetStream(c *gin.Context) bool {
+	return strings.Contains(c.GetHeader("Accept"), "application/octet-stream")
 }
 
 func (s *Server) listResources(c *gin.Context) {

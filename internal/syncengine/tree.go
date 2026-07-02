@@ -42,11 +42,12 @@ type TreeChild struct {
 	// Hash drives change detection and equality, exactly like Entry.Hash: a file's
 	// plaintext sha256, a symlink's domain-separated target hash, or for a directory
 	// the child node's content address (== the subtree Merkle hash).
-	Hash   string         `json:"hash,omitempty"`
-	Link   string         `json:"link,omitempty"`   // symlink target
-	Inline []byte         `json:"inline,omitempty"` // file bytes when Size <= chunker.Min
-	Chunks []crypto.Chunk `json:"chunks,omitempty"` // file content objects when larger
-	Node   *crypto.Chunk  `json:"node,omitempty"`   // dir: the child node object to fetch+open; Node.ID == Hash
+	Hash      string         `json:"hash,omitempty"`
+	Link      string         `json:"link,omitempty"`      // symlink target
+	Inline    []byte         `json:"inline,omitempty"`    // file bytes when Size <= chunker.Min
+	InlineAlg string         `json:"inlineAlg,omitempty"` // compression of Inline; empty = raw
+	Chunks    []crypto.Chunk `json:"chunks,omitempty"`    // file content objects when larger
+	Node      *crypto.Chunk  `json:"node,omitempty"`      // dir: the child node object to fetch+open; Node.ID == Hash
 }
 
 // TreeNode is a directory: its children, name-sorted. One node seals to exactly one
@@ -170,6 +171,7 @@ func (s *sealer) sealNode(d *dirBuild) (crypto.Chunk, error) {
 				}
 			} else {
 				tc.Inline = e.Inline
+				tc.InlineAlg = e.InlineAlg
 			}
 		}
 		children = append(children, tc)
@@ -269,7 +271,7 @@ func walkTree(node crypto.Chunk, prefix string, fetch func(id string) ([]byte, e
 		path := joinChild(prefix, c.Name)
 		switch c.Type {
 		case ChildFile:
-			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, Chunks: c.Chunks})
+			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, InlineAlg: c.InlineAlg, Chunks: c.Chunks})
 		case ChildSymlink:
 			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Link: c.Link})
 		case ChildDir:

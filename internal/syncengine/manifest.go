@@ -19,14 +19,15 @@ const (
 // content-addressed chunks. Hash is over the plaintext (or the link target) and
 // drives change detection.
 type Entry struct {
-	Path   string         `json:"path"` // POSIX, relative to the tracked root
-	Mode   uint32         `json:"mode"`
-	Size   int64          `json:"size"`
-	MTime  int64          `json:"mtime,omitempty"` // mod time (UnixNano); drives the stat fast-path, never change detection
-	Hash   string         `json:"hash"`
-	Link   string         `json:"link,omitempty"` // symlink target; set => this entry is a symlink
-	Inline []byte         `json:"inline,omitempty"`
-	Chunks []crypto.Chunk `json:"chunks,omitempty"`
+	Path      string         `json:"path"` // POSIX, relative to the tracked root
+	Mode      uint32         `json:"mode"`
+	Size      int64          `json:"size"`
+	MTime     int64          `json:"mtime,omitempty"` // mod time (UnixNano); drives the stat fast-path, never change detection
+	Hash      string         `json:"hash"`
+	Link      string         `json:"link,omitempty"` // symlink target; set => this entry is a symlink
+	Inline    []byte         `json:"inline,omitempty"`
+	InlineAlg string         `json:"inlineAlg,omitempty"` // compression of Inline; empty = raw (pre-compression entries)
+	Chunks    []crypto.Chunk `json:"chunks,omitempty"`
 }
 
 // IsSymlink reports whether the entry describes a symbolic link.
