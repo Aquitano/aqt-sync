@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"unicode/utf8"
 
+	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
@@ -320,7 +321,7 @@ func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey
 		if inBase && prev.Hash == entry.Hash {
 			return touchedReuse(prev, entry), nil
 		}
-		entry.Inline = data
+		entry.Inline, entry.InlineAlg = compress.Encode(data)
 		return entry, nil
 	}
 

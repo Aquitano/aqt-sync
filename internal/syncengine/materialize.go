@@ -11,6 +11,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
@@ -64,7 +65,13 @@ func refuseSymlinkParents(dir, full string) error {
 // rather than landing on disk.
 func WriteEntry(dst io.Writer, e Entry, fetch func(id string) ([]byte, error)) error {
 	if len(e.Chunks) == 0 {
-		_, err := dst.Write(e.Inline)
+		// Inline rides inside the sealed manifest, so its length is already
+		// authenticated; -1 skips the exact-length pin a chunk record carries.
+		data, err := compress.Decode(e.Inline, e.InlineAlg, -1)
+		if err != nil {
+			return err
+		}
+		_, err = dst.Write(data)
 		return err
 	}
 	for _, ch := range e.Chunks {
