@@ -75,6 +75,12 @@ var aadChunk = []byte("aqt-chunk-aad-v1")
 // separation) and docs/phase4-merkle-dag.md section 9.6.
 var aadTreeNode = []byte("aqt-treenode-v1")
 
+// aadChunkList domain-separates a sealed chunk-list segment — the indirect form of
+// a large file's chunk records (see syncengine's chunk-list segmentation) — from
+// file-content chunks and directory nodes, which flow through this same convergent
+// pipeline. The tag is constant, so identical lists still dedup.
+var aadChunkList = []byte("aqt-chunklist-v1")
+
 // deriveChunkKey binds the plaintext and the account secret into a unique key.
 func deriveChunkKey(conv ConvergenceKey, plaintext []byte) [KeySize]byte {
 	salt := sha256.Sum256(plaintext)
@@ -111,6 +117,18 @@ func SealNode(plaintext []byte, conv ConvergenceKey) (ciphertext []byte, ch Chun
 // OpenNode reverses SealNode, verifying the node object's address and AEAD tag.
 func OpenNode(ciphertext []byte, ch Chunk) ([]byte, error) {
 	return openConvergent(ciphertext, ch, aadTreeNode)
+}
+
+// SealChunkList seals one segment of a serialized chunk list through the convergent
+// pipeline under its own AAD, so list segments are domain-separated from file chunks
+// and directory nodes while identical lists still dedup.
+func SealChunkList(plaintext []byte, conv ConvergenceKey) (ciphertext []byte, ch Chunk, err error) {
+	return sealConvergent(plaintext, conv, aadChunkList)
+}
+
+// OpenChunkList reverses SealChunkList, verifying the segment's address and AEAD tag.
+func OpenChunkList(ciphertext []byte, ch Chunk) ([]byte, error) {
+	return openConvergent(ciphertext, ch, aadChunkList)
 }
 
 func sealConvergent(plaintext []byte, conv ConvergenceKey, aad []byte) ([]byte, Chunk, error) {

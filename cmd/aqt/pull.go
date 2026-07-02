@@ -104,12 +104,26 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
-	src, err := newPackSource(cl, root.ChunkIDs())
+	// A large file stores its chunk list indirectly as sealed segments; locate and
+	// open those first (they sit behind their own locate) to recover the content
+	// chunk records, then locate the content objects themselves.
+	chunks := root.Chunks
+	if root.Indirect() {
+		segSrc, err := newPackSource(cl, root.ChunkIDs())
+		if err != nil {
+			return err
+		}
+		chunks, err = root.Resolve(segSrc.get)
+		if err != nil {
+			return err
+		}
+	}
+	src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 	if err != nil {
 		return err
 	}
 	if toStdout {
-		return syncengine.WriteFileRoot(os.Stdout, root, src.get)
+		return syncengine.WriteFileRoot(os.Stdout, chunks, src.get)
 	}
 	dest := out
 	if dest == "" {
@@ -121,7 +135,7 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 		}
 	}
 	if err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
-		return syncengine.WriteFileRoot(f, root, src.get)
+		return syncengine.WriteFileRoot(f, chunks, src.get)
 	}); err != nil {
 		return err
 	}
