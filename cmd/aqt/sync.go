@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -915,26 +916,36 @@ func (u *packUploader) upload(cand []candidate) error {
 	return u.cl.PutPack(packID, pack)
 }
 
+// downloadConcurrency bounds how many files a pull materializes at once. Downloads
+// are IO-bound (each file range-fetches its packs, then writes them out), so a small
+// fixed fan-out overlaps the network latency of independent files without a
+// per-core thread. The shared packSource is concurrency-safe, and every file lands
+// at a distinct path, so the content-addressed model makes the parallelism trivially
+// correct — no file's bytes depend on another's.
+const downloadConcurrency = 6
+
 // runDownloads materializes each entry under root, streaming its chunks from the
 // packs that hold them. A pack-backed chunk source range-fetches packs on demand
 // and caches a few, so neither a whole file nor the whole tree is ever in memory.
+// Files are materialized by a bounded worker pool; the first error wins and is
+// returned, matching the upload pipeline's aggregation.
 func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) error {
 	src, err := newPackSource(cl, distinctChunkIDs(entries))
 	if err != nil {
 		return err
 	}
+	var g errgroup.Group
+	g.SetLimit(downloadConcurrency)
 	for _, e := range entries {
-		if e.IsSymlink() {
-			if err := syncengine.WriteSymlink(root, e); err != nil {
-				return err
+		e := e
+		g.Go(func() error {
+			if e.IsSymlink() {
+				return syncengine.WriteSymlink(root, e)
 			}
-			continue
-		}
-		if err := syncengine.MaterializeFile(root, e, src.get); err != nil {
-			return err
-		}
+			return syncengine.MaterializeFile(root, e, src.get)
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 // packSpan is the byte range of a pack covering every object a download needs from
@@ -948,11 +959,17 @@ type packSpan struct {
 // packSource resolves chunk ids to pack byte ranges (one locate up front) and
 // serves their ciphertext, fetching each pack's covering span on demand and keeping
 // a small LRU so a pack shared by several files is fetched once.
+//
+// It is safe for concurrent use by the download worker pool: locs and spans are
+// immutable after construction (read-only), the LRU is guarded by mu, and sf
+// collapses a stampede of workers that all miss the same pack into one GetPackRange.
 type packSource struct {
 	cl    *client.Client
 	locs  map[string]api.ObjectLocation
 	spans map[string]packSpan
+	mu    sync.Mutex // guards cache
 	cache *packCache
+	sf    singleflight.Group
 }
 
 func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
@@ -996,20 +1013,49 @@ func (s *packSource) get(id string) ([]byte, error) {
 		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
 	}
 	span := s.spans[loc.PackID]
-	data, ok := s.cache.get(loc.PackID)
-	if !ok {
-		var err error
-		data, err = s.cl.GetPackRange(loc.PackID, span.base, span.end-span.base)
+	data, err := s.fetchPack(loc.PackID, span)
+	if err != nil {
+		return nil, err
+	}
+	start := loc.Off - span.base
+	return data[start : start+loc.Len], nil
+}
+
+// fetchPack returns a pack's covering-span bytes, fetching it at most once even
+// under the concurrent download pool: the LRU is consulted under mu, and
+// singleflight collapses concurrent misses of the same pack into a single
+// GetPackRange. The returned bytes are never mutated after the fetch, so a later
+// eviction cannot disturb a caller still slicing its object out of them.
+func (s *packSource) fetchPack(packID string, span packSpan) ([]byte, error) {
+	s.mu.Lock()
+	data, ok := s.cache.get(packID)
+	s.mu.Unlock()
+	if ok {
+		return data, nil
+	}
+	v, err, _ := s.sf.Do(packID, func() (any, error) {
+		s.mu.Lock()
+		if data, ok := s.cache.get(packID); ok {
+			s.mu.Unlock()
+			return data, nil
+		}
+		s.mu.Unlock()
+		data, err := s.cl.GetPackRange(packID, span.base, span.end-span.base)
 		if err != nil {
 			return nil, err
 		}
 		if int64(len(data)) < span.end-span.base {
-			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", loc.PackID, len(data), span.end-span.base)
+			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", packID, len(data), span.end-span.base)
 		}
-		s.cache.put(loc.PackID, data)
+		s.mu.Lock()
+		s.cache.put(packID, data)
+		s.mu.Unlock()
+		return data, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	start := loc.Off - span.base
-	return data[start : start+loc.Len], nil
+	return v.([]byte), nil
 }
 
 // packCache is a byte-bounded LRU of fetched pack byte-ranges, so download memory is
