@@ -99,6 +99,19 @@ func reconcilePack(c packCtx) error {
 			"remove pack=true, or re-init a fresh folder to use pack-and-seal")
 	}
 
+	// Freshness guard, mirroring the chunked path: a rolled-back server must not be
+	// read as "remote changed" (decidePack would pull the old tree over newer local
+	// files). An accepted rollback discards the base for this pass — the baseless
+	// reconcile compares the actual trees and conflicts instead of clobbering.
+	if c.st.RemoteVersion > 0 && res.Version < c.st.RemoteVersion {
+		if !c.opts.acceptRollback {
+			return rollbackErr(res.Version, c.st.RemoteVersion)
+		}
+		fmt.Fprintf(os.Stderr, "accepting server rollback (version %d, previously %d); reconciling from scratch\n",
+			res.Version, c.st.RemoteVersion)
+		return reconcilePackNoBase(c, res, ck)
+	}
+
 	if !c.baseExists {
 		return reconcilePackNoBase(c, res, ck)
 	}
@@ -120,6 +133,7 @@ func reconcilePack(c packCtx) error {
 		fmt.Fprintln(os.Stderr, "conflict: the folder changed on both sides since the last sync")
 		return errConflictsRemain
 	default:
+		recordRemoteVersion(c.root, res.Version)
 		fmt.Println("already in sync")
 		return nil
 	}
@@ -242,7 +256,11 @@ func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.Conte
 		fmt.Fprintln(os.Stderr, "conflict: local and remote differ and there is no base to reconcile against")
 		return errConflictsRemain
 	default:
-		return savePackBase(c.root, c.local, res.Version)
+		if err := savePackBase(c.root, c.local, res.Version); err != nil {
+			return err
+		}
+		recordRemoteVersion(c.root, res.Version)
+		return nil
 	}
 }
 
@@ -273,6 +291,7 @@ func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 	if err := savePackBase(c.root, c.push.shipped, resp.Version); err != nil {
 		return err
 	}
+	recordRemoteVersion(c.root, resp.Version)
 	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(c.push.shipped.Entries))
 	return nil
 }
@@ -329,6 +348,7 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 	if err := savePackBase(c.root, remote, res.Version); err != nil {
 		return err
 	}
+	recordRemoteVersion(c.root, res.Version)
 	fmt.Printf("synced: pulled %d files (pack-and-seal)\n", len(remote.Entries))
 	return nil
 }
