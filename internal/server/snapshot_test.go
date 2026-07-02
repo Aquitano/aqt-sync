@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -173,6 +174,70 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	}
 	if len(snaps) != 2 {
 		t.Fatalf("snapshots = %d, want 2 (v1 and v2)", len(snaps))
+	}
+}
+
+// PruneAutoSnapshots is the retention cap that keeps the scheduled job's storage
+// bounded: it drops scheduled snapshots beyond the newest keepLast per resource and
+// never touches a manual one, so a user's explicit snapshots are safe while automatic
+// ones converge.
+func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "retain@example.com")
+	pack, data, ids := packOf("v1 object")
+	if _, err := s.PutPack(owner, pack, data); err != nil {
+		t.Fatal(err)
+	}
+	rid := s.rootResource(t, owner, []string{ids[0]})
+
+	// A manual snapshot at v1 that retention must never touch.
+	manual, err := s.CreateSnapshot(owner, rid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Four scheduled snapshots, one per new version.
+	for i := 2; i <= 5; i++ {
+		p, d, id := packOf(fmt.Sprintf("v%d object", i))
+		if _, err := s.PutPack(owner, p, d); err != nil {
+			t.Fatal(err)
+		}
+		s.supersede(t, owner, rid, []string{id[0]})
+		if n, err := s.RunAutoSnapshots(); err != nil || n != 1 {
+			t.Fatalf("scheduled snapshot v%d: n=%d err=%v, want 1", i, n, err)
+		}
+	}
+	if all, _ := s.ListSnapshots(owner, rid); len(all) != 5 {
+		t.Fatalf("setup: %d snapshots, want 5 (1 manual + 4 scheduled)", len(all))
+	}
+
+	// keepLast <= 0 disables retention.
+	if n, err := s.PruneAutoSnapshots(0); err != nil || n != 0 {
+		t.Fatalf("prune(0): n=%d err=%v, want 0", n, err)
+	}
+
+	// Keep the newest 2 scheduled; the other 2 scheduled go, the manual stays.
+	n, err := s.PruneAutoSnapshots(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("pruned %d, want 2 (4 scheduled minus keep-2)", n)
+	}
+	all, err := s.ListSnapshots(owner, rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("remaining %d, want 3 (2 scheduled + 1 manual)", len(all))
+	}
+	if _, err := s.GetSnapshot(owner, manual.ID); err != nil {
+		t.Fatalf("retention deleted the manual snapshot: %v", err)
+	}
+
+	// Within the cap now, a second prune removes nothing.
+	if n, err := s.PruneAutoSnapshots(2); err != nil || n != 0 {
+		t.Fatalf("prune(2) again: n=%d err=%v, want 0", n, err)
 	}
 }
 

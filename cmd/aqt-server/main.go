@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -30,14 +31,20 @@ func main() {
 
 	// Scheduled snapshots. A snapshot is keyless (it copies already-sealed
 	// ciphertext), so the server runs the job itself; AQT_SNAPSHOT_INTERVAL=0 disables
-	// it. Default daily.
+	// it. Default daily. AQT_SNAPSHOT_KEEP caps how many scheduled snapshots each
+	// resource retains (0 keeps all) so storage converges; manual snapshots are
+	// never pruned.
 	interval, err := time.ParseDuration(envOr("AQT_SNAPSHOT_INTERVAL", "24h"))
 	if err != nil {
 		log.Fatalf("invalid AQT_SNAPSHOT_INTERVAL: %v", err)
 	}
+	keep, err := strconv.Atoi(envOr("AQT_SNAPSHOT_KEEP", "30"))
+	if err != nil || keep < 0 {
+		log.Fatalf("invalid AQT_SNAPSHOT_KEEP: %v", envOr("AQT_SNAPSHOT_KEEP", "30"))
+	}
 	if interval > 0 {
-		log.Printf("scheduled snapshots every %s", interval)
-		api.StartAutoSnapshot(interval, nil)
+		log.Printf("scheduled snapshots every %s (keeping last %d per resource; 0 = all)", interval, keep)
+		api.StartAutoSnapshot(interval, keep, nil)
 	}
 
 	srv := &http.Server{

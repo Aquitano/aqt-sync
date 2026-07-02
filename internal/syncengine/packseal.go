@@ -327,12 +327,17 @@ func packStream(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]by
 // ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
 // it under dir, streaming so neither the tarball nor any file is held whole in memory.
 // Returns the manifest of what it wrote, for the caller to record as base and prune by.
-func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
+//
+// safe, when non-nil, is consulted just before each entry would land on disk; an
+// entry it rejects is not written, but is still hashed from the archive and recorded
+// in the manifest, so the returned manifest always describes the remote tree. The
+// pull path uses this to keep a local edit that raced the download.
+func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error), safe func(path string) (bool, error)) (Manifest, error) {
 	r, done, err := packStream(root, ck, fetch)
 	if err != nil {
 		return Manifest{}, err
 	}
-	m, err := extractTar(newTreeWriter(dir), r)
+	m, err := extractTar(newTreeWriter(dir), r, safe)
 	done(err)
 	if err != nil {
 		return Manifest{}, err
@@ -391,7 +396,8 @@ func hashTar(r io.Reader) (Manifest, error) {
 // parent it created as a symlink this pass, so a hostile archive can't escape via a
 // symlink ordered ahead of a file written through it, while a stale local entry a
 // remote type change replaced with a directory is cleared rather than refused.
-func extractTar(w *treeWriter, r io.Reader) (Manifest, error) {
+// An entry safe rejects is hashed and recorded but never written.
+func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)
 	for {
@@ -402,20 +408,33 @@ func extractTar(w *treeWriter, r io.Reader) (Manifest, error) {
 		if err != nil {
 			return Manifest{}, err
 		}
+		write := true
+		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA) {
+			if write, err = safe(hdr.Name); err != nil {
+				return Manifest{}, err
+			}
+		}
 		switch hdr.Typeflag {
 		case tar.TypeSymlink:
 			e := Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)}
-			if err := w.writeSymlink(e); err != nil {
-				return Manifest{}, err
+			if write {
+				if err := w.writeSymlink(e); err != nil {
+					return Manifest{}, err
+				}
 			}
 			m.Entries = append(m.Entries, e)
 		case tar.TypeReg, tar.TypeRegA:
 			e := Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size}
 			h := sha256.New()
-			if err := w.writeFile(e, func(out io.Writer) error {
-				_, err := io.Copy(out, io.TeeReader(tr, h))
-				return err
-			}); err != nil {
+			if write {
+				err = w.writeFile(e, func(out io.Writer) error {
+					_, err := io.Copy(out, io.TeeReader(tr, h))
+					return err
+				})
+			} else {
+				_, err = io.Copy(h, tr)
+			}
+			if err != nil {
 				return Manifest{}, err
 			}
 			e.Hash = hex.EncodeToString(h.Sum(nil))
