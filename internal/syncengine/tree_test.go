@@ -233,6 +233,57 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 	}
 }
 
+// TestOpenTreeBatchedOneFetchPerLevel proves the level-batched walk collapses a
+// tree's node fetches to one batch per depth level (the fix for 2.4's 2-RTT-per-node
+// cost), and reconstructs exactly the manifest the depth-first OpenTree does.
+func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
+	conv := testConv(t)
+	in := Manifest{Version: TreeManifestVersion, Entries: []Entry{
+		{Path: "a/sub/f1.txt", Hash: "h1", Inline: []byte("1")},
+		{Path: "b/sub/f2.txt", Hash: "h2", Inline: []byte("2")},
+	}, Dirs: []DirEntry{
+		{Path: "a", Mode: 0o700}, {Path: "a/sub", Mode: 0o700},
+		{Path: "b", Mode: 0o700}, {Path: "b/sub", Mode: 0o700},
+	}}
+
+	sink := mapSink{}
+	root, _, err := SealTree(in, conv, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var batchSizes []int
+	fetchBatch := func(ids []string) (map[string][]byte, error) {
+		batchSizes = append(batchSizes, len(ids))
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			ct, err := sink.get(id)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = ct
+		}
+		return out, nil
+	}
+	got, err := OpenTreeBatched(root, fetchBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := OpenTree(root, sink.get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalize(full), normalize(got)) {
+		t.Fatalf("batched read != depth-first read:\n full %+v\n got  %+v", full, got)
+	}
+	// root level (1 node), then {a,b} (2), then {a/sub,b/sub} (2): three batches,
+	// each one locate round-trip, instead of five separate 2-RTT node fetches.
+	wantSizes := []int{1, 2, 2}
+	if !reflect.DeepEqual(batchSizes, wantSizes) {
+		t.Fatalf("batch sizes = %v, want %v (one batch per level)", batchSizes, wantSizes)
+	}
+}
+
 func TestTreeRootAADSeparation(t *testing.T) {
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {

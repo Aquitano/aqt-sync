@@ -252,6 +252,78 @@ func OpenTree(root TreeRoot, fetch func(id string) ([]byte, error)) (Manifest, e
 	return m, nil
 }
 
+// OpenTreeBatched reassembles a flat manifest from a DAG the same way OpenTree does,
+// but walks it level by level instead of depth-first: it hands the whole frontier of
+// directory-node ids to fetchBatch in one call, so the transport can locate them in a
+// single round-trip and range-fetch their packs grouped, rather than paying 2 RTTs per
+// node. Node contents are verified against their address exactly as in OpenTree, so the
+// result is identical — batching only changes how the ciphertexts are fetched, never
+// what is accepted. Used by clone, reconcile, snapshot restore/diff, and find.
+func OpenTreeBatched(root TreeRoot, fetchBatch func(ids []string) (map[string][]byte, error)) (Manifest, error) {
+	m := Manifest{Version: root.Version}
+	type pending struct {
+		node   crypto.Chunk
+		prefix string
+	}
+	frontier := []pending{{node: root.Root, prefix: ""}}
+	for len(frontier) > 0 {
+		ids := make([]string, len(frontier))
+		for i, p := range frontier {
+			ids[i] = p.node.ID
+		}
+		cts, err := fetchBatch(ids)
+		if err != nil {
+			return Manifest{}, err
+		}
+		var next []pending
+		for _, p := range frontier {
+			ct, ok := cts[p.node.ID]
+			if !ok {
+				return Manifest{}, fmt.Errorf("fetch tree node %s: node not returned", p.node.ID)
+			}
+			children, err := openNodeChildren(p.node, ct)
+			if err != nil {
+				return Manifest{}, err
+			}
+			for _, c := range children {
+				path := joinChild(p.prefix, c.Name)
+				switch c.Type {
+				case ChildFile:
+					m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, Chunks: c.Chunks})
+				case ChildSymlink:
+					m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Link: c.Link})
+				case ChildDir:
+					m.Dirs = append(m.Dirs, DirEntry{Path: path, Mode: c.Mode})
+					if c.Node == nil {
+						return Manifest{}, fmt.Errorf("directory child %q has no node reference", path)
+					}
+					next = append(next, pending{node: *c.Node, prefix: path})
+				default:
+					return Manifest{}, fmt.Errorf("unknown child type %q at %q", c.Type, path)
+				}
+			}
+		}
+		frontier = next
+	}
+	sortEntries(m.Entries)
+	sortDirs(m.Dirs)
+	return m, nil
+}
+
+// openNodeChildren decrypts and parses one directory node, verifying its ciphertext
+// against the node's content address before trusting the children.
+func openNodeChildren(node crypto.Chunk, ct []byte) ([]TreeChild, error) {
+	plain, err := crypto.OpenNode(ct, node)
+	if err != nil {
+		return nil, err
+	}
+	var n TreeNode
+	if err := json.Unmarshal(plain, &n); err != nil {
+		return nil, err
+	}
+	return n.Children, nil
+}
+
 func walkTree(node crypto.Chunk, prefix string, fetch func(id string) ([]byte, error), m *Manifest) error {
 	ct, err := fetch(node.ID)
 	if err != nil {

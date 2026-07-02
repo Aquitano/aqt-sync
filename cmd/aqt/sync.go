@@ -1178,14 +1178,15 @@ func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengi
 }
 
 // openRemoteTree reconstructs a folder's manifest from its tree root: it decrypts
-// the tiny root, then walks the DAG, fetching and decrypting each directory node
-// from its pack. The inverse of uploadTreeObjects.
+// the tiny root, then walks the DAG level by level, locating each level's directory
+// nodes in one round-trip and range-fetching their packs grouped. The inverse of
+// uploadTreeObjects.
 func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
 	root, err := syncengine.OpenTreeRoot(blob, ck)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	return syncengine.OpenTree(root, newNodeFetcher(cl))
+	return syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, nil))
 }
 
 // openRemoteTreeReusingBase is openRemoteTree with the last-synced manifest as a node
@@ -1204,40 +1205,50 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	remoteFetch := newNodeFetcher(cl)
-	return syncengine.OpenTree(root, func(id string) ([]byte, error) {
-		if ct, ok := baseCT[id]; ok {
-			return ct, nil
-		}
-		return remoteFetch(id)
-	})
+	return syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, baseCT))
 }
 
-// newNodeFetcher returns a fetch function for directory-node objects, locating and
-// range-fetching each by id and caching it (nodes are small and the DAG walk may
-// revisit shared subtree ids). A node the owner no longer stores — a concurrent sync
-// superseded this version and GC reaped it — surfaces as client.ErrNotFound so a
-// manifest read can retry against the current version.
-func newNodeFetcher(cl *client.Client) func(id string) ([]byte, error) {
-	cache := map[string][]byte{}
-	return func(id string) ([]byte, error) {
-		if b, ok := cache[id]; ok {
-			return b, nil
+// newBatchNodeFetcher returns a level-batch fetch for directory-node objects: it
+// locates a whole level's ids in one call and range-fetches their packs grouped (via
+// packSource), so a tree walk pays one locate per level instead of two round-trips per
+// node. seed carries node ciphertexts already in hand (the base tree in the reuse
+// path), served from memory without a fetch; fetched nodes are cached across levels
+// since the DAG may revisit a shared subtree id. A node the owner no longer stores —
+// a concurrent sync superseded this version and GC reaped it — surfaces from
+// packSource.get as client.ErrNotFound so a manifest read can retry against the
+// current version.
+func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
+	cache := make(map[string][]byte, len(seed))
+	for id, ct := range seed {
+		cache[id] = ct
+	}
+	return func(ids []string) (map[string][]byte, error) {
+		var missing []string
+		for _, id := range ids {
+			if _, ok := cache[id]; !ok {
+				missing = append(missing, id)
+			}
 		}
-		located, err := cl.LocateChunks([]string{id})
-		if err != nil {
-			return nil, err
+		if len(missing) > 0 {
+			src, err := newPackSource(cl, missing)
+			if err != nil {
+				return nil, err
+			}
+			for _, id := range missing {
+				b, err := src.get(id)
+				if err != nil {
+					return nil, err
+				}
+				cache[id] = b
+			}
 		}
-		if len(located) == 0 {
-			return nil, fmt.Errorf("server could not locate tree node %s: %w", id, client.ErrNotFound)
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			if ct, ok := cache[id]; ok {
+				out[id] = ct
+			}
 		}
-		loc := located[0]
-		b, err := cl.GetPackRange(loc.PackID, loc.Off, loc.Len)
-		if err != nil {
-			return nil, err
-		}
-		cache[id] = b
-		return b, nil
+		return out, nil
 	}
 }
 
