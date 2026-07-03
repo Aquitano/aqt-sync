@@ -185,7 +185,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "retain@example.com")
 	pack, data, ids := packOf("v1 object")
-	if _, err := s.PutPack(owner, pack, data); err != nil {
+	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{ids[0]})
@@ -199,7 +199,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	// Four scheduled snapshots, one per new version.
 	for i := 2; i <= 5; i++ {
 		p, d, id := packOf(fmt.Sprintf("v%d object", i))
-		if _, err := s.PutPack(owner, p, d); err != nil {
+		if _, err := s.PutPack(owner, p, d, 0); err != nil {
 			t.Fatal(err)
 		}
 		s.supersede(t, owner, rid, []string{id[0]})
