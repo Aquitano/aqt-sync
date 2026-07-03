@@ -2,6 +2,7 @@ package syncengine
 
 import (
 	"archive/tar"
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
@@ -20,8 +22,10 @@ import (
 // file structure at the cost of dedup — any change re-ships the folder. Selected per
 // folder by .aqtconfig pack=true.
 
-// PackRootVersion identifies the on-the-wire layout of a sealed pack-and-seal root.
-const PackRootVersion = 1
+// PackRootVersion identifies the on-the-wire layout of a sealed pack-and-seal
+// root. Version 2 zstd-compresses the tarball before segmenting; version 1
+// (raw tar) stays readable.
+const PackRootVersion = 2
 
 // segTarget is the fixed plaintext span per segment. Fixed-size, not content-defined:
 // the boundaries can leak only the tree's total byte count, never its file structure —
@@ -42,10 +46,11 @@ type Segment struct {
 
 // PackRoot is the sealed resource blob of a pack-and-seal folder: it names the
 // tarball's segment objects in order, the same way FileRoot names a streamed file's
-// chunks. Reassembling the segments and decrypting yields the tar of the whole tree.
+// chunks. Reassembling the segments and decrypting yields the tar of the whole tree
+// (zstd-compressed for version 2).
 type PackRoot struct {
 	Version  int       `json:"version"`
-	Size     int64     `json:"size"` // tarball plaintext length
+	Size     int64     `json:"size"` // sealed stream length: the raw tar (v1) or its zstd frame (v2)
 	Segments []Segment `json:"segments"`
 }
 
@@ -138,9 +143,13 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 		sink = nopObjectSink{}
 	}
 	ss := &segmentSink{ck: ck, sink: sink}
-	tw := tar.NewWriter(ss)
+	zw, err := compress.NewWriter(ss)
+	if err != nil {
+		return PackRoot{}, Manifest{}, err
+	}
+	tw := tar.NewWriter(zw)
 	var manifest Manifest
-	err := walkFiles(dir, func(n fileNode) error {
+	err = walkFiles(dir, func(n fileNode) error {
 		e, err := writeTarEntry(tw, n)
 		if err != nil {
 			return err
@@ -154,7 +163,10 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 	if err != nil {
 		return PackRoot{}, Manifest{}, err
 	}
-	if err := tw.Close(); err != nil { // flushes the archive trailer into ss
+	if err := tw.Close(); err != nil { // flushes the archive trailer into zw
+		return PackRoot{}, Manifest{}, err
+	}
+	if err := zw.Close(); err != nil { // flushes the zstd frame into ss
 		return PackRoot{}, Manifest{}, err
 	}
 	if err := ss.finish(); err != nil {
@@ -278,20 +290,58 @@ func segmentReader(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([
 	return pr
 }
 
+// packStream returns the tar byte stream a root's segments reassemble to,
+// decompressing version-2 roots, plus a done callback that releases the
+// producer goroutine and any decoder: pass the terminal read error, or nil
+// after a clean read. Closing on nil also unblocks the producer on trailing
+// bytes a malformed archive carries past the tar trailer (else it leaks).
+func packStream(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (io.Reader, func(error), error) {
+	if root.Version > PackRootVersion {
+		return nil, nil, fmt.Errorf("pack root version %d is newer than this client supports", root.Version)
+	}
+	if len(root.Segments) == 0 {
+		return bytes.NewReader(nil), func(error) {}, nil
+	}
+	pr := segmentReader(root, ck, fetch)
+	done := func(err error) {
+		if err != nil {
+			pr.CloseWithError(err)
+			return
+		}
+		pr.Close()
+	}
+	if root.Version < 2 { // pre-compression layout: segments carry the raw tar
+		return pr, done, nil
+	}
+	zr, err := compress.NewReader(pr)
+	if err != nil {
+		pr.CloseWithError(err)
+		return nil, nil, err
+	}
+	return zr, func(err error) {
+		zr.Close()
+		done(err)
+	}, nil
+}
+
 // ExtractToTree reassembles the tarball from its segments (fetched by id) and unpacks
 // it under dir, streaming so neither the tarball nor any file is held whole in memory.
 // Returns the manifest of what it wrote, for the caller to record as base and prune by.
-func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
-	pr := segmentReader(root, ck, fetch)
-	m, err := extractTar(newTreeWriter(dir), pr)
+//
+// safe, when non-nil, is consulted just before each entry would land on disk; an
+// entry it rejects is not written, but is still hashed from the archive and recorded
+// in the manifest, so the returned manifest always describes the remote tree. The
+// pull path uses this to keep a local edit that raced the download.
+func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error), safe func(path string) (bool, error)) (Manifest, error) {
+	r, done, err := packStream(root, ck, fetch)
 	if err != nil {
-		pr.CloseWithError(err) // unblock the writer if extraction bailed early
 		return Manifest{}, err
 	}
-	// tar.Reader stops at the trailer without draining the pipe; closing the read end
-	// unblocks the writer goroutine on any trailing bytes a malformed archive carries
-	// past it (else it leaks). A well-formed archive is already done, so this is a no-op.
-	pr.Close()
+	m, err := extractTar(newTreeWriter(dir), r, safe)
+	done(err)
+	if err != nil {
+		return Manifest{}, err
+	}
 	sortEntries(m.Entries)
 	return m, nil
 }
@@ -301,13 +351,15 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 // nothing to disk. It is the read-only counterpart to ExtractToTree, for deciding
 // whether a remote tree equals the local one without materializing and deleting it.
 func PackTreeManifest(root PackRoot, ck crypto.ContentKey, fetch func(id string) ([]byte, error)) (Manifest, error) {
-	pr := segmentReader(root, ck, fetch)
-	m, err := hashTar(pr)
+	r, done, err := packStream(root, ck, fetch)
 	if err != nil {
-		pr.CloseWithError(err)
 		return Manifest{}, err
 	}
-	pr.Close()
+	m, err := hashTar(r)
+	done(err)
+	if err != nil {
+		return Manifest{}, err
+	}
 	sortEntries(m.Entries)
 	return m, nil
 }
@@ -344,7 +396,8 @@ func hashTar(r io.Reader) (Manifest, error) {
 // parent it created as a symlink this pass, so a hostile archive can't escape via a
 // symlink ordered ahead of a file written through it, while a stale local entry a
 // remote type change replaced with a directory is cleared rather than refused.
-func extractTar(w *treeWriter, r io.Reader) (Manifest, error) {
+// An entry safe rejects is hashed and recorded but never written.
+func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)
 	for {
@@ -355,20 +408,33 @@ func extractTar(w *treeWriter, r io.Reader) (Manifest, error) {
 		if err != nil {
 			return Manifest{}, err
 		}
+		write := true
+		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA) {
+			if write, err = safe(hdr.Name); err != nil {
+				return Manifest{}, err
+			}
+		}
 		switch hdr.Typeflag {
 		case tar.TypeSymlink:
 			e := Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)}
-			if err := w.writeSymlink(e); err != nil {
-				return Manifest{}, err
+			if write {
+				if err := w.writeSymlink(e); err != nil {
+					return Manifest{}, err
+				}
 			}
 			m.Entries = append(m.Entries, e)
 		case tar.TypeReg, tar.TypeRegA:
 			e := Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size}
 			h := sha256.New()
-			if err := w.writeFile(e, func(out io.Writer) error {
-				_, err := io.Copy(out, io.TeeReader(tr, h))
-				return err
-			}); err != nil {
+			if write {
+				err = w.writeFile(e, func(out io.Writer) error {
+					_, err := io.Copy(out, io.TeeReader(tr, h))
+					return err
+				})
+			} else {
+				_, err = io.Copy(h, tr)
+			}
+			if err != nil {
 				return Manifest{}, err
 			}
 			e.Hash = hex.EncodeToString(h.Sum(nil))

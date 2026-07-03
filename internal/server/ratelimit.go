@@ -18,6 +18,25 @@ const (
 	unauthBurst      = 30
 )
 
+// Rate-limit defaults for the authenticated routes, keyed per device token (not per
+// peer address, so a NAT'd office does not share one bucket). Generous enough that a
+// large sync or clone — which fires many chunk-check, pack, and range-fetch calls in
+// quick succession — never trips it, while still capping a single token's sustained
+// request rate so one credential cannot hammer the API.
+const (
+	authedRatePerSec = 50
+	authedBurst      = 500
+)
+
+// Rate-limit defaults for POST /v1/gc, keyed per owner. GC planning scales with the
+// owner's whole object table, so it gets a far tighter budget than the general authed
+// limit; the client already self-throttles to at most one GC per folder per hour, so
+// this only bounds a token deliberately spinning on it.
+const (
+	gcRatePerSec = 0.2
+	gcBurst      = 10
+)
+
 // ipRateLimiter is a per-key token-bucket limiter. Buckets refill lazily and are
 // pruned once fully refilled, so the map cannot grow without bound.
 type ipRateLimiter struct {
@@ -80,12 +99,24 @@ func (l *ipRateLimiter) prune(now time.Time) {
 
 // middleware rejects a request that exceeds the per-client rate with 429.
 func (l *ipRateLimiter) middleware(c *gin.Context) {
-	if !l.allow(clientKey(c)) {
-		abort(c, http.StatusTooManyRequests, "rate limit exceeded; slow down")
-		return
-	}
-	c.Next()
+	l.middlewareKeyed(clientKey)(c)
 }
+
+// middlewareKeyed rejects a request that exceeds the rate for the bucket key returns,
+// with 429. It lets the authenticated limiters bucket by device id or owner handle
+// (set on the context by authMiddleware) instead of the peer address.
+func (l *ipRateLimiter) middlewareKeyed(key func(*gin.Context) string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !l.allow(key(c)) {
+			abort(c, http.StatusTooManyRequests, "rate limit exceeded; slow down")
+			return
+		}
+		c.Next()
+	}
+}
+
+func deviceKey(c *gin.Context) string { return c.GetString(deviceContextKey) }
+func ownerKey(c *gin.Context) string  { return c.GetString(ownerContextKey) }
 
 // clientKey is the rate-limit bucket key: the TCP peer address, not a forwarded
 // header. The header is client-controlled and would let an attacker mint a fresh

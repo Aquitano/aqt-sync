@@ -64,7 +64,7 @@ func TestConfigChunkerRejectsBadConfig(t *testing.T) {
 		name string
 		cfg  Config
 	}{
-		{"unknown profile", Config{ChunkProfile: "huge"}},
+		{"unknown profile", Config{ChunkProfile: "gigantic"}},
 		{"min above normal", Config{Chunk: &ChunkSizes{Min: 10, Normal: 5, Max: 20}}},
 		{"normal above max", Config{Chunk: &ChunkSizes{Min: 1, Normal: 30, Max: 20}}},
 		{"zero min", Config{Chunk: &ChunkSizes{Min: 0, Normal: 5, Max: 20}}},
@@ -76,6 +76,64 @@ func TestConfigChunkerRejectsBadConfig(t *testing.T) {
 				t.Fatal("expected an error, got nil")
 			}
 		})
+	}
+}
+
+// The default size-scaling selector picks a profile from file size at deterministic
+// boundaries: the coarser profile takes over exactly at its threshold.
+func TestDefaultChunkSelectorBySize(t *testing.T) {
+	sel := DefaultChunkSelector()
+	cases := []struct {
+		name string
+		size int64
+		want ChunkSizes
+	}{
+		{"empty", 0, ChunkSizes{defaultMin, defaultNormal, defaultMax}},
+		{"just below large", (8 << 20) - 1, ChunkSizes{defaultMin, defaultNormal, defaultMax}},
+		{"at large boundary", 8 << 20, ChunkSizes{largeMin, largeNormal, largeMax}},
+		{"just below huge", (1 << 30) - 1, ChunkSizes{largeMin, largeNormal, largeMax}},
+		{"at huge boundary", 1 << 30, ChunkSizes{hugeMin, hugeNormal, hugeMax}},
+		{"far past huge", 64 << 30, ChunkSizes{hugeMin, hugeNormal, hugeMax}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ch := sel.ChunkerFor(tc.size)
+			if ch.Min != tc.want.Min || ch.Normal != tc.want.Normal || ch.Max != tc.want.Max {
+				t.Fatalf("size %d -> %d/%d/%d, want %d/%d/%d",
+					tc.size, ch.Min, ch.Normal, ch.Max, tc.want.Min, tc.want.Normal, tc.want.Max)
+			}
+		})
+	}
+}
+
+// A pinned profile ignores file size; the default config scales; a bad profile errors.
+func TestConfigChunkSelectorPinnedVsScaled(t *testing.T) {
+	scaled, err := Config{}.ChunkSelector()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scaled.ChunkerFor(0).Normal == scaled.ChunkerFor(1<<30).Normal {
+		t.Fatal("default config must scale the chunker with file size")
+	}
+
+	pinned, err := Config{ChunkProfile: "large"}.ChunkSelector()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.ChunkerFor(0).Normal != largeNormal || pinned.ChunkerFor(1<<30).Normal != largeNormal {
+		t.Fatal("a named profile must pin one granularity for every size")
+	}
+
+	explicit, err := Config{Chunk: &ChunkSizes{Min: 1, Normal: 2, Max: 3}}.ChunkSelector()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explicit.ChunkerFor(9<<20).Normal != 2 {
+		t.Fatal("an explicit chunk block must pin its sizes regardless of file size")
+	}
+
+	if _, err := (Config{ChunkProfile: "gigantic"}).ChunkSelector(); err == nil {
+		t.Fatal("an unknown profile must error")
 	}
 }
 

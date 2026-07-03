@@ -66,6 +66,17 @@ func NewChunker(min, normal, max int) *Chunker {
 // DefaultChunker returns a chunker with the package default sizes.
 func DefaultChunker() *Chunker { return NewChunker(defaultMin, defaultNormal, defaultMax) }
 
+// ChunkSelector picks the chunking granularity for a file from its size. A single
+// *Chunker satisfies it (size-independent), so callers that want one fixed
+// granularity pass a Chunker directly; Config builds a size-scaling selector so a
+// large file is cut into coarse chunks while small files keep the fine default.
+type ChunkSelector interface {
+	ChunkerFor(size int64) *Chunker
+}
+
+// ChunkerFor lets a fixed Chunker stand in wherever a ChunkSelector is expected.
+func (c *Chunker) ChunkerFor(int64) *Chunker { return c }
+
 func lowMask(bits uint) uint64 { return (uint64(1) << bits) - 1 }
 
 // Split cuts data into content-defined chunks covering it in order.

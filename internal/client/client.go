@@ -25,6 +25,10 @@ var ErrNotFound = errors.New("not found")
 // resource moved under them) and retry against the new state.
 var ErrConflict = errors.New("conflict")
 
+// ErrQuotaExceeded maps a 507 so callers can surface "storage quota exceeded"
+// distinctly from a generic server error.
+var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the server operator to raise the quota")
+
 type Client struct {
 	baseURL string
 	token   string
@@ -140,16 +144,41 @@ func (c *Client) ChangePassphrase(req api.PassphraseChangeRequest) (api.AuthResp
 	return r, err
 }
 
+// PutResource uploads a resource as a raw envelope (JSON header + ciphertext),
+// so the blob never pays the base64-in-JSON tax.
 func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceResponse, error) {
 	var r api.PutResourceResponse
-	err := c.do(http.MethodPut, "/v1/resources", req, &r)
+	body, err := api.EncodeResourceUpload(req)
+	if err != nil {
+		return r, err
+	}
+	err = c.doRaw(http.MethodPut, "/v1/resources", body, &r)
 	return r, err
 }
 
+// GetResource fetches a resource; the response is the raw envelope, decoded
+// straight off the body.
 func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
-	var r api.GetResourceResponse
-	err := c.do(http.MethodGet, "/v1/resources/"+url.PathEscape(id), nil, &r)
-	return r, err
+	path := "/v1/resources/" + url.PathEscape(id)
+	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	if err != nil {
+		return api.GetResourceResponse{}, err
+	}
+	// Opt into the raw envelope; without this the server answers legacy JSON.
+	req.Header.Set("Accept", "application/octet-stream")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return api.GetResourceResponse{}, fmt.Errorf("request GET %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		data, _ := io.ReadAll(resp.Body)
+		return api.GetResourceResponse{}, statusError(resp.StatusCode, path, data)
+	}
+	return api.DecodeResourceDownload(resp.Body)
 }
 
 // SetVisibility flips a resource public/private without re-uploading its blob.
@@ -287,6 +316,33 @@ func (c *Client) putRaw(path string, body []byte) error {
 	return statusError(resp.StatusCode, path, data)
 }
 
+// doRaw sends body as application/octet-stream (the raw resource/pack envelope)
+// and decodes a JSON response into out, mapping non-2xx the same way do() does.
+// Unlike putRaw it carries a status/response body back to the caller.
+func (c *Client) doRaw(method, path string, body []byte, out any) error {
+	req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if c.token != "" {
+		req.Header.Set("Authorization", "Bearer "+c.token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("request %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(resp.Body)
+	if err := statusError(resp.StatusCode, path, data); err != nil {
+		return err
+	}
+	if out != nil && len(data) > 0 {
+		return json.Unmarshal(data, out)
+	}
+	return nil
+}
+
 // getRange downloads [off, off+length) of an opaque body via a Range request and
 // returns exactly that window. The server normally answers 206 with just the range,
 // but 200 with the whole body is a valid response to a Range request; in that case the
@@ -332,6 +388,8 @@ func statusError(status int, path string, body []byte) error {
 		return ErrNotFound
 	case status == http.StatusConflict:
 		return ErrConflict
+	case status == http.StatusInsufficientStorage:
+		return ErrQuotaExceeded
 	case status < 200 || status >= 300:
 		var e api.ErrorResponse
 		if json.Unmarshal(body, &e) == nil && e.Error != "" {

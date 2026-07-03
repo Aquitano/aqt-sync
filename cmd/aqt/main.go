@@ -66,7 +66,8 @@ func exitCode(err error) int {
 		return 0
 	case errors.Is(err, identity.ErrNoProfile), errors.Is(err, errSessionRequired):
 		return 3
-	case errors.Is(err, errConflictsRemain), errors.Is(err, errSyncRace), errors.Is(err, client.ErrConflict):
+	case errors.Is(err, errConflictsRemain), errors.Is(err, errSyncRace), errors.Is(err, client.ErrConflict),
+		errors.Is(err, errRollback):
 		return 4
 	case isNetworkError(err):
 		return 5

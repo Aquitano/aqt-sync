@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -37,10 +38,10 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	// >50% dead and RepackOwner rewrites it. packC is the object the resource moves to.
 	packA, dataA, idsA := packOf("snapshot target", strings.Repeat("x", 8192))
 	packC, dataC, idsC := packOf("post-supersede object")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PutPack(owner, packC, dataC); err != nil {
+	if _, err := s.PutPack(owner, packC, dataC, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -100,7 +101,7 @@ func TestSnapshotSurvivesResourceDelete(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "del@example.com")
 	packA, dataA, idsA := packOf("kept by snapshot")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -134,7 +135,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto@example.com")
 	packA, dataA, idsA := packOf("v1 object")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -147,7 +148,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	}
 
 	packB, dataB, idsB := packOf("v2 object")
-	if _, err := s.PutPack(owner, packB, dataB); err != nil {
+	if _, err := s.PutPack(owner, packB, dataB, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.supersede(t, owner, rid, []string{idsB[0]})
@@ -156,7 +157,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	}
 
 	packD, dataD, idsD := packOf("v3 object")
-	if _, err := s.PutPack(owner, packD, dataD); err != nil {
+	if _, err := s.PutPack(owner, packD, dataD, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.supersede(t, owner, rid, []string{idsD[0]})
@@ -176,12 +177,76 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	}
 }
 
+// PruneAutoSnapshots is the retention cap that keeps the scheduled job's storage
+// bounded: it drops scheduled snapshots beyond the newest keepLast per resource and
+// never touches a manual one, so a user's explicit snapshots are safe while automatic
+// ones converge.
+func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "retain@example.com")
+	pack, data, ids := packOf("v1 object")
+	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	rid := s.rootResource(t, owner, []string{ids[0]})
+
+	// A manual snapshot at v1 that retention must never touch.
+	manual, err := s.CreateSnapshot(owner, rid, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Four scheduled snapshots, one per new version.
+	for i := 2; i <= 5; i++ {
+		p, d, id := packOf(fmt.Sprintf("v%d object", i))
+		if _, err := s.PutPack(owner, p, d, 0); err != nil {
+			t.Fatal(err)
+		}
+		s.supersede(t, owner, rid, []string{id[0]})
+		if n, err := s.RunAutoSnapshots(); err != nil || n != 1 {
+			t.Fatalf("scheduled snapshot v%d: n=%d err=%v, want 1", i, n, err)
+		}
+	}
+	if all, _ := s.ListSnapshots(owner, rid); len(all) != 5 {
+		t.Fatalf("setup: %d snapshots, want 5 (1 manual + 4 scheduled)", len(all))
+	}
+
+	// keepLast <= 0 disables retention.
+	if n, err := s.PruneAutoSnapshots(0); err != nil || n != 0 {
+		t.Fatalf("prune(0): n=%d err=%v, want 0", n, err)
+	}
+
+	// Keep the newest 2 scheduled; the other 2 scheduled go, the manual stays.
+	n, err := s.PruneAutoSnapshots(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Fatalf("pruned %d, want 2 (4 scheduled minus keep-2)", n)
+	}
+	all, err := s.ListSnapshots(owner, rid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("remaining %d, want 3 (2 scheduled + 1 manual)", len(all))
+	}
+	if _, err := s.GetSnapshot(owner, manual.ID); err != nil {
+		t.Fatalf("retention deleted the manual snapshot: %v", err)
+	}
+
+	// Within the cap now, a second prune removes nothing.
+	if n, err := s.PruneAutoSnapshots(2); err != nil || n != 0 {
+		t.Fatalf("prune(2) again: n=%d err=%v, want 0", n, err)
+	}
+}
+
 func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "a@example.com")
 	other := s.mustAccount(t, "b@example.com")
 	packA, dataA, idsA := packOf("obj")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -226,7 +291,7 @@ func TestSnapshotLabelRoundTrip(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "label@example.com")
 	packA, dataA, idsA := packOf("obj")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -286,7 +351,7 @@ func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto-list@example.com")
 	packA, dataA, idsA := packOf("obj")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})

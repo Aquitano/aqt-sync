@@ -42,12 +42,24 @@ type TreeChild struct {
 	// Hash drives change detection and equality, exactly like Entry.Hash: a file's
 	// plaintext sha256, a symlink's domain-separated target hash, or for a directory
 	// the child node's content address (== the subtree Merkle hash).
-	Hash   string         `json:"hash,omitempty"`
-	Link   string         `json:"link,omitempty"`   // symlink target
-	Inline []byte         `json:"inline,omitempty"` // file bytes when Size <= chunker.Min
-	Chunks []crypto.Chunk `json:"chunks,omitempty"` // file content objects when larger
-	Node   *crypto.Chunk  `json:"node,omitempty"`   // dir: the child node object to fetch+open; Node.ID == Hash
+	Hash      string         `json:"hash,omitempty"`
+	Link      string         `json:"link,omitempty"`      // symlink target
+	Inline    []byte         `json:"inline,omitempty"`    // file bytes when Size <= chunker.Min
+	InlineAlg string         `json:"inlineAlg,omitempty"` // compression of Inline; empty = raw
+	Chunks    []crypto.Chunk `json:"chunks,omitempty"`    // file content objects when larger
+	// ChunksRef replaces Chunks for a file whose chunk list is too large to inline:
+	// the sealed chunk-list segments that recover it (see chunklist.go). Absent on
+	// nodes written before indirection existed, so old nodes still open.
+	ChunksRef []crypto.Chunk `json:"chunksRef,omitempty"`
+	Node      *crypto.Chunk  `json:"node,omitempty"` // dir: the child node object to fetch+open; Node.ID == Hash
 }
+
+// MaxNodeBytes caps one directory node's serialized size. A node seals to a single
+// object that must fit one pack (the server caps pack bodies at 32 MiB), and the
+// uploader may batch it with up to a pack target of other objects; 24 MiB leaves
+// that headroom. With chunk lists indirected, only a directory with an enormous
+// number of direct children can hit this.
+const MaxNodeBytes = 24 << 20
 
 // TreeNode is a directory: its children, name-sorted. One node seals to exactly one
 // convergent object whose id is the subtree Merkle hash.
@@ -154,7 +166,7 @@ func (s *sealer) refList() []string {
 	return out
 }
 
-func (s *sealer) sealNode(d *dirBuild) (crypto.Chunk, error) {
+func (s *sealer) sealNode(d *dirBuild, path string) (crypto.Chunk, error) {
 	children := make([]TreeChild, 0, len(d.files)+len(d.subdirs))
 	for name, e := range d.files {
 		tc := TreeChild{Name: name, Mode: e.Mode, Size: e.Size, Hash: e.Hash}
@@ -163,19 +175,33 @@ func (s *sealer) sealNode(d *dirBuild) (crypto.Chunk, error) {
 			tc.Link = e.Link
 		} else {
 			tc.Type = ChildFile
-			if len(e.Chunks) > 0 {
+			switch {
+			case len(e.Chunks) > chunkListInlineMax:
+				refs, err := sealChunkList(e.Chunks, s.conv, s.sink)
+				if err != nil {
+					return crypto.Chunk{}, err
+				}
+				tc.ChunksRef = refs
+				for _, seg := range refs {
+					s.addRef(seg.ID)
+				}
+				for _, ch := range e.Chunks {
+					s.addRef(ch.ID)
+				}
+			case len(e.Chunks) > 0:
 				tc.Chunks = e.Chunks
 				for _, ch := range e.Chunks {
 					s.addRef(ch.ID)
 				}
-			} else {
+			default:
 				tc.Inline = e.Inline
+				tc.InlineAlg = e.InlineAlg
 			}
 		}
 		children = append(children, tc)
 	}
 	for name, sub := range d.subdirs {
-		ch, err := s.sealNode(sub)
+		ch, err := s.sealNode(sub, joinChild(path, name))
 		if err != nil {
 			return crypto.Chunk{}, err
 		}
@@ -188,6 +214,13 @@ func (s *sealer) sealNode(d *dirBuild) (crypto.Chunk, error) {
 	b, err := json.Marshal(n)
 	if err != nil {
 		return crypto.Chunk{}, err
+	}
+	if len(b) > MaxNodeBytes {
+		if path == "" {
+			path = "."
+		}
+		return crypto.Chunk{}, fmt.Errorf("directory %q has too much metadata to sync (%d bytes, limit %d): it has too many direct children; split it into subdirectories",
+			path, len(b), MaxNodeBytes)
 	}
 	ct, ch, err := crypto.SealNode(b, s.conv)
 	if err != nil {
@@ -209,7 +242,7 @@ func SealTree(m Manifest, conv crypto.ConvergenceKey, sink ChunkSink) (TreeRoot,
 		sink = nopSink{}
 	}
 	s := &sealer{conv: conv, sink: sink, refs: map[string]struct{}{}}
-	root, err := s.sealNode(buildDirTree(m))
+	root, err := s.sealNode(buildDirTree(m), "")
 	if err != nil {
 		return TreeRoot{}, nil, err
 	}
@@ -265,11 +298,21 @@ func walkTree(node crypto.Chunk, prefix string, fetch func(id string) ([]byte, e
 	if err := json.Unmarshal(plain, &n); err != nil {
 		return err
 	}
+	if n.Version > TreeManifestVersion {
+		return fmt.Errorf("tree node %s has version %d, newer than this client supports (%d); upgrade aqt", node.ID, n.Version, TreeManifestVersion)
+	}
 	for _, c := range n.Children {
 		path := joinChild(prefix, c.Name)
 		switch c.Type {
 		case ChildFile:
-			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, Chunks: c.Chunks})
+			chunks := c.Chunks
+			if len(c.ChunksRef) > 0 {
+				chunks, err = openChunkList(c.ChunksRef, fetch)
+				if err != nil {
+					return fmt.Errorf("file %q: %w", path, err)
+				}
+			}
+			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, InlineAlg: c.InlineAlg, Chunks: chunks})
 		case ChildSymlink:
 			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Link: c.Link})
 		case ChildDir:

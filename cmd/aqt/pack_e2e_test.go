@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -262,6 +265,113 @@ func TestPartitionDeletesByDownload(t *testing.T) {
 			t.Errorf("unexpected late delete %q", p)
 		}
 	}
+}
+
+// TestPackPullSparesFileCreatedDuringPull covers the 1.4 prune guard: a file that
+// appears after the pull's scan (modeled here by a scan taken before it is created) is
+// a local add for the next sync, not this version's garbage, so the prune must leave
+// it. The same pull still applies the remote edit and prunes a file the remote genuinely
+// dropped. Driving pullPack directly with a stale scan makes the download-window race
+// deterministic.
+func TestPackPullSparesFileCreatedDuringPull(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "A")
+	writeTree(t, origin, "stale.txt", "S")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	// Origin edits a.txt and drops stale.txt; the remote is now {a.txt: "A2"}.
+	writeTree(t, origin, "a.txt", "A2")
+	removeTree(t, origin, "stale.txt")
+	h.sync(origin)
+
+	// Scan the replica as it stood before the pull, then create a local-only file after
+	// that scan: exactly a file landing during the download window.
+	localScan, err := syncengine.Scan(replica)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, replica, "created-during-pull.txt", "local-only")
+
+	c, res, ck := replicaPullCtx(t, replica, localScan)
+	defer ck.Wipe()
+	if err := pullPack(c, res, ck); err != nil {
+		t.Fatalf("pullPack: %v", err)
+	}
+
+	if got := readTree(t, replica, "a.txt"); got != "A2" {
+		t.Fatalf("a.txt = %q, want the pulled edit A2", got)
+	}
+	assertAbsent(t, replica, "stale.txt") // remote genuinely dropped it
+	if got := readTree(t, replica, "created-during-pull.txt"); got != "local-only" {
+		t.Fatalf("prune deleted a file created during the pull: %q", got)
+	}
+}
+
+// TestPackPullKeepsDriftedLocalEdit covers the 1.4 extract guard: a file edited after
+// the pull's scan keeps its local bytes instead of being clobbered by the incoming
+// tree, and the pull reports a conflict rather than silently overwriting.
+func TestPackPullKeepsDriftedLocalEdit(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "A")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "a.txt", "A2")
+	h.sync(origin)
+
+	// Scan before an edit that lands during the download window.
+	localScan, err := syncengine.Scan(replica)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, replica, "a.txt", "local edit mid-pull")
+
+	c, res, ck := replicaPullCtx(t, replica, localScan)
+	defer ck.Wipe()
+	if err := pullPack(c, res, ck); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("drift during pull: want errConflictsRemain, got %v", err)
+	}
+	if got := readTree(t, replica, "a.txt"); got != "local edit mid-pull" {
+		t.Fatalf("drift guard clobbered the local edit: %q", got)
+	}
+}
+
+// replicaPullCtx assembles the packCtx/resource/key a direct pullPack needs, letting a
+// test supply a deliberately stale scan as c.local to reproduce a mid-pull race.
+func replicaPullCtx(t *testing.T, dir string, local syncengine.Manifest) (packCtx, api.GetResourceResponse, crypto.ContentKey) {
+	t.Helper()
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, ok := identity.LoadSession(prof.Name)
+	if !ok {
+		t.Fatal("no cached session")
+	}
+	st, err := loadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := cl.GetResource(st.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return packCtx{root: dir, cl: cl, st: st, local: local, mk: mk, push: &packPushArtifacts{}}, res, ck
 }
 
 func writePackConfig(t *testing.T, root string) {

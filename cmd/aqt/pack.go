@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -99,6 +100,19 @@ func reconcilePack(c packCtx) error {
 			"remove pack=true, or re-init a fresh folder to use pack-and-seal")
 	}
 
+	// Freshness guard, mirroring the chunked path: a rolled-back server must not be
+	// read as "remote changed" (decidePack would pull the old tree over newer local
+	// files). An accepted rollback discards the base for this pass — the baseless
+	// reconcile compares the actual trees and conflicts instead of clobbering.
+	if c.st.RemoteVersion > 0 && res.Version < c.st.RemoteVersion {
+		if !c.opts.acceptRollback {
+			return rollbackErr(res.Version, c.st.RemoteVersion)
+		}
+		fmt.Fprintf(os.Stderr, "accepting server rollback (version %d, previously %d); reconciling from scratch\n",
+			res.Version, c.st.RemoteVersion)
+		return reconcilePackNoBase(c, res, ck)
+	}
+
 	if !c.baseExists {
 		return reconcilePackNoBase(c, res, ck)
 	}
@@ -120,6 +134,7 @@ func reconcilePack(c packCtx) error {
 		fmt.Fprintln(os.Stderr, "conflict: the folder changed on both sides since the last sync")
 		return errConflictsRemain
 	default:
+		recordRemoteVersion(c.root, res.Version)
 		fmt.Println("already in sync")
 		return nil
 	}
@@ -242,7 +257,11 @@ func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.Conte
 		fmt.Fprintln(os.Stderr, "conflict: local and remote differ and there is no base to reconcile against")
 		return errConflictsRemain
 	default:
-		return savePackBase(c.root, c.local, res.Version)
+		if err := savePackBase(c.root, c.local, res.Version); err != nil {
+			return err
+		}
+		recordRemoteVersion(c.root, res.Version)
+		return nil
 	}
 }
 
@@ -273,19 +292,21 @@ func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 	if err := savePackBase(c.root, c.push.shipped, resp.Version); err != nil {
 		return err
 	}
+	recordRemoteVersion(c.root, resp.Version)
 	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(c.push.shipped.Entries))
 	return nil
 }
 
 // extractPack range-fetches a pack-and-seal tree's segments and untars it under dir,
 // returning the manifest of what it wrote. Shared by clone, pull, and reconcile so the
-// fetch+extract wiring lives in one place.
-func extractPack(cl *client.Client, dir string, root syncengine.PackRoot, ck crypto.ContentKey) (syncengine.Manifest, error) {
+// fetch+extract wiring lives in one place. safe, when non-nil, vetoes individual
+// entries just before they land (see ExtractToTree); clone passes nil.
+func extractPack(cl *client.Client, dir string, root syncengine.PackRoot, ck crypto.ContentKey, safe func(path string) (bool, error)) (syncengine.Manifest, error) {
 	src, err := newPackSource(cl, root.SegmentIDs())
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	return syncengine.ExtractToTree(dir, root, ck, src.get)
+	return syncengine.ExtractToTree(dir, root, ck, src.get, safe)
 }
 
 // pullPack replaces the working tree with the remote one. It opens the root; callers
@@ -299,9 +320,30 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 }
 
 // pullPackFromRoot untars the remote tree over the working tree, then removes local
-// files the new tree no longer contains.
+// files the new tree no longer contains. Both steps re-verify their target against
+// the scan first: an edit landing after the scan (the window is the whole download)
+// keeps its local bytes and is reported as a conflict instead of being clobbered.
+// The saved base still records the remote entry, so the next sync sees the kept
+// edit as a pending local change and pack-mode last-writer-wins resolves it.
 func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey, root syncengine.PackRoot) error {
-	remote, err := extractPack(c.cl, c.root, root, ck)
+	localByPath := c.local.ByPath()
+	var conflicts []string
+	safe := func(path string) (bool, error) {
+		h, exists, isDir, err := syncengine.HashOnDisk(c.root, path)
+		if err != nil {
+			return false, err
+		}
+		if !exists || isDir {
+			// Nothing to destroy, or a dir->file replacement the treeWriter handles.
+			return true, nil
+		}
+		if prev, ok := localByPath[path]; ok && h == prev.Hash {
+			return true, nil // unchanged since the scan
+		}
+		conflicts = append(conflicts, path)
+		return false, nil
+	}
+	remote, err := extractPack(c.cl, c.root, root, ck, safe)
 	if err != nil {
 		// A located-but-missing segment means a concurrent push superseded this
 		// version and GC reaped it; re-reconcile against the current version.
@@ -310,26 +352,46 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 		}
 		return err
 	}
-	// Prune whatever the remote no longer carries, listing the tree as it is now: a
-	// prior pull that aborted mid-stream can have left files in neither c.local nor the
-	// new remote, and those must go too so the tree ends equal to the remote. Only the
-	// paths are needed, so this is a hash-free walk.
+	// Prune whatever the remote no longer carries, but only paths the scan saw: a
+	// file created while the pull ran is a local add for the next sync, not this
+	// version's garbage. Leftovers from a prior aborted pull are in the scan, so
+	// their cleanup is preserved. A scanned path whose content drifted since is a
+	// conflict, same as the extract guard above.
 	postPull, err := syncengine.ListPaths(c.root)
 	if err != nil {
 		return err
 	}
 	remoteByPath := remote.ByPath()
 	for _, p := range postPull {
-		if _, ok := remoteByPath[p]; !ok {
-			if err := syncengine.RemoveFile(c.root, p); err != nil {
-				return err
-			}
+		if _, ok := remoteByPath[p]; ok {
+			continue
+		}
+		le, ok := localByPath[p]
+		if !ok {
+			continue // created during the pull
+		}
+		h, exists, isDir, err := syncengine.HashOnDisk(c.root, p)
+		if err != nil {
+			return err
+		}
+		if exists && (isDir || h != le.Hash) {
+			conflicts = append(conflicts, p)
+			continue
+		}
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return err
 		}
 	}
 	if err := savePackBase(c.root, remote, res.Version); err != nil {
 		return err
 	}
+	recordRemoteVersion(c.root, res.Version)
 	fmt.Printf("synced: pulled %d files (pack-and-seal)\n", len(remote.Entries))
+	if len(conflicts) > 0 {
+		sort.Strings(conflicts)
+		printPaths("conflict", conflicts)
+		return errConflictsRemain
+	}
 	return nil
 }
 
