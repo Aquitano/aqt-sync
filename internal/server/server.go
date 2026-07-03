@@ -167,7 +167,7 @@ func (s *Server) Router() *gin.Engine {
 		// decrypt key lives only in the caller's URL fragment.
 		v1.GET("/resources/:id", s.getResource)
 
-// gzipJSON rides the authed group: it compresses the hex-id JSON of
+		// gzipJSON rides the authed group: it compresses the hex-id JSON of
 		// check/locate/list, and its Content-Type guard leaves the raw pack/blob
 		// bodies (octet-stream) uncompressed. The public GET /resources/:id sits
 		// outside this group, so a raw blob download is never buffered for gzip.
