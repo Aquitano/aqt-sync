@@ -25,6 +25,10 @@ var ErrNotFound = errors.New("not found")
 // resource moved under them) and retry against the new state.
 var ErrConflict = errors.New("conflict")
 
+// ErrQuotaExceeded maps a 507 so callers can surface "storage quota exceeded"
+// distinctly from a generic server error.
+var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the server operator to raise the quota")
+
 type Client struct {
 	baseURL string
 	token   string
@@ -384,6 +388,8 @@ func statusError(status int, path string, body []byte) error {
 		return ErrNotFound
 	case status == http.StatusConflict:
 		return ErrConflict
+	case status == http.StatusInsufficientStorage:
+		return ErrQuotaExceeded
 	case status < 200 || status >= 300:
 		var e api.ErrorResponse
 		if json.Unmarshal(body, &e) == nil && e.Error != "" {

@@ -39,6 +39,14 @@ var ErrVersionConflict = errors.New("version conflict")
 // GC, so the store refuses it rather than lose data.
 var ErrDropsRoots = errors.New("replace drops all chunk roots")
 
+// ErrQuotaExceeded is returned when storing a pack would push an owner's stored bytes
+// past the configured quota. Handlers map it to 507; the client surfaces it clearly.
+var ErrQuotaExceeded = errors.New("storage quota exceeded")
+
+// ErrDeviceLimit is returned when attaching a device would exceed an account's
+// configured device cap. Handlers map it to 403.
+var ErrDeviceLimit = errors.New("device limit reached")
+
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs and packs on the filesystem. It holds no plaintext and no live
 // keys.
@@ -214,6 +222,13 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// only those and never a user's manual snapshot. Pre-existing rows cannot be
 	// classified and stay manual (never auto-pruned).
 	`ALTER TABLE snapshots ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;`,
+	// 7: per-owner stored-pack-byte counter for quota enforcement. Maintained
+	// incrementally in the pack put/GC/repack transactions so a quota check never
+	// scans the objects table; backfilled from the current pack sizes so an existing
+	// data dir starts accurate.
+	`ALTER TABLE accounts ADD COLUMN pack_bytes INTEGER NOT NULL DEFAULT 0;
+	 UPDATE accounts SET pack_bytes = COALESCE(
+	     (SELECT SUM(length) FROM packs WHERE packs.owner_handle = accounts.owner_handle), 0);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -508,18 +523,64 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 
 // CreateDevice issues a device token tagged with the account's current auth epoch.
 // It returns the plaintext token once; only its hash is stored.
-func (s *Store) CreateDevice(ownerHandle, name string, epoch int) (deviceID, token string, err error) {
+// CreateDevice issues a device token tagged with the account's current auth epoch.
+// maxDevices > 0 caps the account's device count: the count and the insert run in one
+// transaction, so a signup's first device and a concurrent attach cannot both slip
+// past the cap. Returns ErrDeviceLimit when the cap is already reached.
+func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (deviceID, token string, err error) {
 	deviceID = newID(10)
 	token = newID(32)
 	h := sha256.Sum256([]byte(token))
-	_, err = s.db.Exec(
-		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
-		deviceID, ownerHandle, name, h[:], epoch,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return "", "", err
 	}
+	if maxDevices > 0 {
+		var count int
+		if err := tx.QueryRow(`SELECT count(*) FROM devices WHERE owner_handle = ?`, ownerHandle).Scan(&count); err != nil {
+			tx.Rollback()
+			return "", "", err
+		}
+		if count >= maxDevices {
+			tx.Rollback()
+			return "", "", ErrDeviceLimit
+		}
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
+		deviceID, ownerHandle, name, h[:], epoch,
+	); err != nil {
+		tx.Rollback()
+		return "", "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
 	return deviceID, token, nil
+}
+
+// OwnerPackBytes returns the owner's current stored-pack-byte total: the quota
+// counter, maintained incrementally in the pack put/GC/repack transactions, so this
+// is a single indexed read rather than a scan of the objects table.
+func (s *Store) OwnerPackBytes(owner string) (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT pack_bytes FROM accounts WHERE owner_handle = ?`, owner).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
+// addOwnerPackBytes adjusts the owner's stored-byte counter by delta (may be
+// negative) inside the caller's transaction, so the counter moves atomically with the
+// pack rows it accounts for. It floors at zero as a backstop against a counter
+// drifting negative.
+func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
+	_, err := tx.Exec(
+		`UPDATE accounts SET pack_bytes = MAX(0, pack_bytes + ?) WHERE owner_handle = ?`,
+		delta, owner,
+	)
+	return err
 }
 
 // OwnerByToken resolves a bearer token to its owning account handle, but only while
@@ -1398,7 +1459,13 @@ func placeholders(n int) string {
 // object already stored (in this or another pack, by content address) is left where
 // it is — dedup keys on chunk_id, so a second home is just harmless dead space.
 // Returns how many objects were newly stored.
-func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
+// PutPack verifies and stores one raw pack, returning how many of its objects were
+// newly stored. quotaBytes > 0 caps the owner's total stored pack bytes: a new pack
+// that would push the owner past it is rejected with ErrQuotaExceeded (a re-PUT of an
+// already-stored pack is idempotent and never counted twice). The byte counter is
+// adjusted in the same transaction that inserts the pack row, so it can never drift
+// from the rows it accounts for.
+func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (int, error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
 		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
@@ -1420,6 +1487,22 @@ func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
 		}
 	}
 
+	// Cheap early reject so an over-quota upload does not write a pack file it will
+	// discard. The authoritative check runs inside the transaction below.
+	if quotaBytes > 0 {
+		if existed, err := s.packExists(owner, packID); err != nil {
+			return 0, err
+		} else if !existed {
+			used, err := s.OwnerPackBytes(owner)
+			if err != nil {
+				return 0, err
+			}
+			if used+int64(len(data)) > quotaBytes {
+				return 0, ErrQuotaExceeded
+			}
+		}
+	}
+
 	if err := s.writePack(owner, packID, data); err != nil {
 		return 0, err
 	}
@@ -1428,13 +1511,43 @@ func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
 		return 0, err
 	}
 	now := time.Now().Unix()
-	if _, err := tx.Exec(
+	// DO NOTHING (not DO UPDATE) so RowsAffected distinguishes a first store from a
+	// re-PUT: only a first store counts against the quota and re-arms nothing here.
+	res, err := tx.Exec(
 		`INSERT INTO packs(owner_handle, pack_id, length, created_at) VALUES(?,?,?,?)
-		 ON CONFLICT(owner_handle, pack_id) DO UPDATE SET created_at = excluded.created_at`,
+		 ON CONFLICT(owner_handle, pack_id) DO NOTHING`,
 		owner, packID, len(data), now,
-	); err != nil {
+	)
+	if err != nil {
 		tx.Rollback()
 		return 0, err
+	}
+	if inserted, _ := res.RowsAffected(); inserted == 0 {
+		// The pack already exists; re-arm its GC age guard so a concurrent read of it
+		// is not reaped, exactly as the prior DO UPDATE did.
+		if _, err := tx.Exec(
+			`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`, now, owner, packID,
+		); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	} else {
+		if quotaBytes > 0 {
+			var used int64
+			if err := tx.QueryRow(`SELECT pack_bytes FROM accounts WHERE owner_handle = ?`, owner).Scan(&used); err != nil {
+				tx.Rollback()
+				return 0, err
+			}
+			if used+int64(len(data)) > quotaBytes {
+				tx.Rollback()
+				_ = os.Remove(s.packPath(owner, packID))
+				return 0, ErrQuotaExceeded
+			}
+		}
+		if err := addOwnerPackBytes(tx, owner, int64(len(data))); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
 	}
 	stored, err := insertObjects(tx, owner, packID, index)
 	if err != nil {
@@ -1731,6 +1844,12 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 			return 0, 0, err
 		}
 		freed += d.length
+	}
+	if freed > 0 {
+		if err := addOwnerPackBytes(tx, owner, -freed); err != nil {
+			tx.Rollback()
+			return 0, 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
@@ -2041,6 +2160,12 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 		return false, 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	// The swap added newLen and dropped curLen; keep the byte counter in step within
+	// the same transaction.
+	if err := addOwnerPackBytes(tx, owner, int64(newLen)-curLen); err != nil {
 		tx.Rollback()
 		return false, 0, err
 	}

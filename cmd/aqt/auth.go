@@ -17,19 +17,21 @@ import (
 
 func loginCmd() *cobra.Command {
 	var (
-		email string
-		ttl   time.Duration
-		kc    kdfChoice
+		email  string
+		ttl    time.Duration
+		invite string
+		kc     kdfChoice
 	)
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Create an account or attach this device, caching the unlocked key",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLogin(email, ttl, kc)
+			return runLogin(email, firstNonEmpty(invite, os.Getenv("AQT_INVITE_TOKEN")), ttl, kc)
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "account email")
 	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until logout)")
+	cmd.Flags().StringVar(&invite, "invite", "", "invite token, if the server requires one to register (or set AQT_INVITE_TOKEN)")
 	addKdfFlags(cmd, &kc) // only consulted when this login creates a new account
 	return cmd
 }
@@ -66,7 +68,7 @@ func (k kdfChoice) resolve() (crypto.KdfParams, error) {
 // for the email or the passphrase is wrong.
 var errNoUnlock = errors.New("could not unlock: no account exists for this email, or the passphrase is wrong")
 
-func runLogin(email string, ttl time.Duration, kc kdfChoice) error {
+func runLogin(email, invite string, ttl time.Duration, kc kdfChoice) error {
 	if email == "" {
 		entered, err := promptLine("email: ")
 		if err != nil {
@@ -100,7 +102,7 @@ func runLogin(email string, ttl time.Duration, kc kdfChoice) error {
 		// The wrapped root did not open: no account, or wrong passphrase. Offer to
 		// create an account with this passphrase (a real account would 409).
 		uk.Wipe()
-		return confirmAndCreate(cl, server, email, pass, ttl, kc)
+		return confirmAndCreate(cl, server, email, pass, invite, ttl, kc)
 	}
 	defer rk.Wipe()
 	defer uk.Wipe()
@@ -159,7 +161,7 @@ func revokeOtherDevices() error {
 // passphrase becomes the account passphrase with no recovery path, so on a terminal
 // we confirm it and warn explicitly; without a terminal we proceed (a scripted
 // signup), relying on the server's 409 to catch "account already exists".
-func confirmAndCreate(cl *client.Client, server, email, pass string, ttl time.Duration, kc kdfChoice) error {
+func confirmAndCreate(cl *client.Client, server, email, pass, invite string, ttl time.Duration, kc kdfChoice) error {
 	if interactiveStdin() {
 		create, err := promptYesNo(fmt.Sprintf("No account unlocked for %s. Create a new one? (cannot be reset) [y/N] ", email), false)
 		if err != nil {
@@ -176,14 +178,14 @@ func confirmAndCreate(cl *client.Client, server, email, pass string, ttl time.Du
 			return errors.New("passphrases do not match")
 		}
 	}
-	return createAccount(cl, server, email, pass, ttl, kc)
+	return createAccount(cl, server, email, pass, invite, ttl, kc)
 }
 
 // createAccount mints a random root key, wraps it under the passphrase-derived
 // unlock key, and registers the account with the wrapped root, the verifier, and the
 // signing public key. The root key never leaves this machine; the passphrase change
 // later re-wraps it without touching any data.
-func createAccount(cl *client.Client, server, email, pass string, ttl time.Duration, kc kdfChoice) error {
+func createAccount(cl *client.Client, server, email, pass, invite string, ttl time.Duration, kc kdfChoice) error {
 	fmt.Fprintln(os.Stderr, "Your passphrase wraps your encryption key. We never see it and it CANNOT be reset.")
 
 	kdf, err := kc.resolve()
@@ -212,6 +214,7 @@ func createAccount(cl *client.Client, server, email, pass string, ttl time.Durat
 		WrappedRoot:  wrappedRoot,
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   deviceName(),
+		InviteToken:  invite,
 	})
 	if errors.Is(err, client.ErrConflict) {
 		return errors.New("an account already exists for this email; the passphrase was incorrect")

@@ -55,6 +55,9 @@ type CreateAccountRequest struct {
 	WrappedRoot  crypto.SealedBlob `json:"wrappedRoot"`
 	AuthVerifier []byte            `json:"authVerifier"`
 	DeviceName   string            `json:"deviceName"`
+	// InviteToken is required only when the server runs in invite-registration mode;
+	// open servers ignore it. It is a server-issued shared secret, not key material.
+	InviteToken string `json:"inviteToken,omitempty"`
 }
 
 // ChallengeRequest asks the server for a fresh nonce to sign when attaching a

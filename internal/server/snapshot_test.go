@@ -38,10 +38,10 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	// >50% dead and RepackOwner rewrites it. packC is the object the resource moves to.
 	packA, dataA, idsA := packOf("snapshot target", strings.Repeat("x", 8192))
 	packC, dataC, idsC := packOf("post-supersede object")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.PutPack(owner, packC, dataC); err != nil {
+	if _, err := s.PutPack(owner, packC, dataC, 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -101,7 +101,7 @@ func TestSnapshotSurvivesResourceDelete(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "del@example.com")
 	packA, dataA, idsA := packOf("kept by snapshot")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -135,7 +135,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto@example.com")
 	packA, dataA, idsA := packOf("v1 object")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -148,7 +148,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	}
 
 	packB, dataB, idsB := packOf("v2 object")
-	if _, err := s.PutPack(owner, packB, dataB); err != nil {
+	if _, err := s.PutPack(owner, packB, dataB, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.supersede(t, owner, rid, []string{idsB[0]})
@@ -157,7 +157,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 	}
 
 	packD, dataD, idsD := packOf("v3 object")
-	if _, err := s.PutPack(owner, packD, dataD); err != nil {
+	if _, err := s.PutPack(owner, packD, dataD, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.supersede(t, owner, rid, []string{idsD[0]})
@@ -185,7 +185,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "retain@example.com")
 	pack, data, ids := packOf("v1 object")
-	if _, err := s.PutPack(owner, pack, data); err != nil {
+	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{ids[0]})
@@ -199,7 +199,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	// Four scheduled snapshots, one per new version.
 	for i := 2; i <= 5; i++ {
 		p, d, id := packOf(fmt.Sprintf("v%d object", i))
-		if _, err := s.PutPack(owner, p, d); err != nil {
+		if _, err := s.PutPack(owner, p, d, 0); err != nil {
 			t.Fatal(err)
 		}
 		s.supersede(t, owner, rid, []string{id[0]})
@@ -246,7 +246,7 @@ func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	owner := s.mustAccount(t, "a@example.com")
 	other := s.mustAccount(t, "b@example.com")
 	packA, dataA, idsA := packOf("obj")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -291,7 +291,7 @@ func TestSnapshotLabelRoundTrip(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "label@example.com")
 	packA, dataA, idsA := packOf("obj")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
@@ -351,7 +351,7 @@ func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto-list@example.com")
 	packA, dataA, idsA := packOf("obj")
-	if _, err := s.PutPack(owner, packA, dataA); err != nil {
+	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})

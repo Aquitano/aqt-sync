@@ -102,10 +102,10 @@ func TestPackStoreRoundTripAndGC(t *testing.T) {
 	if missing, err := s.MissingChunks(owner, all); err != nil || len(missing) != 3 {
 		t.Fatalf("missing before upload = %v err=%v, want 3", missing, err)
 	}
-	if n, err := s.PutPack(owner, packA, dataA); err != nil || n != 2 {
+	if n, err := s.PutPack(owner, packA, dataA, 0); err != nil || n != 2 {
 		t.Fatalf("put pack A: n=%d err=%v, want 2", n, err)
 	}
-	if n, err := s.PutPack(owner, packB, dataB); err != nil || n != 1 {
+	if n, err := s.PutPack(owner, packB, dataB, 0); err != nil || n != 1 {
 		t.Fatalf("put pack B: n=%d err=%v, want 1", n, err)
 	}
 	if missing, _ := s.MissingChunks(owner, all); len(missing) != 0 {
@@ -129,7 +129,7 @@ func TestPackStoreRoundTripAndGC(t *testing.T) {
 	// A poisoned pack (an object's bytes do not hash to its id) is rejected.
 	_, bad, _ := packOf("honest")
 	bad[0] ^= 0xff // corrupt an object byte; pack id no longer matches either
-	if _, err := s.PutPack(owner, packA, bad); !errors.Is(err, ErrBadPack) {
+	if _, err := s.PutPack(owner, packA, bad, 0); !errors.Is(err, ErrBadPack) {
 		t.Fatalf("corrupt pack: got %v, want ErrBadPack", err)
 	}
 
@@ -177,7 +177,7 @@ func TestPartiallyReferencedPackSurvives(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "partial@example.com")
 	packID, data, ids := packOf("kept object", "dead object")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.rootResource(t, owner, []string{ids[0]}) // only the first object is live
@@ -203,7 +203,7 @@ func TestRepackCompactsPartiallyDeadPack(t *testing.T) {
 	livePayload := "live-object-keep"
 	deadPayload := strings.Repeat("dead", 64) // 256 bytes of soon-to-be-reclaimed space
 	packID, data, ids := packOf(livePayload, deadPayload)
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.rootResource(t, owner, []string{ids[0]}) // only the first object is live
@@ -248,7 +248,7 @@ func TestRepackLeavesFullyLivePack(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "dense@example.com")
 	packID, data, ids := packOf("aaaa", "bbbb")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.rootResource(t, owner, ids) // both objects live
@@ -267,7 +267,7 @@ func TestRepackHonorsAgeGuard(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "young@example.com")
 	packID, data, ids := packOf("keep", strings.Repeat("dead", 64))
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.rootResource(t, owner, []string{ids[0]})
@@ -346,7 +346,7 @@ func TestConcurrentPackWritesDoNotError(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			packID, data, _ := packOf(fmt.Sprintf("object %d", i))
-			_, err := s.PutPack(owner, packID, data)
+			_, err := s.PutPack(owner, packID, data, 0)
 			errs <- err
 		}(i)
 	}
@@ -376,7 +376,7 @@ func TestConcurrentUploadAndGCKeepsFreshPacks(t *testing.T) {
 		wg.Add(2)
 		go func(id string, d []byte) {
 			defer wg.Done()
-			_, err := s.PutPack(owner, id, d)
+			_, err := s.PutPack(owner, id, d, 0)
 			errs <- err
 		}(packID, data)
 		go func() {
@@ -408,7 +408,7 @@ func TestDedupCheckReArmsGCAgeGuard(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "race@example.com")
 	packID, data, ids := packOf("dedup target")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	// Age the pack past gcMinAge and leave it unreferenced: the state a prior sync's
@@ -610,7 +610,7 @@ func TestFreshPackSurvivesAgeGuard(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "ageguard@example.com")
 	packID, data, _ := packOf("in flight")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	// A sweep at the real guard must not touch a pack uploaded moments ago.
@@ -632,7 +632,7 @@ func TestPutPackIdempotentReArm(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "idem@example.com")
 	packID, data, _ := packOf("once", "twice")
-	if n, err := s.PutPack(owner, packID, data); err != nil || n != 2 {
+	if n, err := s.PutPack(owner, packID, data, 0); err != nil || n != 2 {
 		t.Fatalf("first put: n=%d err=%v, want 2", n, err)
 	}
 	// Age it past the guard, then re-upload: the second put adds no objects but
@@ -643,7 +643,7 @@ func TestPutPackIdempotentReArm(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := s.PutPack(owner, packID, data); err != nil || n != 0 {
+	if n, err := s.PutPack(owner, packID, data, 0); err != nil || n != 0 {
 		t.Fatalf("re-put: n=%d err=%v, want 0 stored", n, err)
 	}
 	if deleted, _, err := s.GCPacks(owner, gcMinAge); err != nil || deleted != 0 {
@@ -666,14 +666,14 @@ func TestPutPackBatchesObjectInserts(t *testing.T) {
 	}
 	packID, data, ids := packOf(payloads...)
 
-	if stored, err := s.PutPack(owner, packID, data); err != nil || stored != n {
+	if stored, err := s.PutPack(owner, packID, data, 0); err != nil || stored != n {
 		t.Fatalf("PutPack stored=%d err=%v, want %d", stored, err, n)
 	}
 	if missing, err := s.MissingChunks(owner, ids); err != nil || len(missing) != 0 {
 		t.Fatalf("missing after upload = %d err=%v, want 0", len(missing), err)
 	}
 	// Re-uploading the identical pack stores nothing new (dedup on chunk_id).
-	if stored, err := s.PutPack(owner, packID, data); err != nil || stored != 0 {
+	if stored, err := s.PutPack(owner, packID, data, 0); err != nil || stored != 0 {
 		t.Fatalf("re-put stored=%d err=%v, want 0", stored, err)
 	}
 }
@@ -702,7 +702,7 @@ func TestPutPackRejectsSliceOutOfRange(t *testing.T) {
 	tampered = append(tampered, lb[:]...)
 	newID := objID(tampered)
 
-	if _, err := s.PutPack(owner, newID, tampered); !errors.Is(err, ErrBadPack) {
+	if _, err := s.PutPack(owner, newID, tampered, 0); !errors.Is(err, ErrBadPack) {
 		t.Fatalf("out-of-range slice: got %v, want ErrBadPack", err)
 	}
 	_ = packID
@@ -724,7 +724,7 @@ func TestPutPackRejectsOverflowSlice(t *testing.T) {
 	buf.Write(lb[:])
 	data := buf.Bytes()
 
-	if _, err := s.PutPack(owner, objID(data), data); !errors.Is(err, ErrBadPack) {
+	if _, err := s.PutPack(owner, objID(data), data, 0); !errors.Is(err, ErrBadPack) {
 		t.Fatalf("overflowing slice: got %v, want ErrBadPack (must not panic)", err)
 	}
 }
@@ -735,7 +735,7 @@ func TestLocateRearmsAgeGuard(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "locaterace@example.com")
 	packID, data, ids := packOf("download target")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	// Age the pack past the guard and leave it unreferenced: a superseded version's
@@ -763,7 +763,7 @@ func TestGCDoesNotCrossOwners(t *testing.T) {
 	other := s.mustAccount(t, "theirs@example.com")
 
 	packID, data, ids := packOf("only mine")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	// Another owner's sweep must not touch my packs.
@@ -784,7 +784,7 @@ func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
 	owner := s.mustAccount(t, "roots@example.com")
 	ck, _ := crypto.GenerateContentKey()
 	packID, data, ids := packOf("obj-one", "obj-two")
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	mkReq := func(id string, expected int, body string, refs []string) api.PutResourceRequest {
@@ -865,7 +865,7 @@ func TestConcurrentGCKeepsLivePack(t *testing.T) {
 	livePayload := "live-object-keep"
 	deadPayload := strings.Repeat("dead", 64) // enough dead space to make a repack candidate
 	packID, data, ids := packOf(livePayload, deadPayload)
-	if _, err := s.PutPack(owner, packID, data); err != nil {
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
 	s.rootResource(t, owner, []string{ids[0]}) // only the first object is live
