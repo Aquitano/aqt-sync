@@ -1,0 +1,39 @@
+# aqt-server behind a Caddy sidecar that terminates TLS and auto-provisions a
+# certificate. Edit the hostname in ./Caddyfile, then: docker compose up -d
+services:
+  aqt-server:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      AQT_DATA_DIR: /data
+      # Trust the compose network so the share-page URL honors X-Forwarded-Proto.
+      # Adjust to your network's subnet (docker network inspect <net> to find it).
+      AQT_TRUSTED_PROXIES: 172.16.0.0/12
+      # Uncomment to gate signups on an invite token:
+      # AQT_REGISTRATION: invite
+      # AQT_INVITE_TOKENS: change-me
+    volumes:
+      - aqt-data:/data
+    # Reachable only from the caddy sidecar, never published directly.
+    expose:
+      - "8080"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - aqt-server
+
+volumes:
+  aqt-data:
+  caddy-data:
+  caddy-config:

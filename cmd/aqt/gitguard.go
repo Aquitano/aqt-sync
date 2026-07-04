@@ -92,6 +92,81 @@ func gitBusy(root string) (busy bool, repoDir string, err error) {
 	return false, "", walkErr
 }
 
+// trackedGitBusy reports whether any git repository whose .git is *tracked* (synced
+// via a `!.git/` re-include, not ignored) is mid git-operation, plus that repo's
+// working-tree path. It is the manual-sync guard's predicate: only a tracked .git can
+// be pushed half-written, so a busy repo whose .git is ignored — the default, or a
+// nested vendored repo re-ignored under a tracked root — must not defer the sync.
+//
+// This is deliberately narrower than gitBusy, which the watch daemon uses to defer on
+// ANY busy repo (an in-progress merge/rebase leaves a half-written working tree that
+// even an ignored-.git repo should not auto-push); the manual guard is scoped to the
+// tracked-.git torn-write this addresses. It scans every repo — not just the first —
+// so a tracked .git that is not lexically first still arms the guard. Best-effort: an
+// unreadable subtree or ignore file yields "not busy" rather than blocking the sync.
+func trackedGitBusy(root string) (busy bool, repoDir string) {
+	ig, err := syncengine.LoadIgnore(root)
+	if err != nil {
+		return false, ""
+	}
+	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if d != nil && d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.IsDir() {
+			switch d.Name() {
+			case syncengine.ControlDir:
+				return filepath.SkipDir
+			case ".git":
+				if gitTracked(ig, root, path) && gitDirBusy(path) {
+					repoDir = filepath.Dir(path)
+					return errStopWalk
+				}
+				return filepath.SkipDir // never descend into git internals
+			}
+			// Skip subtrees the sync ignores (node_modules, build output, …): their
+			// files — and any repo inside — are never pushed, so a git op there cannot
+			// torn-write the backup.
+			if rel, relErr := filepath.Rel(root, path); relErr == nil {
+				if rel = filepath.ToSlash(rel); rel != "." && ig.Match(rel, true) {
+					return filepath.SkipDir
+				}
+			}
+			return nil
+		}
+		// A non-directory .git is a submodule/worktree pointer or a symlink.
+		if d.Name() == ".git" {
+			gitDir := path
+			if info, statErr := os.Stat(path); statErr != nil || !info.IsDir() {
+				resolved, ok := resolveGitFile(path)
+				if !ok {
+					return nil
+				}
+				gitDir = resolved
+			}
+			if gitTracked(ig, root, path) && gitDirBusy(gitDir) {
+				repoDir = filepath.Dir(path)
+				return errStopWalk
+			}
+		}
+		return nil
+	})
+	return errors.Is(walkErr, errStopWalk), repoDir
+}
+
+// gitTracked reports whether the .git entry at gitPath (a working tree's .git dir or
+// pointer) is synced rather than ignored, per the tracked-root ignore rules.
+func gitTracked(ig *syncengine.Ignore, root, gitPath string) bool {
+	rel, err := filepath.Rel(root, gitPath)
+	if err != nil {
+		return false
+	}
+	return !ig.Match(filepath.ToSlash(rel), true)
+}
+
 // firstGitRepo returns the tracked-tree-relative path of the first git working
 // tree found under root ("." for the root itself), and whether one exists. It
 // recognizes both a .git directory and the .git pointer files submodules and

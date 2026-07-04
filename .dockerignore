@@ -1,0 +1,8 @@
+.git/
+bin/
+*.exe
+aqt-data/
+test/
+docs/
+deploy/
+REVIEW.md

@@ -82,7 +82,7 @@ func syncCmd() *cobra.Command {
 		Use:   "sync [dir]",
 		Short: "Two-way reconcile a tracked folder with the server",
 		Args:  cobra.MaximumNArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return runSync(dirArg(args), opts) },
+		RunE:  func(cmd *cobra.Command, args []string) error { return runSyncCmd(dirArg(args), opts) },
 	}
 	f := cmd.Flags()
 	f.BoolVar(&opts.pushOnly, "push-only", false, "only upload local changes")
@@ -263,6 +263,73 @@ func rollbackErr(remote, seen int) error {
 		"that old state as remote changes and could revert or delete newer local files. If the rollback is "+
 		"expected, re-run with --accept-rollback to reconcile from scratch (one-sided differences become "+
 		"conflicts to review)", errRollback, remote, seen)
+}
+
+// gitGuardPoll is how often the manual-sync git guard rechecks a busy repo while
+// waiting for it to go idle (bounded by gitIdleWaitOnce).
+const gitGuardPoll = 250 * time.Millisecond
+
+// runSyncCmd is the `aqt sync` command entry. It arms the git-busy guard the watch
+// daemon already applies, then delegates to runSync. Keeping the guard here — not in
+// runSync — leaves the watcher (which does its own git check) and direct callers
+// unchanged, so only an interactive sync gains the wait.
+func runSyncCmd(dir string, opts syncOptions) error {
+	root, err := trackedRoot(dir)
+	if err != nil {
+		return err
+	}
+	if err := guardTrackedGit(root, opts); err != nil {
+		return err
+	}
+	return runSync(root, opts)
+}
+
+// guardTrackedGit holds a push back while a tracked .git is mid git-operation, so a
+// manual sync of a repo (the Brain-vault shape: a folder that syncs its own .git)
+// cannot capture a half-written index or packfile. It applies only when the folder
+// actually tracks .git (a `!.git/` re-include) and the guard is enabled in .aqtconfig;
+// a pull-only or dry-run pushes nothing, so it is exempt. On a repo that stays busy
+// past the wait it defers rather than push, mapping to the same exit 75 as
+// `watch --once` so cron can tell "deferred" from "failed".
+func guardTrackedGit(root string, opts syncOptions) error {
+	return guardTrackedGitWait(root, opts, gitIdleWaitOnce, gitGuardPoll)
+}
+
+// guardTrackedGitWait is guardTrackedGit with the wait bound injected, so a test can
+// exercise the busy-defer path without blocking for the full production timeout.
+func guardTrackedGitWait(root string, opts syncOptions, timeout, poll time.Duration) error {
+	if opts.pullOnly || opts.dryRun {
+		return nil
+	}
+	cfg, err := syncengine.LoadConfig(root)
+	if err != nil {
+		return err
+	}
+	if !cfg.Watch.GitGuardEnabled() {
+		return nil
+	}
+	if waitTrackedGitIdle(root, timeout, poll) {
+		return nil
+	}
+	return fmt.Errorf("%w (a git operation is in progress in a tracked repository; retry when it "+
+		"finishes, or set \"watch\":{\"gitGuard\":false} in .aqtconfig to disable this guard)", errWatchSkipped)
+}
+
+// waitTrackedGitIdle waits up to timeout for every tracked-.git repository under root
+// to leave its git operation, polling every poll. It returns true once none is busy,
+// or false if one stays busy past the deadline. A read error can't confirm a lock, so
+// trackedGitBusy reports "not busy" and the sync proceeds rather than block forever.
+func waitTrackedGitIdle(root string, timeout, poll time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if busy, _ := trackedGitBusy(root); !busy {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(poll)
+	}
 }
 
 func runSync(dir string, opts syncOptions) error {

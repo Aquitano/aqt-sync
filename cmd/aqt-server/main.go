@@ -2,6 +2,7 @@
 package main
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -60,6 +61,15 @@ func main() {
 		api.StartGC(gcInterval, nil)
 	}
 
+	tlsSet, err := loadTLSSettings()
+	if err != nil {
+		log.Fatalf("tls config: %v", err)
+	}
+	tlsCfg, err := tlsSet.tlsConfig(dataDir)
+	if err != nil {
+		log.Fatalf("tls config: %v", err)
+	}
+
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           api.Router(),
@@ -68,8 +78,8 @@ func main() {
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Printf("aqt-server listening on %s (data dir: %s)", addr, dataDir)
-	if err := srv.ListenAndServe(); err != nil {
+	log.Printf("data dir: %s", dataDir)
+	if err := serve(srv, tlsCfg); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatalf("server exited: %v", err)
 	}
 }

@@ -36,9 +36,9 @@ const (
 	RegistrationInvite RegistrationMode = "invite"
 )
 
-// Config tunes deployment-specific hardening. The zero value is the self-hosted
-// default: open registration (no 409 oracle), no quota, no device cap, loopback-only
-// trusted proxies.
+// Config tunes deployment-specific hardening. The zero value is open registration
+// (no 409 oracle), no quota, and no device cap; trusted proxies are left unset (see
+// TrustedProxies), which the aqt-server binary fills in as loopback-only.
 type Config struct {
 	// Registration selects open (default) or invite-token signup; an empty value is
 	// treated as open.
@@ -51,9 +51,11 @@ type Config struct {
 	QuotaBytes int64
 	// MaxDevices caps devices per account. 0 means unlimited.
 	MaxDevices int
-	// TrustedProxies is passed to gin.SetTrustedProxies: the CIDRs/hosts whose
-	// X-Forwarded-* headers are believed. Nil keeps gin's loopback-only default; an
-	// explicit empty slice trusts none (RemoteAddr is used verbatim).
+	// TrustedProxies is passed to gin.SetTrustedProxies, but only when set through
+	// WithTrustedProxies: the CIDRs/hosts whose X-Forwarded-* headers are believed.
+	// Left unset (the zero value), gin's own default — which trusts every proxy —
+	// applies, so the binary always sets it; an explicit empty slice trusts none
+	// (RemoteAddr is used verbatim).
 	TrustedProxies    []string
 	trustedProxiesSet bool
 	// AuthedRatePerSec and AuthedBurst bound per-device request rates on the
@@ -132,10 +134,11 @@ const (
 // Router builds the Gin engine with all routes mounted.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
-	// Trust only the configured reverse proxies for X-Forwarded-* (default: gin's
-	// loopback-only). Without this, gin trusts every proxy and an attacker could spoof
-	// X-Forwarded-Proto/For; the rate-limit bucket key deliberately stays on the TCP
-	// peer regardless. An explicit empty list trusts none.
+	// Trust only the configured reverse proxies for X-Forwarded-*. Without a call to
+	// SetTrustedProxies gin trusts every proxy, so an attacker could spoof
+	// X-Forwarded-Proto/For; the aqt-server binary always sets a list (loopback when
+	// AQT_TRUSTED_PROXIES is unset). The rate-limit bucket key deliberately stays on the
+	// TCP peer regardless. An explicit empty list trusts none.
 	if s.cfg.trustedProxiesSet {
 		if err := r.SetTrustedProxies(s.cfg.TrustedProxies); err != nil {
 			log.Printf("trusted proxies: %v", err)
@@ -145,6 +148,11 @@ func (s *Server) Router() *gin.Engine {
 	// per-route middleware below only tightens it (a forgotten route is still
 	// bounded, never unlimited).
 	r.Use(gin.Recovery(), limitBody(maxResourceBody))
+
+	// Liveness probe for load balancers, container HEALTHCHECKs, and systemd. It
+	// reads no state and needs no auth, so it stays cheap and can be hit before a
+	// device token exists (e.g. a deploy readiness check).
+	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 
 	// Human-facing landing page for a public share link. Decryption runs in the
 	// CLI; the content key is in the URL fragment, which never reaches the server.
