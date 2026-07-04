@@ -53,7 +53,7 @@ func TestFileRootRoundTrip(t *testing.T) {
 	}
 
 	var buf bytes.Buffer
-	if err := WriteFileRoot(&buf, got, func(id string) ([]byte, error) { return sink[id], nil }); err != nil {
+	if err := WriteFileRoot(&buf, got.Chunks, func(id string) ([]byte, error) { return sink[id], nil }); err != nil {
 		t.Fatalf("WriteFileRoot: %v", err)
 	}
 	if !bytes.Equal(buf.Bytes(), data) {

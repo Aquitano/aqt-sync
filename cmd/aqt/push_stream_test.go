@@ -9,8 +9,82 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
+
+// A streamed file large enough that its chunk list overflows the resource blob must
+// store the list indirectly (as sealed segments) and still round-trip byte-for-byte
+// through the two-phase pull.
+func TestStreamingIndirectChunkListPushPull(t *testing.T) {
+	newE2E(t)
+
+	src := filepath.Join(t.TempDir(), "huge.bin")
+	// ~40 MiB is >128 chunks at the large profile's 256K average, so the chunk list
+	// crosses the indirection threshold.
+	data := make([]byte, 40<<20)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(src, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPush(src, pushOptions{noClip: true, quiet: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, ok := identity.LoadSession(prof.Name)
+	if !ok {
+		t.Fatal("no cached session")
+	}
+	rows, err := collectResources(cl, mk)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	for _, r := range rows {
+		if r.Name == "huge.bin" {
+			id = r.ID
+		}
+	}
+	if id == "" {
+		t.Fatalf("pushed file not in listing; rows=%+v", rows)
+	}
+
+	// The stored root must actually be indirect, else this test is vacuous.
+	res, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := syncengine.OpenFileRoot(res.Blob, ck)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !root.Indirect() {
+		t.Fatalf("expected an indirect chunk list for a 40 MiB file, got %d inline chunks", len(root.Chunks))
+	}
+
+	out := filepath.Join(t.TempDir(), "out.bin")
+	if err := runPull(id, out, "", false, false); err != nil {
+		t.Fatalf("pull: %v", err)
+	}
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("indirect pull content mismatch")
+	}
+}
 
 // TestStreamingSingleFilePushPull pushes a file above the threshold and checks it
 // took the packed path and round-trips byte-for-byte through pull and cat.

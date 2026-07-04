@@ -1136,7 +1136,18 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		if err != nil {
 			return meta, fmt.Errorf("decrypt file root: %w", err)
 		}
-		src, err := newPackSource(cl, root.ChunkIDs())
+		chunks := root.Chunks
+		if root.Indirect() {
+			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			if err != nil {
+				return meta, err
+			}
+			chunks, err = root.Resolve(segSrc.get)
+			if err != nil {
+				return meta, err
+			}
+		}
+		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 		if err != nil {
 			return meta, err
 		}
@@ -1144,7 +1155,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		if err != nil {
 			return meta, err
 		}
-		if err := syncengine.WriteFileRoot(f, root, src.get); err != nil {
+		if err := syncengine.WriteFileRoot(f, chunks, src.get); err != nil {
 			f.Close()
 			_ = os.Remove(dest)
 			return meta, err

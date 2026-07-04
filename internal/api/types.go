@@ -55,6 +55,9 @@ type CreateAccountRequest struct {
 	WrappedRoot  crypto.SealedBlob `json:"wrappedRoot"`
 	AuthVerifier []byte            `json:"authVerifier"`
 	DeviceName   string            `json:"deviceName"`
+	// InviteToken is required only when the server runs in invite-registration mode;
+	// open servers ignore it. It is a server-issued shared secret, not key material.
+	InviteToken string `json:"inviteToken,omitempty"`
 }
 
 // ChallengeRequest asks the server for a fresh nonce to sign when attaching a
@@ -127,14 +130,18 @@ type PassphraseChangeRequest struct {
 // server rejects the write (409) if the stored version differs, so a concurrent
 // write is never silently lost — the client re-fetches and retries. Omit it (0)
 // for a create or an unconditional replace.
+//
+// This is an in-process type: on the wire it travels as the raw envelope in
+// wire.go (JSON header + ciphertext), never as JSON, so the blob pays no base64
+// tax.
 type PutResourceRequest struct {
-	ID              string             `json:"id,omitempty"`
-	Visibility      Visibility         `json:"visibility"`
-	Blob            crypto.SealedBlob  `json:"blob"`
-	EncryptedMeta   crypto.SealedBlob  `json:"encryptedMeta"`
-	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
-	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
-	ExpectedVersion int                `json:"expectedVersion,omitempty"`
+	ID              string
+	Visibility      Visibility
+	Blob            crypto.SealedBlob
+	EncryptedMeta   crypto.SealedBlob
+	WrappedKey      *crypto.WrappedKey
+	ChunkRefs       []string
+	ExpectedVersion int
 }
 
 // PackIndexEntry locates one object inside a pack: its content-address id and the
@@ -205,13 +212,15 @@ type SetVisibilityRequest struct {
 	Visibility Visibility `json:"visibility"`
 }
 
+// GetResourceResponse is an in-process type: on the wire it travels as the raw
+// envelope in wire.go (JSON header + ciphertext), never as JSON.
 type GetResourceResponse struct {
-	ID            string             `json:"id"`
-	Visibility    Visibility         `json:"visibility"`
-	Blob          crypto.SealedBlob  `json:"blob"`
-	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
-	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
-	Version       int                `json:"version"`
+	ID            string
+	Visibility    Visibility
+	Blob          crypto.SealedBlob
+	EncryptedMeta crypto.SealedBlob
+	WrappedKey    *crypto.WrappedKey
+	Version       int
 }
 
 // ResourceListItem describes one of the owner's resources. WrappedKey (the

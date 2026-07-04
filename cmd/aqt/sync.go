@@ -28,6 +28,13 @@ type folderState struct {
 	ID     string `json:"id"`
 	Server string `json:"server"`
 	LastGC int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
+	// RemoteVersion is the highest resource version this machine has observed —
+	// the freshness pin. A server reporting a lower version has been rolled back
+	// (restored from backup, or replaying an old state); syncing against it would
+	// read the regression as remote changes and revert local files, so it is
+	// refused unless --accept-rollback. 0 (state written by an older build)
+	// disables the guard until the next successful sync records a version.
+	RemoteVersion int `json:"remoteVersion,omitempty"`
 }
 
 const (
@@ -84,6 +91,7 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.force, "force", false, "resolve conflicts in favor of local")
 	f.BoolVar(&opts.reconcile, "reconcile", false, "reconcile without a base (.aqt/base.json missing): one-sided differences become conflicts to review")
 	f.BoolVar(&opts.rehash, "rehash", false, "re-hash every file instead of trusting size+mtime (catches edits that preserve them)")
+	f.BoolVar(&opts.acceptRollback, "accept-rollback", false, "proceed although the server reports an older version than previously seen (restored from backup): reconcile from scratch, one-sided differences become conflicts to review")
 	return cmd
 }
 
@@ -164,7 +172,7 @@ func runInit(dir string) error {
 	if err := writeStarterIgnore(abs, syncGit); err != nil {
 		return err
 	}
-	if err := saveState(abs, folderState{ID: resp.ID, Server: prof.Server}); err != nil {
+	if err := saveState(abs, folderState{ID: resp.ID, Server: prof.Server, RemoteVersion: resp.Version}); err != nil {
 		return err
 	}
 	if err := saveBase(abs, manifest); err != nil {
@@ -220,12 +228,13 @@ func runStatus(dir string) error {
 // --- sync ---
 
 type syncOptions struct {
-	pushOnly  bool
-	pullOnly  bool
-	dryRun    bool
-	force     bool
-	reconcile bool
-	rehash    bool
+	pushOnly       bool
+	pullOnly       bool
+	dryRun         bool
+	force          bool
+	reconcile      bool
+	rehash         bool
+	acceptRollback bool
 }
 
 // errSyncNoBase signals that a sync has no last-synced state to reconcile against
@@ -241,6 +250,20 @@ var (
 	errConflictsRemain = errors.New("conflicts changed on both sides; resolve them or re-run with --force (local wins)")
 	errSyncRace        = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
 )
+
+// errRollback marks a remote whose version regressed below what this machine has
+// already seen. Zero-knowledge covers content, not freshness: without this guard a
+// server restored from backup (or a hostile replay) looks like ordinary remote
+// changes and silently reverts or deletes newer local files.
+var errRollback = errors.New("refusing to apply a server rollback")
+
+func rollbackErr(remote, seen int) error {
+	return fmt.Errorf("%w: the server reports version %d but this machine already synced version %d. "+
+		"The server was likely restored from a backup (or is replaying an old state); syncing would treat "+
+		"that old state as remote changes and could revert or delete newer local files. If the rollback is "+
+		"expected, re-run with --accept-rollback to reconcile from scratch (one-sided differences become "+
+		"conflicts to review)", errRollback, remote, seen)
+}
 
 func runSync(dir string, opts syncOptions) error {
 	if opts.pushOnly && opts.pullOnly {
@@ -303,12 +326,12 @@ func runSync(dir string, opts syncOptions) error {
 			return err
 		}
 	} else {
-		chunker, cerr := cfg.Chunker()
+		selector, cerr := cfg.ChunkSelector()
 		if cerr != nil {
 			return cerr
 		}
 		up := newPackUploader(cl)
-		local, err = syncengine.Take(root, conv, chunker, &base, up, opts.rehash)
+		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
 			up.Wait() // drain in-flight uploads before returning the snapshot error
 			return err
@@ -341,6 +364,24 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return err
 		}
+		// Freshness guard: a version below the recorded pin means the server rolled
+		// back. Accepting it discards the base for this pass — the old remote state
+		// must not be reconciled against a base that post-dates it, or one-sided
+		// regressions read as remote edits/deletes and clobber local files. The
+		// baseless reconcile turns them into conflicts to review instead.
+		trustBase := baseExists
+		if st.RemoteVersion > 0 && res.Version < st.RemoteVersion {
+			if !opts.acceptRollback {
+				return rollbackErr(res.Version, st.RemoteVersion)
+			}
+			fmt.Fprintf(os.Stderr, "accepting server rollback (version %d, previously %d); reconciling from scratch\n",
+				res.Version, st.RemoteVersion)
+			trustBase = false
+		}
+		planBase := base
+		if !trustBase {
+			planBase = syncengine.Manifest{}
+		}
 		if res.WrappedKey == nil {
 			return errors.New("folder resource has no owner key; cannot sync")
 		}
@@ -367,10 +408,10 @@ func runSync(dir string, opts syncOptions) error {
 		// Read the remote tree. With a base, reuse it: any directory node whose id the
 		// base tree already contains is byte-identical (nodes are content-addressed), so
 		// it is served from memory and only the nodes on a changed spine are fetched — an
-		// unchanged remote does zero node round-trips. Without a base (reconcile mode)
-		// there is nothing to reuse, so fall back to the full walk.
+		// unchanged remote does zero node round-trips. Without a base (reconcile mode,
+		// or an accepted rollback) there is nothing to reuse, so fall back to the full walk.
 		var remote syncengine.Manifest
-		if baseExists {
+		if trustBase {
 			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, baseCT)
 		} else {
 			remote, err = openRemoteTree(cl, res.Blob, ck)
@@ -389,7 +430,7 @@ func runSync(dir string, opts syncOptions) error {
 		// ambiguous and become conflicts to review rather than silent adds/deletes.
 		var actions []syncengine.Action
 		var dirActions []syncengine.DirAction
-		if baseExists {
+		if trustBase {
 			actions = syncengine.Plan(local, base, remote)
 			dirActions = syncengine.PlanDirs(local, base, remote)
 		} else {
@@ -404,7 +445,7 @@ func runSync(dir string, opts syncOptions) error {
 		}
 		return applySync(applyCtx{
 			root: root, cl: cl, opts: opts,
-			base: base, local: local, remote: remote,
+			base: planBase, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			version: res.Version, id: st.ID,
 		}, actions, dirActions)
@@ -569,12 +610,15 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	// half-applied on disk and the caller can re-plan cleanly. The objects these
 	// entries reference were already packed and uploaded during the snapshot pass;
 	// here we only commit the merged manifest that roots them.
+	syncedVersion := c.version
 	if push && remoteChanged {
 		manifest := manifestFrom(merged, c.version+1)
 		manifest.Dirs = dirsFrom(mergedDirs)
-		if _, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version); err != nil {
+		resp, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version)
+		if err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
+		syncedVersion = resp.Version
 		reclaimPacks(c.root, c.cl)
 	}
 
@@ -680,6 +724,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	if err := saveBase(c.root, newBaseManifest); err != nil {
 		return err
 	}
+	recordRemoteVersion(c.root, syncedVersion)
 	summarize(uploads, downloads, localDeletes, remoteChanged)
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
@@ -745,7 +790,7 @@ func runClone(ref, dir string) error {
 	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
 		return err
 	}
-	if err := saveState(abs, folderState{ID: id, Server: prof.Server}); err != nil {
+	if err := saveState(abs, folderState{ID: id, Server: prof.Server, RemoteVersion: res.Version}); err != nil {
 		return err
 	}
 	if err := saveBase(abs, base); err != nil {
@@ -785,7 +830,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		if err != nil {
 			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
 		}
-		base, err := extractPack(cl, abs, root, ck)
+		base, err := extractPack(cl, abs, root, ck, nil)
 		if err != nil {
 			return syncengine.Manifest{}, err
 		}
@@ -1406,6 +1451,21 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		_, err := f.Write(data)
 		return err
 	})
+}
+
+// recordRemoteVersion pins the freshness guard to the version this sync observed or
+// just committed — including a lower one after an accepted rollback, so subsequent
+// syncs stop tripping the guard. Best-effort like reclaimPacks (the sync itself
+// succeeded); the sync lock makes the read-modify-write race-free.
+func recordRemoteVersion(root string, version int) {
+	st, err := loadState(root)
+	if err != nil || st.RemoteVersion == version {
+		return
+	}
+	st.RemoteVersion = version
+	if err := saveState(root, st); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: recording synced version failed: %v\n", err)
+	}
 }
 
 func saveState(root string, st folderState) error {

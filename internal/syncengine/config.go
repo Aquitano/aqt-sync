@@ -15,13 +15,15 @@ type Config struct {
 	// dedup, so any change re-ships the entire folder. Default false.
 	Pack bool `json:"pack"`
 
-	// ChunkProfile names the content-defined chunking granularity: "" or "default"
-	// is the source-tree profile (2K/8K/64K, ~8K average); "large" is the big-binary
-	// profile (64K/256K/1M, ~256K average), which cuts ~32x fewer chunks per MB and
-	// so slashes the per-chunk metadata and server-ingest cost on media/dataset trees
-	// at the price of coarser dedup. Ignored when Chunk is set. Because boundaries are
-	// derived from these sizes, switching a folder's profile re-chunks it once with no
-	// dedup against the old profile — it is a deliberately sticky, per-folder choice.
+	// ChunkProfile pins one content-defined chunking granularity for every file in the
+	// folder, overriding the default size-scaling. "large" is the big-binary profile
+	// (64K/256K/1M, ~256K average) and "huge" the coarsest (256K/1M/4M, ~1M average);
+	// both cut far fewer chunks per MB than the source-tree default, slashing per-chunk
+	// metadata and server-ingest cost on media/dataset trees at the price of coarser
+	// dedup. "" or "default" leaves the size-scaling on (see ChunkSelector). Ignored
+	// when Chunk is set. Because boundaries are derived from these sizes, changing a
+	// folder's profile re-chunks it once with no dedup against the old profile — it is
+	// a deliberately sticky, per-folder choice.
 	ChunkProfile string `json:"chunkProfile"`
 
 	// Chunk overrides the granularity with explicit byte sizes, taking precedence over
@@ -50,12 +52,71 @@ const (
 	largeMax    = 1 << 20   // 1 MiB
 )
 
+// Chunking sizes for the "huge" profile: ~1 MiB average, for multi-GB files where
+// even the large profile would mint hundreds of thousands of chunk records.
+const (
+	hugeMin    = 256 << 10 // 256 KiB
+	hugeNormal = 1 << 20   // 1 MiB
+	hugeMax    = 4 << 20   // 4 MiB
+)
+
 // namedChunkProfiles maps ChunkProfile to its sizes. "" is treated as "default".
 var namedChunkProfiles = map[string]ChunkSizes{
 	"":        {defaultMin, defaultNormal, defaultMax},
 	"default": {defaultMin, defaultNormal, defaultMax},
 	"large":   {largeMin, largeNormal, largeMax},
+	"huge":    {hugeMin, hugeNormal, hugeMax},
 }
+
+// sizeScaledTiers is the default (unpinned) chunking ladder: a file is cut with the
+// coarsest profile whose size threshold it clears. At the 8K default a 1 GiB file
+// mints ~130k chunk records, each costing an AEAD tag, a manifest entry, a pack-index
+// entry, and a DB row (~4-5% metadata overhead), and drives the node/FileRoot size
+// ceilings; scaling large files to 256K-1M chunks cuts that by 1-2 orders of
+// magnitude while small files keep byte-level dedup. Ascending by minSize.
+var sizeScaledTiers = []struct {
+	minSize int64
+	sizes   ChunkSizes
+}{
+	{0, ChunkSizes{defaultMin, defaultNormal, defaultMax}}, // <= 8 MiB: ~8 KiB average
+	{8 << 20, ChunkSizes{largeMin, largeNormal, largeMax}}, // > 8 MiB: ~256 KiB average
+	{1 << 30, ChunkSizes{hugeMin, hugeNormal, hugeMax}},    // > 1 GiB: ~1 MiB average
+}
+
+// scaledSelector chooses a Chunker by file size from a size ladder. Each Chunker is
+// built once and reused across files, since a Chunker is stateless between calls.
+type scaledSelector struct {
+	minSizes []int64
+	chunkers []*Chunker
+}
+
+func newScaledSelector() scaledSelector {
+	s := scaledSelector{
+		minSizes: make([]int64, len(sizeScaledTiers)),
+		chunkers: make([]*Chunker, len(sizeScaledTiers)),
+	}
+	for i, t := range sizeScaledTiers {
+		s.minSizes[i] = t.minSize
+		s.chunkers[i] = NewChunker(t.sizes.Min, t.sizes.Normal, t.sizes.Max)
+	}
+	return s
+}
+
+// ChunkerFor returns the coarsest tier whose threshold size does not exceed size.
+func (s scaledSelector) ChunkerFor(size int64) *Chunker {
+	c := s.chunkers[0]
+	for i, min := range s.minSizes {
+		if size < min {
+			break
+		}
+		c = s.chunkers[i]
+	}
+	return c
+}
+
+// DefaultChunkSelector returns the size-scaling selector a folder uses when its
+// config pins no granularity — also the right choice for a standalone streamed file.
+func DefaultChunkSelector() ChunkSelector { return newScaledSelector() }
 
 // Chunker builds the content-defined chunker this config selects: an explicit Chunk
 // block if present, else the named ChunkProfile, else the default. Unlike NewChunker
@@ -79,13 +140,29 @@ func (c Config) Chunker() (*Chunker, error) {
 	return NewChunker(sizes.Min, sizes.Normal, sizes.Max), nil
 }
 
+// ChunkSelector builds the per-file chunker chooser this config selects. An explicit
+// Chunk block or a named ChunkProfile pins one granularity for every file (a sticky
+// per-folder choice, since boundaries derive from the sizes). The default — no chunk
+// config — scales the chunker with file size (see sizeScaledTiers) so a large file is
+// not shredded into millions of tiny records.
+func (c Config) ChunkSelector() (ChunkSelector, error) {
+	if c.Chunk != nil || (c.ChunkProfile != "" && c.ChunkProfile != "default") {
+		ch, err := c.Chunker()
+		if err != nil {
+			return nil, err
+		}
+		return ch, nil
+	}
+	return newScaledSelector(), nil
+}
+
 func (c Config) chunkSizes() (ChunkSizes, error) {
 	if c.Chunk != nil {
 		return *c.Chunk, nil
 	}
 	sizes, ok := namedChunkProfiles[c.ChunkProfile]
 	if !ok {
-		return ChunkSizes{}, fmt.Errorf("unknown chunkProfile %q in %s (want \"default\" or \"large\")", c.ChunkProfile, configFile)
+		return ChunkSizes{}, fmt.Errorf("unknown chunkProfile %q in %s (want \"default\", \"large\", or \"huge\")", c.ChunkProfile, configFile)
 	}
 	return sizes, nil
 }

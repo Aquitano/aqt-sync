@@ -43,9 +43,13 @@ func (s *Server) putPack(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "read pack body failed")
 		return
 	}
-	stored, err := s.store.PutPack(owner, packID, data)
+	stored, err := s.store.PutPack(owner, packID, data, s.cfg.QuotaBytes)
 	if errors.Is(err, ErrBadPack) {
 		abort(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if errors.Is(err, ErrQuotaExceeded) {
+		abort(c, http.StatusInsufficientStorage, "storage quota exceeded; free space or raise the quota")
 		return
 	}
 	if err != nil {

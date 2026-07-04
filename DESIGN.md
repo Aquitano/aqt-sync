@@ -456,6 +456,21 @@ both sides is one conflict; `--force` resolves local-wins) rather than merging p
 file; `clone` untars it. The `watch` block lets a folder pin its daemon behavior
 in-tree, the same way `.aqtignore` pins its exclusions.
 
+**Chunked mode leaks a size-sequence fingerprint (choose pack-and-seal to avoid it).**
+FastCDC boundaries are content-derived and the pack index stores each object's
+ciphertext length, so the *sequence of chunk sizes* of a file is observable to the
+server (and to anyone who reads the object store). The keyed convergence key stops an
+attacker *matching chunk hashes* against a candidate file, but not matching that
+size-sequence — the classic content-defined-chunking leak. For a known target file an
+attacker can therefore confirm its presence from the shapes alone. Pack-and-seal
+(`pack: true`) exists precisely to avoid this: it tars the whole tree and seals it into
+fixed-size, per-sync-unique segments with no per-file boundary, so it leaks only the
+total size. Length-bucket padding of chunk ciphertexts (e.g. quantizing to 4 KiB) would
+blunt the chunked-mode leak, but it changes the sealed ciphertext length and so the
+chunk content address, breaking dedup identity against existing chunks and rippling
+through the manifest and pack format; it is deferred as future work rather than folded
+into the seal path here.
+
 ### 4.3 Server HTTP API (`@aqt/server`)
 
 Zero-knowledge REST over HTTPS. Auth is a bearer device token (`Authorization:
@@ -499,6 +514,22 @@ The server enforces: ownership, visibility (a private id returns 404 to anyone b
 the owner), and integrity at the storage layer. It performs **no** decryption,
 merge, or filename inspection.
 
+Deployment hardening is env-configured (all optional; the zero value is the
+self-hosted default):
+
+```
+AQT_REGISTRATION     open (default) | invite      # invite gates signup on a token
+AQT_INVITE_TOKENS    tok1,tok2                     # accepted invite secrets (invite mode)
+AQT_QUOTA_BYTES      0                             # per-owner stored-pack-byte cap; 0 = unlimited
+AQT_MAX_DEVICES      0                             # per-account device cap; 0 = unlimited
+AQT_AUTH_RATE        0                             # authed requests/sec per token; 0 = default (50)
+AQT_AUTH_BURST       0                             # authed burst per token; 0 = default (500)
+AQT_TRUSTED_PROXIES  (unset = loopback)            # X-Forwarded-* trust; "none" trusts none
+```
+
+A client whose server runs in invite mode passes the token via `aqt login --invite`
+(or `AQT_INVITE_TOKEN`).
+
 ### 4.4 Identity / local keystore (`@aqt/identity`)
 
 ```ts
@@ -533,7 +564,9 @@ function currentSession(): Session | null;                                 // fo
 - **Client-side crypto parallelism** — *open follow-up:* chunk sealing (`SealChunk`: XChaCha20-Poly1305 + two SHA-256s) still runs single-threaded on the walk goroutine. With the upload overlap above in place, fanning the seal across cores is the next ceiling to lift for large-file, high-bandwidth pushes. It needs an ordered worker pool: `SplitStream` reuses its emit buffer, so each piece must be copied before it crosses to a sealer, and results reassembled in file order for the manifest. Deferred as lower priority than the pipeline itself.
 - **Public whole-folder sharing** — v1 tracked folders are private, so the object store is uniformly owner-scoped. Sharing a folder publicly needs its objects under the folder key (not the account convergence key) in a publicly-readable space — deferred.
 - **Argon2id tuning** (`time`/`memory`) per machine — *resolved:* `crypto.CalibrateKdf` benchmarks the creating machine at signup (and on `passphrase change`) and scales the iteration count to a preset's target unlock time (`interactive` ~0.5s/64 MiB, `moderate` ~1s/256 MiB default, `sensitive` ~2.5s/1 GiB), stepping memory down toward a 64 MiB floor on a machine too slow to fit one pass. Params are public and travel with the account, so every device re-derives the same key; `--kdf-preset` and manual `--kdf-time/--kdf-memory/--kdf-threads` override, and `passphrase calibrate` re-tunes an existing account in place via the cheap wrapped-root re-wrap (no resource is re-encrypted; other devices re-login).
-- **Account-enumeration oracle** — *resolved:* unauthenticated auth routes are rate-limited, and `GET /account/salt` now returns an indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 404, so it no longer confirms which emails are registered.
+- **Account-enumeration oracle** — *resolved:* unauthenticated auth routes are rate-limited, and `GET /account/salt` returns an indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 404. The decoy's Argon2id costs are now drawn per-email (HKDF over the server secret) from the same value set a moderate calibration produces (memory ∈ {64, 128, 256 MiB}, iterations clustered where a ~1 s unlock lands on common hardware) rather than the fixed package default, so a decoy's params no longer stand out. `POST /account` no longer answers `409` on a duplicate email in the default *open* registration mode: it returns the same success shape with a decoy token that grants nothing, so signup stops being an existence oracle (the caller's next authenticated call fails, matching the wrong-passphrase ambiguity). An *invite* mode (`AQT_REGISTRATION=invite` + `AQT_INVITE_TOKENS`) additionally gates every signup on a server-issued token, closing the email-squatting hole for hosted deployments.
+- **Authenticated-route abuse / quotas** — *resolved:* the authenticated group is now rate-limited per device token (coarse token-bucket, generous burst so a large sync/clone is unaffected), with a second, far tighter limiter on the expensive `POST /gc` keyed per owner. Per-owner quotas cap stored pack bytes (`AQT_QUOTA_BYTES`) and device count (`AQT_MAX_DEVICES`); `0` means unlimited. The byte counter is maintained incrementally inside the pack put / GC / repack transactions (a column on `accounts`, backfilled on migration), so a quota check is one indexed read and never scans the objects table. An over-quota pack put returns `507`, which the client surfaces distinctly.
+- **Trusted proxies** — *resolved:* the Gin engine's trusted-proxy list is set explicitly (`AQT_TRUSTED_PROXIES`, default loopback-only, `none` to trust none), so the `X-Forwarded-*` foot-gun is no longer left at Gin's trust-all default. The rate-limit bucket key stays on the TCP peer address regardless, so a spoofed forwarded header cannot mint fresh buckets.
 - **Defense-in-depth crypto** — AEAD additional-data domain separation across blob/wrap/gated-wrap; complete key wiping (`ContentKey` has no `Wipe`).
 - **Session cache at rest** — *resolved:* the cached master key is sealed under a random per-profile key kept in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service, via pure-Go `zalando/go-keyring`); the on-disk 0600 file holds only ciphertext + `expiresAt` and is useless without the keychain entry. The device token moves into the keychain too. A host with no keychain backend (headless server), or one that sets `AQT_NO_KEYCHAIN=1`, falls back to the machine-bound key/file, so non-interactive operation is unchanged there. Remaining caveat: a process running as the same user can still reach the keychain (or re-derive the machine key); fully closing that needs a passphrase/biometric-gated agent or hardware enclave, still deferred. Exposure stays bounded by `--ttl` and cleared by `logout`.
 - **Conflict copies** — write `name.conflict-<device>` like Dropbox, or just report and block?

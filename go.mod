@@ -5,6 +5,7 @@ go 1.25.4
 require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/gin-gonic/gin v1.12.0
+	github.com/klauspost/compress v1.19.0
 	github.com/spf13/cobra v1.10.2
 	github.com/zalando/go-keyring v0.2.8
 	golang.org/x/crypto v0.53.0

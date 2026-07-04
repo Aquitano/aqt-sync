@@ -284,6 +284,58 @@ func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
 	}
 }
 
+// A file with too many chunk records is stored with an indirect chunk list (ChunksRef),
+// and a compressed inline file carries InlineAlg. The batched reader must reconstruct
+// both exactly like the depth-first OpenTree: earlier it dropped ChunksRef (restoring
+// the file with zero chunks) and InlineAlg (writing raw compressed bytes as plaintext).
+func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
+	conv := testConv(t)
+	key := make([]byte, crypto.KeySize)
+	bigChunks := make([]crypto.Chunk, chunkListInlineMax+1)
+	for i := range bigChunks {
+		bigChunks[i] = crypto.Chunk{ID: fmt.Sprintf("chunk-%03d", i), Key: key, Len: i + 1}
+	}
+	in := Manifest{Version: TreeManifestVersion, Entries: []Entry{
+		{Path: "big.bin", Mode: 0o644, Hash: "hbig", Chunks: bigChunks},
+		{Path: "small.txt", Mode: 0o644, Hash: "hsmall", Inline: []byte("compressed-payload"), InlineAlg: "zstd"},
+	}}
+
+	sink := mapSink{}
+	root, _, err := SealTree(in, conv, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fetchBatch := func(ids []string) (map[string][]byte, error) {
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			ct, err := sink.get(id)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = ct
+		}
+		return out, nil
+	}
+	got, err := OpenTreeBatched(root, fetchBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := OpenTree(root, sink.get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalize(full), normalize(got)) {
+		t.Fatalf("batched read != depth-first read:\n full %+v\n got  %+v", full, got)
+	}
+	if big := got.ByPath()["big.bin"]; len(big.Chunks) != len(bigChunks) {
+		t.Fatalf("indirect chunk list dropped: got %d chunks, want %d", len(big.Chunks), len(bigChunks))
+	}
+	if small := got.ByPath()["small.txt"]; small.InlineAlg != "zstd" {
+		t.Fatalf("InlineAlg dropped: got %q, want zstd", small.InlineAlg)
+	}
+}
+
 func TestTreeRootAADSeparation(t *testing.T) {
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {

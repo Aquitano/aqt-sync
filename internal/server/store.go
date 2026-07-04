@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -39,11 +40,25 @@ var ErrVersionConflict = errors.New("version conflict")
 // GC, so the store refuses it rather than lose data.
 var ErrDropsRoots = errors.New("replace drops all chunk roots")
 
+// ErrQuotaExceeded is returned when storing a pack would push an owner's stored bytes
+// past the configured quota. Handlers map it to 507; the client surfaces it clearly.
+var ErrQuotaExceeded = errors.New("storage quota exceeded")
+
+// ErrDeviceLimit is returned when attaching a device would exceed an account's
+// configured device cap. Handlers map it to 403.
+var ErrDeviceLimit = errors.New("device limit reached")
+
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs and packs on the filesystem. It holds no plaintext and no live
 // keys.
 type Store struct {
-	db       *sql.DB
+	db *sql.DB
+	// rdb is a read-only pool over the same database file. WAL lets its readers run
+	// concurrently with the single writer connection, so GETs, auth lookups, and GC
+	// planning no longer queue behind writes. Reads that are part of a mutation flow
+	// (inside a write transaction or under a resource lock) stay on db.
+	rdb      *sql.DB
+	auth     *authCache
 	blobsDir string
 	packsDir string
 	// gcLocks serializes the GC/repack sequence per owner. The single DB connection
@@ -72,8 +87,8 @@ func OpenStore(dataDir string) (*Store, error) {
 	// of failing the request with SQLITE_BUSY; WAL keeps readers off the writer's
 	// back; foreign_keys turns on the resource_chunks -> chunks reference so a
 	// dangling chunk reference fails the write loudly instead of inserting silently.
-	dsn := filepath.Join(dataDir, "aqt.db") +
-		"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
+	dbPath := filepath.Join(dataDir, "aqt.db")
+	dsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
@@ -84,15 +99,33 @@ func OpenStore(dataDir string) (*Store, error) {
 	// connection serializes every write in-process. This suits the v1
 	// single-instance server; horizontal scaling would need real row locks.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
+	s := &Store{db: db, auth: newAuthCache(), blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
+	// The read pool. query_only makes a stray write on it fail loudly instead of
+	// racing the writer to SQLITE_BUSY; a fresh read transaction per query sees the
+	// latest committed write, so read-your-writes holds for request flows that
+	// commit on db before reading on rdb.
+	rdsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=query_only(1)"
+	rdb, err := sql.Open("sqlite", rdsn)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open read pool: %w", err)
+	}
+	rdb.SetMaxOpenConns(max(4, runtime.NumCPU()))
+	s.rdb = rdb
 	return s, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	rerr := s.rdb.Close()
+	if err := s.db.Close(); err != nil {
+		return err
+	}
+	return rerr
+}
 
 // migrations are the forward-only schema steps, applied in order and tracked by
 // PRAGMA user_version. Append new steps; never edit or reorder a shipped one. Every
@@ -210,6 +243,43 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// (NULL on scheduled snapshots, which the keyless server cannot seal). Stored
 	// opaquely; the server never reads it.
 	`ALTER TABLE snapshots ADD COLUMN encrypted_label TEXT;`,
+	// 6: mark snapshots the scheduled job created, so server-side retention prunes
+	// only those and never a user's manual snapshot. Pre-existing rows cannot be
+	// classified and stay manual (never auto-pruned).
+	`ALTER TABLE snapshots ADD COLUMN scheduled INTEGER NOT NULL DEFAULT 0;`,
+	// 7: per-owner stored-pack-byte counter for quota enforcement. Maintained
+	// incrementally in the pack put/GC/repack transactions so a quota check never
+	// scans the objects table; backfilled from the current pack sizes so an existing
+	// data dir starts accurate.
+	`ALTER TABLE accounts ADD COLUMN pack_bytes INTEGER NOT NULL DEFAULT 0;
+	 UPDATE accounts SET pack_bytes = COALESCE(
+	     (SELECT SUM(length) FROM packs WHERE packs.owner_handle = accounts.owner_handle), 0);`,
+	// 8: per-pack object counters, so GC candidate selection reads the packs table
+	// alone instead of scanning every object row with liveness subqueries per run.
+	// obj_count is the pack's object rows; live_count/live_bytes are the subset some
+	// resource or snapshot roots. Maintained incrementally by every write that moves
+	// objects or roots (see recountPacks); backfilled here for existing rows. The
+	// backfill UPDATE is this migration's own frozen copy of the recount, not shared
+	// with the runtime helper, so later changes to the helper cannot rewrite a
+	// shipped migration.
+	`ALTER TABLE packs ADD COLUMN obj_count INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE packs ADD COLUMN live_count INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE packs ADD COLUMN live_bytes INTEGER NOT NULL DEFAULT 0;
+	 UPDATE packs SET
+	   obj_count = (SELECT count(*) FROM objects o
+	                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
+	   live_count = (SELECT count(*) FROM objects o
+	                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id
+	                   AND (EXISTS(SELECT 1 FROM resource_chunks rc
+	                               WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+	                        OR EXISTS(SELECT 1 FROM snapshot_chunks sc
+	                                  WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))),
+	   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
+	                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id
+	                   AND (EXISTS(SELECT 1 FROM resource_chunks rc
+	                               WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+	                        OR EXISTS(SELECT 1 FROM snapshot_chunks sc
+	                                  WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))), 0);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -218,6 +288,18 @@ func (s *Store) migrate() error {
 	var applied int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&applied); err != nil {
 		return err
+	}
+	// A legacy layout must fail loud before any step touches it: migration 8's
+	// backfill reads resource_chunks.owner_handle, which the pre-pack layouts lack,
+	// so applying it there would surface as an opaque SQL error instead of
+	// checkSchema's recoverable instruction. A fresh dir has no resource_chunks yet
+	// and skips this (migration 1 creates the current shape).
+	if exists, err := s.tableExists("resource_chunks"); err != nil {
+		return err
+	} else if exists {
+		if err := s.checkSchema(); err != nil {
+			return err
+		}
 	}
 	for i := applied; i < len(migrations); i++ {
 		if _, err := s.db.Exec(migrations[i]); err != nil {
@@ -333,7 +415,7 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 		acc               Account
 		kdfJSON, rootJSON string
 	)
-	err := s.db.QueryRow(
+	err := s.rdb.QueryRow(
 		`SELECT owner_handle, email, kdf, wrapped_root FROM accounts WHERE email = ?`, email,
 	).Scan(&acc.OwnerHandle, &acc.Email, &kdfJSON, &rootJSON)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -358,7 +440,7 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 // stored auth-verifier hash (to check the passphrase proof), and the current auth
 // epoch (which the new device's token is tagged with). ErrNotFound if no account.
 func (s *Store) AccountForAuth(email string) (ownerHandle string, publicKey, verifierHash []byte, epoch int, err error) {
-	err = s.db.QueryRow(
+	err = s.rdb.QueryRow(
 		`SELECT owner_handle, public_key, auth_verifier, auth_epoch FROM accounts WHERE email = ?`, email,
 	).Scan(&ownerHandle, &publicKey, &verifierHash, &epoch)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -452,6 +534,9 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	// Every other device's cached token entry is now stale (its epoch no longer
+	// matches); the calling device re-caches on its next request.
+	s.auth.invalidateOwner(owner)
 	return newEpoch, nil
 }
 
@@ -504,18 +589,64 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 
 // CreateDevice issues a device token tagged with the account's current auth epoch.
 // It returns the plaintext token once; only its hash is stored.
-func (s *Store) CreateDevice(ownerHandle, name string, epoch int) (deviceID, token string, err error) {
+// CreateDevice issues a device token tagged with the account's current auth epoch.
+// maxDevices > 0 caps the account's device count: the count and the insert run in one
+// transaction, so a signup's first device and a concurrent attach cannot both slip
+// past the cap. Returns ErrDeviceLimit when the cap is already reached.
+func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (deviceID, token string, err error) {
 	deviceID = newID(10)
 	token = newID(32)
 	h := sha256.Sum256([]byte(token))
-	_, err = s.db.Exec(
-		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
-		deviceID, ownerHandle, name, h[:], epoch,
-	)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return "", "", err
 	}
+	if maxDevices > 0 {
+		var count int
+		if err := tx.QueryRow(`SELECT count(*) FROM devices WHERE owner_handle = ?`, ownerHandle).Scan(&count); err != nil {
+			tx.Rollback()
+			return "", "", err
+		}
+		if count >= maxDevices {
+			tx.Rollback()
+			return "", "", ErrDeviceLimit
+		}
+	}
+	if _, err := tx.Exec(
+		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
+		deviceID, ownerHandle, name, h[:], epoch,
+	); err != nil {
+		tx.Rollback()
+		return "", "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", err
+	}
 	return deviceID, token, nil
+}
+
+// OwnerPackBytes returns the owner's current stored-pack-byte total: the quota
+// counter, maintained incrementally in the pack put/GC/repack transactions, so this
+// is a single indexed read rather than a scan of the objects table.
+func (s *Store) OwnerPackBytes(owner string) (int64, error) {
+	var n int64
+	err := s.db.QueryRow(`SELECT pack_bytes FROM accounts WHERE owner_handle = ?`, owner).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
+// addOwnerPackBytes adjusts the owner's stored-byte counter by delta (may be
+// negative) inside the caller's transaction, so the counter moves atomically with the
+// pack rows it accounts for. It floors at zero as a backstop against a counter
+// drifting negative.
+func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
+	_, err := tx.Exec(
+		`UPDATE accounts SET pack_bytes = MAX(0, pack_bytes + ?) WHERE owner_handle = ?`,
+		delta, owner,
+	)
+	return err
 }
 
 // OwnerByToken resolves a bearer token to its owning account handle, but only while
@@ -529,9 +660,17 @@ func (s *Store) OwnerByToken(token string) (string, error) {
 // AuthByToken resolves a bearer token to its owner handle and device id, enforcing
 // the same epoch check as OwnerByToken. The device id lets a passphrase change keep
 // the calling device's token alive while invalidating the rest.
+//
+// Successful resolutions are cached (this SELECT otherwise runs on every request).
+// ChangePassphrase and DeleteDevice invalidate the affected entries, and the TTL
+// bounds the staleness of any path that misses; only positive results are cached, so
+// unauthenticated garbage cannot grow the map.
 func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 	h := sha256.Sum256([]byte(token))
-	err = s.db.QueryRow(
+	if owner, deviceID, ok := s.auth.get(h); ok {
+		return owner, deviceID, nil
+	}
+	err = s.rdb.QueryRow(
 		`SELECT d.owner_handle, d.device_id FROM devices d
 		   JOIN accounts a ON a.owner_handle = d.owner_handle
 		 WHERE d.token_hash = ? AND d.auth_epoch = a.auth_epoch`, h[:],
@@ -539,13 +678,17 @@ func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", ErrNotFound
 	}
-	return owner, deviceID, err
+	if err != nil {
+		return "", "", err
+	}
+	s.auth.put(h, owner, deviceID)
+	return owner, deviceID, nil
 }
 
 // ListDevices returns the owner's attached devices (id + name). Token hashes never
 // leave the store.
 func (s *Store) ListDevices(owner string) ([]api.Device, error) {
-	rows, err := s.db.Query(
+	rows, err := s.rdb.Query(
 		`SELECT device_id, name FROM devices WHERE owner_handle = ? ORDER BY device_id`, owner,
 	)
 	if err != nil {
@@ -574,7 +717,27 @@ func (s *Store) DeleteDevice(owner, deviceID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	s.auth.invalidateDevice(owner, deviceID) // a revoked token must stop working now, not at TTL
 	return nil
+}
+
+// Owners lists every account handle, for jobs that sweep all accounts (the
+// scheduled GC).
+func (s *Store) Owners() ([]string, error) {
+	rows, err := s.rdb.Query(`SELECT owner_handle FROM accounts ORDER BY owner_handle`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var owners []string
+	for rows.Next() {
+		var o string
+		if err := rows.Scan(&o); err != nil {
+			return nil, err
+		}
+		owners = append(owners, o)
+	}
+	return owners, rows.Err()
 }
 
 // --- Resources ---
@@ -747,7 +910,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		nonce       []byte
 		version     int
 	)
-	err := s.db.QueryRow(
+	err := s.rdb.QueryRow(
 		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version
 		 FROM resources WHERE id = ?`, id,
 	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version)
@@ -794,7 +957,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 // (private or unknown), so a private resource's existence is never confirmed.
 func (s *Store) ResourceVisibility(id string) (api.Visibility, error) {
 	var vis string
-	err := s.db.QueryRow(`SELECT visibility FROM resources WHERE id = ?`, id).Scan(&vis)
+	err := s.rdb.QueryRow(`SELECT visibility FROM resources WHERE id = ?`, id).Scan(&vis)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrNotFound
 	}
@@ -826,7 +989,7 @@ func (s *Store) SetVisibility(owner, id string, vis api.Visibility) (int, error)
 }
 
 func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
-	rows, err := s.db.Query(
+	rows, err := s.rdb.Query(
 		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
 	)
 	if err != nil {
@@ -866,17 +1029,37 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 
 func (s *Store) DeleteResource(owner, id string) error {
 	defer s.resLocks.lock(id)()
-	res, err := s.db.Exec(`DELETE FROM resources WHERE id = ? AND owner_handle = ?`, id, owner)
+	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
+	res, err := tx.Exec(`DELETE FROM resources WHERE id = ? AND owner_handle = ?`, id, owner)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		tx.Rollback()
 		return ErrNotFound
 	}
 	// Drop the GC roots; the chunks themselves are reclaimed by a later sweep
-	// (they may still be referenced by another of the owner's resources).
-	if _, err := s.db.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
+	// (they may still be referenced by another of the owner's resources or pinned
+	// by a snapshot). The dropped ids are read before the delete so the pack
+	// counters can be recomputed for exactly the packs this unrooting touches.
+	dropped, err := resourceChunkIDs(tx, id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.removeStaleBlobs(id, nil) // drop every blob file for this resource
@@ -929,6 +1112,12 @@ func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
 // existing chunk roots, decrypting nothing. label, when non-nil, is the client-
 // sealed user label stored opaquely alongside.
 func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
+	return s.createSnapshot(owner, resourceID, label, false)
+}
+
+// createSnapshot is CreateSnapshot plus the scheduled marker: the scheduled job's
+// snapshots are tagged so retention can prune them without touching manual ones.
+func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled bool) (api.SnapshotInfo, error) {
 	// Serialize against a concurrent update/delete of the same resource so the
 	// snapshot copies a consistent (blob, chunk-roots) pair, not a torn mix of two
 	// versions. Held in the store so the keyless scheduled job is serialized too, not
@@ -981,15 +1170,19 @@ func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		labelJSON = sql.NullString{String: string(b), Valid: true}
 	}
 
+	sched := 0
+	if scheduled {
+		sched = 1
+	}
 	createdAt := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt,
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched,
 	); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -997,7 +1190,8 @@ func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	// Pin every object the live resource references now. The FK to objects holds
 	// because the resource still roots them, and copying inside the tx makes the pin
 	// atomic against a concurrent GC (the single writer connection serializes the two
-	// transactions).
+	// transactions). No pack recount is needed: every pinned object is already live
+	// via resource_chunks, so the pin flips no object's rooted state.
 	if _, err := tx.Exec(
 		`INSERT INTO snapshot_chunks(snapshot_id, owner_handle, chunk_id)
 		 SELECT ?, owner_handle, chunk_id FROM resource_chunks WHERE resource_id = ?`,
@@ -1029,7 +1223,7 @@ func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, err
 		args = append(args, resourceID)
 	}
 	query += ` ORDER BY created_at DESC, snapshot_id`
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.rdb.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1069,7 +1263,7 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 		nonce       []byte
 	)
 	info := api.SnapshotInfo{ID: snapshotID}
-	err := s.db.QueryRow(
+	err := s.rdb.QueryRow(
 		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, blob_nonce
 		 FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
 	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &nonce)
@@ -1112,6 +1306,13 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if err != nil {
 		return err
 	}
+	// Unpinning can flip objects dead (if no resource or other snapshot still roots
+	// them), so the affected packs' counters are recomputed in the same transaction.
+	dropped, err := snapshotChunkIDs(tx, snapshotID)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID); err != nil {
 		tx.Rollback()
 		return err
@@ -1120,11 +1321,33 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 		tx.Rollback()
 		return err
 	}
+	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
+		tx.Rollback()
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.removeStaleBlobs(snapshotID, nil)
 	return nil
+}
+
+// snapshotChunkIDs returns the chunk ids a snapshot currently pins.
+func snapshotChunkIDs(tx *sql.Tx, snapshotID string) ([]string, error) {
+	rows, err := tx.Query(`SELECT chunk_id FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }
 
 // SetAutoSnapshot toggles whether the scheduled job covers a resource (the per-root
@@ -1154,7 +1377,7 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 	// wrapped_key IS NOT NULL skips public resources: their content key only lives in
 	// a share URL fragment, so a keyless snapshot of one could never be restored, yet
 	// would pin its chunks forever. A manual snapshot stays the owner's call.
-	rows, err := s.db.Query(
+	rows, err := s.rdb.Query(
 		`SELECT r.owner_handle, r.id FROM resources r
 		 WHERE r.auto_snapshot = 1
 		   AND r.wrapped_key IS NOT NULL
@@ -1180,7 +1403,7 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 		rows.Close()
 		return 0, err
 	}
-	rows.Close() // the single writer connection can't take CreateSnapshot's writes with this cursor open
+	rows.Close() // release the read connection before the CreateSnapshot writes below
 
 	// Snapshot each due resource independently: a per-resource failure (e.g. the rare
 	// row/blob race a concurrent update can cause, which GetResource also tolerates)
@@ -1189,7 +1412,7 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 	created := 0
 	var firstErr error
 	for _, r := range due {
-		if _, err := s.CreateSnapshot(r.owner, r.id, nil); err != nil {
+		if _, err := s.createSnapshot(r.owner, r.id, nil, true); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("auto-snapshot %s: %w", r.id, err)
 			}
@@ -1198,6 +1421,57 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 		created++
 	}
 	return created, firstErr
+}
+
+// PruneAutoSnapshots deletes scheduled snapshots beyond the newest keepLast per
+// (owner, resource), oldest first; manual snapshots are never touched. This is the
+// retention cap that keeps the scheduled job's storage bounded: without it every
+// version ever auto-snapshotted stays pinned forever. keepLast <= 0 disables it.
+func (s *Store) PruneAutoSnapshots(keepLast int) (int, error) {
+	if keepLast <= 0 {
+		return 0, nil
+	}
+	rows, err := s.db.Query(
+		`SELECT snapshot_id, owner_handle FROM snapshots s
+		 WHERE s.scheduled = 1
+		   AND (SELECT COUNT(*) FROM snapshots n
+		        WHERE n.owner_handle = s.owner_handle AND n.resource_id = s.resource_id
+		          AND n.scheduled = 1
+		          AND (n.created_at > s.created_at
+		               OR (n.created_at = s.created_at AND n.snapshot_id > s.snapshot_id))) >= ?`,
+		keepLast,
+	)
+	if err != nil {
+		return 0, err
+	}
+	type ref struct{ id, owner string }
+	var due []ref
+	for rows.Next() {
+		var r ref
+		if err := rows.Scan(&r.id, &r.owner); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		due = append(due, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close() // the single writer connection can't take DeleteSnapshot's writes with this cursor open
+
+	pruned := 0
+	var firstErr error
+	for _, r := range due {
+		if err := s.DeleteSnapshot(r.owner, r.id); err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("prune snapshot %s: %w", r.id, err)
+			}
+			continue
+		}
+		pruned++
+	}
+	return pruned, firstErr
 }
 
 // --- packed object store ---
@@ -1215,6 +1489,10 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 var ErrBadPack = errors.New("malformed pack")
 
 func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) error {
+	oldRefs, err := resourceChunkIDs(tx, resourceID)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, resourceID); err != nil {
 		return err
 	}
@@ -1238,8 +1516,139 @@ func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) 
 			return err
 		}
 	}
+	// Only a ref entering or leaving this resource can flip an object's rooted
+	// state (a ref in both sets keeps it rooted throughout), so the recount is
+	// scoped to the packs holding the symmetric difference — proportional to the
+	// change, not the manifest.
+	return recountPacksForChunks(tx, owner, symmetricDiff(oldRefs, refs))
+}
+
+// resourceChunkIDs returns the chunk ids a resource currently roots.
+func resourceChunkIDs(tx *sql.Tx, resourceID string) ([]string, error) {
+	rows, err := tx.Query(`SELECT chunk_id FROM resource_chunks WHERE resource_id = ?`, resourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// symmetricDiff returns the ids present in exactly one of the two sets.
+func symmetricDiff(a, b []string) []string {
+	inA := make(map[string]bool, len(a))
+	for _, id := range a {
+		inA[id] = true
+	}
+	var out []string
+	seenB := make(map[string]bool, len(b))
+	for _, id := range b {
+		if seenB[id] {
+			continue
+		}
+		seenB[id] = true
+		if !inA[id] {
+			out = append(out, id)
+		}
+	}
+	for _, id := range a {
+		if inA[id] && !seenB[id] {
+			out = append(out, id)
+			inA[id] = false // dedup repeats within a
+		}
+	}
+	return out
+}
+
+// recountPacksForChunks recomputes the counters of every pack holding one of the
+// given chunks, from the post-mutation state inside the caller's transaction.
+func recountPacksForChunks(tx *sql.Tx, owner string, chunkIDs []string) error {
+	if len(chunkIDs) == 0 {
+		return nil
+	}
+	packSet := map[string]bool{}
+	var packs []string
+	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
+	for start := 0; start < len(chunkIDs); start += batch {
+		end := min(start+batch, len(chunkIDs))
+		group := chunkIDs[start:end]
+		args := make([]any, 0, len(group)+1)
+		args = append(args, owner)
+		for _, id := range group {
+			args = append(args, id)
+		}
+		rows, err := tx.Query(
+			`SELECT DISTINCT pack_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			if !packSet[id] {
+				packSet[id] = true
+				packs = append(packs, id)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	return recountPacks(tx, owner, packs)
+}
+
+// recountPacks recomputes obj_count/live_count/live_bytes for the named packs from
+// the objects and root tables as they stand inside the caller's transaction. Every
+// write that can flip an object's rooted state or move object rows funnels through
+// this, so the counters GC selects on are exact, not approximations.
+func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
+	const batch = 400
+	for start := 0; start < len(packIDs); start += batch {
+		end := min(start+batch, len(packIDs))
+		group := packIDs[start:end]
+		args := make([]any, 0, len(group)+1)
+		args = append(args, owner)
+		for _, id := range group {
+			args = append(args, id)
+		}
+		if _, err := tx.Exec(
+			`UPDATE packs SET
+			   obj_count = (SELECT count(*) FROM objects o
+			                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
+			   live_count = (SELECT count(*) FROM objects o
+			                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id
+			                   AND `+objectIsLive+`),
+			   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
+			                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id
+			                   AND `+objectIsLive+`), 0)
+			 WHERE owner_handle = ? AND pack_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		); err != nil {
+			return err
+		}
+	}
 	return nil
 }
+
+// objectIsLive is the SQL predicate for "some resource or snapshot roots object o".
+const objectIsLive = `(EXISTS(SELECT 1 FROM resource_chunks rc
+	                           WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
+	                   OR EXISTS(SELECT 1 FROM snapshot_chunks sc
+	                             WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))`
 
 // MissingChunks returns the subset of object ids the owner does not already store,
 // and re-arms the GC age guard on the packs holding the ids it does (the dedup-hit
@@ -1261,7 +1670,7 @@ func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 		for _, id := range group {
 			args = append(args, id)
 		}
-		rows, err := s.db.Query(
+		rows, err := s.rdb.Query(
 			`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
 			args...,
 		)
@@ -1333,7 +1742,13 @@ func placeholders(n int) string {
 // object already stored (in this or another pack, by content address) is left where
 // it is — dedup keys on chunk_id, so a second home is just harmless dead space.
 // Returns how many objects were newly stored.
-func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
+// PutPack verifies and stores one raw pack, returning how many of its objects were
+// newly stored. quotaBytes > 0 caps the owner's total stored pack bytes: a new pack
+// that would push the owner past it is rejected with ErrQuotaExceeded (a re-PUT of an
+// already-stored pack is idempotent and never counted twice). The byte counter is
+// adjusted in the same transaction that inserts the pack row, so it can never drift
+// from the rows it accounts for.
+func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (int, error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
 		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
@@ -1355,6 +1770,22 @@ func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
 		}
 	}
 
+	// Cheap early reject so an over-quota upload does not write a pack file it will
+	// discard. The authoritative check runs inside the transaction below.
+	if quotaBytes > 0 {
+		if existed, err := s.packExists(owner, packID); err != nil {
+			return 0, err
+		} else if !existed {
+			used, err := s.OwnerPackBytes(owner)
+			if err != nil {
+				return 0, err
+			}
+			if used+int64(len(data)) > quotaBytes {
+				return 0, ErrQuotaExceeded
+			}
+		}
+	}
+
 	if err := s.writePack(owner, packID, data); err != nil {
 		return 0, err
 	}
@@ -1363,16 +1794,53 @@ func (s *Store) PutPack(owner, packID string, data []byte) (int, error) {
 		return 0, err
 	}
 	now := time.Now().Unix()
-	if _, err := tx.Exec(
+	// DO NOTHING (not DO UPDATE) so RowsAffected distinguishes a first store from a
+	// re-PUT: only a first store counts against the quota and re-arms nothing here.
+	res, err := tx.Exec(
 		`INSERT INTO packs(owner_handle, pack_id, length, created_at) VALUES(?,?,?,?)
-		 ON CONFLICT(owner_handle, pack_id) DO UPDATE SET created_at = excluded.created_at`,
+		 ON CONFLICT(owner_handle, pack_id) DO NOTHING`,
 		owner, packID, len(data), now,
-	); err != nil {
+	)
+	if err != nil {
 		tx.Rollback()
 		return 0, err
 	}
+	if inserted, _ := res.RowsAffected(); inserted == 0 {
+		// The pack already exists; re-arm its GC age guard so a concurrent read of it
+		// is not reaped, exactly as the prior DO UPDATE did.
+		if _, err := tx.Exec(
+			`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`, now, owner, packID,
+		); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	} else {
+		if quotaBytes > 0 {
+			var used int64
+			if err := tx.QueryRow(`SELECT pack_bytes FROM accounts WHERE owner_handle = ?`, owner).Scan(&used); err != nil {
+				tx.Rollback()
+				return 0, err
+			}
+			if used+int64(len(data)) > quotaBytes {
+				tx.Rollback()
+				_ = os.Remove(s.packPath(owner, packID))
+				return 0, ErrQuotaExceeded
+			}
+		}
+		if err := addOwnerPackBytes(tx, owner, int64(len(data))); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+	}
 	stored, err := insertObjects(tx, owner, packID, index)
 	if err != nil {
+		tx.Rollback()
+		return 0, err
+	}
+	// The new rows change this pack's obj_count. They cannot be live yet — a root's
+	// FK requires a pre-existing object row, so a just-inserted object is unrooted
+	// until a later manifest PUT — but recounting keeps one code path.
+	if err := recountPacks(tx, owner, []string{packID}); err != nil {
 		tx.Rollback()
 		return 0, err
 	}
@@ -1469,7 +1937,7 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 		for _, id := range group {
 			args = append(args, id)
 		}
-		rows, err := s.db.Query(
+		rows, err := s.rdb.Query(
 			`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
 			args...,
 		)
@@ -1535,7 +2003,7 @@ func (s *Store) touchPacks(owner string, packIDs []string) error {
 // without ever loading the whole pack into memory.
 func (s *Store) PackFileForOwner(owner, packID string) (string, error) {
 	var one int
-	err := s.db.QueryRow(
+	err := s.rdb.QueryRow(
 		`SELECT 1 FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, packID,
 	).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1552,7 +2020,7 @@ func (s *Store) PackFileForOwner(owner, packID string) (string, error) {
 // coincides with a live pack is never removed out from under a committed swap.
 func (s *Store) packExists(owner, id string) (bool, error) {
 	var one int
-	err := s.db.QueryRow(
+	err := s.rdb.QueryRow(
 		`SELECT 1 FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, id,
 	).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1590,6 +2058,34 @@ func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	}, nil
 }
 
+// RunGCAll runs the owner-scoped GC for every account and returns the aggregate,
+// so space reclamation does not depend on a client happening to sync (the
+// POST /v1/gc trigger). A per-owner failure must not block the rest of the sweep;
+// the first error is returned for logging after the loop has done what it could,
+// mirroring RunAutoSnapshots.
+func (s *Store) RunGCAll(minAge time.Duration) (api.GCResponse, error) {
+	owners, err := s.Owners()
+	if err != nil {
+		return api.GCResponse{}, err
+	}
+	var total api.GCResponse
+	var firstErr error
+	for _, owner := range owners {
+		res, err := s.GC(owner, minAge)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("gc owner %s: %w", owner, err)
+			}
+			continue
+		}
+		total.DeletedPacks += res.DeletedPacks
+		total.FreedBytes += res.FreedBytes
+		total.RepackedPacks += res.RepackedPacks
+		total.ReclaimedBytes += res.ReclaimedBytes
+	}
+	return total, firstErr
+}
+
 // GCPacks deletes the owner's packs none of whose objects any live resource
 // references and that were uploaded longer ago than minAge. The age guard keeps an
 // in-flight push's freshly uploaded packs from being reaped before its manifest
@@ -1611,21 +2107,13 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		return 0, 0, err
 	}
 	// A pack is dead only if none of its objects are rooted by a live resource OR a
-	// snapshot. snapshot_chunks is unioned in so a snapshot pinning a chunk in this
-	// pack keeps the whole pack from being swept.
+	// snapshot. live_count folds both root tables in and is maintained inside every
+	// transaction that moves objects or roots (see recountPacks), so selection reads
+	// the packs table alone instead of joining every object row per sweep.
 	rows, err := tx.Query(
 		`SELECT pack_id, length FROM packs
-		 WHERE owner_handle = ? AND created_at < ?
-		   AND pack_id NOT IN (
-		     SELECT o.pack_id FROM objects o
-		     JOIN resource_chunks rc ON rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id
-		     WHERE o.owner_handle = ?
-		     UNION
-		     SELECT o.pack_id FROM objects o
-		     JOIN snapshot_chunks sc ON sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id
-		     WHERE o.owner_handle = ?
-		   )`,
-		owner, cutoff, owner, owner,
+		 WHERE owner_handle = ? AND created_at < ? AND live_count = 0`,
+		owner, cutoff,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -1667,6 +2155,12 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		}
 		freed += d.length
 	}
+	if freed > 0 {
+		if err := addOwnerPackBytes(tx, owner, -freed); err != nil {
+			tx.Rollback()
+			return 0, 0, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, 0, err
 	}
@@ -1705,7 +2199,6 @@ type repackCand struct {
 	packID    string
 	length    int64
 	liveBytes int64
-	live      []liveObj // in ascending offset order
 }
 
 // RepackOwner compacts the owner's partially-dead packs. GCPacks reclaims a pack only
@@ -1731,13 +2224,23 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 		if movedBytes >= repackBudgetBytes {
 			break
 		}
+		// The live object list is loaded per candidate, only for packs this pass
+		// actually processes within the budget; candidate selection itself never
+		// reads object rows.
+		live, liveBytes, err := s.packLiveObjects(owner, cand.packID)
+		if err != nil {
+			return repacked, reclaimed, err
+		}
+		if len(live) == 0 {
+			continue // went fully dead since planning; the next sweep reclaims it
+		}
 		oldBytes, err := os.ReadFile(s.packPath(owner, cand.packID))
 		if err != nil {
 			// A missing/unreadable pack file is left for a later pass rather than
 			// failing the whole sweep; skip it.
 			continue
 		}
-		newID, newPack, newIndex := buildLivePack(oldBytes, cand.live)
+		newID, newPack, newIndex := buildLivePack(oldBytes, live)
 		if newID == cand.packID {
 			continue // no dead bytes to reclaim (a candidate should always have some)
 		}
@@ -1761,101 +2264,72 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 		_ = os.Remove(s.packPath(owner, cand.packID))
 		repacked++
 		reclaimed += freed
-		movedBytes += cand.liveBytes
+		movedBytes += liveBytes
 	}
 	return repacked, reclaimed, nil
 }
 
-// repackCandidates returns the owner's compaction-worthy packs (see repackCand),
-// reading every object once and grouping by pack. Objects come back ordered by pack
-// and offset, so each candidate's live slice is already offset-sorted.
+// repackCandidates returns the owner's compaction-worthy packs, selected from the
+// maintained per-pack counters alone: aged past cutoff, mixing live and dead objects
+// (0 < live_count < obj_count), and at most repackMaxLiveFraction live. No object
+// row is read here; the caller loads each candidate's live objects only when it
+// actually processes that pack.
 func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, error) {
-	packLen := map[string]int64{}
-	prows, err := s.db.Query(`SELECT pack_id, length FROM packs WHERE owner_handle = ? AND created_at < ?`, owner, cutoff)
-	if err != nil {
-		return nil, err
-	}
-	for prows.Next() {
-		var id string
-		var length int64
-		if err := prows.Scan(&id, &length); err != nil {
-			prows.Close()
-			return nil, err
-		}
-		packLen[id] = length
-	}
-	if err := prows.Err(); err != nil {
-		prows.Close()
-		return nil, err
-	}
-	prows.Close()
-	if len(packLen) == 0 {
-		return nil, nil
-	}
-
-	cands := map[string]*repackCand{}
-	deadSeen := map[string]bool{}
-	var order []string
-	// An object is live if a resource OR a snapshot roots it; a repack must copy every
-	// live object forward, so snapshot_chunks is unioned into the liveness test.
-	rows, err := s.db.Query(
-		`SELECT o.pack_id, o.chunk_id, o."offset", o.length,
-		        (EXISTS(SELECT 1 FROM resource_chunks rc
-		                WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
-		         OR EXISTS(SELECT 1 FROM snapshot_chunks sc
-		                   WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))
-		 FROM objects o WHERE o.owner_handle = ?
-		 ORDER BY o.pack_id, o."offset"`,
-		owner,
+	rows, err := s.rdb.Query(
+		`SELECT pack_id, length, live_bytes FROM packs
+		 WHERE owner_handle = ? AND created_at < ?
+		   AND live_count > 0 AND live_count < obj_count
+		 ORDER BY pack_id`,
+		owner, cutoff,
 	)
 	if err != nil {
 		return nil, err
 	}
+	defer rows.Close()
+	var out []repackCand
 	for rows.Next() {
-		var (
-			pack, id    string
-			off, length int64
-			live        bool
-		)
-		if err := rows.Scan(&pack, &id, &off, &length, &live); err != nil {
-			rows.Close()
+		var c repackCand
+		if err := rows.Scan(&c.packID, &c.length, &c.liveBytes); err != nil {
 			return nil, err
 		}
-		plen, ok := packLen[pack]
-		if !ok {
-			continue // a pack younger than the age guard, not a candidate
+		// Rewriting a nearly-full pack costs more IO than the sliver it frees; the
+		// fraction check stays in Go so the constant is the single source of truth.
+		if float64(c.liveBytes) > repackMaxLiveFraction*float64(c.length) {
+			continue
 		}
-		c := cands[pack]
-		if c == nil {
-			c = &repackCand{packID: pack, length: plen}
-			cands[pack] = c
-			order = append(order, pack)
-		}
-		if live {
-			c.live = append(c.live, liveObj{id: id, off: off, length: length})
-			c.liveBytes += length
-		} else {
-			deadSeen[pack] = true
-		}
+		out = append(out, c)
 	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return nil, err
-	}
-	rows.Close()
+	return out, rows.Err()
+}
 
-	var out []repackCand
-	for _, pid := range order {
-		c := cands[pid]
-		switch {
-		case !deadSeen[pid]: // nothing to reclaim
-		case c.liveBytes == 0: // fully dead — GCPacks handles it
-		case float64(c.liveBytes) > repackMaxLiveFraction*float64(c.length): // too full to bother
-		default:
-			out = append(out, *c)
-		}
+// packLiveObjects returns a pack's rooted objects in ascending offset order, plus
+// their total bytes. Planning reads run on the read pool; commitRepack re-validates
+// the live set inside its transaction, so a root change between the two only makes
+// the swap skip the pack.
+func (s *Store) packLiveObjects(owner, packID string) ([]liveObj, int64, error) {
+	rows, err := s.rdb.Query(
+		`SELECT o.chunk_id, o."offset", o.length FROM objects o
+		 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+objectIsLive+`
+		 ORDER BY o."offset"`,
+		owner, packID,
+	)
+	if err != nil {
+		return nil, 0, err
 	}
-	return out, nil
+	defer rows.Close()
+	var (
+		live  []liveObj
+		total int64
+	)
+	for rows.Next() {
+		var o liveObj
+		if err := rows.Scan(&o.id, &o.off, &o.length); err != nil {
+			return nil, 0, err
+		}
+		live = append(live, o)
+		total += o.length
+	}
+	return live, total, rows.Err()
 }
 
 // buildLivePack assembles a fresh pack from the live slices of an old pack's bytes,
@@ -1909,11 +2383,7 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	liveNow := map[string]bool{}
 	lrows, err := tx.Query(
 		`SELECT o.chunk_id FROM objects o
-		 WHERE o.owner_handle = ? AND o.pack_id = ?
-		   AND (EXISTS(SELECT 1 FROM resource_chunks rc
-		              WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
-		        OR EXISTS(SELECT 1 FROM snapshot_chunks sc
-		                 WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))`,
+		 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+objectIsLive,
 		owner, cand.packID,
 	)
 	if err != nil {
@@ -1976,6 +2446,18 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 		return false, 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	// The moved objects now count against the new pack (which may pre-exist with
+	// other objects, via the ON CONFLICT above), so recount it in the same tx.
+	if err := recountPacks(tx, owner, []string{newID}); err != nil {
+		tx.Rollback()
+		return false, 0, err
+	}
+	// The swap added newLen and dropped curLen; keep the byte counter in step within
+	// the same transaction.
+	if err := addOwnerPackBytes(tx, owner, int64(newLen)-curLen); err != nil {
 		tx.Rollback()
 		return false, 0, err
 	}

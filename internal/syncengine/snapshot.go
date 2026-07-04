@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"unicode/utf8"
 
+	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
@@ -280,7 +281,7 @@ func Fingerprint(dir string) (string, error) {
 // check is hashed and only re-sealed if its content actually changed.
 //
 // sink may be nil for a manifest-only snapshot (no upload).
-func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manifest, sink ChunkSink, rehash bool) (Manifest, error) {
+func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *Manifest, sink ChunkSink, rehash bool) (Manifest, error) {
 	if sink == nil {
 		sink = nopSink{}
 	}
@@ -320,7 +321,7 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker *Chunker, base *Manife
 // snapshotFile turns one regular file into an entry, reusing the base entry when
 // the content is unchanged so it is neither re-read nor re-sealed. Small files
 // inline; larger ones stream through the chunker into sink.
-func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink, rehash bool) (Entry, error) {
+func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey, selector ChunkSelector, sink ChunkSink, rehash bool) (Entry, error) {
 	entry := metaEntry(n)
 	prev, inBase := reuse[n.rel]
 	size := n.info.Size()
@@ -333,6 +334,11 @@ func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey
 		return prev, nil
 	}
 
+	// Pick the chunker for this file's size before deciding to inline: its Min is the
+	// inline cutoff, and the smallest tier (used for everything inlinable) keeps that
+	// cutoff at the default so inline behavior is unchanged.
+	chunker := selector.ChunkerFor(size)
+
 	// Small files are inlined into the (sealed) manifest; read fully — bounded by
 	// the inline cutoff — and hash.
 	if size <= int64(chunker.Min) {
@@ -344,7 +350,7 @@ func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey
 		if inBase && prev.Hash == entry.Hash {
 			return touchedReuse(prev, entry), nil
 		}
-		entry.Inline = data
+		entry.Inline, entry.InlineAlg = compress.Encode(data)
 		return entry, nil
 	}
 
