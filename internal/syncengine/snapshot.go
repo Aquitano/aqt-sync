@@ -150,13 +150,37 @@ func linkHash(target string) string {
 // so scan memory is bounded regardless of file size. Nested .aqtignore files are
 // honored.
 func Scan(dir string) (Manifest, error) {
+	return ScanReusing(dir, nil, false)
+}
+
+// ScanReusing is Scan with the last-synced manifest as a stat fast-path: a regular
+// file whose size, mode, and mtime match its base entry reuses the recorded entry
+// (hash and content refs) without being read — the same signal Take trusts — so
+// `status` and pull-only syncs stop re-reading an unchanged tree. A file that fails
+// the stat check is re-hashed, and one whose content still matches keeps its base
+// entry (with the new mtime/mode) so content refs survive. rehash forces the
+// content hash for the rare edit that preserves size, mode, and mtime.
+func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
+	var reuse map[string]Entry
+	if base != nil {
+		reuse = base.byPath()
+	}
 	var m Manifest
 	err := walkFiles(dir, func(n fileNode) error {
 		e := metaEntry(n)
 		if !n.symlink {
+			prev, inBase := reuse[n.rel]
+			if inBase && !rehash && unchangedStat(prev, e) {
+				m.Entries = append(m.Entries, prev)
+				return nil
+			}
 			h, err := streamHash(n.path)
 			if err != nil {
 				return err
+			}
+			if inBase && h == prev.Hash {
+				m.Entries = append(m.Entries, touchedReuse(prev, e))
+				return nil
 			}
 			e.Hash = h
 		}

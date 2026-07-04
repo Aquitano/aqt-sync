@@ -29,6 +29,70 @@ func newFakeWatcher(f *fakeWatcher) *watcher {
 	}
 }
 
+// fakeWaiter is a test-driven tick source: tick() fires one loop iteration and Reset
+// records the backoff interval the loop asked for.
+type fakeWaiter struct {
+	ch     chan time.Time
+	resets []time.Duration
+}
+
+func newFakeWaiter() *fakeWaiter            { return &fakeWaiter{ch: make(chan time.Time, 1)} }
+func (f *fakeWaiter) C() <-chan time.Time   { return f.ch }
+func (f *fakeWaiter) Reset(d time.Duration) { f.resets = append(f.resets, d) }
+func (f *fakeWaiter) Stop()                 {}
+func (f *fakeWaiter) tick()                 { f.ch <- time.Time{} }
+
+func TestBackoffInterval(t *testing.T) {
+	base, max := 2*time.Second, 30*time.Second
+	cases := []struct {
+		idle int
+		want time.Duration
+	}{
+		{0, 2 * time.Second},
+		{1, 4 * time.Second},
+		{2, 8 * time.Second},
+		{3, 16 * time.Second},
+		{4, 30 * time.Second}, // 32s clamped to max
+		{10, 30 * time.Second},
+	}
+	for _, c := range cases {
+		if got := backoffInterval(base, max, c.idle); got != c.want {
+			t.Errorf("backoffInterval(idle=%d) = %s, want %s", c.idle, got, c.want)
+		}
+	}
+	if got := backoffInterval(time.Minute, 30*time.Second, 5); got != time.Minute {
+		t.Errorf("base >= max must disable backoff: got %s", got)
+	}
+}
+
+// The idle streak grows on quiet ticks (so the poll interval backs off) and resets
+// to 0 on activity — a sync or a detected change — so a change snaps polling back to
+// the base interval.
+func TestWatcherIdleStreakBacksOffAndResets(t *testing.T) {
+	f := &fakeWatcher{sig: "a"}
+	w := newFakeWatcher(f)
+	var st watchState
+
+	w.step(&st) // prime
+	if st.idle != 0 {
+		t.Fatalf("prime idle=%d, want 0", st.idle)
+	}
+	w.step(&st) // quiet -> initial sync (activity)
+	if f.syncs != 1 || st.idle != 0 {
+		t.Fatalf("after sync syncs=%d idle=%d, want 1/0", f.syncs, st.idle)
+	}
+	w.step(&st) // quiet, nothing pending -> idle grows
+	w.step(&st)
+	if st.idle != 2 {
+		t.Fatalf("idle=%d after two quiet ticks, want 2", st.idle)
+	}
+	f.sig = "b"
+	w.step(&st) // a change resets the streak
+	if st.idle != 0 {
+		t.Fatalf("a change must reset the idle streak, got %d", st.idle)
+	}
+}
+
 func TestWatcherSyncsOnceWhenQuiet(t *testing.T) {
 	f := &fakeWatcher{sig: "a"}
 	w := newFakeWatcher(f)
@@ -179,13 +243,13 @@ func TestWatcherKeepsEditMadeDuringSync(t *testing.T) {
 func TestWatcherRunExitsOnCancel(t *testing.T) {
 	f := &fakeWatcher{sig: "a"}
 	w := newFakeWatcher(f)
-	ticks := make(chan time.Time)
+	wait := newFakeWaiter()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.run(ctx, ticks) }()
+	go func() { done <- w.run(ctx, wait, defaultInterval, maxWatchInterval) }()
 
-	ticks <- time.Time{} // prime ran before the first receive; this drives the sync
-	ticks <- time.Time{} // drain: guarantees the previous tick was fully processed
+	wait.tick() // prime ran before the first receive; this drives the sync
+	wait.tick() // drain: guarantees the previous tick was fully processed
 	cancel()
 	select {
 	case err := <-done:
@@ -206,13 +270,13 @@ func TestWatcherRunStopsOnFatalSync(t *testing.T) {
 	f := &fakeWatcher{sig: "a"}
 	w := newFakeWatcher(f)
 	w.sync = func() error { return errSessionRequired }
-	ticks := make(chan time.Time)
+	wait := newFakeWaiter()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- w.run(ctx, ticks) }()
+	go func() { done <- w.run(ctx, wait, defaultInterval, maxWatchInterval) }()
 
-	ticks <- time.Time{} // initial sync attempt -> fatal
+	wait.tick() // initial sync attempt -> fatal
 	select {
 	case err := <-done:
 		if !errors.Is(err, errSessionRequired) {

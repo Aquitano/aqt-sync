@@ -233,6 +233,109 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 	}
 }
 
+// TestOpenTreeBatchedOneFetchPerLevel proves the level-batched walk collapses a
+// tree's node fetches to one batch per depth level (the fix for 2.4's 2-RTT-per-node
+// cost), and reconstructs exactly the manifest the depth-first OpenTree does.
+func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
+	conv := testConv(t)
+	in := Manifest{Version: TreeManifestVersion, Entries: []Entry{
+		{Path: "a/sub/f1.txt", Hash: "h1", Inline: []byte("1")},
+		{Path: "b/sub/f2.txt", Hash: "h2", Inline: []byte("2")},
+	}, Dirs: []DirEntry{
+		{Path: "a", Mode: 0o700}, {Path: "a/sub", Mode: 0o700},
+		{Path: "b", Mode: 0o700}, {Path: "b/sub", Mode: 0o700},
+	}}
+
+	sink := mapSink{}
+	root, _, err := SealTree(in, conv, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var batchSizes []int
+	fetchBatch := func(ids []string) (map[string][]byte, error) {
+		batchSizes = append(batchSizes, len(ids))
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			ct, err := sink.get(id)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = ct
+		}
+		return out, nil
+	}
+	got, err := OpenTreeBatched(root, fetchBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := OpenTree(root, sink.get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalize(full), normalize(got)) {
+		t.Fatalf("batched read != depth-first read:\n full %+v\n got  %+v", full, got)
+	}
+	// root level (1 node), then {a,b} (2), then {a/sub,b/sub} (2): three batches,
+	// each one locate round-trip, instead of five separate 2-RTT node fetches.
+	wantSizes := []int{1, 2, 2}
+	if !reflect.DeepEqual(batchSizes, wantSizes) {
+		t.Fatalf("batch sizes = %v, want %v (one batch per level)", batchSizes, wantSizes)
+	}
+}
+
+// A file with too many chunk records is stored with an indirect chunk list (ChunksRef),
+// and a compressed inline file carries InlineAlg. The batched reader must reconstruct
+// both exactly like the depth-first OpenTree: earlier it dropped ChunksRef (restoring
+// the file with zero chunks) and InlineAlg (writing raw compressed bytes as plaintext).
+func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
+	conv := testConv(t)
+	key := make([]byte, crypto.KeySize)
+	bigChunks := make([]crypto.Chunk, chunkListInlineMax+1)
+	for i := range bigChunks {
+		bigChunks[i] = crypto.Chunk{ID: fmt.Sprintf("chunk-%03d", i), Key: key, Len: i + 1}
+	}
+	in := Manifest{Version: TreeManifestVersion, Entries: []Entry{
+		{Path: "big.bin", Mode: 0o644, Hash: "hbig", Chunks: bigChunks},
+		{Path: "small.txt", Mode: 0o644, Hash: "hsmall", Inline: []byte("compressed-payload"), InlineAlg: "zstd"},
+	}}
+
+	sink := mapSink{}
+	root, _, err := SealTree(in, conv, sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fetchBatch := func(ids []string) (map[string][]byte, error) {
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			ct, err := sink.get(id)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = ct
+		}
+		return out, nil
+	}
+	got, err := OpenTreeBatched(root, fetchBatch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full, err := OpenTree(root, sink.get)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(normalize(full), normalize(got)) {
+		t.Fatalf("batched read != depth-first read:\n full %+v\n got  %+v", full, got)
+	}
+	if big := got.ByPath()["big.bin"]; len(big.Chunks) != len(bigChunks) {
+		t.Fatalf("indirect chunk list dropped: got %d chunks, want %d", len(big.Chunks), len(bigChunks))
+	}
+	if small := got.ByPath()["small.txt"]; small.InlineAlg != "zstd" {
+		t.Fatalf("InlineAlg dropped: got %q, want zstd", small.InlineAlg)
+	}
+}
+
 func TestTreeRootAADSeparation(t *testing.T) {
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {

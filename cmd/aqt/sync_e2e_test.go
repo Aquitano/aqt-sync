@@ -97,9 +97,9 @@ func TestSyncE2E(t *testing.T) {
 // supersede is re-read against the current version instead of hard-failing.
 func TestPackSourceMissingObjectIsNotFound(t *testing.T) {
 	src := &packSource{
-		locs:  map[string]api.ObjectLocation{},
-		spans: map[string]packSpan{},
-		cache: newPackCache(1),
+		locs:    map[string]api.ObjectLocation{},
+		objSpan: map[string]packSpan{},
+		cache:   newPackCache(1),
 	}
 	if _, err := src.get("deadbeef"); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("get of an unlocated object = %v, want client.ErrNotFound", err)

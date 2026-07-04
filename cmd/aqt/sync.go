@@ -14,6 +14,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -193,18 +194,19 @@ func runStatus(dir string) error {
 	if err != nil {
 		return err
 	}
-	local, err := syncengine.Scan(root)
+	local, err := syncengine.ScanReusing(root, &base, false)
 	if err != nil {
 		return err
 	}
 
 	// status is intentionally offline: it compares the working tree to the last
 	// synced manifest. Remote-side changes and conflicts surface during `sync`.
+	baseByPath := base.ByPath()
 	var added, modified, deleted []string
 	for _, a := range syncengine.Plan(local, base, base) {
 		switch a.Kind {
 		case syncengine.Upload:
-			if _, ok := base.Lookup(a.Path); ok {
+			if _, ok := baseByPath[a.Path]; ok {
 				modified = append(modified, a.Path)
 			} else {
 				added = append(added, a.Path)
@@ -315,7 +317,11 @@ func runSync(dir string, opts syncOptions) error {
 	// dry-run pass uploads nothing, so a metadata+hash scan is enough to plan.
 	var local syncengine.Manifest
 	if opts.pullOnly || opts.dryRun {
-		local, err = syncengine.Scan(root)
+		var scanBase *syncengine.Manifest
+		if baseExists {
+			scanBase = &base
+		}
+		local, err = syncengine.ScanReusing(root, scanBase, opts.rehash)
 		if err != nil {
 			return err
 		}
@@ -331,6 +337,18 @@ func runSync(dir string, opts syncOptions) error {
 			return err
 		}
 		if err := up.Flush(); err != nil {
+			return err
+		}
+	}
+
+	// Seal the base tree's node ciphertexts once, up front, and reuse them across every
+	// reconcile attempt. This is the base-serving map the reuse read consults so an
+	// unchanged remote subtree costs no fetch; sealing it here (rather than inside the
+	// retry closure) stops a conflict retry from re-sealing the whole DAG each pass (3.3).
+	var baseCT map[string][]byte
+	if baseExists {
+		baseCT, err = syncengine.SealTreeCiphertexts(base, conv)
+		if err != nil {
 			return err
 		}
 	}
@@ -394,7 +412,7 @@ func runSync(dir string, opts syncOptions) error {
 		// or an accepted rollback) there is nothing to reuse, so fall back to the full walk.
 		var remote syncengine.Manifest
 		if trustBase {
-			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, base, conv)
+			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, baseCT)
 		} else {
 			remote, err = openRemoteTree(cl, res.Blob, ck)
 		}
@@ -955,52 +973,79 @@ func (u *packUploader) upload(cand []candidate) error {
 	return u.cl.PutPack(packID, pack)
 }
 
+// downloadConcurrency bounds how many files a pull materializes at once. Downloads
+// are IO-bound (each file range-fetches its packs, then writes them out), so a small
+// fixed fan-out overlaps the network latency of independent files without a
+// per-core thread. The shared packSource is concurrency-safe, and every file lands
+// at a distinct path, so the content-addressed model makes the parallelism trivially
+// correct — no file's bytes depend on another's.
+const downloadConcurrency = 6
+
 // runDownloads materializes each entry under root, streaming its chunks from the
 // packs that hold them. A pack-backed chunk source range-fetches packs on demand
 // and caches a few, so neither a whole file nor the whole tree is ever in memory.
+// Files are materialized by a bounded worker pool; the first error wins and is
+// returned, matching the upload pipeline's aggregation.
 func runDownloads(cl *client.Client, root string, entries []syncengine.Entry) error {
 	src, err := newPackSource(cl, distinctChunkIDs(entries))
 	if err != nil {
 		return err
 	}
+	var g errgroup.Group
+	g.SetLimit(downloadConcurrency)
 	for _, e := range entries {
-		if e.IsSymlink() {
-			if err := syncengine.WriteSymlink(root, e); err != nil {
-				return err
+		e := e
+		g.Go(func() error {
+			if e.IsSymlink() {
+				return syncengine.WriteSymlink(root, e)
 			}
-			continue
-		}
-		if err := syncengine.MaterializeFile(root, e, src.get); err != nil {
-			return err
-		}
+			return syncengine.MaterializeFile(root, e, src.get)
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
-// packSpan is the byte range of a pack covering every object a download needs from
-// it — fetched in one Range request, never the whole pack when only a few objects
-// are wanted.
+// packSpan is a contiguous byte range of a pack covering a run of objects a download
+// needs — fetched in one Range request. A pack may map to several spans when its
+// needed objects are far apart (see spanSplitGap), so a few KiB at opposite ends of a
+// large pack never drags the whole pack down.
 type packSpan struct {
 	base int64
 	end  int64
 }
 
+// spanSplitGap bounds wasted read-ahead within a pack: two needed objects more than
+// this many bytes apart are fetched as separate ranges rather than one span swallowing
+// the dead bytes between them. Needing 2 objects at opposite ends of a 16 MiB pack thus
+// costs two small ranges instead of the whole pack (3.5); below the gap, one range
+// still wins (one request, and the skipped bytes are cheap).
+const spanSplitGap = 256 << 10
+
 // packSource resolves chunk ids to pack byte ranges (one locate up front) and
 // serves their ciphertext, fetching each pack's covering span on demand and keeping
 // a small LRU so a pack shared by several files is fetched once.
+//
+// It is safe for concurrent use by the download worker pool: locs and spans are
+// immutable after construction (read-only), the LRU is guarded by mu, and sf
+// collapses a stampede of workers that all miss the same pack into one GetPackRange.
 type packSource struct {
-	cl    *client.Client
-	locs  map[string]api.ObjectLocation
-	spans map[string]packSpan
-	cache *packCache
+	cl   *client.Client
+	locs map[string]api.ObjectLocation
+	// objSpan maps each object to the covering span its bytes fall in. A pack with
+	// widely-separated needed objects has several spans, so get fetches only the
+	// window around each object rather than min..max across the whole pack.
+	objSpan map[string]packSpan
+	mu      sync.Mutex // guards cache
+	cache   *packCache
+	sf      singleflight.Group
 }
 
 func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	s := &packSource{
-		cl:    cl,
-		locs:  make(map[string]api.ObjectLocation, len(ids)),
-		spans: map[string]packSpan{},
-		cache: newPackCache(packCacheBytes),
+		cl:      cl,
+		locs:    make(map[string]api.ObjectLocation, len(ids)),
+		objSpan: make(map[string]packSpan, len(ids)),
+		cache:   newPackCache(packCacheBytes),
 	}
 	if len(ids) == 0 {
 		return s, nil
@@ -1009,22 +1054,42 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	if err != nil {
 		return nil, err
 	}
+	byPack := map[string][]api.ObjectLocation{}
 	for _, loc := range located {
 		s.locs[loc.ID] = loc
-		span, ok := s.spans[loc.PackID]
-		if !ok {
-			s.spans[loc.PackID] = packSpan{base: loc.Off, end: loc.Off + loc.Len}
-			continue
-		}
-		if loc.Off < span.base {
-			span.base = loc.Off
-		}
-		if loc.Off+loc.Len > span.end {
-			span.end = loc.Off + loc.Len
-		}
-		s.spans[loc.PackID] = span
+		byPack[loc.PackID] = append(byPack[loc.PackID], loc)
+	}
+	for _, objs := range byPack {
+		s.assignSpans(objs)
 	}
 	return s, nil
+}
+
+// assignSpans groups one pack's needed objects into covering spans, opening a new span
+// whenever the gap to the next object exceeds spanSplitGap, and records each object's
+// span so get range-fetches just that window. Objects within a pack never overlap.
+func (s *packSource) assignSpans(objs []api.ObjectLocation) {
+	sort.Slice(objs, func(i, j int) bool { return objs[i].Off < objs[j].Off })
+	start := 0
+	base := objs[0].Off
+	end := objs[0].Off + objs[0].Len
+	flush := func(hi int) {
+		span := packSpan{base: base, end: end}
+		for _, o := range objs[start:hi] {
+			s.objSpan[o.ID] = span
+		}
+	}
+	for i := 1; i < len(objs); i++ {
+		o := objs[i]
+		if o.Off-end > spanSplitGap {
+			flush(i)
+			start, base = i, o.Off
+		}
+		if o.Off+o.Len > end {
+			end = o.Off + o.Len
+		}
+	}
+	flush(len(objs))
 }
 
 func (s *packSource) get(id string) ([]byte, error) {
@@ -1035,21 +1100,52 @@ func (s *packSource) get(id string) ([]byte, error) {
 		// ErrNotFound so a manifest read can retry against the current version.
 		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
 	}
-	span := s.spans[loc.PackID]
-	data, ok := s.cache.get(loc.PackID)
-	if !ok {
-		var err error
-		data, err = s.cl.GetPackRange(loc.PackID, span.base, span.end-span.base)
+	span := s.objSpan[id]
+	data, err := s.fetchSpan(loc.PackID, span)
+	if err != nil {
+		return nil, err
+	}
+	start := loc.Off - span.base
+	return data[start : start+loc.Len], nil
+}
+
+// fetchSpan returns one span's bytes, fetching it at most once even under the
+// concurrent download pool: the LRU is consulted under mu, and singleflight collapses
+// concurrent misses of the same span into a single GetPackRange. The cache key is the
+// pack plus the span base, since a pack now holds several spans. The returned bytes are
+// never mutated after the fetch, so a later eviction cannot disturb a caller still
+// slicing its object out of them.
+func (s *packSource) fetchSpan(packID string, span packSpan) ([]byte, error) {
+	key := fmt.Sprintf("%s@%d", packID, span.base)
+	s.mu.Lock()
+	data, ok := s.cache.get(key)
+	s.mu.Unlock()
+	if ok {
+		return data, nil
+	}
+	v, err, _ := s.sf.Do(key, func() (any, error) {
+		s.mu.Lock()
+		if data, ok := s.cache.get(key); ok {
+			s.mu.Unlock()
+			return data, nil
+		}
+		s.mu.Unlock()
+		data, err := s.cl.GetPackRange(packID, span.base, span.end-span.base)
 		if err != nil {
 			return nil, err
 		}
 		if int64(len(data)) < span.end-span.base {
-			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", loc.PackID, len(data), span.end-span.base)
+			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", packID, len(data), span.end-span.base)
 		}
-		s.cache.put(loc.PackID, data)
+		s.mu.Lock()
+		s.cache.put(key, data)
+		s.mu.Unlock()
+		return data, nil
+	})
+	if err != nil {
+		return nil, err
 	}
-	start := loc.Off - span.base
-	return data[start : start+loc.Len], nil
+	return v.([]byte), nil
 }
 
 // packCache is a byte-bounded LRU of fetched pack byte-ranges, so download memory is
@@ -1172,66 +1268,74 @@ func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengi
 }
 
 // openRemoteTree reconstructs a folder's manifest from its tree root: it decrypts
-// the tiny root, then walks the DAG, fetching and decrypting each directory node
-// from its pack. The inverse of uploadTreeObjects.
+// the tiny root, then walks the DAG level by level, locating each level's directory
+// nodes in one round-trip and range-fetching their packs grouped. The inverse of
+// uploadTreeObjects.
 func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
 	root, err := syncengine.OpenTreeRoot(blob, ck)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	return syncengine.OpenTree(root, newNodeFetcher(cl))
+	return syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, nil))
 }
 
-// openRemoteTreeReusingBase is openRemoteTree with the last-synced manifest as a node
-// cache. It seals the base tree in memory once and serves any node the remote shares with
-// it from those bytes instead of the server: directory nodes are content-addressed, so a
-// shared id is byte-identical, an unchanged subtree is reconstructed without a single fetch,
-// and only nodes on a spine that changed since the base hit the network. The result is
-// identical to openRemoteTree — OpenNode re-verifies every node against its address either
-// way — so a stale base can only affect which nodes are fetched, never correctness.
-func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, base syncengine.Manifest, conv crypto.ConvergenceKey) (syncengine.Manifest, error) {
+// openRemoteTreeReusingBase is openRemoteTree seeded with the base tree's node
+// ciphertexts (baseCT, sealed once by the caller and reused across retries). It serves
+// any node the remote shares with the base from those bytes instead of the server:
+// directory nodes are content-addressed, so a shared id is byte-identical, an unchanged
+// subtree is reconstructed without a single fetch, and only nodes on a spine that
+// changed since the base hit the network. The result is identical to openRemoteTree —
+// OpenNode re-verifies every node against its address either way — so a stale base can
+// only affect which nodes are fetched, never correctness.
+func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, baseCT map[string][]byte) (syncengine.Manifest, error) {
 	root, err := syncengine.OpenTreeRoot(blob, ck)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	baseCT, err := syncengine.SealTreeCiphertexts(base, conv)
-	if err != nil {
-		return syncengine.Manifest{}, err
-	}
-	remoteFetch := newNodeFetcher(cl)
-	return syncengine.OpenTree(root, func(id string) ([]byte, error) {
-		if ct, ok := baseCT[id]; ok {
-			return ct, nil
-		}
-		return remoteFetch(id)
-	})
+	return syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, baseCT))
 }
 
-// newNodeFetcher returns a fetch function for directory-node objects, locating and
-// range-fetching each by id and caching it (nodes are small and the DAG walk may
-// revisit shared subtree ids). A node the owner no longer stores — a concurrent sync
-// superseded this version and GC reaped it — surfaces as client.ErrNotFound so a
-// manifest read can retry against the current version.
-func newNodeFetcher(cl *client.Client) func(id string) ([]byte, error) {
-	cache := map[string][]byte{}
-	return func(id string) ([]byte, error) {
-		if b, ok := cache[id]; ok {
-			return b, nil
+// newBatchNodeFetcher returns a level-batch fetch for directory-node objects: it
+// locates a whole level's ids in one call and range-fetches their packs grouped (via
+// packSource), so a tree walk pays one locate per level instead of two round-trips per
+// node. seed carries node ciphertexts already in hand (the base tree in the reuse
+// path), served from memory without a fetch; fetched nodes are cached across levels
+// since the DAG may revisit a shared subtree id. A node the owner no longer stores —
+// a concurrent sync superseded this version and GC reaped it — surfaces from
+// packSource.get as client.ErrNotFound so a manifest read can retry against the
+// current version.
+func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
+	cache := make(map[string][]byte, len(seed))
+	for id, ct := range seed {
+		cache[id] = ct
+	}
+	return func(ids []string) (map[string][]byte, error) {
+		var missing []string
+		for _, id := range ids {
+			if _, ok := cache[id]; !ok {
+				missing = append(missing, id)
+			}
 		}
-		located, err := cl.LocateChunks([]string{id})
-		if err != nil {
-			return nil, err
+		if len(missing) > 0 {
+			src, err := newPackSource(cl, missing)
+			if err != nil {
+				return nil, err
+			}
+			for _, id := range missing {
+				b, err := src.get(id)
+				if err != nil {
+					return nil, err
+				}
+				cache[id] = b
+			}
 		}
-		if len(located) == 0 {
-			return nil, fmt.Errorf("server could not locate tree node %s: %w", id, client.ErrNotFound)
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			if ct, ok := cache[id]; ok {
+				out[id] = ct
+			}
 		}
-		loc := located[0]
-		b, err := cl.GetPackRange(loc.PackID, loc.Off, loc.Len)
-		if err != nil {
-			return nil, err
-		}
-		cache[id] = b
-		return b, nil
+		return out, nil
 	}
 }
 

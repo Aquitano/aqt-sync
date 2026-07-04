@@ -42,7 +42,11 @@ func runPackSync(root string, opts syncOptions) error {
 
 	// A metadata+hash scan is all the local side needs to tell whether the tree
 	// changed since the last sync; pack-and-seal never chunks per file.
-	local, err := syncengine.Scan(root)
+	var scanBase *syncengine.Manifest
+	if baseExists {
+		scanBase = &base
+	}
+	local, err := syncengine.ScanReusing(root, scanBase, opts.rehash)
 	if err != nil {
 		return err
 	}
