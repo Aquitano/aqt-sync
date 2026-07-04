@@ -1,0 +1,45 @@
+# systemd unit for aqt-server. Install to /etc/systemd/system/aqt-server.service,
+# put secrets in /etc/aqt-server.env, then: systemctl enable --now aqt-server
+[Unit]
+Description=aqt zero-knowledge sync server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/bin/aqt-server
+# StateDirectory creates and owns /var/lib/aqt-server for the dynamic user.
+Environment=AQT_DATA_DIR=/var/lib/aqt-server
+Environment=AQT_ADDR=:443
+# Registration mode, invite tokens, TLS paths, quotas, etc. go here (0640, root-only).
+EnvironmentFile=-/etc/aqt-server.env
+StateDirectory=aqt-server
+Restart=on-failure
+RestartSec=2
+# SIGTERM triggers a graceful drain; give it room under the 20s shutdown budget.
+TimeoutStopSec=30
+
+# Least privilege: a throwaway user, no root, bind :443 via the one capability that needs.
+DynamicUser=yes
+NoNewPrivileges=yes
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+# AF_NETLINK/AF_UNIX are needed by the Go runtime's resolver and interface probing.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+# For native static certs outside the state dir, add a drop-in with:
+#   ReadOnlyPaths=/etc/letsencrypt
+
+[Install]
+WantedBy=multi-user.target

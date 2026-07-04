@@ -1,0 +1,8 @@
+# Reverse-proxy TLS for aqt-server. Caddy fetches and renews a Let's Encrypt
+# certificate automatically. Replace the hostname with your own.
+#
+# With docker-compose.yml the upstream is the service name; for a host install
+# point it at 127.0.0.1:8080 instead.
+aqt.example.com {
+	reverse_proxy aqt-server:8080
+}
