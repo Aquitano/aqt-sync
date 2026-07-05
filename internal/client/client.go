@@ -319,24 +319,27 @@ func (c *Client) SetAutoSnapshot(resourceID string, enabled bool) error {
 // tests can shorten it.
 var stallTimeout = 60 * time.Second
 
-func errStalled() error {
-	return fmt.Errorf("aqt: transfer stalled (no data for %s)", stallTimeout)
+func errStalled(timeout time.Duration) error {
+	return fmt.Errorf("aqt: transfer stalled (no data for %s)", timeout)
 }
 
 // stallGuard cancels a request's context once no progress has been observed
-// for stallTimeout. touch is called from body Read paths on any goroutine
+// for its timeout. touch is called from body Read paths on any goroutine
 // (atomic store only); the timer re-arms itself from its own callback for the
-// remaining window, so Timer.Reset is never called concurrently.
+// remaining window, so Timer.Reset is never called concurrently. timeout is
+// captured from stallTimeout at construction so the timer goroutine never reads
+// the package var (which tests mutate).
 type stallGuard struct {
-	last   atomic.Int64
-	timer  *time.Timer
-	cancel context.CancelCauseFunc
+	last    atomic.Int64
+	timer   *time.Timer
+	cancel  context.CancelCauseFunc
+	timeout time.Duration
 }
 
 func newStallGuard(cancel context.CancelCauseFunc) *stallGuard {
-	g := &stallGuard{cancel: cancel}
+	g := &stallGuard{cancel: cancel, timeout: stallTimeout}
 	g.touch()
-	g.timer = time.AfterFunc(stallTimeout, g.check)
+	g.timer = time.AfterFunc(g.timeout, g.check)
 	return g
 }
 
@@ -344,11 +347,11 @@ func (g *stallGuard) touch() { g.last.Store(time.Now().UnixNano()) }
 
 func (g *stallGuard) check() {
 	idle := time.Since(time.Unix(0, g.last.Load()))
-	if idle >= stallTimeout {
-		g.cancel(errStalled())
+	if idle >= g.timeout {
+		g.cancel(errStalled(g.timeout))
 		return
 	}
-	g.timer.Reset(stallTimeout - idle)
+	g.timer.Reset(g.timeout - idle)
 }
 
 func (g *stallGuard) stop() { g.timer.Stop() }
