@@ -28,11 +28,18 @@ type progressBar struct {
 // to flood a slow terminal.
 const progressInterval = 100 * time.Millisecond
 
+// progressActive reports whether a --progress bar would actually draw: the flag is set
+// and stderr is a terminal. Call sites gate pre-transfer sizing work on it so a nil
+// (no-op) bar's inputs are never computed only to be thrown away.
+func progressActive() bool {
+	return flagProgress && term.IsTerminal(int(os.Stderr.Fd()))
+}
+
 // newProgressBar starts a bar labeled label. A positive total renders a percentage
 // bar with bytes remaining; total <= 0 means "no bar" (there is nothing to size, or
 // progress is off / stderr is not a terminal), returning a nil no-op bar.
 func newProgressBar(label string, total int64) *progressBar {
-	if total <= 0 || !flagProgress || !term.IsTerminal(int(os.Stderr.Fd())) {
+	if total <= 0 || !progressActive() {
 		return nil
 	}
 	p := &progressBar{label: label, stop: make(chan struct{})}
@@ -49,13 +56,17 @@ func (p *progressBar) add(n int64) {
 	p.done.Add(n)
 }
 
-// finish snaps the bar to its total (hiding the undershoot that dedup leaves), draws
-// a final line, and stops the redraw goroutine. Safe to call once on every path.
-func (p *progressBar) finish() {
+// finish stops the redraw goroutine and draws a final line. On a completed transfer it
+// snaps the bar to its total, hiding the undershoot that dedup and inlined files leave;
+// on an error it leaves the bar at its last real position so a failed transfer is not
+// drawn as 100%. Safe to call once on every path.
+func (p *progressBar) finish(completed bool) {
 	if p == nil {
 		return
 	}
-	p.done.Store(p.total.Load())
+	if completed {
+		p.done.Store(p.total.Load())
+	}
 	close(p.stop)
 	p.wg.Wait()
 	fmt.Fprint(os.Stderr, "\r\033[K"+p.line()+"\n")
@@ -85,8 +96,10 @@ func (p *progressBar) line() string {
 	}
 	pct := float64(done) / float64(total)
 	const width = 24
+	// Truncate both the fill and the percent (not round) so the number never reads 100%
+	// while the bar still has an empty cell.
 	filled := int(pct * width)
 	bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
-	return fmt.Sprintf("%s [%s] %3.0f%%  %s / %s  (%s left)",
-		p.label, bar, pct*100, humanBytes(done), humanBytes(total), humanBytes(total-done))
+	return fmt.Sprintf("%s [%s] %3d%%  %s / %s  (%s left)",
+		p.label, bar, int(pct*100), humanBytes(done), humanBytes(total), humanBytes(total-done))
 }
