@@ -22,17 +22,21 @@ func TestEntriesBytes(t *testing.T) {
 }
 
 func TestUploadBytes(t *testing.T) {
+	const big = 4 << 10 // above the 2 KiB inline cutoff, so it is chunked, not inlined
 	base := syncengine.Manifest{Entries: []syncengine.Entry{
-		{Path: "same", Size: 10, Hash: "h1"},
-		{Path: "changed", Size: 20, Hash: "old"},
+		{Path: "same", Size: big, Hash: "h1"},
+		{Path: "changed", Size: big, Hash: "old"},
 	}}
 	local := syncengine.Manifest{Entries: []syncengine.Entry{
-		{Path: "same", Size: 10, Hash: "h1"},     // unchanged: not counted
-		{Path: "changed", Size: 20, Hash: "new"}, // hash differs: counted
-		{Path: "added", Size: 30, Hash: "h3"},    // absent from base: counted
+		{Path: "same", Size: big, Hash: "h1"},     // unchanged: not counted
+		{Path: "changed", Size: big, Hash: "new"}, // hash differs: counted
+		{Path: "added", Size: big, Hash: "h3"},    // absent from base: counted
+		{Path: "tiny", Size: 100, Hash: "h4"},     // new but inline-sized: never packed, so not counted
+		{Path: "link", Size: big, Link: "target"}, // symlink: never packed, so not counted
 	}}
-	if got := uploadBytes(local, base); got != 50 {
-		t.Errorf("uploadBytes = %d, want 50 (20 changed + 30 added)", got)
+	sel := syncengine.DefaultChunkSelector()
+	if got := uploadBytes(local, base, sel); got != 2*big {
+		t.Errorf("uploadBytes = %d, want %d (changed + added; tiny and link excluded)", got, 2*big)
 	}
 }
 
@@ -51,7 +55,31 @@ func TestProgressBarLine(t *testing.T) {
 func TestProgressBarNilSafe(t *testing.T) {
 	var p *progressBar // progress off => newProgressBar returns nil
 	p.add(10)
-	p.finish()
+	p.finish(true)
+}
+
+// finish(true) snaps the bar to its total so a completed transfer always reads 100%,
+// hiding the undershoot that dedup and inlined files leave.
+func TestProgressBarFinishSnapsWhenComplete(t *testing.T) {
+	p := &progressBar{stop: make(chan struct{})}
+	p.total.Store(1000)
+	p.done.Store(400)
+	p.finish(true)
+	if got := p.done.Load(); got != 1000 {
+		t.Errorf("finish(true) done = %d, want 1000 (snap to total)", got)
+	}
+}
+
+// finish(false) leaves the bar at its last real position so an aborted transfer is not
+// drawn as 100%.
+func TestProgressBarFinishKeepsPositionOnError(t *testing.T) {
+	p := &progressBar{stop: make(chan struct{})}
+	p.total.Store(1000)
+	p.done.Store(400)
+	p.finish(false)
+	if got := p.done.Load(); got != 400 {
+		t.Errorf("finish(false) done = %d, want 400 (no snap on error)", got)
+	}
 }
 
 // A symlink entry materializes without fetching or decrypting any pack, so it is a

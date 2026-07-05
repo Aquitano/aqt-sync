@@ -397,18 +397,20 @@ func runSync(dir string, opts syncOptions) error {
 		if cerr != nil {
 			return cerr
 		}
-		// With --progress, size the upload up front with a metadata pre-scan so the bar
-		// shows a real percentage. Chunked content streams during Take (below) before
-		// any plan exists, so there is no cheaper moment to learn the total; the extra
-		// walk is opt-in. A pre-scan error just leaves the bar off (total 0).
+		// With --progress on a terminal, size the upload up front so the bar shows a real
+		// percentage. Chunked content streams during Take (below) before any plan exists,
+		// so there is no cheaper moment to learn the total. A sizing scan tolerates a stale
+		// estimate (the bar snaps to 100% on completion), so it runs the cheap stat
+		// fast-path with rehash off — avoiding a second full-tree hash under --rehash — and
+		// a scan error just leaves the bar off (total 0).
 		var uploadTotal int64
-		if flagProgress {
+		if progressActive() {
 			scanBase := &base
 			if !baseExists {
 				scanBase = nil
 			}
-			if pre, perr := syncengine.ScanReusing(root, scanBase, opts.rehash); perr == nil {
-				uploadTotal = uploadBytes(pre, base)
+			if pre, perr := syncengine.ScanReusing(root, scanBase, false); perr == nil {
+				uploadTotal = uploadBytes(pre, base, selector)
 			}
 		}
 		prog := newProgressBar("uploading", uploadTotal)
@@ -416,14 +418,14 @@ func runSync(dir string, opts syncOptions) error {
 		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
 			up.Wait() // drain in-flight uploads before returning the snapshot error
-			prog.finish()
+			prog.finish(false)
 			return err
 		}
 		if err := up.Flush(); err != nil {
-			prog.finish()
+			prog.finish(false)
 			return err
 		}
-		prog.finish()
+		prog.finish(true)
 	}
 
 	// Seal the base tree's node ciphertexts once, up front, and reuse them across every
@@ -788,7 +790,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	}
 	dlProg := newProgressBar("downloading", entriesBytes(downloads))
 	dlErr := runDownloads(c.cl, c.root, downloads, dlProg)
-	dlProg.finish()
+	dlProg.finish(dlErr == nil)
 	if dlErr != nil {
 		return dlErr
 	}
@@ -813,7 +815,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		return err
 	}
 	recordRemoteVersion(c.root, syncedVersion)
-	summarize(uploads, downloads, localDeletes, remoteChanged)
+	summarize(uploads, downloads, localDeletes)
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
 		printPaths("conflict", conflicts)
@@ -931,7 +933,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 	}
 	dlProg := newProgressBar("downloading", entriesBytes(manifest.Entries))
 	dlErr := runDownloads(cl, abs, manifest.Entries, dlProg)
-	dlProg.finish()
+	dlProg.finish(dlErr == nil)
 	if dlErr != nil {
 		return syncengine.Manifest{}, dlErr
 	}
@@ -1042,10 +1044,10 @@ func (u *packUploader) dispatch() error {
 // ciphertext is an independent SealChunk allocation), so it needs no locking.
 func (u *packUploader) upload(cand []candidate) error {
 	ids := make([]string, len(cand))
-	var bytes int64
+	var batchBytes int64
 	for i, c := range cand {
 		ids[i] = c.id
-		bytes += int64(c.size)
+		batchBytes += int64(c.size)
 	}
 	missing, err := u.cl.CheckChunks(ids)
 	if err != nil {
@@ -1065,14 +1067,14 @@ func (u *packUploader) upload(cand []candidate) error {
 	// whether it was uploaded or already present (dedup) — so the bar reflects content
 	// committed, not bytes on the wire, and still reaches the total on a re-sync.
 	if pb.Empty() {
-		u.prog.add(bytes) // every candidate already on the server (a re-sync)
+		u.prog.add(batchBytes) // every candidate already on the server (a re-sync)
 		return nil
 	}
 	packID, pack := pb.Finish()
 	if err := u.cl.PutPack(packID, pack); err != nil {
 		return err
 	}
-	u.prog.add(bytes)
+	u.prog.add(batchBytes)
 	return nil
 }
 
@@ -1765,11 +1767,10 @@ func printPaths(label string, paths []string) {
 	}
 }
 
-func summarize(uploads, downloads []syncengine.Entry, localDeletes []string, pushed bool) {
+func summarize(uploads, downloads []syncengine.Entry, localDeletes []string) {
 	fmt.Printf("synced: %d up (%s), %d down (%s), %d removed locally\n",
 		len(uploads), humanBytes(entriesBytes(uploads)),
 		len(downloads), humanBytes(entriesBytes(downloads)), len(localDeletes))
-	_ = pushed
 }
 
 // entriesBytes sums the plaintext size of a set of entries — the logical volume a
@@ -1782,13 +1783,19 @@ func entriesBytes(entries []syncengine.Entry) int64 {
 	return n
 }
 
-// uploadBytes estimates the plaintext bytes a push will send: every local entry that
-// is new or whose content changed since the base. Dedup can make the bytes actually
-// transferred smaller, so the bar is snapped to this total on completion.
-func uploadBytes(local, base syncengine.Manifest) int64 {
+// uploadBytes estimates the plaintext bytes a push will credit to the progress bar:
+// every new or content-changed local entry that is actually chunked into packs. Only
+// chunked files reach the pack uploader that credits the bar, so symlinks and inline-
+// sized files (kept in the manifest, never sent as packs) are excluded to keep the
+// total close to what add() will report. Cross-file and base chunk dedup can still make
+// the credited bytes smaller, so the bar is snapped to this total on completion.
+func uploadBytes(local, base syncengine.Manifest, selector syncengine.ChunkSelector) int64 {
 	baseByPath := base.ByPath()
 	var n int64
 	for _, e := range local.Entries {
+		if e.IsSymlink() || e.Size <= int64(selector.ChunkerFor(e.Size).Min) {
+			continue
+		}
 		if be, ok := baseByPath[e.Path]; !ok || be.Hash != e.Hash {
 			n += e.Size
 		}
