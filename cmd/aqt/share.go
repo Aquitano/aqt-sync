@@ -35,7 +35,7 @@ func runShare(idArg, password string, noClip bool) error {
 	if err != nil {
 		return err
 	}
-	id, _ := parseRef(idArg)
+	id, _, _ := parseRef(idArg)
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
@@ -102,7 +102,7 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
-	id, _ := parseRef(idArg)
+	id, _, _ := parseRef(idArg)
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {

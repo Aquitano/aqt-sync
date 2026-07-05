@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -54,16 +55,14 @@ func catCmd() *cobra.Command {
 }
 
 func runPull(ref, out, password string, toStdout, force bool) error {
-	id, fragment := parseRef(ref)
+	id, fragment, origin := parseRef(ref)
 
 	// A public link decrypts from its fragment and needs no profile; a private
-	// ref needs the account token (to fetch) and passphrase (to unwrap).
+	// ref needs the account token (to fetch) and passphrase (to unwrap). Honor a
+	// host embedded in the ref so a share link is self-contained, but never attach
+	// the token to a foreign host (see newLinkClient).
 	prof := loadProfileOptional()
-	token := ""
-	if prof != nil {
-		token = prof.Token
-	}
-	cl, err := client.New(serverURL(), token)
+	cl, err := newLinkClient(origin, prof)
 	if err != nil {
 		return err
 	}
@@ -231,12 +230,20 @@ func writeStreamAtomic(dest string, perm os.FileMode, fn func(*os.File) error) e
 	return os.Rename(tmp, dest)
 }
 
-// parseRef extracts the resource id and optional fragment from any ref form:
-// a full https URL (.../x/<id>#<frag>), an aqt://<id> ref, or a bare id.
-func parseRef(ref string) (id, fragment string) {
+// parseRef extracts the resource id, optional fragment, and origin (scheme://host)
+// from any ref form: a full http(s) URL (.../x/<id>#<frag>), an aqt://<id> ref, or
+// a bare id. origin is set only for an absolute http/https URL so a share link's
+// own host can be honored; aqt:// refs and bare ids yield an empty origin.
+func parseRef(ref string) (id, fragment, origin string) {
 	if i := strings.Index(ref, "#"); i >= 0 {
 		fragment = ref[i+1:]
 		ref = ref[:i]
+	}
+	// Only an absolute http(s) URL carries a usable host; guarding on the scheme
+	// keeps aqt://<id> (which parses to scheme=aqt, host=<id>) and bare ids from
+	// yielding a spurious origin.
+	if u, err := url.Parse(ref); err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" {
+		origin = u.Scheme + "://" + u.Host
 	}
 	ref = strings.TrimPrefix(ref, "aqt://")
 	if i := strings.LastIndex(ref, "/x/"); i >= 0 {
@@ -244,7 +251,7 @@ func parseRef(ref string) (id, fragment string) {
 	} else if i := strings.LastIndex(ref, "/"); i >= 0 {
 		ref = ref[i+1:]
 	}
-	return ref, fragment
+	return ref, fragment, origin
 }
 
 // decodeMeta decrypts and parses a resource's sealed metadata. A decrypt or parse

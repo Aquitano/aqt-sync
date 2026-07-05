@@ -27,17 +27,14 @@ func infoCmd() *cobra.Command {
 }
 
 func runInfo(ref, password string, asJSON bool) error {
-	id, fragment := parseRef(ref)
+	id, fragment, origin := parseRef(ref)
 
 	// Metadata for your own resource needs the account token (to fetch) and the
 	// master key (to unwrap); a public link instead decrypts from its fragment and
-	// needs no profile — the same key recovery as pull.
+	// needs no profile — the same key recovery as pull. Honor a host embedded in
+	// the ref, without attaching the token to a foreign host (see newLinkClient).
 	prof := loadProfileOptional()
-	token := ""
-	if prof != nil {
-		token = prof.Token
-	}
-	cl, err := client.New(serverURL(), token)
+	cl, err := newLinkClient(origin, prof)
 	if err != nil {
 		return err
 	}

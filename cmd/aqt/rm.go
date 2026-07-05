@@ -28,7 +28,7 @@ func runRemove(refs []string, withSnapshots bool) error {
 		return err
 	}
 	for _, ref := range refs {
-		id, _ := parseRef(ref)
+		id, _, _ := parseRef(ref)
 		if err := cl.DeleteResource(id); err != nil {
 			if errors.Is(err, client.ErrNotFound) {
 				return fmt.Errorf("resource %s not found (or not yours); run `aqt ls` to list yours", id)
