@@ -70,12 +70,14 @@ func main() {
 		log.Fatalf("tls config: %v", err)
 	}
 
+	// No ReadTimeout/WriteTimeout: they span the full body transfer, capping a
+	// 32 MiB pack at ~4.3 Mbps and permanently failing slower links. Handlers
+	// already cap body sizes, ReadHeaderTimeout bounds header slowloris, and
+	// IdleTimeout reaps idle keep-alives.
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           api.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       60 * time.Second,
-		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("data dir: %s", dataDir)
