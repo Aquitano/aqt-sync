@@ -19,6 +19,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -1552,18 +1553,51 @@ func loadState(root string) (folderState, error) {
 	return st, json.Unmarshal(b, &st)
 }
 
+// sealedBase is the at-rest envelope for the local base manifest. Its "sealed" key
+// is disjoint from a plaintext Manifest's ("version"/"entries"), so a legacy
+// unsealed base.json is detected and read transparently, then upgraded on the next
+// save. base.json holds chunk decryption keys and inline file plaintext, so it is
+// sealed under the profile's session sealing key rather than left in the clear.
+type sealedBase struct {
+	Sealed *crypto.SealedBlob `json:"sealed"`
+}
+
 func saveBase(root string, m syncengine.Manifest) error {
-	b, err := json.Marshal(m)
+	plain, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	sealed, err := identity.SealBase(flagProfile, plain)
+	if err != nil {
+		return err
+	}
+	b, err := json.Marshal(sealedBase{Sealed: &sealed})
 	if err != nil {
 		return err
 	}
 	return writeFileAtomic(controlPath(root, baseFile), b, 0o600)
 }
 
+// decodeBase unmarshals base.json bytes into m, transparently opening a sealed
+// envelope (current format) or reading a legacy plaintext manifest (pre-seal,
+// upgraded on the next save). The two forms have disjoint top-level keys, so the
+// sealed probe is unambiguous.
+func decodeBase(b []byte, m *syncengine.Manifest) error {
+	var env sealedBase
+	if err := json.Unmarshal(b, &env); err == nil && env.Sealed != nil {
+		plain, err := identity.OpenBase(flagProfile, *env.Sealed)
+		if err != nil {
+			return err
+		}
+		b = plain
+	}
+	return json.Unmarshal(b, m)
+}
+
 // loadBaseForSync returns the last-synced manifest and whether a usable base
-// exists. A missing or corrupt base reports exists=false so the caller can refuse
-// the sync — reconciling against an empty base silently resurrects deletions —
-// unless the user opts into --reconcile.
+// exists. A missing, corrupt, or unopenable base reports exists=false so the caller
+// can refuse the sync — reconciling against an empty base silently resurrects
+// deletions — unless the user opts into --reconcile.
 func loadBaseForSync(root string) (syncengine.Manifest, bool, error) {
 	var m syncengine.Manifest
 	b, err := os.ReadFile(controlPath(root, baseFile))
@@ -1573,8 +1607,8 @@ func loadBaseForSync(root string) (syncengine.Manifest, bool, error) {
 	if err != nil {
 		return m, false, err
 	}
-	if err := json.Unmarshal(b, &m); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: .aqt/base.json is corrupt (%v)\n", err)
+	if err := decodeBase(b, &m); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: .aqt/base.json is unreadable (%v)\n", err)
 		return syncengine.Manifest{}, false, nil
 	}
 	return m, true, nil
@@ -1592,7 +1626,7 @@ func loadBase(root string) (syncengine.Manifest, error) {
 	if err != nil {
 		return m, err
 	}
-	return m, json.Unmarshal(b, &m)
+	return m, decodeBase(b, &m)
 }
 
 // trackedRoot walks up from start to find the directory holding .aqt/.
