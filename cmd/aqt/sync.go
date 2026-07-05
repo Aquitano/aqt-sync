@@ -804,7 +804,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 // --- clone ---
 
 func runClone(ref, dir string) error {
-	id, _ := parseRef(ref) // v1 folders are private; no fragment key
+	id, _, _ := parseRef(ref) // v1 folders are private; no fragment key
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err

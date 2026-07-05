@@ -167,6 +167,47 @@ func serverURL() string {
 	return defaultServer
 }
 
+// linkServer resolves which server to talk to for a ref that may carry its own
+// host (a share URL), and whether the target is the user's own server. Server
+// precedence: explicit --server > host embedded in the ref > profile server >
+// default. ownServer reports whether the account token may be attached: only when
+// the operator chose the server explicitly (--server) or the resolved host matches
+// the profile's server. A foreign host from a share link is never the own server.
+func linkServer(origin string, prof *identity.Profile) (server string, ownServer bool) {
+	switch {
+	case flagServer != "":
+		return flagServer, true
+	case origin != "":
+		return origin, prof != nil && sameServer(origin, prof.Server)
+	case prof != nil && prof.Server != "":
+		return prof.Server, true
+	default:
+		return defaultServer, true
+	}
+}
+
+// newLinkClient builds a client for a possibly self-contained ref. The account
+// token is attached only when talking to the user's own server; a public link
+// decrypts from its #key fragment and public resources need no auth, so dropping
+// the token for a foreign host loses nothing for the intended flow while a crafted
+// link cannot exfiltrate the device credential to an attacker host. client.New's
+// loopback/HTTPS guard still applies to the resolved host as defense in depth.
+func newLinkClient(origin string, prof *identity.Profile) (*client.Client, error) {
+	server, own := linkServer(origin, prof)
+	token := ""
+	if own && prof != nil {
+		token = prof.Token
+	}
+	return client.New(server, token)
+}
+
+// sameServer compares two server URLs ignoring a trailing slash. A mismatch only
+// drops the token (a public fetch still works), so exact host matching is the safe
+// default: over-strict harmlessly withholds the token, over-loose risks leaking it.
+func sameServer(a, b string) bool {
+	return b != "" && strings.TrimRight(a, "/") == strings.TrimRight(b, "/")
+}
+
 // promptPassphrase reads a passphrase without echoing it on a real terminal.
 // When stdin is not a terminal (pipe/CI), it reads a single line instead so the
 // CLI stays scriptable.
