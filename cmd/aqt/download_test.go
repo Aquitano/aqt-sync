@@ -141,7 +141,7 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 	entries := []syncengine.Entry{
 		{Path: "f.bin", Mode: 0o644, Size: 100, Hash: "h", Chunks: []crypto.Chunk{{ID: "a", Key: make([]byte, crypto.KeySize), Len: 100}}},
 	}
-	if err := runDownloads(cl, t.TempDir(), entries); err == nil {
+	if err := runDownloads(cl, t.TempDir(), entries, nil); err == nil {
 		t.Fatal("runDownloads must fail when a pack fetch errors")
 	}
 }

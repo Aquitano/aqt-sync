@@ -42,11 +42,12 @@ const exitDeferred = 75
 var errSessionRequired = errors.New("no unlocked session and no passphrase provided; run `aqt login`")
 
 var (
-	flagServer  string
-	flagProfile string
-	flagJSON    bool
-	flagQuiet   bool
-	flagVerbose bool
+	flagServer   string
+	flagProfile  string
+	flagJSON     bool
+	flagQuiet    bool
+	flagVerbose  bool
+	flagProgress bool
 )
 
 func main() {
@@ -108,6 +109,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
 	// Accepted on every command; verbose diagnostics are currently minimal.
 	root.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "verbose output")
+	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
