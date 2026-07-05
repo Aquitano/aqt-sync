@@ -180,19 +180,11 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 	}
 	// Opt into the raw envelope; without this the server answers legacy JSON.
 	req.Header.Set("Accept", "application/octet-stream")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.http.Do(req)
+	_, data, err := c.send(req, path)
 	if err != nil {
-		return api.GetResourceResponse{}, fmt.Errorf("request GET %s: %w", path, err)
+		return api.GetResourceResponse{}, err
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		data, _ := io.ReadAll(resp.Body)
-		return api.GetResourceResponse{}, statusError(resp.StatusCode, path, data)
-	}
-	return api.DecodeResourceDownload(resp.Body)
+	return api.DecodeResourceDownload(bytes.NewReader(data))
 }
 
 // SetVisibility flips a resource public/private without re-uploading its blob.
@@ -443,16 +435,8 @@ func (c *Client) doRaw(method, path string, body []byte, out any) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
-	if c.token != "" {
-		req.Header.Set("Authorization", "Bearer "+c.token)
-	}
-	resp, err := c.http.Do(req)
+	_, data, err := c.send(req, path)
 	if err != nil {
-		return fmt.Errorf("request %s %s: %w", method, path, err)
-	}
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if err := statusError(resp.StatusCode, path, data); err != nil {
 		return err
 	}
 	if out != nil && len(data) > 0 {
