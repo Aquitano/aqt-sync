@@ -578,10 +578,12 @@ func snapshotDiffCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "diff <snapshot-id>",
 		Short: "Show what changed between a snapshot and the live tree (or another snapshot)",
-		Long: "Reconstructs both sides on this machine and compares them by file path and " +
-			"content. By default the snapshot is compared against the current live state of " +
-			"its resource; --against compares it to a second snapshot instead. Added (+), " +
-			"removed (-), and modified (~) files are listed.",
+		Long: "Compares both sides by file path and content. Chunked folders are diffed by " +
+			"their content-addressed metadata alone — no file content is downloaded and " +
+			"unchanged subtrees are skipped by hash; other resources are reconstructed to " +
+			"temp dirs and compared on disk. By default the snapshot is compared against " +
+			"the current live state of its resource; --against compares it to a second " +
+			"snapshot instead. Added (+), removed (-), and modified (~) files are listed.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cl, prof, err := authedClient()
@@ -667,25 +669,7 @@ func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, agai
 	}
 	defer mk.Wipe()
 
-	leftDir, err := os.MkdirTemp("", "aqt-diff-old-*")
-	if err != nil {
-		return zero, err
-	}
-	defer os.RemoveAll(leftDir)
-	rightDir, err := os.MkdirTemp("", "aqt-diff-new-*")
-	if err != nil {
-		return zero, err
-	}
-	defer os.RemoveAll(rightDir)
-
-	if _, err := materializeWithMaster(cl, mk, snapshotAsResource(left), leftDir); err != nil {
-		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
-	}
-	if _, err := materializeWithMaster(cl, mk, rightRes, rightDir); err != nil {
-		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
-	}
-
-	added, removed, modified, err := diffTrees(leftDir, rightDir)
+	added, removed, modified, err := diffResources(cl, mk, snapshotAsResource(left), rightRes, leftID, rightLabel)
 	if err != nil {
 		return zero, err
 	}
@@ -696,6 +680,73 @@ func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, agai
 		Removed:  nonNil(removed),
 		Modified: nonNil(modified),
 	}, nil
+}
+
+// diffResources compares two resource states. When both sides are chunked tree
+// folders it diffs their Merkle DAGs by content address — identical subtrees are
+// pruned by hash without a fetch, and no file-content chunk is ever downloaded —
+// which turns the old "download both trees, hash them on disk" diff into a
+// metadata-only walk of the changed spines. Anything else (single files,
+// pack-and-seal folders, a mixed pair) still materializes both sides to temp
+// dirs and compares them on disk.
+func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (added, removed, modified []string, err error) {
+	leftRoot, leftOK, err := treeRootOf(left, mk)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
+	}
+	rightRoot, rightOK, err := treeRootOf(right, mk)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
+	}
+	if leftOK && rightOK {
+		// One fetcher serves both sides, so a node the two versions share is
+		// fetched at most once (and usually not at all, via the disk node cache).
+		return syncengine.DiffTreeRoots(leftRoot, rightRoot, newBatchNodeFetcher(cl, nil))
+	}
+
+	leftDir, err := os.MkdirTemp("", "aqt-diff-old-*")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer os.RemoveAll(leftDir)
+	rightDir, err := os.MkdirTemp("", "aqt-diff-new-*")
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	defer os.RemoveAll(rightDir)
+	if _, err := materializeWithMaster(cl, mk, left, leftDir); err != nil {
+		return nil, nil, nil, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
+	}
+	if _, err := materializeWithMaster(cl, mk, right, rightDir); err != nil {
+		return nil, nil, nil, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
+	}
+	return diffTrees(leftDir, rightDir)
+}
+
+// treeRootOf opens a resource's sealed TreeRoot when it is a chunked tree folder;
+// ok=false routes every other shape (single file, pack-and-seal, legacy, or a
+// public resource with no owner key) to the materialize fallback.
+func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.TreeRoot, bool, error) {
+	if res.WrappedKey == nil {
+		return syncengine.TreeRoot{}, false, nil
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return syncengine.TreeRoot{}, false, fmt.Errorf("unwrap key: %w", err)
+	}
+	defer ck.Wipe()
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return syncengine.TreeRoot{}, false, err
+	}
+	if meta.Kind != api.KindFolder || !meta.Tree || meta.Packed {
+		return syncengine.TreeRoot{}, false, nil
+	}
+	root, err := syncengine.OpenTreeRoot(res.Blob, ck)
+	if err != nil {
+		return syncengine.TreeRoot{}, false, fmt.Errorf("decrypt folder root: %w", err)
+	}
+	return root, true, nil
 }
 
 func printSnapshotDiff(r snapshotDiffResult) {
