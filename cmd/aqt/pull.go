@@ -26,8 +26,8 @@ func pullCmd() *cobra.Command {
 		force    bool
 	)
 	cmd := &cobra.Command{
-		Use:   "pull <url|id|aqt://ref>",
-		Short: "Fetch and decrypt a resource",
+		Use:   "pull <url|id|aqt://ref>[/path]",
+		Short: "Fetch and decrypt a resource, or a single entry inside a folder",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPull(args[0], out, password, toStdout, force)
@@ -43,8 +43,8 @@ func pullCmd() *cobra.Command {
 func catCmd() *cobra.Command {
 	var password string
 	cmd := &cobra.Command{
-		Use:   "cat <url|id|aqt://ref>",
-		Short: "Decrypt a resource to stdout without writing to disk",
+		Use:   "cat <url|id|aqt://ref>[/path]",
+		Short: "Decrypt a resource (or one file inside a folder) to stdout",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runPull(args[0], "", password, true, false)
@@ -55,7 +55,8 @@ func catCmd() *cobra.Command {
 }
 
 func runPull(ref, out, password string, toStdout, force bool) error {
-	id, fragment, origin := parseRef(ref)
+	baseRef, subpath := splitRefPath(ref)
+	id, fragment, origin := parseRef(baseRef)
 
 	// A public link decrypts from its fragment and needs no profile; a private
 	// ref needs the account token (to fetch) and passphrase (to unwrap). Honor a
@@ -81,9 +82,19 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	}
 	defer ck.Wipe()
 
+	// An aqt://<id>/<path> ref addresses one entry inside a folder: only the
+	// path's spine nodes and that entry's chunks are fetched, never the tree.
+	if subpath != "" {
+		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force)
+	}
+
 	meta, err := decodeMeta(res.EncryptedMeta, ck)
 	if err != nil {
 		return err
+	}
+	if meta.Kind == api.KindFolder {
+		return fmt.Errorf("%s is a folder: `aqt clone aqt://%s` materializes it, `aqt ls aqt://%s` lists it, "+
+			"and aqt://%s/<path> pulls a single entry", meta.Name, id, id, id)
 	}
 	if meta.Streamed {
 		return pullStream(cl, res, ck, out, meta, toStdout, force)
