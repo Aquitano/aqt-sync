@@ -240,13 +240,54 @@ func TestWatcherKeepsEditMadeDuringSync(t *testing.T) {
 	}
 }
 
+// A file event must snap the loop out of its idle backoff: the timer rearms to the
+// base interval and the idle streak restarts from zero. Unbuffered channels make
+// every handshake deterministic: a send returning means the loop received it, and
+// the sequential loop processed everything before it.
+func TestWatcherRunEventRearmsToBase(t *testing.T) {
+	f := &fakeWatcher{sig: "a"}
+	w := newFakeWatcher(f)
+	wait := &fakeWaiter{ch: make(chan time.Time)}
+	events := make(chan struct{})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	base, max := 2*time.Second, 30*time.Second
+	go func() { done <- w.run(ctx, wait, base, max, events) }()
+
+	wait.tick()          // initial sync -> Reset(base)
+	wait.tick()          // quiet: idle 1 -> Reset(4s)
+	wait.tick()          // quiet: idle 2 -> Reset(8s)
+	events <- struct{}{} // event -> Reset(base), idle reset
+	events <- struct{}{} // handshake: the first event's Reset is recorded
+	wait.tick()          // quiet: idle restarts at 1 -> Reset(4s)
+	events <- struct{}{} // handshake: the tick's Reset is recorded
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+
+	r := wait.resets
+	if len(r) < 7 {
+		t.Fatalf("recorded %d resets, want at least 7: %v", len(r), r)
+	}
+	if r[3] != 8*time.Second {
+		t.Fatalf("backoff before the event = %s, want 8s (resets %v)", r[3], r)
+	}
+	if r[4] != base {
+		t.Fatalf("an event must rearm to base: got %s (resets %v)", r[4], r)
+	}
+	if r[6] != 4*time.Second {
+		t.Fatalf("idle streak must restart after an event: got %s, want 4s (resets %v)", r[6], r)
+	}
+}
+
 func TestWatcherRunExitsOnCancel(t *testing.T) {
 	f := &fakeWatcher{sig: "a"}
 	w := newFakeWatcher(f)
 	wait := newFakeWaiter()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- w.run(ctx, wait, defaultInterval, maxWatchInterval) }()
+	go func() { done <- w.run(ctx, wait, defaultInterval, maxWatchInterval, nil) }()
 
 	wait.tick() // prime ran before the first receive; this drives the sync
 	wait.tick() // drain: guarantees the previous tick was fully processed
@@ -274,7 +315,7 @@ func TestWatcherRunStopsOnFatalSync(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- w.run(ctx, wait, defaultInterval, maxWatchInterval) }()
+	go func() { done <- w.run(ctx, wait, defaultInterval, maxWatchInterval, nil) }()
 
 	wait.tick() // initial sync attempt -> fatal
 	select {

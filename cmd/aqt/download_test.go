@@ -150,7 +150,7 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 // (one range), but a gap wider than spanSplitGap opens a new span so the dead bytes
 // between them are never downloaded.
 func TestPackSourceSpanSplitting(t *testing.T) {
-	s := &packSource{objSpan: map[string]packSpan{}}
+	s := &packSource{objSpan: map[string]packSpan{}, spans: map[string][]packSpan{}}
 	bEnd := int64(100 + 1000 + 100)  // a: [0,100), b: [1100,1200); gap 1000 < threshold
 	cBase := bEnd + spanSplitGap + 1 // c starts a fresh span (gap beyond threshold)
 	s.assignSpans([]api.ObjectLocation{
@@ -170,6 +170,43 @@ func TestPackSourceSpanSplitting(t *testing.T) {
 	}
 	if c := s.objSpan["c"]; c.base != cBase || c.end != cBase+100 {
 		t.Fatalf("c span = %+v, want base %d end %d", c, cBase, cBase+100)
+	}
+}
+
+// TestBatchNodeFetcherSharesPackAcrossLevels drives the level-batched fetcher the
+// way a tree walk does — one call per level — against a pack holding nodes from two
+// levels. The shared packSource must serve the second level's node from the span the
+// first level already fetched: exactly one pack GET across both calls.
+func TestBatchNodeFetcherSharesPackAcrossLevels(t *testing.T) {
+	pack := []byte(strings.Repeat("A", 100) + strings.Repeat("B", 100) + strings.Repeat("C", 100))
+	f := &fakePackServer{
+		packs: map[string][]byte{"p1": pack},
+		locs: map[string]api.ObjectLocation{
+			"a": {ID: "a", PackID: "p1", Off: 0, Len: 100},
+			"b": {ID: "b", PackID: "p1", Off: 100, Len: 100},
+			"c": {ID: "c", PackID: "p1", Off: 200, Len: 100},
+		},
+		getHits: map[string]*int32{"p1": new(int32)},
+	}
+	cl := newFakePackClient(t, f)
+
+	fetch := newBatchNodeFetcher(cl, nil)
+	level1, err := fetch([]string{"a", "c"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(level1["a"][:1]) != "A" || string(level1["c"][:1]) != "C" {
+		t.Fatal("level 1 nodes came back wrong")
+	}
+	level2, err := fetch([]string{"b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(level2["b"][:1]) != "B" {
+		t.Fatal("level 2 node came back wrong")
+	}
+	if n := atomic.LoadInt32(f.getHits["p1"]); n != 1 {
+		t.Fatalf("pack p1 fetched %d times across levels, want exactly 1", n)
 	}
 }
 

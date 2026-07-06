@@ -1136,8 +1136,9 @@ const spanSplitGap = 256 << 10
 // a small LRU so a pack shared by several files is fetched once.
 //
 // It is safe for concurrent use by the download worker pool: locs and spans are
-// immutable after construction (read-only), the LRU is guarded by mu, and sf
-// collapses a stampede of workers that all miss the same pack into one GetPackRange.
+// immutable once concurrent gets begin (locate runs before, see its comment), the
+// LRU is guarded by mu, and sf collapses a stampede of workers that all miss the
+// same pack into one GetPackRange.
 type packSource struct {
 	cl   *client.Client
 	locs map[string]api.ObjectLocation
@@ -1145,24 +1146,47 @@ type packSource struct {
 	// widely-separated needed objects has several spans, so get fetches only the
 	// window around each object rather than min..max across the whole pack.
 	objSpan map[string]packSpan
-	mu      sync.Mutex // guards cache
-	cache   *packCache
-	sf      singleflight.Group
+	// spans records each pack's assigned spans so a later locate (the tree walk
+	// locates level by level) reuses a span that already contains an object instead
+	// of cutting a new one — the cache key is pack+span base, so reuse is what lets
+	// a level-2 node inside a level-1 window come from the LRU, not the network.
+	spans map[string][]packSpan
+	mu    sync.Mutex // guards cache
+	cache *packCache
+	sf    singleflight.Group
 }
 
 func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
-	s := &packSource{
+	s := newEmptyPackSource(cl)
+	if err := s.locate(ids); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// newEmptyPackSource returns a source with no located objects yet, for callers
+// that locate incrementally (the level-batched tree walk) while keeping one LRU
+// across all their fetches.
+func newEmptyPackSource(cl *client.Client) *packSource {
+	return &packSource{
 		cl:      cl,
-		locs:    make(map[string]api.ObjectLocation, len(ids)),
-		objSpan: make(map[string]packSpan, len(ids)),
+		locs:    map[string]api.ObjectLocation{},
+		objSpan: map[string]packSpan{},
+		spans:   map[string][]packSpan{},
 		cache:   newPackCache(packCacheBytes),
 	}
+}
+
+// locate resolves ids to pack spans and records them for get. It mutates locs and
+// objSpan, so it must not run concurrently with get — callers either locate once
+// up front (downloads) or interleave locate/get on a single goroutine (tree walk).
+func (s *packSource) locate(ids []string) error {
 	if len(ids) == 0 {
-		return s, nil
+		return nil
 	}
-	located, err := cl.LocateChunks(ids)
+	located, err := s.cl.LocateChunks(ids)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	byPack := map[string][]api.ObjectLocation{}
 	for _, loc := range located {
@@ -1172,19 +1196,36 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	for _, objs := range byPack {
 		s.assignSpans(objs)
 	}
-	return s, nil
+	return nil
 }
 
 // assignSpans groups one pack's needed objects into covering spans, opening a new span
 // whenever the gap to the next object exceeds spanSplitGap, and records each object's
 // span so get range-fetches just that window. Objects within a pack never overlap.
+// An object already contained in one of the pack's earlier spans (a prior locate — the
+// tree walk locates level by level) adopts that span, so its bytes are served from the
+// span already fetched rather than a fresh overlapping range.
 func (s *packSource) assignSpans(objs []api.ObjectLocation) {
+	packID := objs[0].PackID
+	fresh := objs[:0]
+	for _, o := range objs {
+		if sp, ok := spanContaining(s.spans[packID], o); ok {
+			s.objSpan[o.ID] = sp
+			continue
+		}
+		fresh = append(fresh, o)
+	}
+	objs = fresh
+	if len(objs) == 0 {
+		return
+	}
 	sort.Slice(objs, func(i, j int) bool { return objs[i].Off < objs[j].Off })
 	start := 0
 	base := objs[0].Off
 	end := objs[0].Off + objs[0].Len
 	flush := func(hi int) {
 		span := packSpan{base: base, end: end}
+		s.spans[packID] = append(s.spans[packID], span)
 		for _, o := range objs[start:hi] {
 			s.objSpan[o.ID] = span
 		}
@@ -1200,6 +1241,15 @@ func (s *packSource) assignSpans(objs []api.ObjectLocation) {
 		}
 	}
 	flush(len(objs))
+}
+
+func spanContaining(spans []packSpan, o api.ObjectLocation) (packSpan, bool) {
+	for _, sp := range spans {
+		if o.Off >= sp.base && o.Off+o.Len <= sp.end {
+			return sp, true
+		}
+	}
+	return packSpan{}, false
 }
 
 func (s *packSource) get(id string) ([]byte, error) {
@@ -1408,17 +1458,19 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 // newBatchNodeFetcher returns a level-batch fetch for directory-node objects: it
 // locates a whole level's ids in one call and range-fetches their packs grouped (via
 // packSource), so a tree walk pays one locate per level instead of two round-trips per
-// node. seed carries node ciphertexts already in hand (the base tree in the reuse
-// path), served from memory without a fetch; fetched nodes are cached across levels
-// since the DAG may revisit a shared subtree id. A node the owner no longer stores —
-// a concurrent sync superseded this version and GC reaped it — surfaces from
-// packSource.get as client.ErrNotFound so a manifest read can retry against the
-// current version.
+// node. One packSource (and its LRU) is shared across every level of the walk, so a
+// pack carrying nodes from several levels is fetched once, not once per level. seed
+// carries node ciphertexts already in hand (the base tree in the reuse path), served
+// from memory without a fetch; fetched nodes are cached across levels since the DAG
+// may revisit a shared subtree id. A node the owner no longer stores — a concurrent
+// sync superseded this version and GC reaped it — surfaces from packSource.get as
+// client.ErrNotFound so a manifest read can retry against the current version.
 func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
 	cache := make(map[string][]byte, len(seed))
 	for id, ct := range seed {
 		cache[id] = ct
 	}
+	src := newEmptyPackSource(cl)
 	return func(ids []string) (map[string][]byte, error) {
 		var missing []string
 		for _, id := range ids {
@@ -1427,8 +1479,7 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 			}
 		}
 		if len(missing) > 0 {
-			src, err := newPackSource(cl, missing)
-			if err != nil {
+			if err := src.locate(missing); err != nil {
 				return nil, err
 			}
 			for _, id := range missing {
