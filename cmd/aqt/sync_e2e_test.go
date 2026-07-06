@@ -215,14 +215,26 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildFindIndex: %v", err)
 	}
-	var sawMember bool
+	var memberRef string
 	for _, e := range entries {
 		if e.Kind == kindFolderFile && e.Path == "notes/todo.txt" {
-			sawMember = true
+			memberRef = e.Ref
 		}
 	}
-	if !sawMember {
-		t.Errorf("find did not surface the folder member; entries=%+v", entries)
+	if memberRef == "" {
+		t.Fatalf("find did not surface the folder member; entries=%+v", entries)
+	}
+	// The member ref carries the subpath, so it composes with pull to fetch just
+	// that file: `aqt pull "$(aqt find)"`.
+	if want := "/notes/todo.txt"; !strings.HasSuffix(memberRef, want) {
+		t.Errorf("member ref = %q, want aqt://<id>%s", memberRef, want)
+	}
+	dest := filepath.Join(t.TempDir(), "todo.txt")
+	if err := runPull(memberRef, dest, "", false, false); err != nil {
+		t.Fatalf("pull of find ref: %v", err)
+	}
+	if got, err := os.ReadFile(dest); err != nil || string(got) != "buy milk" {
+		t.Errorf("pulled member = %q, %v; want %q", got, err, "buy milk")
 	}
 }
 
