@@ -3,45 +3,24 @@ name: CI
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
   pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - 'docs/**'
 
 permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  test:
-    name: test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-      - name: Build
-        run: go build ./...
-      - name: Vet
-        run: go vet ./...
-      # The race detector needs a C toolchain; Windows runners don't ship one by
-      # default, so race only runs on Linux/macOS. Windows still build+test+vet
-      # natively, which is what the cross-platform process seam needs covered.
-      - name: Test (race)
-        if: runner.os != 'Windows'
-        run: go test -race ./...
-      - name: Test
-        if: runner.os == 'Windows'
-        run: go test ./...
-
-  lint:
-    name: lint
+  linux:
+    name: linux ci
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -57,3 +36,9 @@ jobs:
             echo "$unformatted"
             exit 1
           fi
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        run: go test -race ./...

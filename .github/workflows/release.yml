@@ -14,10 +14,39 @@ on:
 permissions:
   contents: write   # create the Release and upload its assets
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  native-test:
+    name: native test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build
+        run: go build ./...
+      - name: Vet
+        run: go vet ./...
+      - name: Test (race)
+        if: runner.os != 'Windows'
+        run: go test -race ./...
+      - name: Test
+        if: runner.os == 'Windows'
+        run: go test ./...
+
   build:
     name: build and release
     runs-on: ubuntu-latest
+    needs: native-test
     steps:
       - uses: actions/checkout@v5
         with:
