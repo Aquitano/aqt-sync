@@ -69,12 +69,15 @@ func initCmd() *cobra.Command {
 }
 
 func statusCmd() *cobra.Command {
-	return &cobra.Command{
+	var opts statusOptions
+	cmd := &cobra.Command{
 		Use:   "status [dir]",
-		Short: "Show local changes since the last sync",
+		Short: "Show local changes since the last sync, and any incoming changes on the server",
 		Args:  cobra.MaximumNArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return runStatus(dirArg(args)) },
+		RunE:  func(cmd *cobra.Command, args []string) error { return runStatus(dirArg(args), opts) },
 	}
+	cmd.Flags().BoolVar(&opts.offline, "offline", false, "report only local changes; skip the server check for incoming changes")
+	return cmd
 }
 
 func syncCmd() *cobra.Command {
@@ -186,7 +189,11 @@ func runInit(dir string) error {
 
 // --- status ---
 
-func runStatus(dir string) error {
+type statusOptions struct {
+	offline bool
+}
+
+func runStatus(dir string, opts statusOptions) error {
 	root, err := trackedRoot(dir)
 	if err != nil {
 		return err
@@ -200,8 +207,8 @@ func runStatus(dir string) error {
 		return err
 	}
 
-	// status is intentionally offline: it compares the working tree to the last
-	// synced manifest. Remote-side changes and conflicts surface during `sync`.
+	// The local half is offline: it compares the working tree to the last synced
+	// manifest. Conflicts (both sides changed) still surface only during `sync`.
 	baseByPath := base.ByPath()
 	var added, modified, deleted []string
 	for _, a := range syncengine.Plan(local, base, base) {
@@ -218,12 +225,201 @@ func runStatus(dir string) error {
 	}
 	if len(added)+len(modified)+len(deleted) == 0 {
 		fmt.Println("clean (no local changes since last sync)")
+	} else {
+		printPaths("new", added)
+		printPaths("modified", modified)
+		printPaths("deleted", deleted)
+	}
+
+	if opts.offline {
 		return nil
 	}
-	printPaths("new", added)
-	printPaths("modified", modified)
-	printPaths("deleted", deleted)
+	reportIncoming(root, base)
 	return nil
+}
+
+// incomingSummary is the file-level view of what the server holds that this machine
+// has not yet pulled: entries added or modified on the remote since the last sync,
+// and entries the remote dropped. Like the local status view it is files-only.
+type incomingSummary struct {
+	added    []string
+	modified []string
+	deleted  []string
+}
+
+func (s incomingSummary) total() int { return len(s.added) + len(s.modified) + len(s.deleted) }
+
+// reportIncoming prints whether the server holds changes this machine has not pulled.
+// It is best-effort and never fails `status`: the command is primarily an offline,
+// local-changes view, so a missing profile or an unreachable server downgrades to a
+// short note on stderr rather than an error. A precise file count needs the folder
+// key, so it is shown only when an unlocked session is already cached — status never
+// prompts for a passphrase; otherwise the coarser version delta is reported.
+func reportIncoming(root string, base syncengine.Manifest) {
+	prof := loadProfileOptional()
+	if prof == nil {
+		return // never logged in: no server to compare against
+	}
+	st, err := loadState(root)
+	if err != nil {
+		return
+	}
+	cl, err := client.New(prof.Server, prof.Token)
+	if err != nil {
+		return
+	}
+	res, err := cl.GetResource(st.ID)
+	if err != nil {
+		noteIncomingUnavailable(err)
+		return
+	}
+
+	// Cheap freshness compare first: RemoteVersion is the server version this machine
+	// last integrated (recorded by every init/clone/sync), so the resource header alone
+	// answers "is the server ahead?" — no folder key, no tree walk.
+	switch {
+	case st.RemoteVersion > 0 && res.Version < st.RemoteVersion:
+		fmt.Printf("server reports an older version (%d < %d): it may have been restored from a backup; run `aqt sync`\n",
+			res.Version, st.RemoteVersion)
+		return
+	case st.RemoteVersion > 0 && res.Version == st.RemoteVersion:
+		fmt.Println("up to date with the server")
+		return
+	}
+
+	// The server is ahead (or RemoteVersion predates version tracking). Try for a
+	// file-level breakdown; it needs the folder key, available without a prompt only
+	// when a session is already unlocked, and only for a chunked folder — a pack-and-seal
+	// folder is one opaque blob with no per-file remote diff, so it stays version-level.
+	if cfg, cerr := syncengine.LoadConfig(root); cerr == nil && !cfg.Pack {
+		if mk, ok := identity.LoadSession(prof.Name); ok {
+			defer mk.Wipe()
+			if inc, ierr := incomingFiles(cl, res, base, mk); ierr == nil {
+				printIncoming(inc)
+				return
+			}
+		}
+	}
+
+	// Fallback: the server advanced but we cannot (or need not) enumerate the files.
+	if st.RemoteVersion == 0 {
+		fmt.Println("the server may hold changes to pull; run `aqt sync`")
+		return
+	}
+	fmt.Printf("incoming: the server is ahead by %d version(s); run `aqt sync` to pull\n", res.Version-st.RemoteVersion)
+}
+
+// incomingFiles decrypts the remote manifest and diffs it against the last-synced
+// base, yielding the files this machine would pull. It reuses the base tree's node
+// ciphertexts so an unchanged remote subtree costs no fetch, exactly like a sync's
+// remote read.
+func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengine.Manifest, mk crypto.MasterKey) (incomingSummary, error) {
+	if res.WrappedKey == nil {
+		return incomingSummary{}, errors.New("folder resource has no owner key")
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return incomingSummary{}, err
+	}
+	defer ck.Wipe()
+	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	if err != nil {
+		return incomingSummary{}, err
+	}
+	if !meta.Tree {
+		return incomingSummary{}, errors.New("unsupported remote folder format")
+	}
+	remote, err := readRemoteManifest(cl, res, ck, base, mk)
+	if err != nil {
+		return incomingSummary{}, err
+	}
+	return diffIncoming(base, remote), nil
+}
+
+// readRemoteManifest reconstructs the remote folder manifest, reusing the base tree's
+// node ciphertexts when a base is present (an unchanged subtree then costs no fetch)
+// and falling back to a full walk when there is nothing to reuse.
+func readRemoteManifest(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, base syncengine.Manifest, mk crypto.MasterKey) (syncengine.Manifest, error) {
+	if len(base.Entries) == 0 && len(base.Dirs) == 0 {
+		return openRemoteTree(cl, res.Blob, ck)
+	}
+	conv := crypto.DeriveConvergenceKey(mk)
+	defer conv.Wipe()
+	baseCT, err := syncengine.SealTreeCiphertexts(base, conv)
+	if err != nil {
+		return syncengine.Manifest{}, err
+	}
+	return openRemoteTreeReusingBase(cl, res.Blob, ck, baseCT)
+}
+
+// diffIncoming reports the file-level changes the server holds relative to the last
+// synced base. It mirrors the planner's notion of "changed" (content or mode), and
+// like the local status view it considers files only, not tracked directories.
+func diffIncoming(base, remote syncengine.Manifest) incomingSummary {
+	baseByPath := base.ByPath()
+	remoteByPath := remote.ByPath()
+	var s incomingSummary
+	for path, re := range remoteByPath {
+		switch be, ok := baseByPath[path]; {
+		case !ok:
+			s.added = append(s.added, path)
+		case be.Hash != re.Hash || be.Mode != re.Mode:
+			s.modified = append(s.modified, path)
+		}
+	}
+	for path := range baseByPath {
+		if _, ok := remoteByPath[path]; !ok {
+			s.deleted = append(s.deleted, path)
+		}
+	}
+	sort.Strings(s.added)
+	sort.Strings(s.modified)
+	sort.Strings(s.deleted)
+	return s
+}
+
+func printIncoming(s incomingSummary) {
+	if s.total() == 0 {
+		fmt.Println("up to date with the server")
+		return
+	}
+	fmt.Printf("incoming: %d to pull (%s); run `aqt sync`\n", s.total(), incomingBreakdown(s))
+	printIncomingPaths("new", s.added)
+	printIncomingPaths("modified", s.modified)
+	printIncomingPaths("deleted", s.deleted)
+}
+
+// printIncomingPaths lists incoming paths indented under the "incoming:" summary, so
+// they read as a group and never look like the top-level local changes above them.
+func printIncomingPaths(label string, paths []string) {
+	for _, p := range paths {
+		fmt.Printf("  %-9s %s\n", label, p)
+	}
+}
+
+func incomingBreakdown(s incomingSummary) string {
+	var parts []string
+	if n := len(s.added); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d new", n))
+	}
+	if n := len(s.modified); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d modified", n))
+	}
+	if n := len(s.deleted); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d deleted", n))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func noteIncomingUnavailable(err error) {
+	switch {
+	case isNetworkError(err):
+		fmt.Fprintln(os.Stderr, "note: could not reach the server to check for incoming changes")
+	case errors.Is(err, client.ErrNotFound):
+		fmt.Fprintln(os.Stderr, "note: this folder no longer exists on the server")
+	default:
+		fmt.Fprintf(os.Stderr, "note: could not check the server for incoming changes: %v\n", err)
+	}
 }
 
 // --- sync ---

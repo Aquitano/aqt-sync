@@ -145,7 +145,8 @@ aqt://9fK2qd
 
 ```
 aqt init   [<dir>]        Mark a folder tracked. Writes .aqt/ and a starter .aqtignore.
-aqt status [<dir>]        Changed / new / deleted / conflicted since last sync.
+aqt status [<dir>]        Local changes since last sync, plus incoming changes on the server.
+      --offline           Report only local changes; skip the server check.
 aqt sync   [<dir>]        Two-way reconcile: encrypt+push local changes, pull remote.
       --push-only / --pull-only / --dry-run / --force
 aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
