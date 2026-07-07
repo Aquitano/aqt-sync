@@ -26,6 +26,11 @@ const (
 	// ~30s instead of every 2s, cutting the O(tree) background scan (3.7). A change
 	// snaps it back to the base interval.
 	maxWatchInterval = 30 * time.Second
+	// watchRescanInterval replaces maxWatchInterval as the idle cap when kernel file
+	// events are active: changes arrive as events, so the stat-walk drops to a slow
+	// safety-net rescan that catches whatever the events missed (an unwatchable new
+	// subtree, a queue overflow, stale ignore rules).
+	watchRescanInterval = 5 * time.Minute
 	// gitIdleWaitOnce bounds how long `--once` waits for an in-progress git
 	// operation before it skips, so a cron run can't block forever on a stale lock.
 	gitIdleWaitOnce = 30 * time.Second
@@ -211,9 +216,22 @@ func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 		sync:    func() error { return runSync(root, syncOptions{}) },
 		logf:    logger.Printf,
 	}
-	logger.Printf("watching %s (interval %s, backing off to %s while idle, git-guard %s)", root, interval, maxWatchInterval, onOff(gitGuard))
+	// Prefer kernel file events over the poll walk; the poll survives as a slow
+	// safety-net rescan. A tree the OS can't watch (e.g. over the inotify budget)
+	// keeps the original polling behavior.
+	var events <-chan struct{}
+	max := maxWatchInterval
+	if tw, err := syncengine.WatchTree(root); err != nil {
+		logger.Printf("file events unavailable (%v); polling every %s (backing off to %s while idle)", err, interval, maxWatchInterval)
+	} else {
+		defer tw.Close()
+		events = tw.Events()
+		max = watchRescanInterval
+		logger.Printf("file events active (debounce %s, safety rescan every %s)", interval, watchRescanInterval)
+	}
+	logger.Printf("watching %s (git-guard %s)", root, onOff(gitGuard))
 	wait := newRealWaiter(interval)
-	if err := w.run(ctx, wait, interval, maxWatchInterval); err != nil {
+	if err := w.run(ctx, wait, interval, max, events); err != nil {
 		logger.Printf("stopping: %v", err)
 		return err
 	}
@@ -274,7 +292,12 @@ type watchState struct {
 // (e.g. the session can no longer be unlocked) so the caller can stop the agent. After
 // each step it rearms wait with the backoff interval for the current idle streak, so a
 // settled tree is polled less often while any change snaps the interval back to base.
-func (w *watcher) run(ctx context.Context, wait waiter, base, max time.Duration) error {
+//
+// events, when non-nil, carries kernel file-event signals: each one rearms the timer
+// to the base interval so the next scan runs one debounce after the burst, instead of
+// waiting out the idle backoff. A nil channel blocks forever, leaving the pure
+// polling behavior.
+func (w *watcher) run(ctx context.Context, wait waiter, base, max time.Duration, events <-chan struct{}) error {
 	defer wait.Stop()
 	var st watchState
 	if err := w.step(&st); err != nil { // prime the baseline + queue initial sync
@@ -285,6 +308,9 @@ func (w *watcher) run(ctx context.Context, wait waiter, base, max time.Duration)
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-events:
+			st.idle = 0
+			wait.Reset(base)
 		case <-wait.C():
 			if err := w.step(&st); err != nil {
 				return err

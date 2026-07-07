@@ -105,28 +105,15 @@ func OpenFileRoot(blob crypto.SealedBlob, ck crypto.ContentKey) (FileRoot, error
 	return r, nil
 }
 
-// ChunkFile streams r through the chunker, sealing each chunk under conv into sink,
-// and returns the chunk records and total plaintext size. Memory is O(one chunk +
-// the sink's pack buffer).
+// ChunkFile streams r through the chunker, sealing each chunk under conv into sink
+// (fanned across cores by sealStream, in stream order), and returns the chunk
+// records and total plaintext size. Memory is O(a few chunks + the sink's pack
+// buffer).
 func ChunkFile(r io.Reader, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink) ([]crypto.Chunk, int64, error) {
 	if sink == nil {
 		sink = nopSink{}
 	}
-	var chunks []crypto.Chunk
-	var size int64
-	err := chunker.SplitStream(r, func(piece []byte) error {
-		ct, ch, err := crypto.SealChunk(piece, conv)
-		if err != nil {
-			return err
-		}
-		size += int64(len(piece))
-		chunks = append(chunks, ch)
-		return sink.Add(ch, ct)
-	})
-	if err != nil {
-		return nil, 0, err
-	}
-	return chunks, size, nil
+	return sealStream(r, conv, chunker, sink)
 }
 
 // WriteFileRoot streams a file's content to dst from its ordered chunk records,

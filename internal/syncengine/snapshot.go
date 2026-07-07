@@ -388,7 +388,8 @@ func touchedReuse(prev, cur Entry) Entry {
 }
 
 // sealFile streams a file through the chunker once, sealing each chunk into sink
-// and computing the content hash from the same pass.
+// (fanned across cores by sealStream, in file order) and computing the content
+// hash from the same pass.
 func sealFile(n fileNode, entry Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink) (Entry, error) {
 	f, err := os.Open(n.path)
 	if err != nil {
@@ -397,17 +398,11 @@ func sealFile(n fileNode, entry Entry, conv crypto.ConvergenceKey, chunker *Chun
 	defer f.Close()
 	h := sha256.New()
 	tee := io.TeeReader(f, h)
-	err = chunker.SplitStream(tee, func(piece []byte) error {
-		ct, ch, err := crypto.SealChunk(piece, conv)
-		if err != nil {
-			return err
-		}
-		entry.Chunks = append(entry.Chunks, ch)
-		return sink.Add(ch, ct)
-	})
+	chunks, _, err := sealStream(tee, conv, chunker, sink)
 	if err != nil {
 		return Entry{}, err
 	}
+	entry.Chunks = chunks
 	entry.Hash = hex.EncodeToString(h.Sum(nil))
 	return entry, nil
 }
