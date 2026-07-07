@@ -1659,21 +1659,31 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 // pack carrying nodes from several levels is fetched once, not once per level. seed
 // carries node ciphertexts already in hand (the base tree in the reuse path), served
 // from memory without a fetch; fetched nodes are cached across levels since the DAG
-// may revisit a shared subtree id. A node the owner no longer stores — a concurrent
-// sync superseded this version and GC reaped it — surfaces from packSource.get as
-// client.ErrNotFound so a manifest read can retry against the current version.
+// may revisit a shared subtree id, and persist in the on-disk node cache, so a later
+// command (find, diff, clone, a cold reconcile) re-fetches only nodes it has never
+// seen — content addressing makes a disk hit exactly as trustworthy as a server fetch,
+// since OpenNode verifies either against the id. A node the owner no longer stores —
+// a concurrent sync superseded this version and GC reaped it — surfaces from
+// packSource.get as client.ErrNotFound so a manifest read can retry against the
+// current version.
 func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
 	cache := make(map[string][]byte, len(seed))
 	for id, ct := range seed {
 		cache[id] = ct
 	}
 	src := newEmptyPackSource(cl)
+	disk := openNodeCache()
 	return func(ids []string) (map[string][]byte, error) {
 		var missing []string
 		for _, id := range ids {
-			if _, ok := cache[id]; !ok {
-				missing = append(missing, id)
+			if _, ok := cache[id]; ok {
+				continue
 			}
+			if ct, ok := disk.get(id); ok {
+				cache[id] = ct
+				continue
+			}
+			missing = append(missing, id)
 		}
 		if len(missing) > 0 {
 			if err := src.locate(missing); err != nil {
@@ -1685,6 +1695,7 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 					return nil, err
 				}
 				cache[id] = b
+				disk.put(id, b)
 			}
 		}
 		out := make(map[string][]byte, len(ids))

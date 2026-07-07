@@ -11,6 +11,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/term"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -24,9 +25,10 @@ import (
 const kindFolderFile = "folder-file"
 
 // findEntry is one searchable row: a file resource, a folder resource, or a file
-// within a folder. Ref is what `find` prints when the entry is selected — always
-// the owning resource (the folder, for a folder member), so it composes with
-// `aqt pull` / `aqt clone`.
+// within a folder. Ref is what `find` prints when the entry is selected: the
+// resource itself, or aqt://<id>/<path> for a folder member, so a selection
+// composes directly with `aqt pull` / `aqt cat` (which fetch just that entry)
+// as well as `aqt clone` on the folder ref.
 type findEntry struct {
 	Kind       string `json:"kind"` // file | folder | folder-file
 	Name       string `json:"name"` // display: resource name, or "folder/path"
@@ -44,7 +46,9 @@ func findCmd() *cobra.Command {
 		Short: "Fuzzy-search all your files and folder contents (via fzf)",
 		Long: "Build a searchable index of every resource — single files, folders, and the\n" +
 			"files inside each folder — and open it in fzf. The selected entry's ref is\n" +
-			"printed, so it composes: `aqt pull \"$(aqt find)\"`.\n\n" +
+			"printed, so it composes: `aqt pull \"$(aqt find)\"`. A file inside a folder\n" +
+			"prints as aqt://<id>/<path>, which pull/cat fetch without downloading the\n" +
+			"rest of the folder.\n\n" +
 			"Without a terminal or fzf, the index is printed as a table instead.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -91,15 +95,26 @@ func runFind(query string, asJSON, noFzf bool) error {
 	return fzfSelect(fzfPath, query, entries)
 }
 
+// findConcurrency bounds how many folder DAGs are walked at once. Each walk is
+// IO-bound (level-batched node fetches), so a small fan-out overlaps the network
+// latency of independent folders without hammering the server.
+const findConcurrency = 4
+
 // buildFindIndex lists the owner's resources and expands each tracked folder into
-// its member files, so a single search covers everything. A folder whose manifest
-// cannot be read is reported and skipped rather than aborting the whole index.
+// its member files, so a single search covers everything. Folder DAGs are walked
+// concurrently — each is independent, and the shared node cache makes a repeat
+// index build mostly disk reads. A folder whose manifest cannot be read is
+// reported and skipped rather than aborting the whole index.
 func buildFindIndex(cl *client.Client, mk crypto.MasterKey) ([]findEntry, error) {
 	items, err := cl.ListResources()
 	if err != nil {
 		return nil, err
 	}
 	out := []findEntry{} // non-nil so an empty index marshals to [] not null
+	type folderJob struct {
+		id, name, vis string
+	}
+	var jobs []folderJob
 	for _, it := range items {
 		meta, ok := openMetadata(it, mk)
 		name := meta.Name
@@ -110,10 +125,9 @@ func buildFindIndex(cl *client.Client, mk crypto.MasterKey) ([]findEntry, error)
 		if kind == "" {
 			kind = api.KindFile
 		}
-		ref := "aqt://" + it.ID
 		out = append(out, findEntry{
 			Kind: kind, Name: name, Size: meta.Size,
-			Visibility: string(it.Visibility), Ref: ref, ID: it.ID,
+			Visibility: string(it.Visibility), Ref: "aqt://" + it.ID, ID: it.ID,
 		})
 
 		// A pack-and-seal folder's blob is an opaque tarball, not a per-file
@@ -121,17 +135,35 @@ func buildFindIndex(cl *client.Client, mk crypto.MasterKey) ([]findEntry, error)
 		if kind != api.KindFolder || it.WrappedKey == nil || meta.Packed {
 			continue
 		}
-		members, err := folderMembers(cl, it.ID, mk)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not read folder %q: %v\n", name, err)
-			continue
-		}
-		for _, e := range members {
-			out = append(out, findEntry{
-				Kind: kindFolderFile, Name: name + "/" + e.Path, Path: e.Path,
-				Size: e.Size, Visibility: string(it.Visibility), Ref: ref, ID: it.ID,
-			})
-		}
+		jobs = append(jobs, folderJob{id: it.ID, name: name, vis: string(it.Visibility)})
+	}
+
+	// Each slot is owned by exactly one goroutine, and a failed folder leaves its
+	// slot nil, so no further synchronization is needed.
+	memberRows := make([][]findEntry, len(jobs))
+	var g errgroup.Group
+	g.SetLimit(findConcurrency)
+	for i, job := range jobs {
+		g.Go(func() error {
+			members, err := folderMembers(cl, job.id, mk)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not read folder %q: %v\n", job.name, err)
+				return nil
+			}
+			rows := make([]findEntry, 0, len(members))
+			for _, e := range members {
+				rows = append(rows, findEntry{
+					Kind: kindFolderFile, Name: job.name + "/" + e.Path, Path: e.Path,
+					Size: e.Size, Visibility: job.vis, Ref: "aqt://" + job.id + "/" + e.Path, ID: job.id,
+				})
+			}
+			memberRows[i] = rows
+			return nil
+		})
+	}
+	_ = g.Wait() // workers never return errors; failures degrade to warnings
+	for _, rows := range memberRows {
+		out = append(out, rows...)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Name != out[j].Name {
