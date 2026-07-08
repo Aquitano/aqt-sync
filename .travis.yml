@@ -1,0 +1,31 @@
+language: go
+os: linux
+dist: jammy
+
+go:
+  - 1.25.x
+
+# Only push builds on main; PRs targeting main are built regardless.
+branches:
+  only:
+    - main
+
+cache:
+  directories:
+    - $HOME/go/pkg/mod
+    - $HOME/.cache/go-build
+
+# Skip Travis' default `go get ./...`; modules handle dependencies.
+install: true
+
+script:
+  - |
+    unformatted=$(gofmt -l .)
+    if [ -n "$unformatted" ]; then
+      echo "These files are not gofmt-clean:"
+      echo "$unformatted"
+      exit 1
+    fi
+  - go build ./...
+  - go vet ./...
+  - go test -race ./...
