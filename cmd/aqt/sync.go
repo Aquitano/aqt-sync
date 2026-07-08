@@ -223,12 +223,16 @@ func runStatus(dir string, opts statusOptions) error {
 			deleted = append(deleted, a.Path)
 		}
 	}
-	if len(added)+len(modified)+len(deleted) == 0 {
+	renamed, added, deleted := syncengine.DetectRenames(added, deleted, local, base)
+	if len(added)+len(modified)+len(deleted)+len(renamed) == 0 {
 		fmt.Println("clean (no local changes since last sync)")
 	} else {
 		printPaths("new", added)
 		printPaths("modified", modified)
 		printPaths("deleted", deleted)
+		for _, r := range renamed {
+			fmt.Printf("%-9s %s\n", "renamed", renameArrow(r))
+		}
 	}
 
 	if opts.offline {
@@ -245,9 +249,12 @@ type incomingSummary struct {
 	added    []string
 	modified []string
 	deleted  []string
+	renamed  []syncengine.Rename
 }
 
-func (s incomingSummary) total() int { return len(s.added) + len(s.modified) + len(s.deleted) }
+func (s incomingSummary) total() int {
+	return len(s.added) + len(s.modified) + len(s.deleted) + len(s.renamed)
+}
 
 // reportIncoming prints whether the server holds changes this machine has not pulled.
 // It is best-effort and never fails `status`: the command is primarily an offline,
@@ -375,6 +382,7 @@ func diffIncoming(base, remote syncengine.Manifest) incomingSummary {
 	sort.Strings(s.added)
 	sort.Strings(s.modified)
 	sort.Strings(s.deleted)
+	s.renamed, s.added, s.deleted = syncengine.DetectRenames(s.added, s.deleted, remote, base)
 	return s
 }
 
@@ -387,6 +395,9 @@ func printIncoming(s incomingSummary) {
 	printIncomingPaths("new", s.added)
 	printIncomingPaths("modified", s.modified)
 	printIncomingPaths("deleted", s.deleted)
+	for _, r := range s.renamed {
+		fmt.Printf("  %-9s %s\n", "renamed", renameArrow(r))
+	}
 }
 
 // printIncomingPaths lists incoming paths indented under the "incoming:" summary, so
@@ -407,6 +418,9 @@ func incomingBreakdown(s incomingSummary) string {
 	}
 	if n := len(s.deleted); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d deleted", n))
+	}
+	if n := len(s.renamed); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d renamed", n))
 	}
 	return strings.Join(parts, ", ")
 }
@@ -722,7 +736,7 @@ func runSync(dir string, opts syncOptions) error {
 			dirActions = syncengine.PlanDirsReconcile(local, remote)
 		}
 		if opts.dryRun {
-			return printPlan(actions, dirActions)
+			return printPlan(coalescePlanRenames(actions, dirActions, local, base, remote))
 		}
 		if err := abortOnConflicts(actions, dirActions, opts.force); err != nil {
 			return err
@@ -2039,10 +2053,13 @@ func abortOnConflicts(actions []syncengine.Action, dirActions []syncengine.DirAc
 	return errConflictsRemain
 }
 
-func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction) error {
-	if len(actions) == 0 && len(dirActions) == 0 {
+func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction, renames []syncengine.Rename) error {
+	if len(actions) == 0 && len(dirActions) == 0 && len(renames) == 0 {
 		fmt.Println("already in sync")
 		return nil
+	}
+	for _, r := range renames {
+		fmt.Printf("%-13s %s\n", "renamed", renameArrow(r))
 	}
 	for _, a := range actions {
 		fmt.Printf("%-13s %s\n", a.Kind, a.Path)
@@ -2051,6 +2068,104 @@ func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction) e
 		fmt.Printf("%-13s %s/\n", a.Kind, a.Path) // trailing slash marks a directory
 	}
 	return nil
+}
+
+// coalescePlanRenames pairs delete+add actions that move unchanged content —
+// an upload of a path new to the base with a delete-remote (local rename), and
+// a download new to the base with a delete-local (remote rename) — into
+// renames for the dry-run display. It never alters what a real sync executes.
+// A whole-directory move also swallows its now-redundant directory actions
+// (DetectRenames only coalesces a dir when its tracked dirs move with modes
+// intact, so those actions carry no information beyond the rename).
+func coalescePlanRenames(actions []syncengine.Action, dirActions []syncengine.DirAction, local, base, remote syncengine.Manifest) ([]syncengine.Action, []syncengine.DirAction, []syncengine.Rename) {
+	baseBy := base.ByPath()
+	var upAdds, upDels, downAdds, downDels []string
+	for _, a := range actions {
+		switch a.Kind {
+		case syncengine.Upload:
+			if _, ok := baseBy[a.Path]; !ok {
+				upAdds = append(upAdds, a.Path)
+			}
+		case syncengine.DeleteRemote:
+			upDels = append(upDels, a.Path)
+		case syncengine.Download:
+			if _, ok := baseBy[a.Path]; !ok {
+				downAdds = append(downAdds, a.Path)
+			}
+		case syncengine.DeleteLocal:
+			downDels = append(downDels, a.Path)
+		}
+	}
+	localRen, _, _ := syncengine.DetectRenames(upAdds, upDels, local, base)
+	remoteRen, _, _ := syncengine.DetectRenames(downAdds, downDels, remote, base)
+	if len(localRen)+len(remoteRen) == 0 {
+		return actions, dirActions, nil
+	}
+
+	covers := func(r syncengine.Rename, addPath, delPath string, add bool) bool {
+		if r.Dir {
+			if add {
+				return strings.HasPrefix(addPath, r.To+"/")
+			}
+			return strings.HasPrefix(delPath, r.From+"/")
+		}
+		if add {
+			return addPath == r.To
+		}
+		return delPath == r.From
+	}
+	keepActions := actions[:0:0]
+	for _, a := range actions {
+		drop := false
+		for _, r := range localRen {
+			if (a.Kind == syncengine.Upload && covers(r, a.Path, "", true)) ||
+				(a.Kind == syncengine.DeleteRemote && covers(r, "", a.Path, false)) {
+				drop = true
+				break
+			}
+		}
+		for _, r := range remoteRen {
+			if drop {
+				break
+			}
+			if (a.Kind == syncengine.Download && covers(r, a.Path, "", true)) ||
+				(a.Kind == syncengine.DeleteLocal && covers(r, "", a.Path, false)) {
+				drop = true
+			}
+		}
+		if !drop {
+			keepActions = append(keepActions, a)
+		}
+	}
+	atOrUnder := func(path, dir string) bool {
+		return path == dir || strings.HasPrefix(path, dir+"/")
+	}
+	keepDirs := dirActions[:0:0]
+	for _, a := range dirActions {
+		drop := false
+		for _, r := range localRen {
+			if r.Dir && ((a.Kind == syncengine.Upload && atOrUnder(a.Path, r.To)) ||
+				(a.Kind == syncengine.DeleteRemote && atOrUnder(a.Path, r.From))) {
+				drop = true
+				break
+			}
+		}
+		for _, r := range remoteRen {
+			if drop {
+				break
+			}
+			if r.Dir && ((a.Kind == syncengine.Download && atOrUnder(a.Path, r.To)) ||
+				(a.Kind == syncengine.DeleteLocal && atOrUnder(a.Path, r.From))) {
+				drop = true
+			}
+		}
+		if !drop {
+			keepDirs = append(keepDirs, a)
+		}
+	}
+	renames := append(localRen, remoteRen...)
+	sort.Slice(renames, func(i, j int) bool { return renames[i].From < renames[j].From })
+	return keepActions, keepDirs, renames
 }
 
 func printPaths(label string, paths []string) {
