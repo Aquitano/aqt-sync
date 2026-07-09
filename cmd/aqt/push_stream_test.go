@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -154,66 +153,5 @@ func TestStreamingSingleFilePushPull(t *testing.T) {
 	})
 	if !bytes.Equal([]byte(captured), data) {
 		t.Fatal("cat content mismatch")
-	}
-
-	if err := runShare(id, "", true); err == nil || !strings.Contains(err.Error(), "streamed") {
-		t.Errorf("share of streamed file err = %v, want a streamed rejection", err)
-	}
-}
-
-// Rotating the content key of a streamed file would re-PUT its root blob with no
-// ChunkRefs, dropping the GC roots that keep its chunk objects alive. runPrivate must
-// refuse it, and the file must remain pullable byte-for-byte.
-func TestPrivateRefusedOnStreamedFile(t *testing.T) {
-	newE2E(t)
-
-	src := filepath.Join(t.TempDir(), "big.bin")
-	data := make([]byte, 9<<20) // above streamThreshold
-	if _, err := rand.Read(data); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(src, data, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := runPush(src, pushOptions{noClip: true, quiet: true}); err != nil {
-		t.Fatalf("push: %v", err)
-	}
-
-	cl, prof, err := authedClient()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mk, ok := identity.LoadSession(prof.Name)
-	if !ok {
-		t.Fatal("no cached session")
-	}
-	rows, err := collectResources(cl, mk)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var id string
-	for _, r := range rows {
-		if r.Name == "big.bin" {
-			id = r.ID
-		}
-	}
-	if id == "" {
-		t.Fatalf("pushed file not in listing; rows=%+v", rows)
-	}
-
-	if err := runPrivate(id); err == nil || !strings.Contains(err.Error(), "streamed") {
-		t.Fatalf("private of streamed file err = %v, want a refusal", err)
-	}
-
-	out := filepath.Join(t.TempDir(), "out.bin")
-	if err := runPull(id, out, "", false, false); err != nil {
-		t.Fatalf("pull after refused private: %v", err)
-	}
-	got, err := os.ReadFile(out)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Equal(got, data) {
-		t.Fatal("streamed file content changed after a refused private")
 	}
 }

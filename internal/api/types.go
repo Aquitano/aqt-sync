@@ -189,6 +189,14 @@ type ChunkCheckResponse struct {
 	Missing []string `json:"missing"`
 }
 
+// PublicObjectsRequest asks the unauthenticated public-read endpoint for a set of a
+// public resource's referenced object slices. The response is not JSON but a binary
+// framing (one length-prefixed frame per requested id, in request order), so there
+// is no matching response type here.
+type PublicObjectsRequest struct {
+	IDs []string `json:"ids"`
+}
+
 // PutPackResponse acknowledges a pack upload, reporting how many of its objects
 // were newly stored (zero means every object already existed: a fully-deduped pack).
 type PutPackResponse struct {

@@ -47,6 +47,19 @@ func BuildFileRoot(chunks []crypto.Chunk, size int64, conv crypto.ConvergenceKey
 	return root, refs, nil
 }
 
+// Refs returns the resource's full GC roots for the given resolved content chunks:
+// the same id set BuildFileRoot produced at push time (every content chunk id, plus
+// any list-segment id when the root stores its chunk list indirectly). Callers that
+// re-PUT the root — key rotation — must carry these so the server does not drop the
+// objects' liveness roots.
+func (r FileRoot) Refs(chunks []crypto.Chunk) []string {
+	refs := distinctIDs(chunks)
+	if r.Indirect() {
+		refs = append(refs, distinctIDs(r.ChunkList)...)
+	}
+	return refs
+}
+
 // Resolve returns the file's chunk records, fetching and opening the sealed list
 // segments when the root stores the list indirectly.
 func (r FileRoot) Resolve(fetch func(id string) ([]byte, error)) ([]crypto.Chunk, error) {

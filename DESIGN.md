@@ -89,6 +89,12 @@ Output (human default): the ref/URL (and `(copied to clipboard)` when applicable
 then a metadata line. With `-q`: only the ref/URL on stdout (pipe-friendly). With
 `--json`: `{ id, ref, url?, name?, bytes, visibility }`.
 
+A regular file at or above ~8 MiB streams through the chunk/pack pipeline instead of
+sealing whole in memory — private, public, or gated alike. A public or gated streamed
+file's objects are read back through the per-resource public object endpoint, so a link
+holder can pull it with no account. Stdin has no size to threshold on and always seals
+inline.
+
 ```console
 $ aqt .env
 aqt://7yQ2pe        (copied to clipboard)
@@ -141,6 +147,15 @@ $ aqt private 9fK2qd
 rotated content key — previous link no longer decrypts
 aqt://9fK2qd
 ```
+
+For a streamed (large) file, `private` re-wraps only the root under a fresh key and
+flips visibility; the convergent chunk ciphertext and per-chunk keys are unchanged
+(re-sealing would break dedup and re-upload the whole file). Revocation of the content
+bytes is therefore enforced by the server's visibility check, not by re-encryption: an
+old link holder who saved the root's chunk keys could still decrypt the ciphertext if
+they somehow obtained it later — but they could equally have saved the plaintext. Either
+way the old LINK is dead: the root no longer opens under the old key, and the server
+stops serving the objects. (A tracked folder is private-only, so `private` refuses it.)
 
 ### 3.4 Tracked folder (git-style)
 
@@ -520,6 +535,10 @@ POST   /v1/resources/:id/visibility  Body: { visibility, ciphertext, encryptedMe
                                      Used by `share`/`private`; rotation just replaces the blob.
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility).
+POST   /v1/public/resources/:id/objects  Unauthenticated. Body: { ids } → positional length-prefixed
+                                     object slices. Serves exact objects of a PUBLIC resource, each id
+                                     of which must be referenced by that resource (the share-link read
+                                     path for a public/gated streamed file). ≤10,000 ids per call.
 
 # Tracked folders: the folder's blob is a sealed ManifestRoot pointing at the
 # manifest objects, so it uses the resource routes above; PUT additionally carries
@@ -581,7 +600,7 @@ function currentSession(): Session | null;                                 // fo
 
 ## 5. Open implementation questions (not blocking the interface)
 
-- **Large single files / streaming** — a private single file at or above ~8 MiB now streams: `push` chunks it (FastCDC), convergent-seals and packs it in a bounded-memory pass, and stores a tiny sealed `FileRoot` (the resource blob) naming the objects; `pull`/`cat` range-fetch the packs and materialize straight to disk. Memory is O(one pack), and the inline body cap no longer bounds private file size. Smaller files keep the one-shot inline path. Public/gated single files and stdin still seal in memory under the body cap (public streaming needs the deferred publicly-readable object store).
+- **Large single files / streaming** — a private single file at or above ~8 MiB now streams: `push` chunks it (FastCDC), convergent-seals and packs it in a bounded-memory pass, and stores a tiny sealed `FileRoot` (the resource blob) naming the objects; `pull`/`cat` range-fetch the packs and materialize straight to disk. Memory is O(one pack), and the inline body cap no longer bounds private file size. Smaller files keep the one-shot inline path. Public and gated single files now stream the same way — a link holder reads their objects through the per-resource public object endpoint (`POST /v1/public/resources/:id/objects`), and `share`/`private` re-wrap only the root, so the content bytes are never re-sealed. Stdin still seals in memory under the body cap.
 - **Manifest size / subtree dedup** — *implemented (Phase 4):* a chunked folder is now a Merkle DAG of directory nodes. Each directory node lists its name-sorted children and is sealed through the convergent pipeline under a distinct `aqt-treenode-v1` AAD, so a node's content address is its subtree Merkle hash and a moved/copied/renamed directory dedups for free (its node and file chunks are already on the server). The resource blob is a tiny sealed `TreeRoot` under `AADTreeRoot`. Directories are first-class: empty directories round-trip and directory modes propagate. The format is a clean break (`tree` metadata flag, v2); older folders are not read. Spec: `docs/phase4-merkle-dag.md`. The reconcile's remote read is lazy: because directory nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares with it is served from those bytes, so an unchanged subtree is reconstructed without a fetch and only the nodes on a spine that changed since the base hit the network — a no-op sync does zero node round-trips. The level-batched fetch shares one pack source (object locations, spans, and the byte-bounded LRU) across the whole walk, so a pack carrying nodes from several levels is range-fetched once, and a node landing inside an already-fetched span is served from memory. Directory-mode conflicts surface like file conflicts (a plain sync aborts; `--force` takes local). Rename detection is reporting-only: a move dedups its bytes and still executes as delete+add, but `status`, `sync --dry-run`, and `snapshot diff` coalesce an unambiguous delete+add pair (same content address, one path per side) into `renamed old -> new`, with whole-directory moves collapsing to one entry via the stable subtree hash.
 - **Persistent metadata cache** — *resolved:* every remote tree walk (clone, cold reconcile, `find`, snapshot diff) shares an on-disk, content-addressed cache of directory-node and chunk-list ciphertexts (default `~/.cache/aqt/nodes`, `AQT_NODE_CACHE_DIR` overrides, `AQT_NO_NODE_CACHE=1` disables). An object's id is the sha256 of its ciphertext, so entries are immutable (no invalidation, ever) and self-verifying (a corrupt file fails its hash check and is dropped); `OpenNode` re-verifies on open either way, so a disk hit is exactly as trustworthy as a server fetch. Only ciphertext is stored — the same bytes the server keeps — and the cache is LRU-pruned to a 256 MiB budget. A repeated `find` or diff over a large account therefore fetches only nodes it has never seen.
 - **Subpath addressing** — *resolved:* `aqt://<id>/<path>` addresses one entry inside a chunked folder. `pull`/`cat` walk only the path's spine (one directory node per segment) and fetch just that entry's chunks; pulling a directory materializes its subtree from the subtree's own content-addressed node without touching the rest of the folder; `aqt ls <folder>[/<path>]` lists one directory by fetching the spine plus that node. Pack-and-seal folders refuse with guidance (no per-entry objects exist — the privacy trade-off working as intended).

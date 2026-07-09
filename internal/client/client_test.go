@@ -1,6 +1,7 @@
 package client
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -119,6 +120,88 @@ func TestListSnapshotsRejectsForeignResource(t *testing.T) {
 // An empty id set must not hit the network at all, matching the old behavior the
 // pull path relies on (callers already short-circuit, but a stray request would 400
 // nothing useful).
+// writeFrame emits one length-prefixed object frame, the server side of the
+// positional framing PublicObjects decodes.
+func writeFrame(w http.ResponseWriter, b []byte) {
+	var lenbuf [4]byte
+	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(b)))
+	w.Write(lenbuf[:])
+	w.Write(b)
+}
+
+// PublicObjects must return one slice per requested id, in request order, decoded off
+// the positional length-prefixed framing.
+func TestPublicObjectsFramingRoundTrip(t *testing.T) {
+	want := [][]byte{[]byte("alpha"), []byte("bravo bytes"), []byte("c")}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req api.PublicObjectsRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		if len(req.IDs) != len(want) {
+			t.Errorf("server saw %d ids, want %d", len(req.IDs), len(want))
+		}
+		w.Header().Set("Content-Type", "application/octet-stream")
+		for _, b := range want {
+			writeFrame(w, b)
+		}
+	}))
+	defer srv.Close()
+
+	cl, err := New(srv.URL, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := cl.PublicObjects("res1", []string{"id0", "id1", "id2"})
+	if err != nil {
+		t.Fatalf("PublicObjects: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("got %d frames, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if string(got[i]) != string(want[i]) {
+			t.Fatalf("frame %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// A frame whose declared length overruns the body is a truncated response and must
+// error rather than return a short or panicking slice.
+func TestPublicObjectsRejectsTruncatedBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var lenbuf [4]byte
+		binary.BigEndian.PutUint32(lenbuf[:], 100) // claims 100 bytes...
+		w.Write(lenbuf[:])
+		w.Write([]byte("only ten b")) // ...but sends 10
+	}))
+	defer srv.Close()
+
+	cl, err := New(srv.URL, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := cl.PublicObjects("res1", []string{"id0"}); err == nil {
+		t.Fatal("a truncated frame must be rejected")
+	}
+}
+
+// A 404 (private or unknown resource) maps to ErrNotFound, like the other reads.
+func TestPublicObjectsMaps404(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	cl, err := New(srv.URL, "")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := cl.PublicObjects("res1", []string{"id0"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("err = %v, want ErrNotFound", err)
+	}
+}
+
 func TestLocateChunksEmptyMakesNoRequest(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Errorf("unexpected request for empty id set: %s", r.URL.Path)
