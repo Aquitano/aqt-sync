@@ -70,3 +70,13 @@ A tracked `.git` restores like any other subtree: `aqt clone` (or `aqt sync`)
 reproduces its files byte for byte. After restoring a local-only repository, run
 `git status` (and `git fsck` if the backup may have caught a repack) to confirm the
 working tree and history agree.
+
+## Adopting a repository already on disk
+
+When the working tree is already checked out — a fresh `git clone` from the code
+host, or a machine that still has the repo — a plain `aqt clone` refuses the
+non-empty directory. Use `aqt clone --adopt <folder-id> <dir>` instead: it writes the
+tracking metadata in place, reuses every file that already matches the remote by
+content hash (no re-download), and surfaces one-sided differences as conflicts, the
+same as `aqt sync --reconcile`. On a conflict it still leaves the tracking written, so
+you can resolve and re-run `aqt sync --reconcile`.

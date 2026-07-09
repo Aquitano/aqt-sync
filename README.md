@@ -39,6 +39,10 @@ aqt sync ~/vault
 
 # Restore a tracked folder on another machine after `aqt login` there.
 aqt clone <folder-id> ~/vault
+
+# Bind an existing local directory to a remote folder, reusing matching files by
+# hash instead of re-downloading; one-sided differences surface as conflicts.
+aqt clone --adopt <folder-id> ~/vault
 ```
 
 `aqt <path>` with no subcommand is shorthand for `aqt push <path>`. Run `aqt --help`

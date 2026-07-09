@@ -100,7 +100,8 @@ func syncCmd() *cobra.Command {
 }
 
 func cloneCmd() *cobra.Command {
-	return &cobra.Command{
+	var adopt bool
+	cmd := &cobra.Command{
 		Use:   "clone <id|aqt://ref> [dir]",
 		Short: "Materialize a tracked folder on this machine",
 		Args:  cobra.RangeArgs(1, 2),
@@ -109,9 +110,12 @@ func cloneCmd() *cobra.Command {
 			if len(args) == 2 {
 				dir = args[1]
 			}
-			return runClone(args[0], dir)
+			return runClone(args[0], dir, adopt)
 		},
 	}
+	cmd.Flags().BoolVar(&adopt, "adopt", false,
+		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
+	return cmd
 }
 
 // --- init ---
@@ -1037,7 +1041,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 
 // --- clone ---
 
-func runClone(ref, dir string) error {
+func runClone(ref, dir string, adopt bool) error {
 	id, _, _ := parseRef(ref) // v1 folders are private; no fragment key
 	cl, prof, err := authedClient()
 	if err != nil {
@@ -1081,6 +1085,9 @@ func runClone(ref, dir string) error {
 	if err := validateCloneRoot(res.Blob, ck, meta); err != nil {
 		return err
 	}
+	if adopt {
+		return adoptClone(id, abs, prof.Server, res.Version, meta)
+	}
 	if err := ensureEmptyDir(abs); err != nil {
 		return err
 	}
@@ -1099,6 +1106,49 @@ func runClone(ref, dir string) error {
 	}
 	fmt.Printf("cloned %d files into %s\n", len(base.Entries), abs)
 	return nil
+}
+
+// adoptClone binds an existing local directory to an already-tracked remote folder
+// without re-downloading: it writes only the tracking metadata (no base.json), then
+// runs a baseless reconcile so equal-hash files are reused and one-sided differences
+// surface as conflicts, exactly like `sync --reconcile`. Tracking is written before
+// the reconcile so it survives a conflict abort: the user can resolve and re-run
+// `aqt sync --reconcile`.
+func adoptClone(id, abs, server string, version int, meta api.Metadata) error {
+	// Hash-level reconcile does not apply to a sealed pack (whole-folder last-writer-wins);
+	// adopting one would compare an empty base against opaque segments.
+	if meta.Packed {
+		return errors.New("cannot adopt a pack-and-seal folder; use plain clone into a fresh directory")
+	}
+	if _, err := os.Stat(filepath.Join(abs, syncengine.ControlDir)); err == nil {
+		return errors.New("already a tracked folder")
+	}
+	// .aqtconfig is itself synced content, so an adopted copy may carry one. A local
+	// pack setting against this chunked remote would send runSync down the pack path
+	// and fail on an unrelated decrypt error; refuse up front instead.
+	cfg, err := syncengine.LoadConfig(abs)
+	if err != nil {
+		return err
+	}
+	if cfg.Pack {
+		return errors.New("this directory's .aqtconfig selects pack-and-seal, but the remote is a chunked folder; remove the pack setting to adopt it")
+	}
+	if err := os.MkdirAll(abs, 0o755); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
+		return err
+	}
+	// Deliberately no saveBase: an empty base would resurrect deletions; the reconcile
+	// below writes base.json once local and remote agree.
+	if err := saveState(abs, folderState{ID: id, Server: server, RemoteVersion: version}); err != nil {
+		return err
+	}
+	fmt.Printf("adopted %s; reconciling with the remote\n", abs)
+	if err := guardTrackedGit(abs, syncOptions{reconcile: true}); err != nil {
+		return err
+	}
+	return runSync(abs, syncOptions{reconcile: true})
 }
 
 // validateCloneRoot confirms the resource's sealed root decrypts under ck, using the
