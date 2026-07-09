@@ -48,6 +48,26 @@ var ErrQuotaExceeded = errors.New("storage quota exceeded")
 // configured device cap. Handlers map it to 403.
 var ErrDeviceLimit = errors.New("device limit reached")
 
+// UpgradeRequiredError is returned when a write targets a resource whose stored
+// min_client exceeds the writer's capability: a client that cannot read the current
+// state must not overwrite it. MinClient is the capability the resource needs.
+// Handlers map it to 426.
+type UpgradeRequiredError struct{ MinClient int }
+
+func (e *UpgradeRequiredError) Error() string {
+	return fmt.Sprintf("resource requires client capability %d", e.MinClient)
+}
+
+// normalizeMinClient floors a declared min_client at the baseline: a legacy writer
+// declares 0, and a resource is never over-restricted below the format every release
+// reads.
+func normalizeMinClient(declared int) int {
+	if declared < api.CapabilityBaseline {
+		return api.CapabilityBaseline
+	}
+	return declared
+}
+
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs and packs on the filesystem. It holds no plaintext and no live
 // keys.
@@ -280,6 +300,14 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	                               WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
 	                        OR EXISTS(SELECT 1 FROM snapshot_chunks sc
 	                                  WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))), 0);`,
+	// 9: min_client is the lowest client capability that can read a resource's (or a
+	// snapshot's) sealed formats. Existing rows default to 1 (v0.1.0 baseline): they
+	// were written before capability negotiation and are readable by every release, so
+	// the server must not start rejecting reads of them. A capable client re-declares a
+	// higher value the next time it writes an id-bound format. A snapshot copies the
+	// value from its source resource at capture time.
+	`ALTER TABLE resources ADD COLUMN min_client INTEGER NOT NULL DEFAULT 1;
+	 ALTER TABLE snapshots ADD COLUMN min_client INTEGER NOT NULL DEFAULT 1;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -747,7 +775,11 @@ func (s *Store) Owners() ([]string, error) {
 // write are coupled so a failure of either leaves no half-written resource:
 // the row is committed only after the blob lands, and the blob is written
 // atomically so a failed replace keeps the previous content intact.
-func (s *Store) PutResource(owner string, req api.PutResourceRequest) (id string, version int, err error) {
+// capability is the writer's declared client capability (already validated by the
+// handler to be >= req.MinClient). An update whose stored min_client exceeds it is
+// rejected with *UpgradeRequiredError: a client that cannot read the current state
+// must not overwrite it.
+func (s *Store) PutResource(owner string, capability int, req api.PutResourceRequest) (id string, version int, err error) {
 	metaJSON, err := json.Marshal(req.EncryptedMeta)
 	if err != nil {
 		return "", 0, err
@@ -763,7 +795,7 @@ func (s *Store) PutResource(owner string, req api.PutResourceRequest) (id string
 	if req.ID == "" {
 		return s.createResource(owner, req, string(metaJSON), wrappedJSON)
 	}
-	return s.updateResource(owner, req, string(metaJSON), wrappedJSON)
+	return s.updateResource(owner, capability, req, string(metaJSON), wrappedJSON)
 }
 
 func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
@@ -791,9 +823,9 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		return "", 0, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version)
-		 VALUES(?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version,
+		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client)
+		 VALUES(?,?,?,?,?,?,?,?)`,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient),
 	); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -809,17 +841,26 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	return id, version, nil
 }
 
-func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
+func (s *Store) updateResource(owner string, capability int, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
 	defer s.resLocks.lock(req.ID)()
-	var current int
+	var (
+		current   int
+		storedMin int
+	)
 	err := s.db.QueryRow(
-		`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
-	).Scan(&current)
+		`SELECT version, min_client FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
+	).Scan(&current, &storedMin)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, ErrNotFound
 	}
 	if err != nil {
 		return "", 0, err
+	}
+	// A client that cannot read the current sealed format must not overwrite it (it
+	// would clobber state it can't merge). Checked under the per-resource lock, so it
+	// races no concurrent min_client change.
+	if capability < storedMin {
+		return "", 0, &UpgradeRequiredError{MinClient: storedMin}
 	}
 	// Optimistic concurrency: a client that based its update on an older version
 	// is rejected so a concurrent write is never lost. (The per-resource lock above
@@ -851,10 +892,13 @@ func (s *Store) updateResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
+	// An update may lower min_client: a capable client legitimately rewrites a
+	// resource in an older (baseline) format, and that state is then readable by
+	// older clients again.
 	res, err := tx.Exec(
-		`UPDATE resources SET visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?
+		`UPDATE resources SET visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?
 		 WHERE id=? AND owner_handle=? AND version=?`,
-		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, req.ID, owner, current,
+		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), req.ID, owner, current,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -909,11 +953,12 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		wrappedJSON sql.NullString
 		nonce       []byte
 		version     int
+		minClient   int
 	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version
+		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client
 		 FROM resources WHERE id = ?`, id,
-	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version)
+	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -935,6 +980,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		Visibility: vis,
 		Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext},
 		Version:    version,
+		MinClient:  minClient,
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &out.EncryptedMeta); err != nil {
 		return out, err
@@ -1066,6 +1112,16 @@ func (s *Store) DeleteResource(owner, id string) error {
 	return nil
 }
 
+// SetResourceMinClientForTest overrides a resource's stored min_client. It exists
+// only so end-to-end tests can simulate a future write-format boundary (a resource
+// whose min_client exceeds the current ClientCapability) without a client that could
+// declare one — production writes go through PutResource, which caps the declared
+// value at the writer's own capability.
+func (s *Store) SetResourceMinClientForTest(id string, minClient int) error {
+	_, err := s.db.Exec(`UPDATE resources SET min_client = ? WHERE id = ?`, minClient, id)
+	return err
+}
+
 // --- snapshots ---
 //
 // A snapshot freezes a resource version against the in-place overwrite the next
@@ -1128,11 +1184,12 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		wrappedJSON          sql.NullString
 		nonce                []byte
 		version              int
+		minClient            int
 	)
 	err := s.db.QueryRow(
-		`SELECT visibility, encrypted_meta, wrapped_key, blob_nonce, version
+		`SELECT visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client
 		 FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner,
-	).Scan(&visibility, &metaJSON, &wrappedJSON, &nonce, &version)
+	).Scan(&visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient)
 	if errors.Is(err, sql.ErrNoRows) {
 		return api.SnapshotInfo{}, ErrNotFound
 	}
@@ -1180,9 +1237,9 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched,
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled, min_client)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched, minClient,
 	); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -1263,10 +1320,11 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 		nonce       []byte
 	)
 	info := api.SnapshotInfo{ID: snapshotID}
+	var minClient int
 	err := s.rdb.QueryRow(
-		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, blob_nonce
+		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, min_client
 		 FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
-	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &nonce)
+	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &nonce, &minClient)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -1285,6 +1343,7 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 	}
 	out.Snapshot = info
 	out.Blob = crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext}
+	out.MinClient = minClient
 	return out, nil
 }
 

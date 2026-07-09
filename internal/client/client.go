@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -30,6 +31,23 @@ var ErrConflict = errors.New("conflict")
 // ErrQuotaExceeded maps a 507 so callers can surface "storage quota exceeded"
 // distinctly from a generic server error.
 var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the server operator to raise the quota")
+
+// ErrUpgradeRequired maps a 426: the resource is sealed in a format newer than this
+// build reads. Callers test errors.Is(err, ErrUpgradeRequired); the concrete
+// UpgradeRequiredError carries the server-declared min_client for messaging.
+var ErrUpgradeRequired = errors.New("client upgrade required to read this resource")
+
+// UpgradeRequiredError is the 426 mapping. Message is the server's human-actionable
+// text (printed verbatim); MinClient is the capability the resource needs.
+type UpgradeRequiredError struct {
+	MinClient int
+	Message   string
+}
+
+func (e *UpgradeRequiredError) Error() string { return e.Message }
+
+// Is lets errors.Is(err, ErrUpgradeRequired) match any UpgradeRequiredError.
+func (e *UpgradeRequiredError) Is(target error) bool { return target == ErrUpgradeRequired }
 
 type Client struct {
 	baseURL string
@@ -416,6 +434,9 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 	if c.token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.token)
 	}
+	// Declare which sealed-resource formats this build reads, so the server can answer
+	// a boundary it cannot cross with a 426 rather than serving bytes that fail to open.
+	req.Header.Set(api.CapabilityHeader, strconv.Itoa(api.ClientCapability))
 
 	resp, err := c.http.Do(req.WithContext(ctx))
 	if err != nil {
@@ -510,6 +531,13 @@ func statusError(status int, path string, body []byte) error {
 		return ErrConflict
 	case status == http.StatusInsufficientStorage:
 		return ErrQuotaExceeded
+	case status == http.StatusUpgradeRequired:
+		var e api.ErrorResponse
+		msg := fmt.Sprintf("server returned %d for %s", status, path)
+		if json.Unmarshal(body, &e) == nil && e.Error != "" {
+			msg = e.Error
+		}
+		return &UpgradeRequiredError{MinClient: e.MinClient, Message: msg}
 	case status < 200 || status >= 300:
 		var e api.ErrorResponse
 		if json.Unmarshal(body, &e) == nil && e.Error != "" {

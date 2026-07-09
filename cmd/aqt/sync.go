@@ -1801,6 +1801,10 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs,
+		// Both seals above bind iff id is non-empty, so the declaration follows the
+		// same rule. In practice this is a create (callers pass id ""): the seals stay
+		// unbound and the first putFolderUpdate re-seals them id-bound.
+		MinClient: minClientForID(id),
 	})
 }
 
@@ -1829,7 +1833,18 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
+		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
 	})
+}
+
+// minClientForID reports the capability a folder write requires: a create (empty id)
+// seals its root and metadata unbound and so stays baseline-readable, while an
+// id-bound write needs the id-binding capability.
+func minClientForID(id string) int {
+	if id == "" {
+		return api.CapabilityBaseline
+	}
+	return api.CapabilityIDBinding
 }
 
 // resealMetaBound upgrades carried-forward resource metadata that predates id

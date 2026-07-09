@@ -19,7 +19,7 @@ func (s *Store) supersede(t *testing.T, owner, id string, refs []string) {
 	blob, _ := crypto.Seal([]byte("new manifest"), ck, crypto.AADBlob)
 	meta, _ := crypto.Seal([]byte(`{"name":"folder","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
-	if _, _, err := s.PutResource(owner, api.PutResourceRequest{
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, ChunkRefs: refs,
 	}); err != nil {
 		t.Fatalf("supersede resource: %v", err)

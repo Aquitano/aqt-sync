@@ -444,6 +444,7 @@ func putPackFolderCreate(cl *client.Client, root syncengine.PackRoot, ck crypto.
 	return cl.PutResource(api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: root.SegmentIDs(),
+		MinClient: api.CapabilityBaseline, // create seals unbound; the first update re-seals bound
 	})
 }
 
@@ -467,6 +468,7 @@ func putPackFolderUpdate(cl *client.Client, id string, root syncengine.PackRoot,
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: root.SegmentIDs(), ExpectedVersion: expectedVersion,
+		MinClient: api.CapabilityIDBinding, // root and meta are sealed id-bound (v2)
 	})
 }
 

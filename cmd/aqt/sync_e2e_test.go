@@ -92,6 +92,41 @@ func TestSyncE2E(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
+// TestMixedVersionUpgradeRequired proves the point of issue #69: a client that hits a
+// future write-format boundary gets an actionable upgrade error, not an opaque
+// decryption failure. A folder syncs normally, then its resource's min_client is
+// bumped past this build's capability (simulating a device that wrote a newer
+// format); a clone must fail with client.ErrUpgradeRequired before any decrypt runs.
+func TestMixedVersionUpgradeRequired(t *testing.T) {
+	h := newE2E(t)
+	origin := filepath.Join(t.TempDir(), "origin")
+
+	h.init(origin)
+	writeTree(t, origin, "notes/todo.txt", "buy milk")
+	h.sync(origin)
+	id := h.folderID(origin)
+
+	// Simulate a resource sealed in a format newer than this build reads. No client
+	// can declare this over the wire (the server 400s a declaration above the writer's
+	// own capability), so the test reaches through the store the harness owns.
+	if err := h.store.SetResourceMinClientForTest(id, api.ClientCapability+1); err != nil {
+		t.Fatalf("bump min_client: %v", err)
+	}
+
+	err := runClone(id, filepath.Join(t.TempDir(), "replica"), false)
+	if !errors.Is(err, client.ErrUpgradeRequired) {
+		t.Fatalf("clone error = %v, want client.ErrUpgradeRequired", err)
+	}
+	// The gate must fire at the API layer, before the client tries (and fails) to open
+	// the blob — the whole point is to replace the AEAD failure with a clear message.
+	if strings.Contains(err.Error(), "decrypt") {
+		t.Fatalf("error mentions decryption (%q); it must fail before any decrypt attempt", err.Error())
+	}
+	if !strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("error = %q, want an actionable upgrade hint", err.Error())
+	}
+}
+
 // A located-but-missing object surfaces client.ErrNotFound, which the reconcile
 // loop maps to a conflict-retry: a manifest whose objects were GC'd by a concurrent
 // supersede is re-read against the current version instead of hard-failing.
@@ -280,6 +315,7 @@ type e2eHarness struct {
 	t       *testing.T
 	url     string
 	dataDir string
+	store   *server.Store
 }
 
 func newE2E(t *testing.T) *e2eHarness {
@@ -298,7 +334,7 @@ func newE2E(t *testing.T) *e2eHarness {
 	ts := httptest.NewServer(server.New(store).Router())
 	t.Cleanup(ts.Close)
 
-	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir}
+	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir, store: store}
 	h.signup("e2e@example.com", "correct horse battery staple")
 	return h
 }

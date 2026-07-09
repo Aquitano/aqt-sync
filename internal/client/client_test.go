@@ -2,9 +2,12 @@ package client
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -132,5 +135,60 @@ func TestLocateChunksEmptyMakesNoRequest(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("got %d locations for empty input, want 0", len(got))
+	}
+}
+
+// Every request must advertise the build's read capability so the server can gate a
+// format boundary with a 426 instead of serving bytes the client cannot open.
+func TestRequestsCarryCapabilityHeader(t *testing.T) {
+	var got string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Get(api.CapabilityHeader)
+		if err := json.NewEncoder(w).Encode(api.ChunkCheckResponse{}); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	cl, err := New(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := cl.CheckChunks([]string{"a"}); err != nil {
+		t.Fatalf("CheckChunks: %v", err)
+	}
+	if want := strconv.Itoa(api.ClientCapability); got != want {
+		t.Fatalf("capability header = %q, want %q", got, want)
+	}
+}
+
+// A 426 must map to ErrUpgradeRequired carrying the server's min_client, and the
+// error text must be the server's message (printed verbatim to the user).
+func TestUpgradeRequiredMaps426(t *testing.T) {
+	const msg = "resource requires client capability 3 or newer (this client supports 2): upgrade aqt"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired)
+		if err := json.NewEncoder(w).Encode(api.ErrorResponse{
+			Error: msg, Code: api.ErrCodeUpgradeRequired, MinClient: 3,
+		}); err != nil {
+			t.Errorf("encode: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	cl, err := New(srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = cl.GetResource("id")
+	if !errors.Is(err, ErrUpgradeRequired) {
+		t.Fatalf("error = %v, want ErrUpgradeRequired", err)
+	}
+	var ue *UpgradeRequiredError
+	if !errors.As(err, &ue) || ue.MinClient != 3 {
+		t.Fatalf("min_client not surfaced: %v", err)
+	}
+	if !strings.Contains(err.Error(), "upgrade aqt") {
+		t.Fatalf("error text = %q, want the server's message", err.Error())
 	}
 }
