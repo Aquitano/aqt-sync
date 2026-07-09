@@ -152,7 +152,10 @@ aqt sync   [<dir>]        Two-way reconcile: encrypt+push local changes, pull re
 aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
 ```
 
-`.aqtignore` uses gitignore syntax. Conflicts (changed both sides) are left
+`.aqtignore` uses gitignore syntax. The starter file seeds common build-artifact
+and cache excludes (`node_modules/`, `.next/`, `target/`, `__pycache__/`, `dist/`,
+…) so regenerable outputs stay out of the sync by default; edit or `!`-re-include
+any line. Conflicts (changed both sides) are left
 untouched and reported; `--force` resolves in favor of local. When the target
 tree holds a git repository, `init` notices it and asks whether to track the
 `.git` directory too — declined by default (it ignores `.git`); accepting writes a

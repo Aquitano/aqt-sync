@@ -20,6 +20,11 @@ func TestWriteStarterIgnore(t *testing.T) {
 		if strings.Contains(body, "!.git/") {
 			t.Fatal("the default starter must not re-include .git")
 		}
+		for _, want := range []string{"node_modules/", ".next/", "target/", "__pycache__/", "dist/"} {
+			if !strings.Contains(body, "\n"+want+"\n") {
+				t.Fatalf("starter ignore must exclude %q by default, got:\n%s", want, body)
+			}
+		}
 	})
 
 	t.Run("syncGit re-includes git", func(t *testing.T) {

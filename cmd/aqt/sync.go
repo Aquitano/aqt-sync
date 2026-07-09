@@ -2037,22 +2037,65 @@ func trackedRoot(start string) (string, error) {
 	}
 }
 
-const starterIgnore = `# aqt ignore patterns (gitignore syntax)
-.git/
+// defaultIgnoreBody is the build-artifact and cache exclude set every starter
+// .aqtignore carries. These are regenerable outputs that otherwise dominate a
+// sync (a Next.js .next/ measured ~915 MB, ~90% of one payload) and, being the
+// largest packs, are the flakiest to transfer. Everything here is overridable:
+// delete a line, or re-include a path with a trailing `!rule`. The ambiguous
+// output dirs (dist/, build/, out/, bin/) sometimes hold committed assets, so
+// they are called out for the user to prune.
+const defaultIgnoreBody = `
+# JS/TS / web
 node_modules/
+.next/
+.nuxt/
+.svelte-kit/
+.astro/
+.turbo/
+.parcel-cache/
+.cache/
+.vite/
+coverage/
+*.tsbuildinfo
+
+# Rust
+target/
+
+# Java / JVM (Gradle/Maven)
+.gradle/
+*.class
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Build outputs (may hold committed assets; remove lines that do not apply)
+dist/
+build/
+out/
+bin/
+
+# General
 .DS_Store
+Thumbs.db
 *.log
 `
+
+const starterIgnore = `# aqt ignore patterns (gitignore syntax)
+.git/
+` + defaultIgnoreBody
 
 // starterIgnoreWithGit re-includes .git for a user who chose to track their git
 // history at init: aqt always ignores .git, and a leading ! overrides that.
 const starterIgnoreWithGit = `# aqt ignore patterns (gitignore syntax)
 # track the git repository (aqt ignores .git by default; ! re-includes it)
 !.git/
-node_modules/
-.DS_Store
-*.log
-`
+` + defaultIgnoreBody
 
 func writeStarterIgnore(root string, syncGit bool) error {
 	path := filepath.Join(root, ".aqtignore")
