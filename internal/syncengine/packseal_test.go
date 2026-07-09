@@ -267,25 +267,25 @@ func TestExtractLegacyRawTarRoot(t *testing.T) {
 func TestPackRootDoesNotCrossOpenAsTree(t *testing.T) {
 	ck := testContentKey(t)
 
-	packBlob, err := SealPackRoot(PackRoot{Version: PackRootVersion, Size: 123, Segments: []Segment{{ID: "abc", Len: 10}}}, ck)
+	packBlob, err := SealPackRoot(PackRoot{Version: PackRootVersion, Size: 123, Segments: []Segment{{ID: "abc", Len: 10}}}, ck, "res1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	treeBlob, err := SealTreeRoot(TreeRoot{Version: TreeManifestVersion, Root: crypto.Chunk{ID: "abc", Key: make([]byte, crypto.KeySize), Len: 4}}, ck)
+	treeBlob, err := SealTreeRoot(TreeRoot{Version: TreeManifestVersion, Root: crypto.Chunk{ID: "abc", Key: make([]byte, crypto.KeySize), Len: 4}}, ck, "res1")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := OpenTreeRoot(packBlob, ck); err == nil {
+	if _, err := OpenTreeRoot(packBlob, ck, "res1"); err == nil {
 		t.Fatal("a sealed pack root opened as a tree root; AAD domain separation missing")
 	}
-	if _, err := OpenPackRoot(treeBlob, ck); err == nil {
+	if _, err := OpenPackRoot(treeBlob, ck, "res1"); err == nil {
 		t.Fatal("a sealed tree root opened as a pack root; AAD domain separation missing")
 	}
-	if _, err := OpenPackRoot(packBlob, ck); err != nil {
+	if _, err := OpenPackRoot(packBlob, ck, "res1"); err != nil {
 		t.Fatalf("pack root did not open as itself: %v", err)
 	}
-	if _, err := OpenTreeRoot(treeBlob, ck); err != nil {
+	if _, err := OpenTreeRoot(treeBlob, ck, "res1"); err != nil {
 		t.Fatalf("tree root did not open as itself: %v", err)
 	}
 }

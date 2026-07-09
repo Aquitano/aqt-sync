@@ -82,17 +82,19 @@ func distinctIDs(chunks []crypto.Chunk) []string {
 	return ids
 }
 
-func SealFileRoot(r FileRoot, ck crypto.ContentKey) (crypto.SealedBlob, error) {
+// SealFileRoot seals a streamed file's root as the resource blob, bound to the
+// resource id when known (empty on create, before the server assigns one).
+func SealFileRoot(r FileRoot, ck crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return crypto.SealedBlob{}, err
 	}
-	return crypto.Seal(b, ck, crypto.AADBlob)
+	return crypto.SealBound(b, ck, crypto.AADBlob, resourceID)
 }
 
-func OpenFileRoot(blob crypto.SealedBlob, ck crypto.ContentKey) (FileRoot, error) {
+func OpenFileRoot(blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string) (FileRoot, error) {
 	var r FileRoot
-	plain, err := crypto.Open(blob, ck, crypto.AADBlob)
+	plain, err := crypto.OpenBound(blob, ck, crypto.AADBlob, resourceID)
 	if err != nil {
 		return r, err
 	}

@@ -37,7 +37,7 @@ func splitRefPath(ref string) (baseRef, subpath string) {
 // root. Pack-and-seal folders have no per-entry objects, so subpath reads and
 // member listings are structurally impossible for them.
 func openFolderRoot(res api.GetResourceResponse, ck crypto.ContentKey) (syncengine.TreeRoot, error) {
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return syncengine.TreeRoot{}, err
 	}
@@ -51,7 +51,7 @@ func openFolderRoot(res api.GetResourceResponse, ck crypto.ContentKey) (syncengi
 	if !meta.Tree {
 		return syncengine.TreeRoot{}, errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 	}
-	root, err := syncengine.OpenTreeRoot(res.Blob, ck)
+	root, err := syncengine.OpenTreeRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return syncengine.TreeRoot{}, fmt.Errorf("decrypt folder root: %w", err)
 	}

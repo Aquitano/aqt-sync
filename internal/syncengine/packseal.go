@@ -69,18 +69,19 @@ func (r PackRoot) SegmentIDs() []string {
 // the same content key, so without domain separation a pack root opens cleanly as an
 // empty manifest (its segments/size fields ignored) — routing a packed folder through
 // the chunked path would then silently wipe the tree or clone nothing. The distinct
-// tag makes that cross-open fail the AEAD check instead.
-func SealPackRoot(r PackRoot, ck crypto.ContentKey) (crypto.SealedBlob, error) {
+// tag makes that cross-open fail the AEAD check instead. The seal also binds the
+// resource id when known (empty on create, before the server assigns one).
+func SealPackRoot(r PackRoot, ck crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return crypto.SealedBlob{}, err
 	}
-	return crypto.Seal(b, ck, crypto.AADPackRoot)
+	return crypto.SealBound(b, ck, crypto.AADPackRoot, resourceID)
 }
 
-func OpenPackRoot(blob crypto.SealedBlob, ck crypto.ContentKey) (PackRoot, error) {
+func OpenPackRoot(blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string) (PackRoot, error) {
 	var r PackRoot
-	plain, err := crypto.Open(blob, ck, crypto.AADPackRoot)
+	plain, err := crypto.OpenBound(blob, ck, crypto.AADPackRoot, resourceID)
 	if err != nil {
 		return r, err
 	}

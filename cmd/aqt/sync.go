@@ -329,7 +329,7 @@ func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengi
 		return incomingSummary{}, err
 	}
 	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return incomingSummary{}, err
 	}
@@ -348,7 +348,7 @@ func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengi
 // and falling back to a full walk when there is nothing to reuse.
 func readRemoteManifest(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, base syncengine.Manifest, mk crypto.MasterKey) (syncengine.Manifest, error) {
 	if len(base.Entries) == 0 && len(base.Dirs) == 0 {
-		return openRemoteTree(cl, res.Blob, ck)
+		return openRemoteTree(cl, res.Blob, ck, res.ID)
 	}
 	conv := crypto.DeriveConvergenceKey(mk)
 	defer conv.Wipe()
@@ -356,7 +356,7 @@ func readRemoteManifest(cl *client.Client, res api.GetResourceResponse, ck crypt
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
-	return openRemoteTreeReusingBase(cl, res.Blob, ck, baseCT)
+	return openRemoteTreeReusingBase(cl, res.Blob, ck, res.ID, baseCT)
 }
 
 // diffIncoming reports the file-level changes the server holds relative to the last
@@ -692,7 +692,7 @@ func runSync(dir string, opts syncOptions) error {
 		// reconciled as chunked would read an empty manifest and delete the whole tree.
 		// Refuse it instead. (AAD domain separation also makes the manifest read below
 		// fail, but this gives the actionable message.)
-		meta, err := decodeMeta(res.EncryptedMeta, ck)
+		meta, err := decodeMeta(res.EncryptedMeta, ck, st.ID)
 		if err != nil {
 			return err
 		}
@@ -710,9 +710,9 @@ func runSync(dir string, opts syncOptions) error {
 		// or an accepted rollback) there is nothing to reuse, so fall back to the full walk.
 		var remote syncengine.Manifest
 		if trustBase {
-			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, baseCT)
+			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, st.ID, baseCT)
 		} else {
-			remote, err = openRemoteTree(cl, res.Blob, ck)
+			remote, err = openRemoteTree(cl, res.Blob, ck, st.ID)
 		}
 		if errors.Is(err, client.ErrNotFound) {
 			// We read version res.Version's root, but a concurrent sync superseded it
@@ -786,6 +786,11 @@ type applyCtx struct {
 }
 
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
+	// c holds by-value copies of the caller's keys ([32]byte, so the caller's
+	// deferred wipes do not reach them); scrub this frame's copies on exit.
+	defer c.ck.Wipe()
+	defer c.conv.Wipe()
+	defer c.mk.Wipe()
 	push := !c.opts.pullOnly
 	pull := !c.opts.pushOnly
 	localByPath := c.local.ByPath()
@@ -1063,7 +1068,7 @@ func runClone(ref, dir string) error {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
 	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
 	if err != nil {
 		return err
 	}
@@ -1078,7 +1083,7 @@ func runClone(ref, dir string) error {
 	// Decrypt the resource root before creating the destination, so a wrong or corrupt
 	// key fails the clone without leaving an empty directory behind. The root blob is
 	// tiny; materializeClone re-opens it to do the actual reconstruction.
-	if err := validateCloneRoot(res.Blob, ck, meta); err != nil {
+	if err := validateCloneRoot(res.Blob, ck, meta, id); err != nil {
 		return err
 	}
 	if err := ensureEmptyDir(abs); err != nil {
@@ -1105,13 +1110,13 @@ func runClone(ref, dir string) error {
 // root type the metadata selects. The AAD is domain-separated per type, so a folder
 // mis-flagged fails here rather than opening as an empty tree. A folder with neither
 // flag predates the v2 tree format and is no longer supported.
-func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, meta api.Metadata) error {
+func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, meta api.Metadata, resourceID string) error {
 	var err error
 	switch {
 	case meta.Packed:
-		_, err = syncengine.OpenPackRoot(blob, ck)
+		_, err = syncengine.OpenPackRoot(blob, ck, resourceID)
 	case meta.Tree:
-		_, err = syncengine.OpenTreeRoot(blob, ck)
+		_, err = syncengine.OpenTreeRoot(blob, ck, resourceID)
 	default:
 		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 	}
@@ -1127,7 +1132,7 @@ func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, meta api.Me
 // file from its packs, and materializes (empty) directories with their modes.
 func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse, ck crypto.ContentKey, meta api.Metadata) (syncengine.Manifest, error) {
 	if meta.Packed {
-		root, err := syncengine.OpenPackRoot(res.Blob, ck)
+		root, err := syncengine.OpenPackRoot(res.Blob, ck, res.ID)
 		if err != nil {
 			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
 		}
@@ -1138,7 +1143,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		base.Version = res.Version
 		return base, nil
 	}
-	manifest, err := openRemoteTree(cl, res.Blob, ck)
+	manifest, err := openRemoteTree(cl, res.Blob, ck, res.ID)
 	if err != nil {
 		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)
 	}
@@ -1642,8 +1647,8 @@ func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengi
 // the tiny root, then walks the DAG level by level, locating each level's directory
 // nodes in one round-trip and range-fetching their packs grouped. The inverse of
 // uploadTreeObjects.
-func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey) (syncengine.Manifest, error) {
-	root, err := syncengine.OpenTreeRoot(blob, ck)
+func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string) (syncengine.Manifest, error) {
+	root, err := syncengine.OpenTreeRoot(blob, ck, resourceID)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
@@ -1658,8 +1663,8 @@ func openRemoteTree(cl *client.Client, blob crypto.SealedBlob, ck crypto.Content
 // changed since the base hit the network. The result is identical to openRemoteTree —
 // OpenNode re-verifies every node against its address either way — so a stale base can
 // only affect which nodes are fetched, never correctness.
-func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, baseCT map[string][]byte) (syncengine.Manifest, error) {
-	root, err := syncengine.OpenTreeRoot(blob, ck)
+func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string, baseCT map[string][]byte) (syncengine.Manifest, error) {
+	root, err := syncengine.OpenTreeRoot(blob, ck, resourceID)
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
@@ -1727,7 +1732,7 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	blob, err := syncengine.SealTreeRoot(root, ck)
+	blob, err := syncengine.SealTreeRoot(root, ck, id)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -1735,7 +1740,7 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	metaBlob, err := crypto.Seal(metaJSON, ck, crypto.AADMeta)
+	metaBlob, err := crypto.SealBound(metaJSON, ck, crypto.AADMeta, id)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -1752,13 +1757,18 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 // putFolderUpdate replaces an existing folder's manifest, conditional on the
 // resource still being at expectedVersion (else the server returns a conflict).
 // The encrypted metadata (the folder name sealed at init) is carried forward
-// unchanged, so a sync never clobbers it.
+// unchanged, so a sync never clobbers it; metadata that predates id binding is
+// re-sealed bound to the id once (init seals before the server assigns the id).
 func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	blob, err := syncengine.SealTreeRoot(root, ck)
+	blob, err := syncengine.SealTreeRoot(root, ck, id)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	metaBlob, err := resealMetaBound(meta, ck, id)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -1767,9 +1777,24 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m
 		return api.PutResourceResponse{}, err
 	}
 	return cl.PutResource(api.PutResourceRequest{
-		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 	})
+}
+
+// resealMetaBound upgrades carried-forward resource metadata that predates id
+// binding: a blob already bound to the id passes through byte-identical, and only
+// a legacy (unbound) blob is re-sealed. The raw plaintext is re-sealed (not
+// re-marshaled), so fields a newer client wrote survive the round trip.
+func resealMetaBound(meta crypto.SealedBlob, ck crypto.ContentKey, id string) (crypto.SealedBlob, error) {
+	if _, err := crypto.Open(meta, ck, crypto.BoundAAD(crypto.AADMeta, id)); err == nil {
+		return meta, nil
+	}
+	plain, err := crypto.Open(meta, ck, crypto.AADMeta)
+	if err != nil {
+		return crypto.SealedBlob{}, fmt.Errorf("decrypt metadata: %w", err)
+	}
+	return crypto.SealBound(plain, ck, crypto.AADMeta, id)
 }
 
 func manifestFrom(byPath map[string]syncengine.Entry, version int) syncengine.Manifest {

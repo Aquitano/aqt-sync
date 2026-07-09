@@ -65,7 +65,7 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	root, err := syncengine.OpenFileRoot(res.Blob, ck)
+	root, err := syncengine.OpenFileRoot(res.Blob, ck, id)
 	if err != nil {
 		t.Fatal(err)
 	}
