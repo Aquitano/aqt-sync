@@ -380,7 +380,7 @@ func (h *e2eHarness) init(dir string) {
 
 func (h *e2eHarness) clone(id, dir string) {
 	h.t.Helper()
-	if err := runClone(id, dir); err != nil {
+	if err := runClone(id, dir, false); err != nil {
 		h.t.Fatalf("clone %s: %v", id, err)
 	}
 }

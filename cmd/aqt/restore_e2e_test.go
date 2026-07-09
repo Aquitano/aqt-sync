@@ -92,7 +92,7 @@ func TestFullBackupRestoreDrill(t *testing.T) {
 	reattach(t, srvB.URL, email, pass)
 
 	replica := t.TempDir()
-	if err := runClone(folderID, replica); err != nil {
+	if err := runClone(folderID, replica, false); err != nil {
 		t.Fatalf("clone onto clean machine: %v", err)
 	}
 
