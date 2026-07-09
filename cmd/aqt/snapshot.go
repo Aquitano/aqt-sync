@@ -604,11 +604,12 @@ type diffSide struct {
 }
 
 type snapshotDiffResult struct {
-	Left     diffSide `json:"left"`
-	Right    diffSide `json:"right"`
-	Added    []string `json:"added"`
-	Removed  []string `json:"removed"`
-	Modified []string `json:"modified"`
+	Left     diffSide            `json:"left"`
+	Right    diffSide            `json:"right"`
+	Added    []string            `json:"added"`
+	Removed  []string            `json:"removed"`
+	Modified []string            `json:"modified"`
+	Renamed  []syncengine.Rename `json:"renamed"`
 }
 
 func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
@@ -669,16 +670,21 @@ func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, agai
 	}
 	defer mk.Wipe()
 
-	added, removed, modified, err := diffResources(cl, mk, snapshotAsResource(left), rightRes, leftID, rightLabel)
+	diff, err := diffResources(cl, mk, snapshotAsResource(left), rightRes, leftID, rightLabel)
 	if err != nil {
 		return zero, err
+	}
+	renamed := diff.Renamed
+	if renamed == nil {
+		renamed = []syncengine.Rename{}
 	}
 	return snapshotDiffResult{
 		Left:     diffSide{Label: "snapshot " + leftID, Version: left.Snapshot.Version},
 		Right:    diffSide{Label: rightLabel, Version: rightVer},
-		Added:    nonNil(added),
-		Removed:  nonNil(removed),
-		Modified: nonNil(modified),
+		Added:    nonNil(diff.Added),
+		Removed:  nonNil(diff.Removed),
+		Modified: nonNil(diff.Modified),
+		Renamed:  renamed,
 	}, nil
 }
 
@@ -689,14 +695,15 @@ func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, agai
 // metadata-only walk of the changed spines. Anything else (single files,
 // pack-and-seal folders, a mixed pair) still materializes both sides to temp
 // dirs and compares them on disk.
-func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (added, removed, modified []string, err error) {
+func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.TreeDiff, error) {
+	var zero syncengine.TreeDiff
 	leftRoot, leftOK, err := treeRootOf(left, mk)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
+		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
 	}
 	rightRoot, rightOK, err := treeRootOf(right, mk)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
+		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
 	}
 	if leftOK && rightOK {
 		// One fetcher serves both sides, so a node the two versions share is
@@ -706,21 +713,25 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 
 	leftDir, err := os.MkdirTemp("", "aqt-diff-old-*")
 	if err != nil {
-		return nil, nil, nil, err
+		return zero, err
 	}
 	defer os.RemoveAll(leftDir)
 	rightDir, err := os.MkdirTemp("", "aqt-diff-new-*")
 	if err != nil {
-		return nil, nil, nil, err
+		return zero, err
 	}
 	defer os.RemoveAll(rightDir)
 	if _, err := materializeWithMaster(cl, mk, left, leftDir); err != nil {
-		return nil, nil, nil, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
+		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
 	}
 	if _, err := materializeWithMaster(cl, mk, right, rightDir); err != nil {
-		return nil, nil, nil, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
+		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
 	}
-	return diffTrees(leftDir, rightDir)
+	added, removed, modified, err := diffTrees(leftDir, rightDir)
+	if err != nil {
+		return zero, err
+	}
+	return syncengine.TreeDiff{Added: added, Removed: removed, Modified: modified}, nil
 }
 
 // treeRootOf opens a resource's sealed TreeRoot when it is a chunked tree folder;
@@ -751,7 +762,7 @@ func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.Tr
 
 func printSnapshotDiff(r snapshotDiffResult) {
 	fmt.Printf("%s (v%d)  ->  %s (v%d)\n", r.Left.Label, r.Left.Version, r.Right.Label, r.Right.Version)
-	total := len(r.Added) + len(r.Removed) + len(r.Modified)
+	total := len(r.Added) + len(r.Removed) + len(r.Modified) + len(r.Renamed)
 	if total == 0 {
 		fmt.Println("no differences")
 		return
@@ -767,11 +778,24 @@ func printSnapshotDiff(r snapshotDiffResult) {
 	for _, p := range r.Modified {
 		lines = append(lines, line{"~", p})
 	}
+	for _, rn := range r.Renamed {
+		lines = append(lines, line{"renamed", renameArrow(rn)})
+	}
 	sort.Slice(lines, func(i, j int) bool { return lines[i].path < lines[j].path })
 	for _, l := range lines {
 		fmt.Printf("%s %s\n", l.mark, l.path)
 	}
-	fmt.Printf("%d changed: %d added, %d removed, %d modified\n", total, len(r.Added), len(r.Removed), len(r.Modified))
+	fmt.Printf("%d changed: %d added, %d removed, %d modified, %d renamed\n",
+		total, len(r.Added), len(r.Removed), len(r.Modified), len(r.Renamed))
+}
+
+// renameArrow renders one rename pair; directories get the trailing slash the
+// plan printer uses.
+func renameArrow(r syncengine.Rename) string {
+	if r.Dir {
+		return r.From + "/ -> " + r.To + "/"
+	}
+	return r.From + " -> " + r.To
 }
 
 // diffTrees compares the file trees at oldDir and newDir by relative path and

@@ -68,18 +68,21 @@ func TestDiffTreeRootsReportsChanges(t *testing.T) {
 	}
 	f := newDiffFetcher(leftSink, rightSink)
 
-	added, removed, modified, err := DiffTreeRoots(leftRoot, rightRoot, f.fetch)
+	d, err := DiffTreeRoots(leftRoot, rightRoot, f.fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"fresh/only-right.txt", "root-new.txt"}; !reflect.DeepEqual(added, want) {
-		t.Errorf("added = %v, want %v", added, want)
+	if want := []string{"fresh/only-right.txt", "root-new.txt"}; !reflect.DeepEqual(d.Added, want) {
+		t.Errorf("added = %v, want %v", d.Added, want)
 	}
-	if want := []string{"gone/only-left.txt", "root-gone.txt"}; !reflect.DeepEqual(removed, want) {
-		t.Errorf("removed = %v, want %v", removed, want)
+	if want := []string{"gone/only-left.txt", "root-gone.txt"}; !reflect.DeepEqual(d.Removed, want) {
+		t.Errorf("removed = %v, want %v", d.Removed, want)
 	}
-	if want := []string{"mod/changed.txt"}; !reflect.DeepEqual(modified, want) {
-		t.Errorf("modified = %v, want %v", modified, want)
+	if want := []string{"mod/changed.txt"}; !reflect.DeepEqual(d.Modified, want) {
+		t.Errorf("modified = %v, want %v", d.Modified, want)
+	}
+	if len(d.Renamed) != 0 {
+		t.Errorf("renamed = %v, want none", d.Renamed)
 	}
 
 	// The unchanged "keep" subtree hashes equal on both sides, so its node must be
@@ -97,7 +100,7 @@ func TestDiffTreeRootsReportsChanges(t *testing.T) {
 	}
 	// The symlink target changed but symlinks are not reported (parity with the
 	// on-disk diff) — the "links" dir differs by hash yet must yield no output.
-	for _, p := range [][]string{added, removed, modified} {
+	for _, p := range [][]string{d.Added, d.Removed, d.Modified} {
 		for _, path := range p {
 			if path == "links/ln" {
 				t.Error("symlink change was reported")
@@ -115,12 +118,12 @@ func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := newDiffFetcher(sink)
-	added, removed, modified, err := DiffTreeRoots(root, root, f.fetch)
+	d, err := DiffTreeRoots(root, root, f.fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(added)+len(removed)+len(modified) != 0 {
-		t.Fatalf("identical roots diffed non-empty: +%v -%v ~%v", added, removed, modified)
+	if len(d.Added)+len(d.Removed)+len(d.Modified)+len(d.Renamed) != 0 {
+		t.Fatalf("identical roots diffed non-empty: %+v", d)
 	}
 	if len(f.requested) != 0 {
 		t.Fatalf("identical roots fetched %d nodes, want 0", len(f.requested))
@@ -146,17 +149,17 @@ func TestDiffTreeRootsTypeChange(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	added, removed, modified, err := DiffTreeRoots(leftRoot, rightRoot, newDiffFetcher(leftSink, rightSink).fetch)
+	d, err := DiffTreeRoots(leftRoot, rightRoot, newDiffFetcher(leftSink, rightSink).fetch)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"x/deep/nested.txt", "x/inner.txt"}; !reflect.DeepEqual(added, want) {
-		t.Errorf("added = %v, want %v", added, want)
+	if want := []string{"x/deep/nested.txt", "x/inner.txt"}; !reflect.DeepEqual(d.Added, want) {
+		t.Errorf("added = %v, want %v", d.Added, want)
 	}
-	if want := []string{"x"}; !reflect.DeepEqual(removed, want) {
-		t.Errorf("removed = %v, want %v", removed, want)
+	if want := []string{"x"}; !reflect.DeepEqual(d.Removed, want) {
+		t.Errorf("removed = %v, want %v", d.Removed, want)
 	}
-	if len(modified) != 0 {
-		t.Errorf("modified = %v, want none", modified)
+	if len(d.Modified) != 0 {
+		t.Errorf("modified = %v, want none", d.Modified)
 	}
 }

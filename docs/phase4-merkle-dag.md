@@ -8,7 +8,9 @@ Decisions taken during implementation (see §9):
 - **Directories: first-class** (Q4/Q5) — empty directories round-trip and directory modes propagate.
 - **Node AAD: separated** (Q6) — directory nodes seal under `aqt-treenode-v1`, distinct from file chunks.
 - **Migration: clean break** — a `tree` metadata flag marks v2 folders; older folders are not read (no shim).
-- **Renames: path churn accepted** (Q3) — a move dedups its bytes but still surfaces as delete+add at the path level.
+- **Renames: detected in reporting** (Q3) — a move dedups its bytes and executes as delete+add, but the diffs
+  coalesce the pair into a `renamed old -> new` when the content address matches unambiguously (`status`,
+  `sync --dry-run`, `snapshot diff`; a whole-directory move collapses to one entry via its stable subtree hash).
 - **Directory conflicts: surfaced** — a directory whose mode/existence diverged on both sides aborts a plain
   sync exactly like a file conflict; `--force` takes local. It is not silently resolved.
 - **Lazy remote read: shipped via base-node reuse (see §5), not a separate `DiffTree`.** Because directory
@@ -350,12 +352,14 @@ no Phase 4 change.
    nodes (B-tree-style), or CDC-chunk the node serialization (which reintroduces a
    "hash of the chunk list" instead of a single id). Recommend deferring with a soft cap;
    needs a decision if very wide directories are expected.
-3. **Rename / path-independence.** Content addressing already means a moved directory's
-   *bytes* are not re-uploaded (same node id) and a moved file's chunks dedup. But
-   `Plan` is path-keyed, so a rename still surfaces as `DeleteRemote(old) + Upload(new)`
-   at the leaf level — the manifest churns even though no bytes move. Do we want explicit
-   rename detection (a `Rename` action) so the diff records a move without re-listing,
-   or is "bytes dedup, paths churn" acceptable?
+3. **Rename / path-independence.** *Resolved: detected in reporting, not execution.*
+   Content addressing already means a moved directory's *bytes* are not re-uploaded
+   (same node id) and a moved file's chunks dedup. `Plan` stays path-keyed and a rename
+   still executes as `DeleteRemote(old) + Upload(new)`, but the diff layers coalesce the
+   pair into a reported rename when the content address matches exactly one deleted and
+   one added path (`DiffTreeRoots` by file/subtree hash; `DetectRenames` on manifests
+   for `status` and `sync --dry-run`). Ambiguous cases — duplicated content, mode
+   changes — conservatively stay delete+add.
 4. **Empty directories.** The flat manifest tracks only files/symlinks; a DAG can
    naturally carry an empty directory node. Do we start syncing empty directories (a
    behavior change), or keep dropping them for parity?
