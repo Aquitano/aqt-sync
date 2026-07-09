@@ -92,7 +92,9 @@ func runPush(path string, opts pushOptions) error {
 		return err
 	}
 
-	req := api.PutResourceRequest{Blob: blob, EncryptedMeta: metaBlob}
+	// Inline push seals unbound (AADBlob, no id): a create has no server-assigned id
+	// to bind yet, so it stays baseline-readable.
+	req := api.PutResourceRequest{Blob: blob, EncryptedMeta: metaBlob, MinClient: api.CapabilityBaseline}
 	if opts.public || opts.password != "" {
 		req.Visibility = api.Public
 	} else {
@@ -203,6 +205,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
 		ChunkRefs:     refs,
+		MinClient:     api.CapabilityBaseline, // create seals the FileRoot unbound (id not assigned yet)
 	})
 	if err != nil {
 		return err

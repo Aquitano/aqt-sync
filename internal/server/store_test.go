@@ -82,7 +82,7 @@ func (s *Store) rootResource(t *testing.T, owner string, refs []string) string {
 	blob, _ := crypto.Seal([]byte("sealed manifest"), ck, crypto.AADBlob)
 	meta, _ := crypto.Seal([]byte(`{"name":"folder","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
-	id, _, err := s.PutResource(owner, api.PutResourceRequest{
+	id, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 		ChunkRefs: refs,
 	})
@@ -90,6 +90,45 @@ func (s *Store) rootResource(t *testing.T, owner string, refs []string) string {
 		t.Fatalf("root resource: %v", err)
 	}
 	return id
+}
+
+// TestResourceMinClientDefaultsToBaseline covers migration 9's DEFAULT and the
+// store's normalization: an undeclared write stores the baseline capability (so a
+// pre-migration row and a legacy writer are never over-restricted), while a declared
+// value is stored verbatim.
+func TestResourceMinClientDefaultsToBaseline(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "mincli@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	req := func(minClient int) api.PutResourceRequest {
+		blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+		return api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, MinClient: minClient}
+	}
+	stored := func(id string) int {
+		var n int
+		if err := s.db.QueryRow(`SELECT min_client FROM resources WHERE id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("read min_client: %v", err)
+		}
+		return n
+	}
+
+	undeclared, _, err := s.PutResource(owner, api.CapabilityIDBinding, req(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(undeclared); got != api.CapabilityBaseline {
+		t.Fatalf("undeclared min_client = %d, want %d", got, api.CapabilityBaseline)
+	}
+
+	declared, _, err := s.PutResource(owner, api.CapabilityIDBinding, req(api.CapabilityIDBinding))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stored(declared); got != api.CapabilityIDBinding {
+		t.Fatalf("declared min_client = %d, want %d", got, api.CapabilityIDBinding)
+	}
 }
 
 func TestPackStoreRoundTripAndGC(t *testing.T) {
@@ -295,20 +334,20 @@ func TestUpdateResourceVersionConflict(t *testing.T) {
 		}
 	}
 
-	id, v, err := s.PutResource(owner, req("", 0, "v1"))
+	id, v, err := s.PutResource(owner, api.CapabilityIDBinding, req("", 0, "v1"))
 	if err != nil || v != 1 {
 		t.Fatalf("create: v=%d err=%v", v, err)
 	}
 	// An update based on the current version succeeds and bumps it.
-	if _, v2, err := s.PutResource(owner, req(id, 1, "v2")); err != nil || v2 != 2 {
+	if _, v2, err := s.PutResource(owner, api.CapabilityIDBinding, req(id, 1, "v2")); err != nil || v2 != 2 {
 		t.Fatalf("update@1: v=%d err=%v", v2, err)
 	}
 	// A second update still claiming version 1 is stale and must be rejected.
-	if _, _, err := s.PutResource(owner, req(id, 1, "v3")); !errors.Is(err, ErrVersionConflict) {
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, req(id, 1, "v3")); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("stale update: got %v, want ErrVersionConflict", err)
 	}
 	// Catching up to the current version works again (the retry path).
-	if _, v3, err := s.PutResource(owner, req(id, 2, "v3")); err != nil || v3 != 3 {
+	if _, v3, err := s.PutResource(owner, api.CapabilityIDBinding, req(id, 2, "v3")); err != nil || v3 != 3 {
 		t.Fatalf("update@2: v=%d err=%v", v3, err)
 	}
 }
@@ -450,15 +489,15 @@ func TestManifestRejectsDanglingChunkReference(t *testing.T) {
 	}
 	ghost := objID([]byte("never uploaded"))
 
-	if _, _, err := s.PutResource(owner, mkReq("", 0, "v1", []string{ghost})); err == nil {
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq("", 0, "v1", []string{ghost})); err == nil {
 		t.Fatal("create referencing a missing object must be rejected")
 	}
 
-	id, _, err := s.PutResource(owner, mkReq("", 0, "v1", nil))
+	id, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq("", 0, "v1", nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.PutResource(owner, mkReq(id, 1, "v2", []string{ghost})); err == nil {
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", []string{ghost})); err == nil {
 		t.Fatal("update introducing a missing object reference must be rejected")
 	}
 
@@ -538,7 +577,7 @@ func TestUpdatesReclaimSupersededBlobs(t *testing.T) {
 		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
 		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
-		rid, _, err := s.PutResource(owner, api.PutResourceRequest{
+		rid, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
 			WrappedKey: &wrapped, ExpectedVersion: expected,
 		})
@@ -797,13 +836,13 @@ func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
 		}
 	}
 
-	id, _, err := s.PutResource(owner, mkReq("", 0, "v1", ids))
+	id, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq("", 0, "v1", ids))
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// The root-dropping replace is rejected.
-	if _, _, err := s.PutResource(owner, mkReq(id, 1, "v2", nil)); !errors.Is(err, ErrDropsRoots) {
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", nil)); !errors.Is(err, ErrDropsRoots) {
 		t.Fatalf("replace dropping all roots = %v, want ErrDropsRoots", err)
 	}
 
@@ -823,7 +862,7 @@ func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
 	}
 
 	// A replace that keeps the roots is unaffected (no false positive).
-	if _, v, err := s.PutResource(owner, mkReq(id, 1, "v2", ids)); err != nil || v != 2 {
+	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", ids)); err != nil || v != 2 {
 		t.Fatalf("replace keeping roots = v%d err=%v, want v2 nil", v, err)
 	}
 }
@@ -844,11 +883,11 @@ func TestUpdateAllowsEmptyRootsWhenNoneExisted(t *testing.T) {
 			WrappedKey: &wrapped, ExpectedVersion: expected,
 		}
 	}
-	id, _, err := s.PutResource(owner, mkReq("", 0, "v1"))
+	id, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq("", 0, "v1"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, v, err := s.PutResource(owner, mkReq(id, 1, "v2")); err != nil || v != 2 {
+	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2")); err != nil || v != 2 {
 		t.Fatalf("inline replace with no roots = v%d err=%v, want v2 nil", v, err)
 	}
 }
@@ -961,7 +1000,7 @@ func TestPackCountersStayConsistent(t *testing.T) {
 		blob, _ := crypto.Seal([]byte("manifest"), ck, crypto.AADBlob)
 		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
-		rid, _, err := s.PutResource(owner, api.PutResourceRequest{
+		rid, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
 			WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expected,
 		})

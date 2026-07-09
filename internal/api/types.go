@@ -134,6 +134,10 @@ type PassphraseChangeRequest struct {
 // This is an in-process type: on the wire it travels as the raw envelope in
 // wire.go (JSON header + ciphertext), never as JSON, so the blob pays no base64
 // tax.
+// MinClient declares the lowest client capability that can read the sealed formats
+// this write stores (Capability* constants). A create/update leaves it 0 for a
+// baseline (v1) write; a server treats 0 as CapabilityBaseline and never lets a
+// client declare above its own capability.
 type PutResourceRequest struct {
 	ID              string
 	Visibility      Visibility
@@ -142,6 +146,7 @@ type PutResourceRequest struct {
 	WrappedKey      *crypto.WrappedKey
 	ChunkRefs       []string
 	ExpectedVersion int
+	MinClient       int
 }
 
 // PackIndexEntry locates one object inside a pack: its content-address id and the
@@ -221,6 +226,10 @@ type GetResourceResponse struct {
 	EncryptedMeta crypto.SealedBlob
 	WrappedKey    *crypto.WrappedKey
 	Version       int
+	// MinClient is the lowest client capability that can read this resource's sealed
+	// formats, so a current client can explain an incompatible remote instead of
+	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).
+	MinClient int
 }
 
 // ResourceListItem describes one of the owner's resources. WrappedKey (the
@@ -296,6 +305,9 @@ type ListSnapshotsResponse struct {
 type GetSnapshotResponse struct {
 	Snapshot SnapshotInfo      `json:"snapshot"`
 	Blob     crypto.SealedBlob `json:"blob"`
+	// MinClient is the capability the snapshot's sealed formats need, copied from the
+	// resource at snapshot time so restore can be gated the same way a resource read is.
+	MinClient int `json:"minClient,omitempty"`
 }
 
 // SetAutoSnapshotRequest toggles whether the server's scheduled snapshot job
@@ -307,4 +319,10 @@ type SetAutoSnapshotRequest struct {
 
 type ErrorResponse struct {
 	Error string `json:"error"`
+	// Code is a stable machine-readable tag for errors a client acts on
+	// programmatically (e.g. ErrCodeUpgradeRequired on a 426). Absent on plain errors.
+	Code string `json:"code,omitempty"`
+	// MinClient accompanies an upgrade-required (426) error: the capability the
+	// resource needs, so the client can report exactly how far it is behind.
+	MinClient int `json:"min_client,omitempty"`
 }

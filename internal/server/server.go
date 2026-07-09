@@ -7,9 +7,11 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -528,8 +530,15 @@ func (s *Server) deleteDevice(c *gin.Context) {
 
 func (s *Server) putResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
+	capability := requestCapability(c)
 	req, ok := decodePutResource(c)
 	if !ok {
+		return
+	}
+	// A client cannot declare content unreadable by itself: that would be a resource
+	// it just wrote but could never read back. Reject it as a client bug.
+	if req.MinClient > capability {
+		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
 		return
 	}
 	switch req.Visibility {
@@ -546,7 +555,12 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	id, version, err := s.store.PutResource(owner, req)
+	id, version, err := s.store.PutResource(owner, capability, req)
+	var upgrade *UpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		abortUpgradeRequired(c, upgrade.MinClient, capability)
+		return
+	}
 	if errors.Is(err, ErrVersionConflict) {
 		abort(c, http.StatusConflict, "resource changed since you last fetched it; re-sync")
 		return
@@ -588,6 +602,14 @@ func (s *Server) getResource(c *gin.Context) {
 	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "fetch failed")
+		return
+	}
+	// Gate the read on the requester's capability before any payload is written: a
+	// client too old to open the sealed format gets an actionable 426 instead of the
+	// bytes and a downstream AEAD failure. This route is public, so the check lives
+	// here rather than in the authed middleware.
+	if capability := requestCapability(c); capability < res.MinClient {
+		abortUpgradeRequired(c, res.MinClient, capability)
 		return
 	}
 	// A raw-envelope client (Accept: octet-stream) gets the blob verbatim, no
@@ -731,6 +753,12 @@ func (s *Server) getSnapshot(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "fetch snapshot failed")
 		return
 	}
+	// A snapshot copies its source resource's sealed format, so restore is gated the
+	// same way a resource read is: a client below the snapshot's min_client gets a 426.
+	if capability := requestCapability(c); capability < resp.MinClient {
+		abortUpgradeRequired(c, resp.MinClient, capability)
+		return
+	}
 	c.JSON(http.StatusOK, resp)
 }
 
@@ -836,6 +864,38 @@ func bindJSON(c *gin.Context, v any) bool {
 
 func abort(c *gin.Context, code int, msg string) {
 	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg})
+}
+
+// requestCapability reads the client's declared capability from the request header.
+// A missing or unparseable value is treated as CapabilityIDBinding (2): the header
+// ships only after v0.2.0, so any header-less request comes from a client no newer
+// than v0.2.x, whose newest release reads capability-2 (id-bound) resources. Assuming
+// 2 keeps released v0.2.0 binaries working against id-bound resources; pre-0.2 clients
+// are indistinguishable, so they keep the status-quo AEAD failure on capability-2
+// resources only. A malformed value is a client bug, not an attack surface, so it also
+// assumes 2 rather than rejecting.
+func requestCapability(c *gin.Context) int {
+	v := c.GetHeader(api.CapabilityHeader)
+	if v == "" {
+		return api.CapabilityIDBinding
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return api.CapabilityIDBinding
+	}
+	return n
+}
+
+// abortUpgradeRequired answers 426 with the structured upgrade error. The message is
+// self-contained because a header-less old client prints it verbatim (server: %s), so
+// it must explain the mismatch on its own. need is the capability the resource
+// requires; have is what the requester declared.
+func abortUpgradeRequired(c *gin.Context, need, have int) {
+	c.AbortWithStatusJSON(http.StatusUpgradeRequired, api.ErrorResponse{
+		Error:     fmt.Sprintf("resource requires client capability %d or newer (this client supports %d): upgrade aqt", need, have),
+		Code:      api.ErrCodeUpgradeRequired,
+		MinClient: need,
+	})
 }
 
 func deviceName(name string) string {

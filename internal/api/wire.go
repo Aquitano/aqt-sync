@@ -31,6 +31,7 @@ type resourceUploadHeader struct {
 	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
+	MinClient       int                `json:"minClient,omitempty"`
 }
 
 // resourceDownloadHeader is the JSON header of a GET /v1/resources/:id
@@ -42,6 +43,7 @@ type resourceDownloadHeader struct {
 	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	Version       int                `json:"version"`
+	MinClient     int                `json:"minClient,omitempty"`
 }
 
 // EncodeResourceUpload encodes req as a raw upload body: length-prefixed JSON
@@ -55,6 +57,7 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		WrappedKey:      req.WrappedKey,
 		ChunkRefs:       req.ChunkRefs,
 		ExpectedVersion: req.ExpectedVersion,
+		MinClient:       req.MinClient,
 	}, req.Blob.Ciphertext)
 }
 
@@ -74,6 +77,7 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		WrappedKey:      h.WrappedKey,
 		ChunkRefs:       h.ChunkRefs,
 		ExpectedVersion: h.ExpectedVersion,
+		MinClient:       h.MinClient,
 	}, nil
 }
 
@@ -87,6 +91,7 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		EncryptedMeta: res.EncryptedMeta,
 		WrappedKey:    res.WrappedKey,
 		Version:       res.Version,
+		MinClient:     res.MinClient,
 	}, res.Blob.Ciphertext)
 }
 
@@ -104,6 +109,7 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		EncryptedMeta: h.EncryptedMeta,
 		WrappedKey:    h.WrappedKey,
 		Version:       h.Version,
+		MinClient:     h.MinClient,
 	}, nil
 }
 

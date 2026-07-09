@@ -2,6 +2,17 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Client capability negotiation. Every request advertises which encrypted-resource
+  formats the client can read (`X-Aqt-Capability`), and resource writes record the
+  lowest capability that can read them. A client too old to read a resource now gets
+  an actionable `Upgrade Required` error (exit code `6`) before any download, instead
+  of a bare decryption failure. This is forward-looking: it gates the next format
+  boundary once every device advertises a capability. See `docs/compatibility.md`.
+
 ## [v0.2.0] - 2026-07-09
 
 ### Breaking Changes

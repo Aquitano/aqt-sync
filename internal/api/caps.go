@@ -1,0 +1,25 @@
+package api
+
+// Capability is a small, monotonically increasing integer describing which
+// encrypted-resource formats a client can read. Bump it whenever a write format
+// becomes unreadable by an older release, so the server can turn an under-capable
+// client's read into an actionable HTTP 426 "upgrade required" instead of letting
+// it surface as an opaque AEAD failure.
+const (
+	// CapabilityBaseline is v0.1.0: unbound (v1 AAD) resource roots and metadata.
+	CapabilityBaseline = 1
+	// CapabilityIDBinding is v0.2.0: resource-id-bound (v2 AAD) roots and metadata.
+	CapabilityIDBinding = 2
+	// ClientCapability is the highest format this build can read. Negotiation itself
+	// changes no encrypted format, so it tops out at CapabilityIDBinding.
+	ClientCapability = CapabilityIDBinding
+)
+
+// CapabilityHeader carries a request's client capability. A missing or unparseable
+// value is treated as CapabilityIDBinding by the server; see the server's request
+// capability helper for the rationale.
+const CapabilityHeader = "X-Aqt-Capability"
+
+// ErrCodeUpgradeRequired is the stable ErrorResponse.Code the server returns with an
+// HTTP 426 when a resource's declared min_client exceeds the requester's capability.
+const ErrCodeUpgradeRequired = "upgrade_required"

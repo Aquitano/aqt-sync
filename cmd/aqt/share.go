@@ -177,6 +177,7 @@ func runPrivate(idArg string) error {
 		EncryptedMeta:   metaBlob,
 		WrappedKey:      &wrapped,
 		ExpectedVersion: res.Version,
+		MinClient:       api.CapabilityIDBinding, // rotate re-seals blob and meta id-bound (v2)
 	}); err != nil {
 		if errors.Is(err, client.ErrConflict) {
 			return errors.New("resource changed while rotating its key; re-run `aqt private`")

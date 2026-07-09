@@ -815,3 +815,183 @@ func TestListResourcesReturnsWrappedKey(t *testing.T) {
 		t.Fatalf("decrypted meta = %+v, want name=secret.env kind=file", got)
 	}
 }
+
+// --- capability negotiation (issue #69) ---
+
+// putCap PUTs a resource as a JSON body with an explicit X-Aqt-Capability header
+// (empty capHdr omits it), so a test can act as a client of any capability. It
+// returns the recorder; the caller asserts the status.
+func (h *harness) putCap(token, capHdr string, req api.PutResourceRequest) *httptest.ResponseRecorder {
+	h.t.Helper()
+	body, err := json.Marshal(req)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	header := map[string]string{"Content-Type": "application/json"}
+	if capHdr != "" {
+		header[api.CapabilityHeader] = capHdr
+	}
+	return h.raw(http.MethodPut, "/v1/resources", token, header, body)
+}
+
+// getCap GETs a resource with an explicit capability header.
+func (h *harness) getCap(id, token, capHdr string) *httptest.ResponseRecorder {
+	h.t.Helper()
+	header := map[string]string{}
+	if capHdr != "" {
+		header[api.CapabilityHeader] = capHdr
+	}
+	return h.raw(http.MethodGet, "/v1/resources/"+id, token, header, nil)
+}
+
+// sealResource builds a sealed private resource body declaring minClient.
+func sealResource(t *testing.T, minClient int) (api.PutResourceRequest, crypto.ContentKey) {
+	t.Helper()
+	ck, err := crypto.GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	return api.PutResourceRequest{
+		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, MinClient: minClient,
+	}, ck
+}
+
+func mustPutID(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("put: status %d (%s)", rec.Code, rec.Body.String())
+	}
+	var out api.PutResourceResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode put response: %v", err)
+	}
+	return out.ID
+}
+
+// TestCapabilityReadBelowMinClientIs426 covers the core gate: a read whose declared
+// capability is below the resource's stored min_client is refused with 426 and a
+// structured upgrade error, before any payload is served.
+func TestCapabilityReadBelowMinClientIs426(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.signup("cap-read@example.com", "a good long passphrase here")
+
+	req, _ := sealResource(t, api.CapabilityIDBinding)
+	id := mustPutID(t, h.putCap(token, "2", req))
+
+	// A capability-1 client cannot read a capability-2 resource.
+	rec := h.getCap(id, token, "1")
+	if rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("read below min_client: got %d, want 426", rec.Code)
+	}
+	var e api.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatalf("decode error body: %v", err)
+	}
+	if e.Code != api.ErrCodeUpgradeRequired {
+		t.Fatalf("error code = %q, want %q", e.Code, api.ErrCodeUpgradeRequired)
+	}
+	if e.MinClient != api.CapabilityIDBinding {
+		t.Fatalf("error min_client = %d, want %d", e.MinClient, api.CapabilityIDBinding)
+	}
+
+	// The same client at capability 2 reads it fine.
+	if rec := h.getCap(id, token, "2"); rec.Code != http.StatusOK {
+		t.Fatalf("read at min_client: got %d, want 200", rec.Code)
+	}
+}
+
+// TestCapabilityMissingHeaderAssumesTwo pins the header-less fallback: a request with
+// no capability header is treated as capability 2, so it reads a min_client=2 resource
+// but is refused a min_client=3 one.
+func TestCapabilityMissingHeaderAssumesTwo(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.signup("cap-missing@example.com", "a good long passphrase here")
+
+	req2, _ := sealResource(t, api.CapabilityIDBinding)
+	id2 := mustPutID(t, h.putCap(token, "2", req2))
+	if rec := h.getCap(id2, token, ""); rec.Code != http.StatusOK {
+		t.Fatalf("header-less read of min_client=2: got %d, want 200", rec.Code)
+	}
+
+	// A future capability-3 client writes a capability-3 resource.
+	req3, _ := sealResource(t, 3)
+	id3 := mustPutID(t, h.putCap(token, "3", req3))
+	rec := h.getCap(id3, token, "")
+	if rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("header-less read of min_client=3: got %d, want 426", rec.Code)
+	}
+	var e api.ErrorResponse
+	_ = json.Unmarshal(rec.Body.Bytes(), &e)
+	if e.MinClient != 3 {
+		t.Fatalf("error min_client = %d, want 3", e.MinClient)
+	}
+}
+
+// TestCapabilityWriteDeclaration covers the write-side rules: a declared min_client is
+// stored, a declaration above the writer's own capability is rejected, and an omitted
+// declaration stores the baseline.
+func TestCapabilityWriteDeclaration(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.signup("cap-write@example.com", "a good long passphrase here")
+
+	// Declaring above the writer's own capability is a client bug: 400.
+	req, _ := sealResource(t, 3)
+	if rec := h.putCap(token, "2", req); rec.Code != http.StatusBadRequest {
+		t.Fatalf("declare min_client 3 as a cap-2 client: got %d, want 400", rec.Code)
+	}
+
+	// An omitted declaration stores the baseline (1), readable by a cap-1 client.
+	base, _ := sealResource(t, 0)
+	idBase := mustPutID(t, h.putCap(token, "2", base))
+	if rec := h.getCap(idBase, token, "1"); rec.Code != http.StatusOK {
+		t.Fatalf("cap-1 read of an undeclared (baseline) resource: got %d, want 200", rec.Code)
+	}
+}
+
+// TestCapabilityUpdateGate covers update enforcement: a client that cannot read the
+// current state cannot overwrite it, but a capable client may lower min_client.
+func TestCapabilityUpdateGate(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.signup("cap-update@example.com", "a good long passphrase here")
+
+	req, _ := sealResource(t, api.CapabilityIDBinding)
+	id := mustPutID(t, h.putCap(token, "2", req))
+
+	// A capability-1 client must not overwrite a capability-2 resource.
+	upd, _ := sealResource(t, api.CapabilityBaseline)
+	upd.ID = id
+	if rec := h.putCap(token, "1", upd); rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("update by cap-1 client: got %d, want 426", rec.Code)
+	}
+
+	// A capable client may rewrite it in the baseline format, lowering min_client so
+	// older clients can read it again.
+	if rec := h.putCap(token, "2", upd); rec.Code != http.StatusOK {
+		t.Fatalf("cap-2 client lowering min_client: got %d, want 200", rec.Code)
+	}
+	if rec := h.getCap(id, token, "1"); rec.Code != http.StatusOK {
+		t.Fatalf("cap-1 read after min_client lowered: got %d, want 200", rec.Code)
+	}
+}
+
+// TestCapabilityPublicReadEnforced covers the unauthenticated (public) read path,
+// which is served by its own handler outside the authed group.
+func TestCapabilityPublicReadEnforced(t *testing.T) {
+	h := newHarness(t)
+	token, _ := h.signup("cap-public@example.com", "a good long passphrase here")
+
+	req, _ := sealResource(t, api.CapabilityIDBinding)
+	req.Visibility = api.Public
+	id := mustPutID(t, h.putCap(token, "2", req))
+
+	// Unauthenticated cap-1 read is gated the same as an owner read.
+	if rec := h.getCap(id, "", "1"); rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("public cap-1 read: got %d, want 426", rec.Code)
+	}
+	if rec := h.getCap(id, "", "2"); rec.Code != http.StatusOK {
+		t.Fatalf("public cap-2 read: got %d, want 200", rec.Code)
+	}
+}
