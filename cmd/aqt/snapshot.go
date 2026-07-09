@@ -111,7 +111,7 @@ func sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, la
 		return nil, fmt.Errorf("unwrap resource key: %w", err)
 	}
 	defer ck.Wipe()
-	sealed, err := crypto.Seal([]byte(label), ck, crypto.AADSnapshotLabel)
+	sealed, err := crypto.SealBound([]byte(label), ck, crypto.AADSnapshotLabel, resourceID)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +245,7 @@ func snapshotNameLabel(s api.SnapshotInfo, mk crypto.MasterKey) (name, label str
 		return name, ""
 	}
 	defer ck.Wipe()
-	if plain, err := crypto.Open(s.EncryptedMeta, ck, crypto.AADMeta); err == nil {
+	if plain, err := crypto.OpenBound(s.EncryptedMeta, ck, crypto.AADMeta, s.ResourceID); err == nil {
 		var m api.Metadata
 		if json.Unmarshal(plain, &m) == nil {
 			if name = m.Name; name == "" {
@@ -254,7 +254,7 @@ func snapshotNameLabel(s api.SnapshotInfo, mk crypto.MasterKey) (name, label str
 		}
 	}
 	if s.EncryptedLabel != nil {
-		if plain, err := crypto.Open(*s.EncryptedLabel, ck, crypto.AADSnapshotLabel); err == nil {
+		if plain, err := crypto.OpenBound(*s.EncryptedLabel, ck, crypto.AADSnapshotLabel, s.ResourceID); err == nil {
 			label = string(plain)
 		}
 	}
@@ -746,14 +746,14 @@ func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.Tr
 		return syncengine.TreeRoot{}, false, fmt.Errorf("unwrap key: %w", err)
 	}
 	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return syncengine.TreeRoot{}, false, err
 	}
 	if meta.Kind != api.KindFolder || !meta.Tree || meta.Packed {
 		return syncengine.TreeRoot{}, false, nil
 	}
-	root, err := syncengine.OpenTreeRoot(res.Blob, ck)
+	root, err := syncengine.OpenTreeRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return syncengine.TreeRoot{}, false, fmt.Errorf("decrypt folder root: %w", err)
 	}
@@ -1188,7 +1188,7 @@ func snapshotAsResource(snap api.GetSnapshotResponse) api.GetResourceResponse {
 // writes its plaintext tree under destDir: a folder is untarred or streamed from its
 // objects, a single file is written by its name. The caller owns ck's lifetime.
 func materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string) (api.Metadata, error) {
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return api.Metadata{}, err
 	}
@@ -1207,7 +1207,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 	}
 	dest := filepath.Join(destDir, safeOutputName(meta.Name))
 	if meta.Streamed {
-		root, err := syncengine.OpenFileRoot(res.Blob, ck)
+		root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
 		if err != nil {
 			return meta, fmt.Errorf("decrypt file root: %w", err)
 		}
@@ -1237,7 +1237,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		}
 		return meta, f.Close()
 	}
-	plain, err := crypto.Open(res.Blob, ck, crypto.AADBlob)
+	plain, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, res.ID)
 	if err != nil {
 		return meta, fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}

@@ -184,7 +184,17 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 	if err != nil {
 		return api.GetResourceResponse{}, err
 	}
-	return api.DecodeResourceDownload(bytes.NewReader(data))
+	res, err := api.DecodeResourceDownload(bytes.NewReader(data))
+	if err != nil {
+		return api.GetResourceResponse{}, err
+	}
+	// Pin the echoed id to the requested one. The id-bound AAD checks downstream
+	// verify against res.ID; without this pin a hostile server could serve another
+	// resource's record and echo that record's id, satisfying its own binding.
+	if res.ID != id {
+		return api.GetResourceResponse{}, fmt.Errorf("server returned resource %q for requested id %q", res.ID, id)
+	}
+	return res, nil
 }
 
 // SetVisibility flips a resource public/private without re-uploading its blob.
@@ -278,16 +288,32 @@ func (c *Client) ListSnapshots(resourceID string) ([]api.SnapshotInfo, error) {
 		path += "?resource=" + url.QueryEscape(resourceID)
 	}
 	var r api.ListSnapshotsResponse
-	err := c.do(http.MethodGet, path, nil, &r)
-	return r.Snapshots, err
+	if err := c.do(http.MethodGet, path, nil, &r); err != nil {
+		return nil, err
+	}
+	// Pin a filtered listing to the requested resource: the ResourceID field is
+	// server-supplied, and downstream id-bound AAD checks verify against it.
+	if resourceID != "" {
+		for _, s := range r.Snapshots {
+			if s.ResourceID != resourceID {
+				return nil, fmt.Errorf("server returned a snapshot of resource %q in a listing for %q", s.ResourceID, resourceID)
+			}
+		}
+	}
+	return r.Snapshots, nil
 }
 
 // GetSnapshot fetches a snapshot's sealed root blob plus the copied meta and
 // wrapped key; the client reconstructs and decrypts it locally.
 func (c *Client) GetSnapshot(id string) (api.GetSnapshotResponse, error) {
 	var r api.GetSnapshotResponse
-	err := c.do(http.MethodGet, "/v1/snapshots/"+url.PathEscape(id), nil, &r)
-	return r, err
+	if err := c.do(http.MethodGet, "/v1/snapshots/"+url.PathEscape(id), nil, &r); err != nil {
+		return r, err
+	}
+	if r.Snapshot.ID != id {
+		return api.GetSnapshotResponse{}, fmt.Errorf("server returned snapshot %q for requested id %q", r.Snapshot.ID, id)
+	}
+	return r, nil
 }
 
 // DeleteSnapshot prunes a snapshot. Objects no live resource or other snapshot

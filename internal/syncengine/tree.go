@@ -81,18 +81,20 @@ type TreeRoot struct {
 // and a ManifestRoot are byte-compatible JSON under the same key, so without it an
 // old client could open a v2 root as an empty manifest and delete the whole tree —
 // the same footgun SealPackRoot guards. With it, the cross-open fails the AEAD check.
-func SealTreeRoot(r TreeRoot, ck crypto.ContentKey) (crypto.SealedBlob, error) {
+// The seal also binds the resource id when known (empty on create, before the
+// server assigns one).
+func SealTreeRoot(r TreeRoot, ck crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {
 	b, err := json.Marshal(r)
 	if err != nil {
 		return crypto.SealedBlob{}, err
 	}
-	return crypto.Seal(b, ck, crypto.AADTreeRoot)
+	return crypto.SealBound(b, ck, crypto.AADTreeRoot, resourceID)
 }
 
 // OpenTreeRoot decrypts and parses a sealed tree root.
-func OpenTreeRoot(blob crypto.SealedBlob, ck crypto.ContentKey) (TreeRoot, error) {
+func OpenTreeRoot(blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string) (TreeRoot, error) {
 	var r TreeRoot
-	plain, err := crypto.Open(blob, ck, crypto.AADTreeRoot)
+	plain, err := crypto.OpenBound(blob, ck, crypto.AADTreeRoot, resourceID)
 	if err != nil {
 		return r, err
 	}

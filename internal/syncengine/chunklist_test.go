@@ -75,11 +75,11 @@ func TestFileRootIndirectRoundTrip(t *testing.T) {
 	}
 
 	// The root survives a seal/open cycle and resolves to the original records.
-	blob, err := SealFileRoot(root, ck)
+	blob, err := SealFileRoot(root, ck, "res1")
 	if err != nil {
 		t.Fatalf("SealFileRoot: %v", err)
 	}
-	got, err := OpenFileRoot(blob, ck)
+	got, err := OpenFileRoot(blob, ck, "res1")
 	if err != nil {
 		t.Fatalf("OpenFileRoot: %v", err)
 	}
@@ -121,20 +121,20 @@ func TestFileRootLegacyInlineAndVersionGuard(t *testing.T) {
 	if !reflect.DeepEqual(resolved, legacy.Chunks) {
 		t.Fatal("inline resolve must return the inline chunks verbatim")
 	}
-	blob, err := SealFileRoot(legacy, ck)
+	blob, err := SealFileRoot(legacy, ck, "res1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenFileRoot(blob, ck); err != nil {
+	if _, err := OpenFileRoot(blob, ck, "res1"); err != nil {
 		t.Fatalf("a legacy v1 root must still open: %v", err)
 	}
 
 	future := FileRoot{Version: FileRootVersion + 1, Size: 1, Chunks: fakeChunks(1)}
-	fblob, err := SealFileRoot(future, ck)
+	fblob, err := SealFileRoot(future, ck, "res1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenFileRoot(fblob, ck); err == nil {
+	if _, err := OpenFileRoot(fblob, ck, "res1"); err == nil {
 		t.Fatal("a root newer than this client must be rejected")
 	}
 }

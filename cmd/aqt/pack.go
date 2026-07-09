@@ -52,6 +52,8 @@ func runPackSync(root string, opts syncOptions) error {
 	}
 
 	c := packCtx{root: root, cl: cl, opts: opts, st: st, base: base, baseExists: baseExists, local: local, mk: mk, push: &packPushArtifacts{}}
+	// c.mk is a by-value copy the deferred mk.Wipe above does not reach.
+	defer c.mk.Wipe()
 	return reconcileWithRetry(func() error { return reconcilePack(c) })
 }
 
@@ -95,7 +97,7 @@ func reconcilePack(c packCtx) error {
 		return fmt.Errorf("unwrap folder key: %w", err)
 	}
 	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, c.st.ID)
 	if err != nil {
 		return err
 	}
@@ -215,7 +217,7 @@ func printPackAction(a packDecision) {
 // an add from a delete. One empty side is unambiguous; otherwise the trees are
 // compared and an actual difference is a conflict unless --force.
 func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
-	root, err := syncengine.OpenPackRoot(res.Blob, ck)
+	root, err := syncengine.OpenPackRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt remote pack root: %w", err)
 	}
@@ -316,7 +318,7 @@ func extractPack(cl *client.Client, dir string, root syncengine.PackRoot, ck cry
 // pullPack replaces the working tree with the remote one. It opens the root; callers
 // that already decrypted it use pullPackFromRoot to avoid a second decrypt.
 func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
-	root, err := syncengine.OpenPackRoot(res.Blob, ck)
+	root, err := syncengine.OpenPackRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt remote pack root: %w", err)
 	}
@@ -421,7 +423,9 @@ func savePackBase(root string, m syncengine.Manifest, version int) error {
 }
 
 func putPackFolderCreate(cl *client.Client, root syncengine.PackRoot, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
-	blob, err := syncengine.SealPackRoot(root, ck)
+	// A create's seals cannot bind the resource id (the server assigns it in the
+	// response); the first putPackFolderUpdate re-seals both bound.
+	blob, err := syncengine.SealPackRoot(root, ck, "")
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -444,9 +448,15 @@ func putPackFolderCreate(cl *client.Client, root syncengine.PackRoot, ck crypto.
 }
 
 // putPackFolderUpdate commits a new root over an existing pack folder. The sealed
-// metadata (the folder name and packed flag) is carried forward unchanged.
+// metadata (the folder name and packed flag) is carried forward unchanged;
+// metadata that predates id binding is re-sealed bound to the id once (create
+// seals before the server assigns the id).
 func putPackFolderUpdate(cl *client.Client, id string, root syncengine.PackRoot, ck crypto.ContentKey, mk crypto.MasterKey, meta crypto.SealedBlob, expectedVersion int) (api.PutResourceResponse, error) {
-	blob, err := syncengine.SealPackRoot(root, ck)
+	blob, err := syncengine.SealPackRoot(root, ck, id)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	metaBlob, err := resealMetaBound(meta, ck, id)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -455,7 +465,7 @@ func putPackFolderUpdate(cl *client.Client, id string, root syncengine.PackRoot,
 		return api.PutResourceResponse{}, err
 	}
 	return cl.PutResource(api.PutResourceRequest{
-		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: root.SegmentIDs(), ExpectedVersion: expectedVersion,
 	})
 }

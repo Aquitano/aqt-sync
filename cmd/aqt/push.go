@@ -77,6 +77,8 @@ func runPush(path string, opts pushOptions) error {
 		return err
 	}
 	defer ck.Wipe()
+	// A create's seals cannot bind the resource id: the server assigns it only in
+	// the PutResource response below. OpenBound's v1 fallback reads them.
 	blob, err := crypto.Seal(data, ck, crypto.AADBlob)
 	if err != nil {
 		return err
@@ -178,7 +180,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		return err
 	}
 
-	blob, err := syncengine.SealFileRoot(root, ck)
+	blob, err := syncengine.SealFileRoot(root, ck, "") // create: id not assigned yet
 	if err != nil {
 		return err
 	}

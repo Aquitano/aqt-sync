@@ -342,11 +342,11 @@ func TestTreeRootAADSeparation(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := TreeRoot{Version: TreeManifestVersion, Root: crypto.Chunk{ID: "abc", Key: make([]byte, crypto.KeySize), Len: 4}}
-	blob, err := SealTreeRoot(root, ck)
+	blob, err := SealTreeRoot(root, ck, "res1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenTreeRoot(blob, ck)
+	got, err := OpenTreeRoot(blob, ck, "res1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,5 +358,31 @@ func TestTreeRootAADSeparation(t *testing.T) {
 	// reading an empty tree and deleting everything.
 	if _, err := crypto.Open(blob, ck, crypto.AADBlob); err == nil {
 		t.Fatal("opening a TreeRoot blob under AADBlob must fail the AEAD check")
+	}
+}
+
+func TestTreeRootBoundToResourceID(t *testing.T) {
+	ck, err := crypto.GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := TreeRoot{Version: TreeManifestVersion, Root: crypto.Chunk{ID: "abc", Key: make([]byte, crypto.KeySize), Len: 4}}
+	blob, err := SealTreeRoot(root, ck, "res1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The record-swap case: a root sealed for one resource id served under another
+	// must fail the AEAD check even with the right key.
+	if _, err := OpenTreeRoot(blob, ck, "res2"); err == nil {
+		t.Fatal("a TreeRoot bound to one resource id must not open under another")
+	}
+	// Pre-binding roots (and init-time seals, before the server assigns the id)
+	// carry the unbound tag and must still open when fetched by id.
+	legacy, err := SealTreeRoot(root, ck, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenTreeRoot(legacy, ck, "res1"); err != nil {
+		t.Fatalf("an unbound TreeRoot must open via the v1 fallback: %v", err)
 	}
 }

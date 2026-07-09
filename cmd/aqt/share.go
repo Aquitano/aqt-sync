@@ -62,7 +62,7 @@ func runShare(idArg, password string, noClip bool) error {
 	defer ck.Wipe()
 	// A streamed file's objects live in the owner-only pack store, so a public reader
 	// could not fetch them even with the link key.
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
 	if err != nil {
 		return err
 	}
@@ -132,18 +132,18 @@ func runPrivate(idArg string) error {
 	// objects — unrecoverable loss. Such resources are private-only anyway (their
 	// objects are never publicly fetchable, and `share` already refuses streamed
 	// files), so there is no public link to rotate. Refuse rather than destroy.
-	meta, err := decodeMeta(res.EncryptedMeta, oldCK)
+	meta, err := decodeMeta(res.EncryptedMeta, oldCK, id)
 	if err != nil {
 		return err
 	}
 	if meta.Streamed || meta.Kind == api.KindFolder {
 		return errors.New("cannot rotate the key of a streamed file or tracked folder; it is private-only and has no public link to rotate")
 	}
-	plaintext, err := crypto.Open(res.Blob, oldCK, crypto.AADBlob)
+	plaintext, err := crypto.OpenBound(res.Blob, oldCK, crypto.AADBlob, id)
 	if err != nil {
 		return fmt.Errorf("decrypt: %w", err)
 	}
-	metaPlain, err := crypto.Open(res.EncryptedMeta, oldCK, crypto.AADMeta)
+	metaPlain, err := crypto.OpenBound(res.EncryptedMeta, oldCK, crypto.AADMeta, id)
 	if err != nil {
 		return fmt.Errorf("decrypt metadata: %w", err)
 	}
@@ -155,11 +155,11 @@ func runPrivate(idArg string) error {
 		return err
 	}
 	defer newCK.Wipe()
-	blob, err := crypto.Seal(plaintext, newCK, crypto.AADBlob)
+	blob, err := crypto.SealBound(plaintext, newCK, crypto.AADBlob, id)
 	if err != nil {
 		return err
 	}
-	metaBlob, err := crypto.Seal(metaPlain, newCK, crypto.AADMeta)
+	metaBlob, err := crypto.SealBound(metaPlain, newCK, crypto.AADMeta, id)
 	if err != nil {
 		return err
 	}

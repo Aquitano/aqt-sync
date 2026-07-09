@@ -195,6 +195,85 @@ func TestOpenRejectsWrongAAD(t *testing.T) {
 	}
 }
 
+func TestSealBoundRoundTrip(t *testing.T) {
+	ck, _ := GenerateContentKey()
+	plaintext := []byte("bound body")
+
+	blob, err := SealBound(plaintext, ck, AADBlob, "res-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := OpenBound(blob, ck, AADBlob, "res-a")
+	if err != nil {
+		t.Fatalf("matching id must open: %v", err)
+	}
+	if !bytes.Equal(got, plaintext) {
+		t.Fatalf("round trip mismatch: %q", got)
+	}
+}
+
+func TestOpenBoundRejectsWrongID(t *testing.T) {
+	ck, _ := GenerateContentKey()
+	// The record-swap detection: a blob sealed for one resource id must not open
+	// under another, even with the right key and role — a server moving a whole
+	// record (blob + meta + wrapped key) between ids fails here.
+	blob, err := SealBound([]byte("secret"), ck, AADBlob, "res-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBound(blob, ck, AADBlob, "res-b"); err == nil {
+		t.Fatal("a blob bound to one id must not open under another")
+	}
+	if _, err := OpenBound(blob, ck, AADMeta, "res-a"); err == nil {
+		t.Fatal("a bound blob must still not cross roles")
+	}
+	if _, err := Open(blob, ck, AADBlob); err == nil {
+		t.Fatal("a bound blob must not open under the unbound v1 tag")
+	}
+}
+
+func TestOpenBoundFallsBackToUnbound(t *testing.T) {
+	ck, _ := GenerateContentKey()
+	// Pre-binding blobs (and create-time seals, where the id does not exist yet)
+	// carry the plain v1 tag; OpenBound must still read them under any id.
+	legacy, err := Seal([]byte("legacy"), ck, AADMeta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := OpenBound(legacy, ck, AADMeta, "res-a"); err != nil {
+		t.Fatalf("v1 blob must open via fallback: %v", err)
+	}
+
+	// SealBound with an empty id is the create path and must equal a v1 seal.
+	createTime, err := SealBound([]byte("created"), ck, AADMeta, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(createTime, ck, AADMeta); err != nil {
+		t.Fatalf("empty-id seal must open under the v1 tag: %v", err)
+	}
+	if _, err := OpenBound(createTime, ck, AADMeta, "res-a"); err != nil {
+		t.Fatalf("empty-id seal must open when later fetched by id: %v", err)
+	}
+}
+
+func TestBoundAADDisjointAcrossRoles(t *testing.T) {
+	// The id-bound tags must stay disjoint per role and never collide with a v1
+	// tag, or the domain separation the roles exist for silently vanishes.
+	roles := [][]byte{AADBlob, AADMeta, AADSnapshotLabel, AADPack, AADPackRoot, AADTreeRoot}
+	seen := map[string]bool{}
+	for _, role := range roles {
+		seen[string(role)] = true
+	}
+	for _, role := range roles {
+		bound := string(BoundAAD(role, "res-a"))
+		if seen[bound] {
+			t.Fatalf("bound AAD %q collides", bound)
+		}
+		seen[bound] = true
+	}
+}
+
 func TestWrapUnwrapRoundTrip(t *testing.T) {
 	params, _ := NewKdfParams()
 	mk, err := DeriveMasterKey("master passphrase", params)

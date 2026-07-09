@@ -43,11 +43,11 @@ func TestFileRootRoundTrip(t *testing.T) {
 	}
 
 	root := FileRoot{Version: FileRootVersion, Size: size, Chunks: chunks}
-	blob, err := SealFileRoot(root, ck)
+	blob, err := SealFileRoot(root, ck, "res1")
 	if err != nil {
 		t.Fatalf("SealFileRoot: %v", err)
 	}
-	got, err := OpenFileRoot(blob, ck)
+	got, err := OpenFileRoot(blob, ck, "res1")
 	if err != nil {
 		t.Fatalf("OpenFileRoot: %v", err)
 	}
@@ -61,7 +61,7 @@ func TestFileRootRoundTrip(t *testing.T) {
 	}
 
 	other, _ := crypto.GenerateContentKey()
-	if _, err := OpenFileRoot(blob, other); err == nil {
+	if _, err := OpenFileRoot(blob, other, "res1"); err == nil {
 		t.Fatal("OpenFileRoot accepted a wrong key")
 	}
 }

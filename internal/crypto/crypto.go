@@ -286,8 +286,9 @@ type WrappedKey struct {
 // check. This domain-separates the structurally-identical SealedBlob/WrappedKey so
 // a hostile server cannot reinterpret one field as another — e.g. move a resource
 // blob into the wrappedKey slot, or swap a body blob for its metadata blob (both
-// sealed under the same content key). Binding the resource id as well is a future
-// step: the id is server-assigned and unknown when the client seals on create.
+// sealed under the same content key). SealBound/OpenBound additionally bind the
+// resource id when it is known, so a whole record (blob + meta + wrapped key)
+// served under a different id fails the tag check too.
 var (
 	AADBlob          = []byte("aqt-blob-v1")      // resource body (file bytes or chunked-folder manifest root)
 	AADMeta          = []byte("aqt-meta-v1")      // resource metadata
@@ -328,6 +329,45 @@ func Open(blob SealedBlob, ck ContentKey, aad []byte) ([]byte, error) {
 		return nil, errors.New("invalid nonce length")
 	}
 	return aead.Open(nil, blob.Nonce, blob.Ciphertext, aad)
+}
+
+// BoundAAD is the id-bound (v2) form of a v1 role tag: "aqt-blob-v1" plus id
+// "abc" becomes "aqt-blob-v2:abc". The version bump keeps it disjoint from every
+// v1 tag; the id makes the ciphertext openable only under the id it was stored
+// for. Exposed for callers that need to distinguish a bound blob from a legacy
+// one (e.g. to upgrade the latter in place); sealing goes through SealBound.
+func BoundAAD(role []byte, resourceID string) []byte {
+	base, ok := strings.CutSuffix(string(role), "-v1")
+	if !ok {
+		panic("crypto: AAD role tag without -v1 suffix: " + string(role))
+	}
+	return []byte(base + "-v2:" + resourceID)
+}
+
+// SealBound is Seal with the resource id bound into the additional data, so the
+// ciphertext only opens under the id it is stored under and a server swapping
+// whole records between ids is detected. An empty id seals with the plain role
+// tag: on create the id is server-assigned and does not exist yet, so a create
+// seal is unbound until the resource is next re-sealed (e.g. a folder sync).
+func SealBound(plaintext []byte, ck ContentKey, role []byte, resourceID string) (SealedBlob, error) {
+	if resourceID == "" {
+		return Seal(plaintext, ck, role)
+	}
+	return Seal(plaintext, ck, BoundAAD(role, resourceID))
+}
+
+// OpenBound reverses SealBound, falling back to the unbound v1 role tag so
+// pre-binding blobs and create-time seals still open. The fallback means a server
+// can strip the binding by serving an unbound blob (it cannot forge one — the key
+// is still required); the binding therefore detects record swaps between ids for
+// any blob sealed with the id in hand, not a deliberate downgrade.
+func OpenBound(blob SealedBlob, ck ContentKey, role []byte, resourceID string) ([]byte, error) {
+	if resourceID != "" {
+		if plain, err := Open(blob, ck, BoundAAD(role, resourceID)); err == nil {
+			return plain, nil
+		}
+	}
+	return Open(blob, ck, role)
 }
 
 // WrapKey encrypts a content key under a 32-byte wrapping key (the master key),

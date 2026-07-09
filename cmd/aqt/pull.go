@@ -88,7 +88,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force)
 	}
 
-	meta, err := decodeMeta(res.EncryptedMeta, ck)
+	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return pullStream(cl, res, ck, out, meta, toStdout, force)
 	}
 
-	plaintext, err := crypto.Open(res.Blob, ck, crypto.AADBlob)
+	plaintext, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, id)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
@@ -110,7 +110,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 // pullStream reconstructs a streamed file from its objects, writing chunks to the
 // destination as they are fetched so the whole file is never held in memory.
 func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, toStdout, force bool) error {
-	root, err := syncengine.OpenFileRoot(res.Blob, ck)
+	root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
@@ -270,8 +270,8 @@ func parseRef(ref string) (id, fragment, origin string) {
 // correct, so a failure means corruption (or a blob/meta mix-up), and treating it as
 // a default (unpacked, unstreamed) resource silently misroutes the resource — e.g.
 // cloning a pack-and-seal folder through the chunked path and writing nothing.
-func decodeMeta(blob crypto.SealedBlob, ck crypto.ContentKey) (api.Metadata, error) {
-	plain, err := crypto.Open(blob, ck, crypto.AADMeta)
+func decodeMeta(blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string) (api.Metadata, error) {
+	plain, err := crypto.OpenBound(blob, ck, crypto.AADMeta, resourceID)
 	if err != nil {
 		return api.Metadata{}, fmt.Errorf("decrypt metadata: %w", err)
 	}

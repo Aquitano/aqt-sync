@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -9,7 +8,6 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 func infoCmd() *cobra.Command {
@@ -51,13 +49,10 @@ func runInfo(ref, password string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	metaPlain, err := crypto.Open(res.EncryptedMeta, ck, crypto.AADMeta)
+	defer ck.Wipe()
+	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
-		return fmt.Errorf("decrypt metadata failed (wrong key or corrupted): %w", err)
-	}
-	var meta api.Metadata
-	if err := json.Unmarshal(metaPlain, &meta); err != nil {
-		return fmt.Errorf("parse metadata: %w", err)
+		return err
 	}
 
 	kind := meta.Kind
