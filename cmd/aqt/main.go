@@ -25,7 +25,7 @@ const defaultServer = "http://localhost:8080"
 
 // version is reported by `aqt --version` / `-V`, overridable at build time via
 // -ldflags "-X main.version=...".
-var version = "0.1.0-dev"
+var version = "0.2.0-dev"
 
 // defaultSessionTTL bounds how long the unlocked master key stays cached after a
 // passphrase prompt. `aqt login --ttl` overrides it; `aqt logout` clears it.
