@@ -110,9 +110,15 @@ func pathExists(root, rel string) bool {
 }
 
 // conflictHost is the sanitized hostname stamped into a conflict-copy name, so a copy
-// made on one machine reads as "the version from <host>".
+// made on one machine reads as "the version from <host>". AQT_CONFLICT_HOST overrides
+// the OS hostname, so a device with an unstable or duplicate hostname can pin a stable,
+// distinct identity (two devices that share a hostname would otherwise mint colliding
+// copy names for the same concurrently-edited path).
 func conflictHost() string {
-	name, _ := os.Hostname()
+	name := os.Getenv("AQT_CONFLICT_HOST")
+	if name == "" {
+		name, _ = os.Hostname()
+	}
 	return sanitizeHost(name)
 }
 
