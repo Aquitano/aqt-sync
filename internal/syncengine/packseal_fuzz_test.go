@@ -38,6 +38,18 @@ func seedTar(f *testing.F) {
 	_ = sw.Close()
 	f.Add(sl.Bytes())
 
+	// A relative symlink escape targets a sibling of dest, so a write that slips
+	// through the symlink-parent guard lands inside the scratch dir where the
+	// containment walk can actually observe it (an absolute target like /etc fails
+	// silently on permissions instead).
+	var rel bytes.Buffer
+	rw := tar.NewWriter(&rel)
+	_ = rw.WriteHeader(&tar.Header{Name: "up", Typeflag: tar.TypeSymlink, Linkname: "../outside", Mode: 0o777, ModTime: time.Unix(0, 0)})
+	_ = rw.WriteHeader(&tar.Header{Name: "up/leak.txt", Typeflag: tar.TypeReg, Mode: 0o644, Size: 1, ModTime: time.Unix(0, 0)})
+	_, _ = rw.Write([]byte("z"))
+	_ = rw.Close()
+	f.Add(rel.Bytes())
+
 	f.Add([]byte{})
 }
 
