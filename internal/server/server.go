@@ -232,6 +232,7 @@ func (s *Server) Router() *gin.Engine {
 			authed.POST("/snapshots", limitBody(maxControlBody), s.createSnapshot)
 			authed.GET("/snapshots", s.listSnapshots)
 			authed.GET("/snapshots/:id", s.getSnapshot)
+			authed.POST("/snapshots/:id/anchor", limitBody(maxControlBody), s.setSnapshotAnchor)
 			authed.DELETE("/snapshots/:id", s.deleteSnapshot)
 			authed.POST("/resources/:id/auto-snapshot", limitBody(maxControlBody), s.setAutoSnapshot)
 		}
@@ -770,7 +771,7 @@ func (s *Server) createSnapshot(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "resourceId is required")
 		return
 	}
-	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel)
+	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel, req.Anchor)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
 		return
@@ -780,6 +781,24 @@ func (s *Server) createSnapshot(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, info)
+}
+
+func (s *Server) setSnapshotAnchor(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.SetSnapshotAnchorRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	info, err := s.store.SetSnapshotAnchor(owner, c.Param("id"), req.Anchored)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "update failed")
+		return
+	}
+	c.JSON(http.StatusOK, info)
 }
 
 func (s *Server) listSnapshots(c *gin.Context) {
@@ -816,6 +835,13 @@ func (s *Server) deleteSnapshot(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	if err := s.store.DeleteSnapshot(owner, c.Param("id")); errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
+		return
+	} else if errors.Is(err, ErrSnapshotAnchored) {
+		c.AbortWithStatusJSON(http.StatusConflict, api.ErrorResponse{
+			Error: "snapshot is anchored and protected from pruning; run `aqt snapshot anchor " +
+				c.Param("id") + " --remove` first",
+			Code: api.ErrCodeSnapshotAnchored,
+		})
 		return
 	} else if err != nil {
 		abort(c, http.StatusInternalServerError, "delete snapshot failed")

@@ -51,7 +51,12 @@ aqt clone --adopt <folder-id> ~/vault
 
 `aqt <path>` with no subcommand is shorthand for `aqt push <path>`. Run `aqt --help`
 for the full command set (`ls`, `find`, `cat`, `share`, `private`, `snapshot`,
-`watch`, `devices`, `passphrase`, …).
+`checkpoint`, `restore`, `watch`, `devices`, `passphrase`, …).
+
+`aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes,
+and `aqt restore <name>` rolls the tracked folder back to it (in place by default,
+`--into <dir>` for side-by-side). The name is sealed on this machine like any snapshot
+label. Anchor or unanchor an existing snapshot with `aqt snapshot anchor <id> [--remove]`.
 
 The client refuses to send its bearer token over plain HTTP to any non-loopback
 host, so an offsite server must serve HTTPS. `http://localhost:8080` is exempted for

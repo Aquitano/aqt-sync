@@ -44,6 +44,12 @@ var ErrDropsRoots = errors.New("replace drops all chunk roots")
 // past the configured quota. Handlers map it to 507; the client surfaces it clearly.
 var ErrQuotaExceeded = errors.New("storage quota exceeded")
 
+// ErrSnapshotAnchored is returned when a delete targets an anchored snapshot. Anchors
+// exist precisely so retention (and an accidental explicit prune) cannot drop a pinned
+// checkpoint, so the store refuses the delete rather than trusting the client to skip
+// it. Handlers map it to 409 with the anchored error code.
+var ErrSnapshotAnchored = errors.New("snapshot is anchored")
+
 // ErrGone is returned when a public link has expired, reached its read limit, or had
 // its ciphertext reclaimed. Handlers map it to 410 so a link holder learns the link is
 // dead rather than seeing an indistinguishable 404. Distinct from ErrNotFound so the
@@ -354,6 +360,13 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	 ALTER TABLE resources ADD COLUMN reads INTEGER NOT NULL DEFAULT 0;
 	 ALTER TABLE resources ADD COLUMN exhausted_at INTEGER;
 	 ALTER TABLE resources ADD COLUMN reclaimed INTEGER NOT NULL DEFAULT 0;`,
+	// 11: an anchor pins a snapshot against every retention path (the scheduled job's
+	// prune, the client's --keep-last/--older-than selection, and an explicit prune,
+	// which the store refuses). Like `scheduled`, it is a plaintext server-side boolean
+	// so retention can act on it without a key; it leaks only "this snapshot is
+	// protected", the same shape of leak as scheduled, while the name stays sealed.
+	// Pre-existing rows default to unanchored.
+	`ALTER TABLE snapshots ADD COLUMN anchored INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -1331,14 +1344,16 @@ func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
 // CreateSnapshot pins the owner's current version of a resource, returning the new
 // snapshot's metadata. It is keyless: it copies the already-sealed blob and the
 // existing chunk roots, decrypting nothing. label, when non-nil, is the client-
-// sealed user label stored opaquely alongside.
-func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
-	return s.createSnapshot(owner, resourceID, label, false)
+// sealed user label stored opaquely alongside. anchor pins the snapshot against
+// retention (see `aqt checkpoint`).
+func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob, anchor bool) (api.SnapshotInfo, error) {
+	return s.createSnapshot(owner, resourceID, label, false, anchor)
 }
 
 // createSnapshot is CreateSnapshot plus the scheduled marker: the scheduled job's
 // snapshots are tagged so retention can prune them without touching manual ones.
-func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled bool) (api.SnapshotInfo, error) {
+// anchored pins the snapshot against every retention path.
+func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled, anchored bool) (api.SnapshotInfo, error) {
 	// Serialize against a concurrent update/delete of the same resource so the
 	// snapshot copies a consistent (blob, chunk-roots) pair, not a torn mix of two
 	// versions. Held in the store so the keyless scheduled job is serialized too, not
@@ -1396,15 +1411,19 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	if scheduled {
 		sched = 1
 	}
+	anchor := 0
+	if anchored {
+		anchor = 1
+	}
 	createdAt := time.Now().Unix()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled, min_client)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched, minClient,
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled, min_client, anchored)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched, minClient, anchor,
 	); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -1427,7 +1446,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	}
 	committed = true
 
-	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label}
+	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
 		return api.SnapshotInfo{}, err
 	}
@@ -1437,7 +1456,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 // ListSnapshots returns the owner's snapshots, newest first. A non-empty
 // resourceID restricts the list to one resource's history.
 func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, error) {
-	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key
+	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored
 	          FROM snapshots WHERE owner_handle = ?`
 	args := []any{owner}
 	if resourceID != "" {
@@ -1459,7 +1478,7 @@ func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, err
 			labelJSON   sql.NullString
 			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON); err != nil {
+		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored); err != nil {
 			return nil, err
 		}
 		if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
@@ -1487,9 +1506,9 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 	info := api.SnapshotInfo{ID: snapshotID}
 	var minClient int
 	err := s.rdb.QueryRow(
-		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, min_client
+		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, min_client, anchored
 		 FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
-	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &nonce, &minClient)
+	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &nonce, &minClient, &info.Anchored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -1516,15 +1535,24 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 // live resource or other snapshot still roots become unreferenced and are reclaimed
 // by a later GC sweep/repack; the snapshot's own blob copy is dropped here.
 func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
-	var nonce []byte
+	var (
+		nonce    []byte
+		anchored bool
+	)
 	err := s.db.QueryRow(
-		`SELECT blob_nonce FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
-	).Scan(&nonce)
+		`SELECT blob_nonce, anchored FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
+	).Scan(&nonce, &anchored)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
 	if err != nil {
 		return err
+	}
+	// Refuse in the store, not just the client: the anchor is the durable guarantee a
+	// checkpoint is not pruned, so it must hold against any caller, including a stale
+	// client that never learned the snapshot was anchored.
+	if anchored {
+		return ErrSnapshotAnchored
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1572,6 +1600,46 @@ func snapshotChunkIDs(tx *sql.Tx, snapshotID string) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// SetSnapshotAnchor sets a snapshot's anchor flag and returns the updated metadata so
+// the client can verify the new state (an older server that lacks the column would
+// echo the old value, which the client treats as a hard error). Owner-checked;
+// ErrNotFound if no such snapshot belongs to the owner.
+func (s *Store) SetSnapshotAnchor(owner, snapshotID string, anchored bool) (api.SnapshotInfo, error) {
+	v := 0
+	if anchored {
+		v = 1
+	}
+	res, err := s.db.Exec(
+		`UPDATE snapshots SET anchored = ? WHERE snapshot_id = ? AND owner_handle = ?`, v, snapshotID, owner,
+	)
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return api.SnapshotInfo{}, ErrNotFound
+	}
+
+	info := api.SnapshotInfo{ID: snapshotID}
+	var (
+		metaJSON    string
+		labelJSON   sql.NullString
+		wrappedJSON sql.NullString
+	)
+	if err := s.db.QueryRow(
+		`SELECT resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored
+		 FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
+	).Scan(&info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored); err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	if info.EncryptedLabel, err = decodeLabel(labelJSON); err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	return info, nil
 }
 
 // SetAutoSnapshot toggles whether the scheduled job covers a resource (the per-root
@@ -1636,7 +1704,7 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 	created := 0
 	var firstErr error
 	for _, r := range due {
-		if _, err := s.createSnapshot(r.owner, r.id, nil, true); err != nil {
+		if _, err := s.createSnapshot(r.owner, r.id, nil, true, false); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("auto-snapshot %s: %w", r.id, err)
 			}
@@ -1655,12 +1723,16 @@ func (s *Store) PruneAutoSnapshots(keepLast int) (int, error) {
 	if keepLast <= 0 {
 		return 0, nil
 	}
+	// Anchored snapshots sit outside the retention universe entirely: the outer
+	// s.anchored = 0 never selects one for pruning, and the inner n.anchored = 0 keeps
+	// an anchored snapshot from consuming a keep-last slot, so it neither ages out nor
+	// pushes an unanchored snapshot out of the window.
 	rows, err := s.db.Query(
 		`SELECT snapshot_id, owner_handle FROM snapshots s
-		 WHERE s.scheduled = 1
+		 WHERE s.scheduled = 1 AND s.anchored = 0
 		   AND (SELECT COUNT(*) FROM snapshots n
 		        WHERE n.owner_handle = s.owner_handle AND n.resource_id = s.resource_id
-		          AND n.scheduled = 1
+		          AND n.scheduled = 1 AND n.anchored = 0
 		          AND (n.created_at > s.created_at
 		               OR (n.created_at = s.created_at AND n.snapshot_id > s.snapshot_id))) >= ?`,
 		keepLast,

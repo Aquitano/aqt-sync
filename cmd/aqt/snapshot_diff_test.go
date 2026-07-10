@@ -84,7 +84,7 @@ func TestSnapshotDiffAgainstLive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := cl.CreateSnapshot(h.folderID(src), nil)
+	snap, err := cl.CreateSnapshot(h.folderID(src), nil, false)
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := cl.CreateSnapshot(h.folderID(src), nil)
+	first, err := cl.CreateSnapshot(h.folderID(src), nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
 	writeTree(t, src, "a.txt", "v2")
 	writeTree(t, src, "d.txt", "added later")
 	h.sync(src)
-	second, err := cl.CreateSnapshot(h.folderID(src), nil)
+	second, err := cl.CreateSnapshot(h.folderID(src), nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

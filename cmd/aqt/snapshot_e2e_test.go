@@ -25,7 +25,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := cl.CreateSnapshot(h.folderID(src), nil)
+	snap, err := cl.CreateSnapshot(h.folderID(src), nil, false)
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestSnapshotLabelEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal label: %v", err)
 	}
-	if _, err := cl.CreateSnapshot(rid, sealed); err != nil {
+	if _, err := cl.CreateSnapshot(rid, sealed, false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestSnapshotPrune(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := cl.CreateSnapshot(h.folderID(src), nil)
+	snap, err := cl.CreateSnapshot(h.folderID(src), nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

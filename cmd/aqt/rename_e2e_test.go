@@ -97,7 +97,7 @@ func TestSnapshotDiffRename(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := cl.CreateSnapshot(h.folderID(src), nil)
+	snap, err := cl.CreateSnapshot(h.folderID(src), nil, false)
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}

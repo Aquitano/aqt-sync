@@ -119,7 +119,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 
 	// Default rm: the snapshot survives, so the ciphertext is still retained.
 	kept := push("keep.env", "SECRET=1")
-	if _, err := cl.CreateSnapshot(kept, nil); err != nil {
+	if _, err := cl.CreateSnapshot(kept, nil, false); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 	if err := runRemove([]string{kept}, false); err != nil {
@@ -131,7 +131,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 
 	// --with-snapshots: the cascade deletes the snapshot too.
 	cascade := push("cascade.env", "SECRET=2")
-	if _, err := cl.CreateSnapshot(cascade, nil); err != nil {
+	if _, err := cl.CreateSnapshot(cascade, nil, false); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
 	if err := runRemove([]string{cascade}, true); err != nil {
