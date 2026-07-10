@@ -133,6 +133,10 @@ func (s *Server) publicObjects(c *gin.Context) {
 		abort(c, http.StatusNotFound, "not found")
 		return
 	}
+	if errors.Is(err, ErrGone) {
+		abortGone(c)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "locate failed")
 		return

@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -31,10 +32,16 @@ type pushOptions struct {
 	noClip   bool
 	quiet    bool
 	json     bool
+	policy   linkPolicy
 }
 
 func pushCmd() *cobra.Command {
-	var opts pushOptions
+	var (
+		opts     pushOptions
+		expire   string
+		maxReads int64
+		burn     bool
+	)
 	cmd := &cobra.Command{
 		Use:   "push <path|->",
 		Short: "Encrypt and upload a file (private by default)",
@@ -44,6 +51,16 @@ func pushCmd() *cobra.Command {
 			if opts.password != "" {
 				opts.public = true
 			}
+			policy, err := resolveLinkPolicy(expire, maxReads, burn)
+			if err != nil {
+				return err
+			}
+			// Lifecycle is a property of a public link; require an explicit --public/-P
+			// rather than silently minting one.
+			if policy.requested() && !opts.public {
+				return errors.New("--expire/--max-reads/--burn require --public (or -P)")
+			}
+			opts.policy = policy
 			return runPush(args[0], opts)
 		},
 	}
@@ -52,6 +69,9 @@ func pushCmd() *cobra.Command {
 	f.StringVarP(&opts.password, "password", "P", "", "password-gate a public link (implies --public)")
 	f.StringVarP(&opts.name, "name", "n", "", "label shown in `aqt ls` (encrypted)")
 	f.BoolVar(&opts.noClip, "no-clip", false, "do not copy the result to the clipboard")
+	f.StringVar(&expire, "expire", "", "expire the public link after a duration (e.g. 30m, 24h, 7d)")
+	f.Int64Var(&maxReads, "max-reads", 0, "expire the public link after this many downloads")
+	f.BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
 	return cmd
 }
 
@@ -98,6 +118,8 @@ func runPush(path string, opts pushOptions) error {
 	req := api.PutResourceRequest{Blob: blob, EncryptedMeta: metaBlob, MinClient: api.CapabilityBaseline}
 	if opts.public || opts.password != "" {
 		req.Visibility = api.Public
+		req.ExpireSeconds = opts.policy.expireSeconds
+		req.MaxReads = opts.policy.maxReads
 	} else {
 		req.Visibility = api.Private
 	}
@@ -118,6 +140,9 @@ func runPush(path string, opts pushOptions) error {
 
 	resp, err := cl.PutResource(req)
 	if err != nil {
+		return err
+	}
+	if err := confirmPolicy(cl, resp, opts.policy); err != nil {
 		return err
 	}
 
@@ -203,8 +228,11 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	}
 
 	visibility := api.Private
+	var expireSeconds, maxReads int64
 	if opts.public || opts.password != "" {
 		visibility = api.Public
+		expireSeconds = opts.policy.expireSeconds
+		maxReads = opts.policy.maxReads
 	}
 
 	resp, err := cl.PutResource(api.PutResourceRequest{
@@ -214,8 +242,13 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		WrappedKey:    &wrapped,
 		ChunkRefs:     refs,
 		MinClient:     api.CapabilityBaseline, // create seals the FileRoot unbound (id not assigned yet)
+		ExpireSeconds: expireSeconds,
+		MaxReads:      maxReads,
 	})
 	if err != nil {
+		return err
+	}
+	if err := confirmPolicy(cl, resp, opts.policy); err != nil {
 		return err
 	}
 	ref, err := buildRef(prof.Server, resp.ID, visibility, ck, opts.password)
@@ -223,6 +256,17 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
 	printResult(resp.ID, ref, name, size, visibility, opts)
+	return nil
+}
+
+// confirmPolicy fails closed when a requested lifecycle policy was not enforced by the
+// server, deleting the just-created resource so a link is never handed out for content
+// the server will not actually expire. A no-policy push is a no-op.
+func confirmPolicy(cl *client.Client, resp api.PutResourceResponse, policy linkPolicy) error {
+	if err := verifyPolicyEcho(policy, resp); err != nil {
+		_ = cl.DeleteResource(resp.ID)
+		return err
+	}
 	return nil
 }
 

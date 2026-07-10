@@ -90,6 +90,9 @@ func (s *publicChunkSource) fetchBatch(start int) error {
 	batch := s.ids[start:end]
 	frames, err := s.cl.PublicObjects(s.resourceID, batch)
 	if err != nil {
+		if errors.Is(err, client.ErrGone) {
+			return fmt.Errorf("this link has expired or reached its read limit: %w", err)
+		}
 		if errors.Is(err, client.ErrNotFound) {
 			return errors.New("public objects unavailable: the resource is no longer public, or the server predates public streamed sharing")
 		}

@@ -17,21 +17,31 @@ func shareCmd() *cobra.Command {
 	var (
 		password string
 		noClip   bool
+		expire   string
+		maxReads int64
+		burn     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "share <id>",
 		Short: "Make a private resource public and print a share link",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runShare(args[0], password, noClip)
+			policy, err := resolveLinkPolicy(expire, maxReads, burn)
+			if err != nil {
+				return err
+			}
+			return runShare(args[0], password, noClip, policy)
 		},
 	}
 	cmd.Flags().StringVarP(&password, "password", "P", "", "password-gate the share link")
 	cmd.Flags().BoolVar(&noClip, "no-clip", false, "do not copy the link to the clipboard")
+	cmd.Flags().StringVar(&expire, "expire", "", "expire the link after a duration (e.g. 30m, 24h, 7d)")
+	cmd.Flags().Int64Var(&maxReads, "max-reads", 0, "expire the link after this many downloads")
+	cmd.Flags().BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
 	return cmd
 }
 
-func runShare(idArg, password string, noClip bool) error {
+func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
@@ -69,8 +79,21 @@ func runShare(idArg, password string, noClip bool) error {
 	if meta.Kind == api.KindFolder {
 		return errors.New("sharing a whole folder publicly is not supported yet")
 	}
-	if res.Visibility != api.Public {
-		if _, err := cl.SetVisibility(id, api.Public); err != nil {
+	// Always call SetVisibility when a policy is requested, even if the resource is
+	// already public, so the policy is applied (and the read counter reset). A plain
+	// re-share of an already-public resource still skips the call.
+	wasPublic := res.Visibility == api.Public
+	if !wasPublic || policy.requested() {
+		resp, err := cl.SetVisibility(id, api.Public, policy.expireSeconds, policy.maxReads)
+		if err != nil {
+			return err
+		}
+		if err := verifyPolicyEcho(policy, resp); err != nil {
+			// Fail closed: undo the flip only if this call made it public, so a
+			// previously-public link is not silently revoked by a failed policy add.
+			if !wasPublic {
+				_, _ = cl.SetVisibility(id, api.Private, 0, 0)
+			}
 			return err
 		}
 	}

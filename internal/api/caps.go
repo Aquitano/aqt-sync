@@ -23,3 +23,7 @@ const CapabilityHeader = "X-Aqt-Capability"
 // ErrCodeUpgradeRequired is the stable ErrorResponse.Code the server returns with an
 // HTTP 426 when a resource's declared min_client exceeds the requester's capability.
 const ErrCodeUpgradeRequired = "upgrade_required"
+
+// ErrCodeGone is the stable ErrorResponse.Code the server returns with an HTTP 410
+// when a public link has expired, reached its read limit, or been reclaimed.
+const ErrCodeGone = "gone"
