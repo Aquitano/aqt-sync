@@ -310,6 +310,11 @@ type SnapshotInfo struct {
 	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
 	EncryptedMeta  crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey     *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	// Anchored marks a snapshot retention must never prune. It is a plaintext
+	// server-side flag (like the scheduled marker): retention acts on it without a
+	// key, and it leaks only "this snapshot is protected" — the same shape of leak as
+	// scheduled — while the name stays sealed in EncryptedLabel.
+	Anchored bool `json:"anchored,omitempty"`
 }
 
 // CreateSnapshotRequest pins the current version of a resource the caller owns.
@@ -320,6 +325,15 @@ type SnapshotInfo struct {
 type CreateSnapshotRequest struct {
 	ResourceID     string             `json:"resourceId"`
 	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
+	// Anchor pins the new snapshot against retention (see SnapshotInfo.Anchored). Set
+	// by `aqt checkpoint`; a plain `snapshot create` leaves it false.
+	Anchor bool `json:"anchor,omitempty"`
+}
+
+// SetSnapshotAnchorRequest toggles a snapshot's anchor: an anchored snapshot is
+// exempt from every retention path and cannot be pruned until unanchored.
+type SetSnapshotAnchorRequest struct {
+	Anchored bool `json:"anchored"`
 }
 
 type ListSnapshotsResponse struct {

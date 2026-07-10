@@ -73,7 +73,7 @@ func TestSnapshotFindIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("seal label: %v", err)
 	}
-	if _, err := cl.CreateSnapshot(rid, sealed); err != nil {
+	if _, err := cl.CreateSnapshot(rid, sealed, false); err != nil {
 		t.Fatalf("create: %v", err)
 	}
 

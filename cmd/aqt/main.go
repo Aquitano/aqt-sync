@@ -118,7 +118,7 @@ func rootCmd() *cobra.Command {
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
-	root.AddCommand(snapshotCmd())
+	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 
 	// root.Version makes cobra print the version when the flag is set; we register
 	// the flag ourselves so it carries the documented -V shorthand (cobra's own

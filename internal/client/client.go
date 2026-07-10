@@ -54,6 +54,19 @@ func (e *UpgradeRequiredError) Error() string { return e.Message }
 // Is lets errors.Is(err, ErrUpgradeRequired) match any UpgradeRequiredError.
 func (e *UpgradeRequiredError) Is(target error) bool { return target == ErrUpgradeRequired }
 
+// ErrSnapshotAnchored maps a 409 carrying the anchored error code: the prune targeted
+// an anchored snapshot. Callers test errors.Is(err, ErrSnapshotAnchored); the concrete
+// SnapshotAnchoredError carries the server's message naming the unanchor escape hatch.
+var ErrSnapshotAnchored = errors.New("snapshot is anchored")
+
+// SnapshotAnchoredError is the anchored-prune 409 mapping. Message is the server's
+// human-actionable text (printed verbatim).
+type SnapshotAnchoredError struct{ Message string }
+
+func (e *SnapshotAnchoredError) Error() string { return e.Message }
+
+func (e *SnapshotAnchoredError) Is(target error) bool { return target == ErrSnapshotAnchored }
+
 type Client struct {
 	baseURL string
 	token   string
@@ -356,10 +369,20 @@ func (c *Client) GC() (api.GCResponse, error) {
 // CreateSnapshot pins the current version of a resource the caller owns, returning
 // the new snapshot's metadata. label, when non-nil, is the client-sealed user label
 // stored opaquely alongside (the client does the sealing; this package holds no
-// keys).
-func (c *Client) CreateSnapshot(resourceID string, label *crypto.SealedBlob) (api.SnapshotInfo, error) {
+// keys). anchor pins the snapshot against retention.
+func (c *Client) CreateSnapshot(resourceID string, label *crypto.SealedBlob, anchor bool) (api.SnapshotInfo, error) {
 	var r api.SnapshotInfo
-	err := c.do(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, EncryptedLabel: label}, &r)
+	err := c.do(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, EncryptedLabel: label, Anchor: anchor}, &r)
+	return r, err
+}
+
+// SetSnapshotAnchor toggles a snapshot's anchor and returns the updated metadata, so
+// the caller can verify the server honored the change (an older server that ignores
+// the field echoes the old state, which the caller treats as a hard error).
+func (c *Client) SetSnapshotAnchor(id string, anchored bool) (api.SnapshotInfo, error) {
+	var r api.SnapshotInfo
+	err := c.do(http.MethodPost, "/v1/snapshots/"+url.PathEscape(id)+"/anchor",
+		api.SetSnapshotAnchorRequest{Anchored: anchored}, &r)
 	return r, err
 }
 
@@ -593,6 +616,12 @@ func statusError(status int, path string, body []byte) error {
 	case status == http.StatusNotFound:
 		return ErrNotFound
 	case status == http.StatusConflict:
+		// An anchored-prune 409 carries a distinct code and an actionable message; a
+		// plain 409 is a version conflict.
+		var e api.ErrorResponse
+		if json.Unmarshal(body, &e) == nil && e.Code == api.ErrCodeSnapshotAnchored {
+			return &SnapshotAnchoredError{Message: e.Error}
+		}
 		return ErrConflict
 	case status == http.StatusGone:
 		return ErrGone
