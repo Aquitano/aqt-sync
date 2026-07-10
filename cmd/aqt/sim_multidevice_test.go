@@ -40,10 +40,10 @@ func TestMultiDeviceSim(t *testing.T) {
 }
 
 const (
-	simDevices  = 3
-	simSteps    = 40
-	simQuiesce  = 8 // convergence must be reached within this many all-sync rounds
-	simMaxCopyK = 3 // a crash aborts the connection on the 1st..Kth request of a sync
+	simDevices   = 3
+	simSteps     = 40
+	simQuiesce   = 8 // convergence must be reached within this many all-sync rounds
+	simMaxCrashK = 3 // a crash aborts the connection on the 1st..Kth request of a sync
 )
 
 // simSeeds returns the fixed seed set, or the single AQT_SIM_SEED override.
@@ -359,7 +359,7 @@ func (s *sim) doSync(step int, d *simDevice) {
 // the device's unchanged local edits against the server regardless of how far the
 // aborted attempt got, so the converged result is the same either way.
 func (s *sim) doCrashSync(step int, d *simDevice) {
-	k := s.rng.Intn(simMaxCopyK) + 1
+	k := s.rng.Intn(simMaxCrashK) + 1
 	s.fault.arm(k)
 	crashErr := runSync(d.dir, copyOpts())
 	s.fault.disarm()
