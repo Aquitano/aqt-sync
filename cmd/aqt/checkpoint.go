@@ -53,7 +53,10 @@ func checkpointCmd() *cobra.Command {
 			// unanchored (prunable) snapshot, which would be a checkpoint in name only. Drop
 			// it best-effort so no half-checkpoint lingers, and report the server is too old.
 			if !info.Anchored {
-				_ = cl.DeleteSnapshot(info.ID)
+				if delErr := cl.DeleteSnapshot(info.ID); delErr != nil {
+					return fmt.Errorf("server did not anchor the checkpoint (it is too old to support anchors), "+
+						"and the unanchored snapshot %s could not be cleaned up (%v); prune it manually and upgrade the server", info.ID, delErr)
+				}
 				return errors.New("server did not anchor the checkpoint (it is too old to support anchors); nothing was kept — upgrade the server")
 			}
 			if flagJSON {
