@@ -1026,7 +1026,7 @@ func TestPackCountersStayConsistent(t *testing.T) {
 	// the snapshot, c flips live.
 	id := put("", 0, []string{ids1[0], ids1[1]})
 	s.assertPackCounters(t, owner)
-	snap, err := s.CreateSnapshot(owner, id, nil)
+	snap, err := s.CreateSnapshot(owner, id, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

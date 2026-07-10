@@ -46,7 +46,7 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	}
 
 	rid := s.rootResource(t, owner, []string{idsA[0]})
-	snap, err := s.CreateSnapshot(owner, rid, nil)
+	snap, err := s.CreateSnapshot(owner, rid, nil, false)
 	if err != nil {
 		t.Fatalf("create snapshot: %v", err)
 	}
@@ -105,7 +105,7 @@ func TestSnapshotSurvivesResourceDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
-	snap, err := s.CreateSnapshot(owner, rid, nil)
+	snap, err := s.CreateSnapshot(owner, rid, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +191,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	rid := s.rootResource(t, owner, []string{ids[0]})
 
 	// A manual snapshot at v1 that retention must never touch.
-	manual, err := s.CreateSnapshot(owner, rid, nil)
+	manual, err := s.CreateSnapshot(owner, rid, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,6 +241,105 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	}
 }
 
+// Anchoring protects a snapshot from an explicit delete and round-trips through the
+// read paths; removing the anchor makes it prunable again.
+func TestSnapshotAnchorRefusesDelete(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "anchor@example.com")
+	pack, data, ids := packOf("obj")
+	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	rid := s.rootResource(t, owner, []string{ids[0]})
+
+	// A checkpoint (anchored at creation) is reported anchored everywhere it is read.
+	snap, err := s.CreateSnapshot(owner, rid, nil, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Anchored {
+		t.Fatal("CreateSnapshot(anchor=true) returned Anchored=false")
+	}
+	if got, _ := s.GetSnapshot(owner, snap.ID); !got.Snapshot.Anchored {
+		t.Fatal("GetSnapshot lost the anchor")
+	}
+	if list, _ := s.ListSnapshots(owner, rid); len(list) != 1 || !list[0].Anchored {
+		t.Fatalf("ListSnapshots anchor = %v, want one anchored", list)
+	}
+
+	// The store refuses to delete it while anchored.
+	if err := s.DeleteSnapshot(owner, snap.ID); !errors.Is(err, ErrSnapshotAnchored) {
+		t.Fatalf("DeleteSnapshot of anchored = %v, want ErrSnapshotAnchored", err)
+	}
+
+	// Removing the anchor makes it prunable; the toggle echoes the new state.
+	info, err := s.SetSnapshotAnchor(owner, snap.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Anchored {
+		t.Fatal("SetSnapshotAnchor(false) still reports anchored")
+	}
+	if err := s.DeleteSnapshot(owner, snap.ID); err != nil {
+		t.Fatalf("DeleteSnapshot after unanchor = %v, want nil", err)
+	}
+}
+
+// A scheduled snapshot that is later anchored is exempt from the scheduled-retention
+// prune, and it does not consume a keep-last slot (it is outside the retention
+// universe entirely).
+func TestPruneAutoSnapshotsSkipsAnchored(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "anchorprune@example.com")
+	pack, data, ids := packOf("v1 object")
+	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	rid := s.rootResource(t, owner, []string{ids[0]})
+
+	// Three scheduled snapshots, oldest first.
+	if n, err := s.RunAutoSnapshots(); err != nil || n != 1 {
+		t.Fatalf("scheduled v1: n=%d err=%v", n, err)
+	}
+	for i := 2; i <= 3; i++ {
+		p, d, id := packOf(fmt.Sprintf("v%d object", i))
+		if _, err := s.PutPack(owner, p, d, 0); err != nil {
+			t.Fatal(err)
+		}
+		s.supersede(t, owner, rid, []string{id[0]})
+		if n, err := s.RunAutoSnapshots(); err != nil || n != 1 {
+			t.Fatalf("scheduled v%d: n=%d err=%v", i, n, err)
+		}
+	}
+	all, _ := s.ListSnapshots(owner, rid)
+	if len(all) != 3 {
+		t.Fatalf("setup: %d snapshots, want 3", len(all))
+	}
+	// Anchor the oldest scheduled snapshot (last in the newest-first listing).
+	oldest := all[len(all)-1].ID
+	if _, err := s.SetSnapshotAnchor(owner, oldest, true); err != nil {
+		t.Fatal(err)
+	}
+
+	// keep-last 1: without the anchor exemption this would prune the two older
+	// scheduled snapshots. The anchored one is excluded from the count and never
+	// selected, so only the single remaining unanchored old one is pruned.
+	n, err := s.PruneAutoSnapshots(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Fatalf("pruned %d, want 1 (anchored + newest survive)", n)
+	}
+	remaining, _ := s.ListSnapshots(owner, rid)
+	if len(remaining) != 2 {
+		t.Fatalf("remaining %d, want 2 (1 anchored + 1 newest)", len(remaining))
+	}
+	if _, err := s.GetSnapshot(owner, oldest); err != nil {
+		t.Fatalf("retention deleted the anchored snapshot: %v", err)
+	}
+}
+
 func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "a@example.com")
@@ -251,11 +350,11 @@ func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
 
-	if _, err := s.CreateSnapshot(owner, "nosuchid", nil); !errors.Is(err, ErrNotFound) {
+	if _, err := s.CreateSnapshot(owner, "nosuchid", nil, false); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("snapshot of missing resource = %v, want ErrNotFound", err)
 	}
 
-	snap, err := s.CreateSnapshot(owner, rid, nil)
+	snap, err := s.CreateSnapshot(owner, rid, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +401,7 @@ func TestSnapshotLabelRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	snap, err := s.CreateSnapshot(owner, rid, &sealedLabel)
+	snap, err := s.CreateSnapshot(owner, rid, &sealedLabel, false)
 	if err != nil {
 		t.Fatal(err)
 	}

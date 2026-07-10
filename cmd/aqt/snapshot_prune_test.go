@@ -38,6 +38,30 @@ func TestSelectSnapshotsToPrune(t *testing.T) {
 	}
 }
 
+// Anchored snapshots are outside the retention universe: they are never selected and
+// do not consume a --keep-last slot, so anchoring the newest one lets an older
+// unanchored snapshot fill the kept quota instead.
+func TestSelectSnapshotsToPruneSkipsAnchored(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	day := 24 * time.Hour
+	snaps := []api.SnapshotInfo{
+		{ID: "new", ResourceID: "r1", CreatedAt: now.Unix(), Anchored: true},
+		{ID: "mid", ResourceID: "r1", CreatedAt: now.Add(-2 * day).Unix()},
+		{ID: "old", ResourceID: "r1", CreatedAt: now.Add(-10 * day).Unix()},
+	}
+
+	// keep-last 1: the anchored newest does not count, so "mid" fills the kept slot and
+	// only "old" is pruned. The anchor is never selected.
+	assertIDs(t, "keep-last 1 with anchor", selectSnapshotsToPrune(snaps, 1, 0, now), "old")
+
+	// older-than spans all snapshots but still skips the anchored one, even were it old.
+	anchoredOld := []api.SnapshotInfo{
+		{ID: "a", ResourceID: "r1", CreatedAt: now.Add(-30 * day).Unix(), Anchored: true},
+		{ID: "b", ResourceID: "r1", CreatedAt: now.Add(-30 * day).Unix()},
+	}
+	assertIDs(t, "older-than skips anchor", selectSnapshotsToPrune(anchoredOld, 0, 5*day, now), "b")
+}
+
 func assertIDs(t *testing.T, label string, got []string, want ...string) {
 	t.Helper()
 	set := map[string]bool{}

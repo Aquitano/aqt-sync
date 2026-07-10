@@ -35,8 +35,58 @@ func snapshotCmd() *cobra.Command {
 			"pinned server-side so a later sync (or a mistaken delete) cannot reclaim them. " +
 			"They are account-global: any of your devices can browse and restore them.",
 	}
-	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAutoCmd())
+	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAnchorCmd(), snapshotAutoCmd())
 	return cmd
+}
+
+// --- anchor ---
+
+func snapshotAnchorCmd() *cobra.Command {
+	var remove bool
+	cmd := &cobra.Command{
+		Use:   "anchor <snapshot-id>",
+		Short: "Protect a snapshot from retention (or --remove to make it prunable)",
+		Long: "An anchored snapshot is exempt from every retention path — the scheduled job's\n" +
+			"prune, `snapshot prune --keep-last/--older-than`, and an explicit prune, which is\n" +
+			"refused until the anchor is removed. `aqt checkpoint` anchors as it creates; this\n" +
+			"toggles the anchor on an existing snapshot.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, _, err := authedClient()
+			if err != nil {
+				return err
+			}
+			return setSnapshotAnchor(cl, args[0], !remove)
+		},
+	}
+	cmd.Flags().BoolVar(&remove, "remove", false, "remove the anchor, making the snapshot prunable again")
+	return cmd
+}
+
+// setSnapshotAnchor toggles a snapshot's anchor and fails closed on an older server.
+// An older server silently ignores the anchor field and echoes the old state, so a
+// mismatch between the requested and returned anchor is treated as a hard error rather
+// than a silently unprotected (or still-protected) snapshot.
+func setSnapshotAnchor(cl *client.Client, id string, want bool) error {
+	info, err := cl.SetSnapshotAnchor(id, want)
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Errorf("snapshot %s not found (or not yours)", id)
+	}
+	if err != nil {
+		return err
+	}
+	if info.Anchored != want {
+		return fmt.Errorf("server did not apply the anchor change (it is too old to support anchors); upgrade the server")
+	}
+	if flagJSON {
+		return printJSON(map[string]any{"id": info.ID, "anchored": info.Anchored})
+	}
+	if want {
+		fmt.Printf("anchored %s (protected from retention)\n", id)
+	} else {
+		fmt.Printf("unanchored %s (prunable again)\n", id)
+	}
+	return nil
 }
 
 // --- create ---
@@ -67,7 +117,7 @@ func snapshotCreateCmd() *cobra.Command {
 					return err
 				}
 			}
-			info, err := cl.CreateSnapshot(resourceID, sealed)
+			info, err := cl.CreateSnapshot(resourceID, sealed, false)
 			if errors.Is(err, client.ErrNotFound) {
 				return fmt.Errorf("resource %s not found (or not yours)", resourceID)
 			}
@@ -200,11 +250,20 @@ func filterSnapshots(snaps []api.SnapshotInfo, limit int, since, before time.Dur
 
 func printSnapshotTable(rows []snapshotRow) error {
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tVERSION\tSNAPSHOT-ID\tRESOURCE")
+	fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tANCHOR\tVERSION\tSNAPSHOT-ID\tRESOURCE")
 	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, r.Version, r.ID, r.ResourceID)
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, anchorMark(r.Anchored), r.Version, r.ID, r.ResourceID)
 	}
 	return w.Flush()
+}
+
+// anchorMark renders the anchor column: a `*` for a protected snapshot, blank
+// otherwise, so an anchored checkpoint stands out at a glance.
+func anchorMark(anchored bool) string {
+	if anchored {
+		return "*"
+	}
+	return ""
 }
 
 // snapshotRow is one snapshot as shown by `aqt snapshot list`, with its name
@@ -214,6 +273,7 @@ type snapshotRow struct {
 	ResourceID string `json:"resourceId"`
 	Name       string `json:"name"`
 	Label      string `json:"label,omitempty"`
+	Anchored   bool   `json:"anchored,omitempty"`
 	Version    int    `json:"version"`
 	Created    string `json:"created"`
 	CreatedAt  int64  `json:"createdAt"`
@@ -224,7 +284,7 @@ func snapshotRows(snaps []api.SnapshotInfo, mk crypto.MasterKey) []snapshotRow {
 	for _, s := range snaps {
 		name, label := snapshotNameLabel(s, mk)
 		rows = append(rows, snapshotRow{
-			ID: s.ID, ResourceID: s.ResourceID, Name: name, Label: label, Version: s.Version,
+			ID: s.ID, ResourceID: s.ResourceID, Name: name, Label: label, Anchored: s.Anchored, Version: s.Version,
 			Created: formatTime(s.CreatedAt), CreatedAt: s.CreatedAt,
 		})
 	}
@@ -331,11 +391,15 @@ func snapshotFzfSelect(fzfPath, query string, rows []snapshotRow) error {
 		if label == "" {
 			label = "-"
 		}
-		fmt.Fprintf(&input, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, label, r.Version, r.ResourceID, r.ID)
+		anchor := "-"
+		if r.Anchored {
+			anchor = "anchor"
+		}
+		fmt.Fprintf(&input, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, label, anchor, r.Version, r.ResourceID, r.ID)
 	}
 	args := []string{
 		"--delimiter", "\t",
-		"--with-nth", "1,2,3,4,5",
+		"--with-nth", "1,2,3,4,5,6",
 		"--header", "Enter prints the snapshot id · Esc cancels",
 	}
 	if query != "" {
@@ -967,7 +1031,7 @@ func snapshotPruneCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope a retention prune to this resource id")
 	cmd.Flags().StringVar(&dir, "dir", "", "scope a retention prune to this tracked dir")
-	cmd.Flags().IntVar(&keepLast, "keep-last", 0, "keep the N newest snapshots per resource, prune the rest")
+	cmd.Flags().IntVar(&keepLast, "keep-last", 0, "keep the N newest snapshots per resource, prune the rest (anchored snapshots are excluded from the count and never pruned)")
 	cmd.Flags().StringVar(&olderThan, "older-than", "", "prune snapshots older than this duration (e.g. 720h)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be pruned without deleting")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
@@ -990,6 +1054,10 @@ func parseOlderThan(s string) (time.Duration, error) {
 // per resource; olderThan > 0 selects snapshots created before now-olderThan. When
 // both are set, only snapshots beyond the keep-last window AND older than the cutoff
 // are selected (the conservative intersection). It returns the ids to prune.
+//
+// Anchored snapshots are outside the retention universe entirely: they are never
+// selected, and they do not count toward the --keep-last quota, so anchoring a
+// snapshot never pushes an unanchored one out of the keep window.
 func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, olderThan time.Duration, now time.Time) []string {
 	var cutoff int64
 	if olderThan > 0 {
@@ -998,6 +1066,9 @@ func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, olderThan ti
 	perResource := map[string]int{}
 	var prune []string
 	for _, s := range snaps {
+		if s.Anchored {
+			continue
+		}
 		perResource[s.ResourceID]++ // newest-first, so this rank rises going back in time
 		beyondKeep := keepLast > 0 && perResource[s.ResourceID] > keepLast
 		olderThanCutoff := olderThan > 0 && s.CreatedAt < cutoff
@@ -1040,12 +1111,7 @@ func reportPruneTargets(snaps []api.SnapshotInfo, targets []string, prof *identi
 		return printJSON(rows)
 	}
 	fmt.Fprintf(os.Stderr, "would prune %d snapshot(s):\n", len(rows))
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tVERSION\tSNAPSHOT-ID\tRESOURCE")
-	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, r.Version, r.ID, r.ResourceID)
-	}
-	return w.Flush()
+	return printSnapshotTable(rows)
 }
 
 // --- auto (scheduled opt-out) ---
