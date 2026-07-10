@@ -32,6 +32,8 @@ type resourceUploadHeader struct {
 	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 	MinClient       int                `json:"minClient,omitempty"`
+	ExpireSeconds   int64              `json:"expireSeconds,omitempty"`
+	MaxReads        int64              `json:"maxReads,omitempty"`
 }
 
 // resourceDownloadHeader is the JSON header of a GET /v1/resources/:id
@@ -58,6 +60,8 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		ChunkRefs:       req.ChunkRefs,
 		ExpectedVersion: req.ExpectedVersion,
 		MinClient:       req.MinClient,
+		ExpireSeconds:   req.ExpireSeconds,
+		MaxReads:        req.MaxReads,
 	}, req.Blob.Ciphertext)
 }
 
@@ -78,6 +82,8 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		ChunkRefs:       h.ChunkRefs,
 		ExpectedVersion: h.ExpectedVersion,
 		MinClient:       h.MinClient,
+		ExpireSeconds:   h.ExpireSeconds,
+		MaxReads:        h.MaxReads,
 	}, nil
 }
 

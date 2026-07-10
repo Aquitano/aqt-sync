@@ -29,3 +29,7 @@ const ErrCodeUpgradeRequired = "upgrade_required"
 // version conflict on the client, so the code lets it surface the anchored-specific
 // message (which names the `aqt snapshot anchor --remove` escape hatch) instead.
 const ErrCodeSnapshotAnchored = "snapshot_anchored"
+
+// ErrCodeGone is the stable ErrorResponse.Code the server returns with an HTTP 410
+// when a public link has expired, reached its read limit, or been reclaimed.
+const ErrCodeGone = "gone"

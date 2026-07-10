@@ -583,6 +583,10 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss")
 		return
 	}
+	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
+		abort(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		// Update targeting an id the caller doesn't own (or that doesn't exist).
 		abort(c, http.StatusNotFound, "not found")
@@ -596,7 +600,25 @@ func (s *Server) putResource(c *gin.Context) {
 	if req.ID != "" {
 		status = http.StatusOK
 	}
-	c.JSON(status, api.PutResourceResponse{ID: id, Version: version})
+	c.JSON(status, api.PutResourceResponse{ID: id, Version: version, ExpiresAt: policyExpiresAt(req), MaxReads: policyMaxReads(req)})
+}
+
+// policyExpiresAt is the absolute expiry the server just stored, echoed so a new client
+// can confirm an old server did not silently drop the policy. It recomputes now + TTL;
+// the microsecond drift from the store's own clock is immaterial (the client's sanity
+// check tolerates it). Zero unless a policy was accepted on a public resource.
+func policyExpiresAt(req api.PutResourceRequest) int64 {
+	if req.Visibility == api.Public && req.ExpireSeconds > 0 {
+		return time.Now().Unix() + req.ExpireSeconds
+	}
+	return 0
+}
+
+func policyMaxReads(req api.PutResourceRequest) int64 {
+	if req.Visibility == api.Public {
+		return req.MaxReads
+	}
+	return 0
 }
 
 func (s *Server) getResource(c *gin.Context) {
@@ -612,6 +634,10 @@ func (s *Server) getResource(c *gin.Context) {
 	res, err := s.store.GetResource(c.Param("id"), owner)
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if errors.Is(err, ErrGone) {
+		abortGone(c)
 		return
 	}
 	if err != nil {
@@ -696,7 +722,11 @@ func (s *Server) setVisibility(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	version, err := s.store.SetVisibility(owner, c.Param("id"), req.Visibility)
+	version, err := s.store.SetVisibility(owner, c.Param("id"), req.Visibility, req.ExpireSeconds, req.MaxReads)
+	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
+		abort(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abort(c, http.StatusNotFound, "not found")
 		return
@@ -705,7 +735,14 @@ func (s *Server) setVisibility(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "update failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.PutResourceResponse{ID: c.Param("id"), Version: version})
+	resp := api.PutResourceResponse{ID: c.Param("id"), Version: version}
+	if req.Visibility == api.Public {
+		if req.ExpireSeconds > 0 {
+			resp.ExpiresAt = time.Now().Unix() + req.ExpireSeconds
+		}
+		resp.MaxReads = req.MaxReads
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 func (s *Server) deleteResource(c *gin.Context) {
@@ -934,6 +971,15 @@ func abortUpgradeRequired(c *gin.Context, need, have int) {
 		Error:     fmt.Sprintf("resource requires client capability %d or newer (this client supports %d): upgrade aqt", need, have),
 		Code:      api.ErrCodeUpgradeRequired,
 		MinClient: need,
+	})
+}
+
+// abortGone answers 410 for an expired, exhausted, or reclaimed public link. The Code
+// is stable so the client maps it to a distinct exit status.
+func abortGone(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusGone, api.ErrorResponse{
+		Error: "link expired or read limit reached",
+		Code:  api.ErrCodeGone,
 	})
 }
 

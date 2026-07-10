@@ -50,6 +50,21 @@ var ErrQuotaExceeded = errors.New("storage quota exceeded")
 // it. Handlers map it to 409 with the anchored error code.
 var ErrSnapshotAnchored = errors.New("snapshot is anchored")
 
+// ErrGone is returned when a public link has expired, reached its read limit, or had
+// its ciphertext reclaimed. Handlers map it to 410 so a link holder learns the link is
+// dead rather than seeing an indistinguishable 404. Distinct from ErrNotFound so the
+// tombstone never decays to "never existed".
+var ErrGone = errors.New("resource gone")
+
+// ErrPolicyOnPrivate is returned when a lifecycle policy (expiry/max-reads) is attached
+// to a non-public resource. Lifecycle is a property of the public link, so this is a
+// client bug; handlers map it to 400.
+var ErrPolicyOnPrivate = errors.New("lifecycle policy requires a public resource")
+
+// ErrBadPolicy is returned when a policy carries a negative expiry or read limit.
+// Handlers map it to 400.
+var ErrBadPolicy = errors.New("lifecycle policy values must be non-negative")
+
 // ErrDeviceLimit is returned when attaching a device would exceed an account's
 // configured device cap. Handlers map it to 403.
 var ErrDeviceLimit = errors.New("device limit reached")
@@ -72,6 +87,26 @@ func normalizeMinClient(declared int) int {
 		return api.CapabilityBaseline
 	}
 	return declared
+}
+
+// resolvePolicy validates a lifecycle request and turns it into the stored columns.
+// expireSeconds is a TTL: the absolute expires_at is now + TTL, so a client never has
+// to agree with the server's clock. A policy is legal only on a public resource. A
+// zero field means "no limit" (NULL). Negative values are a client bug.
+func resolvePolicy(vis api.Visibility, expireSeconds, maxReads, now int64) (expiresAt, max sql.NullInt64, err error) {
+	if expireSeconds < 0 || maxReads < 0 {
+		return sql.NullInt64{}, sql.NullInt64{}, ErrBadPolicy
+	}
+	if (expireSeconds > 0 || maxReads > 0) && vis != api.Public {
+		return sql.NullInt64{}, sql.NullInt64{}, ErrPolicyOnPrivate
+	}
+	if expireSeconds > 0 {
+		expiresAt = sql.NullInt64{Int64: now + expireSeconds, Valid: true}
+	}
+	if maxReads > 0 {
+		max = sql.NullInt64{Int64: maxReads, Valid: true}
+	}
+	return expiresAt, max, nil
 }
 
 // Store persists accounts, devices, and resource metadata in SQLite, with the
@@ -314,7 +349,18 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// value from its source resource at capture time.
 	`ALTER TABLE resources ADD COLUMN min_client INTEGER NOT NULL DEFAULT 1;
 	 ALTER TABLE snapshots ADD COLUMN min_client INTEGER NOT NULL DEFAULT 1;`,
-	// 10: an anchor pins a snapshot against every retention path (the scheduled job's
+	// 10: server-enforced lifecycle for public links. expires_at (NULL = none) and
+	// max_reads (NULL = none) are the policy; reads counts non-owner serves; exhausted_at
+	// records when the read limit was reached (so the sweep can grant a grace window for
+	// an in-flight streamed pull); reclaimed marks a tombstone whose ciphertext has been
+	// reaped and which now returns 410 (not 404) forever. All default to "no policy", so
+	// existing rows are unaffected.
+	`ALTER TABLE resources ADD COLUMN expires_at INTEGER;
+	 ALTER TABLE resources ADD COLUMN max_reads INTEGER;
+	 ALTER TABLE resources ADD COLUMN reads INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE resources ADD COLUMN exhausted_at INTEGER;
+	 ALTER TABLE resources ADD COLUMN reclaimed INTEGER NOT NULL DEFAULT 0;`,
+	// 11: an anchor pins a snapshot against every retention path (the scheduled job's
 	// prune, the client's --keep-last/--older-than selection, and an explicit prune,
 	// which the store refuses). Like `scheduled`, it is a plaintext server-side boolean
 	// so retention can act on it without a key; it leaks only "this snapshot is
@@ -815,6 +861,11 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	id := newID(8)
 	const version = 1
 
+	expiresAt, maxReads, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, time.Now().Unix())
+	if err != nil {
+		return "", 0, err
+	}
+
 	// Write and fsync the blob before opening the transaction, mirroring
 	// updateResource: keep the durable write off the single writer connection (an
 	// fsync inside the tx stalls every other request) and drop the file unless the
@@ -836,9 +887,9 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		return "", 0, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client)
-		 VALUES(?,?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient),
+		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads)
+		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads,
 	); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -855,12 +906,16 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 }
 
 func (s *Store) updateResource(owner string, capability int, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
+	expiresAt, maxReads, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, time.Now().Unix())
+	if err != nil {
+		return "", 0, err
+	}
 	defer s.resLocks.lock(req.ID)()
 	var (
 		current   int
 		storedMin int
 	)
-	err := s.db.QueryRow(
+	err = s.db.QueryRow(
 		`SELECT version, min_client FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
 	).Scan(&current, &storedMin)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -908,10 +963,14 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// An update may lower min_client: a capable client legitimately rewrites a
 	// resource in an older (baseline) format, and that state is then readable by
 	// older clients again.
+	// A replace fully re-specifies the resource, so the lifecycle policy is taken from
+	// this request: reset the read counter and clear the exhausted/reclaimed marks so a
+	// re-PUT resurrects a tombstone and never inherits a stale count.
 	res, err := tx.Exec(
-		`UPDATE resources SET visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?
+		`UPDATE resources SET visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?,
+		   expires_at=?, max_reads=?, reads=0, exhausted_at=NULL, reclaimed=0
 		 WHERE id=? AND owner_handle=? AND version=?`,
-		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), req.ID, owner, current,
+		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads, req.ID, owner, current,
 	)
 	if err != nil {
 		tx.Rollback()
@@ -967,11 +1026,14 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		nonce       []byte
 		version     int
 		minClient   int
+		expiresAt   sql.NullInt64
+		maxReads    sql.NullInt64
+		reclaimed   bool
 	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client
+		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, reclaimed
 		 FROM resources WHERE id = ?`, id,
-	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient)
+	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient, &expiresAt, &maxReads, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -979,14 +1041,37 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		return out, err
 	}
 
+	// A reclaimed tombstone is gone for everyone (its ciphertext is deleted), including
+	// the owner; the owner reaches it only to `aqt rm` the row. Short-circuit before any
+	// blob load, whose file no longer exists.
+	if reclaimed {
+		return out, ErrGone
+	}
+
 	vis := api.Visibility(visibility)
-	if vis == api.Private && (requireOwner == "" || requireOwner != owner) {
+	isOwner := requireOwner != "" && requireOwner == owner
+	if vis == api.Private && !isOwner {
 		return out, ErrNotFound
+	}
+	// A non-owner read of a public link is subject to the lifecycle policy. Expiry is a
+	// pure time check (no state to mutate); the max-reads count is done under the
+	// resource lock after the blob loads, so a successful serve is what increments.
+	// Owner reads are never counted or gated (until reclaimed, handled above).
+	if !isOwner {
+		now := time.Now().Unix()
+		if expiresAt.Valid && now >= expiresAt.Int64 {
+			return out, ErrGone
+		}
 	}
 
 	ciphertext, err := s.readBlob(id, nonce)
 	if err != nil {
 		return out, err
+	}
+	if !isOwner && maxReads.Valid {
+		if err := s.countPublicRead(id); err != nil {
+			return out, err
+		}
 	}
 	out = api.GetResourceResponse{
 		ID:         id,
@@ -1011,28 +1096,101 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	return out, nil
 }
 
+// countPublicRead atomically records one non-owner serve of a max-reads-limited public
+// resource. Held under the resource lock and re-read inside the transaction so two
+// concurrent fetches can never both slip past the last permitted read: the Nth reader
+// commits reads == max_reads and stamps exhausted_at, the (N+1)th sees the limit and
+// gets ErrGone. A policy the update path cleared (max_reads now NULL) means no limit.
+func (s *Store) countPublicRead(id string) error {
+	defer s.resLocks.lock(id)()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var (
+		reads     int64
+		maxReads  sql.NullInt64
+		reclaimed bool
+	)
+	if err := tx.QueryRow(
+		`SELECT reads, max_reads, reclaimed FROM resources WHERE id = ?`, id,
+	).Scan(&reads, &maxReads, &reclaimed); err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if reclaimed {
+		tx.Rollback()
+		return ErrGone
+	}
+	if !maxReads.Valid {
+		tx.Rollback()
+		return nil
+	}
+	if reads >= maxReads.Int64 {
+		tx.Rollback()
+		return ErrGone
+	}
+	reads++
+	var exhaustedAt sql.NullInt64
+	if reads >= maxReads.Int64 {
+		exhaustedAt = sql.NullInt64{Int64: time.Now().Unix(), Valid: true}
+	}
+	if _, err := tx.Exec(
+		`UPDATE resources SET reads = ?, exhausted_at = COALESCE(exhausted_at, ?) WHERE id = ?`,
+		reads, exhaustedAt, id,
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
 // ResourceVisibility returns a resource's visibility without loading its blob.
-// The web landing page uses it to decide whether to render (public) or 404
-// (private or unknown), so a private resource's existence is never confirmed.
-func (s *Store) ResourceVisibility(id string) (api.Visibility, error) {
-	var vis string
-	err := s.rdb.QueryRow(`SELECT visibility FROM resources WHERE id = ?`, id).Scan(&vis)
+// The web landing page uses it to decide whether to render (public), 410 (a gone
+// public link), or 404 (private or unknown), so a private resource's existence is
+// never confirmed. gone reports an expired/exhausted-and-reclaimed public link:
+// reclaimed is a hard tombstone, and an expired-but-not-yet-swept link is gone too so
+// the page does not offer a pull command that would 410.
+func (s *Store) ResourceVisibility(id string) (vis api.Visibility, gone bool, err error) {
+	var (
+		visStr    string
+		expiresAt sql.NullInt64
+		reclaimed bool
+	)
+	err = s.rdb.QueryRow(
+		`SELECT visibility, expires_at, reclaimed FROM resources WHERE id = ?`, id,
+	).Scan(&visStr, &expiresAt, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
+		return "", false, ErrNotFound
 	}
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
-	return api.Visibility(vis), nil
+	gone = reclaimed || (expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64)
+	return api.Visibility(visStr), gone, nil
 }
 
 // SetVisibility flips a resource public/private in place (owner-checked, version
-// bumped) without touching the blob or its wrapped key.
-func (s *Store) SetVisibility(owner, id string, vis api.Visibility) (int, error) {
+// bumped) without touching the blob or its wrapped key. expireSeconds/maxReads carry
+// an optional lifecycle policy applied on the same flip: keeping/turning public with a
+// policy replaces it and resets the read counter (and clears any exhausted mark), so a
+// re-share starts fresh; turning private clears the policy entirely, since lifecycle is
+// a property of the public link. A policy on a private flip is a client bug
+// (ErrPolicyOnPrivate).
+func (s *Store) SetVisibility(owner, id string, vis api.Visibility, expireSeconds, maxReads int64) (int, error) {
+	expiresAt, maxReadsCol, err := resolvePolicy(vis, expireSeconds, maxReads, time.Now().Unix())
+	if err != nil {
+		return 0, err
+	}
 	defer s.resLocks.lock(id)()
 	res, err := s.db.Exec(
-		`UPDATE resources SET visibility = ?, version = version + 1 WHERE id = ? AND owner_handle = ?`,
-		string(vis), id, owner,
+		`UPDATE resources SET visibility = ?, version = version + 1,
+		   expires_at = ?, max_reads = ?, reads = 0, exhausted_at = NULL
+		 WHERE id = ? AND owner_handle = ?`,
+		string(vis), expiresAt, maxReadsCol, id, owner,
 	)
 	if err != nil {
 		return 0, err
@@ -1132,6 +1290,13 @@ func (s *Store) DeleteResource(owner, id string) error {
 // value at the writer's own capability.
 func (s *Store) SetResourceMinClientForTest(id string, minClient int) error {
 	_, err := s.db.Exec(`UPDATE resources SET min_client = ? WHERE id = ?`, minClient, id)
+	return err
+}
+
+// SetResourceExpiryForTest overrides a resource's stored expires_at (unix seconds), so
+// an end-to-end test can drive a link past its expiry without waiting out a real TTL.
+func (s *Store) SetResourceExpiryForTest(id string, expiresAt int64) error {
+	_, err := s.db.Exec(`UPDATE resources SET expires_at = ? WHERE id = ?`, expiresAt, id)
 	return err
 }
 
@@ -2116,10 +2281,14 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 // yields a duplicate entry — the wire framing is positional), and every resolved
 // pack is touched so a concurrent GC cannot reap a pack this download is mid-read of.
 func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []api.ObjectLocation, error) {
-	var owner, vis string
+	var (
+		owner, vis string
+		expiresAt  sql.NullInt64
+		reclaimed  bool
+	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, visibility FROM resources WHERE id = ?`, resourceID,
-	).Scan(&owner, &vis)
+		`SELECT owner_handle, visibility, expires_at, reclaimed FROM resources WHERE id = ?`, resourceID,
+	).Scan(&owner, &vis, &expiresAt, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, ErrNotFound
 	}
@@ -2128,6 +2297,13 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 	}
 	if api.Visibility(vis) != api.Public {
 		return "", nil, ErrNotFound
+	}
+	// Expiry and reclamation gate object reads, but max-reads exhaustion does not: the
+	// root fetch is the per-link-holder gate, and blocking objects on exhaustion would
+	// break the final permitted streamed pull mid-flight (it fetches objects after the
+	// root read that consumed the last permit).
+	if reclaimed || (expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64) {
+		return "", nil, ErrGone
 	}
 
 	distinct := make([]string, 0, len(ids))
@@ -2307,8 +2483,112 @@ func (s *Store) packExists(owner, id string) (bool, error) {
 // have the loser's stale-plan branch delete the winner's now-live compacted pack. The
 // single DB connection serializes the transactions, but not the pack-file writes and
 // removes around them, so this lock is what makes the swap safe.
+// SweepExpired reclaims the owner's public links whose lifecycle has ended: expired
+// ones immediately, and exhausted ones only after a grace window (gcMinAge) so an
+// in-flight permitted streamed pull can finish fetching its objects before they unroot.
+// Reclaiming deletes the ciphertext blob files, unroots the resource's objects (which
+// the age-guarded pack GC then reaps), and leaves the row as a reclaimed tombstone that
+// keeps returning 410. Returns how many rows it reclaimed. now is passed so tests can
+// drive the clock.
+func (s *Store) SweepExpired(owner string, now int64) (int, error) {
+	graceCutoff := now - int64(gcMinAge/time.Second)
+	rows, err := s.rdb.Query(
+		`SELECT id FROM resources
+		 WHERE owner_handle = ? AND reclaimed = 0
+		   AND ((expires_at IS NOT NULL AND expires_at <= ?)
+		     OR (exhausted_at IS NOT NULL AND exhausted_at < ?))`,
+		owner, now, graceCutoff,
+	)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	rows.Close()
+
+	var swept int
+	for _, id := range ids {
+		if err := s.reclaimResource(owner, id); err != nil {
+			return swept, err
+		}
+		swept++
+	}
+	return swept, nil
+}
+
+// reclaimResource turns one resource into a tombstone: it drops the GC roots (so the
+// objects become collectable), removes the ciphertext blob files, clears the owner's
+// wrapped key, marks the row reclaimed, and bumps the version. The encrypted metadata
+// is left intact so the owner can still see (and `aqt rm`) the tombstone; only the
+// content ciphertext is reclaimed. Held under the resource lock so it serializes
+// against a concurrent update/delete of the same id.
+func (s *Store) reclaimResource(owner, id string) error {
+	defer s.resLocks.lock(id)()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	// A concurrent update may have already resurrected or removed this id since the
+	// unlocked scan picked it; re-check under the lock.
+	var reclaimed bool
+	if err := tx.QueryRow(
+		`SELECT reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, id, owner,
+	).Scan(&reclaimed); err != nil {
+		tx.Rollback()
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return err
+	}
+	if reclaimed {
+		tx.Rollback()
+		return nil
+	}
+	dropped, err := resourceChunkIDs(tx, id)
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE resources SET reclaimed = 1, wrapped_key = NULL, version = version + 1 WHERE id = ?`, id,
+	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.removeStaleBlobs(id, nil) // drop every blob file; the content is reclaimed
+	return nil
+}
+
 func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	defer s.gcLocks.lock(owner)()
+	// Reclaim expired/exhausted links first, so the objects they unroot become dead and
+	// are eligible for the pack sweep in this same pass (still subject to the pack age
+	// guard, which is the point of the grace window on exhaustion).
+	if _, err := s.SweepExpired(owner, time.Now().Unix()); err != nil {
+		return api.GCResponse{}, err
+	}
 	deleted, freed, err := s.GCPacks(owner, minAge)
 	if err != nil {
 		return api.GCResponse{}, err

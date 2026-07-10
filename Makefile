@@ -1,4 +1,4 @@
-.PHONY: build build-server test test-short test-race vet fmt restore-drill docker clean
+.PHONY: build build-server test test-short test-race vet fmt fuzz restore-drill docker clean
 
 # Build both binaries into ./bin.
 build:
@@ -19,6 +19,23 @@ test-race:
 
 vet:
 	go vet ./...
+
+# Run every fuzz target for a short burst. Native fuzzing runs one target per
+# invocation, so each decoder is listed explicitly.
+fuzz:
+	go test -run='^$$' -fuzz='^FuzzDecodeResourceUpload$$' -fuzztime=10s ./internal/api
+	go test -run='^$$' -fuzz='^FuzzDecodeResourceDownload$$' -fuzztime=10s ./internal/api
+	go test -run='^$$' -fuzz='^FuzzResourceUploadRoundTrip$$' -fuzztime=10s ./internal/api
+	go test -run='^$$' -fuzz='^FuzzResourceDownloadRoundTrip$$' -fuzztime=10s ./internal/api
+	go test -run='^$$' -fuzz='^FuzzParsePackIndex$$' -fuzztime=10s ./internal/server
+	go test -run='^$$' -fuzz='^FuzzPackRoundTrip$$' -fuzztime=10s ./internal/server
+	go test -run='^$$' -fuzz='^FuzzExtractTar$$' -fuzztime=10s ./internal/syncengine
+	go test -run='^$$' -fuzz='^FuzzHashTar$$' -fuzztime=10s ./internal/syncengine
+	go test -run='^$$' -fuzz='^FuzzParseRef$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzSplitRefPath$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzDecodeBase$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzDecodeFragment$$' -fuzztime=10s ./internal/crypto
+	go test -run='^$$' -fuzz='^FuzzFragmentRoundTrip$$' -fuzztime=10s ./internal/crypto
 
 fmt:
 	gofmt -l -w .

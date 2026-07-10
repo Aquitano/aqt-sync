@@ -138,6 +138,12 @@ type PassphraseChangeRequest struct {
 // this write stores (Capability* constants). A create/update leaves it 0 for a
 // baseline (v1) write; a server treats 0 as CapabilityBaseline and never lets a
 // client declare above its own capability.
+//
+// ExpireSeconds and MaxReads carry an optional server-enforced lifecycle policy for a
+// public link. ExpireSeconds is a TTL in seconds (not an absolute time, so server
+// clock skew is irrelevant); the server computes expires_at = now + ExpireSeconds.
+// MaxReads caps the number of non-owner reads. Both are meaningful only on a public
+// resource; a policy on a private put is rejected. Zero means "no limit".
 type PutResourceRequest struct {
 	ID              string
 	Visibility      Visibility
@@ -147,6 +153,8 @@ type PutResourceRequest struct {
 	ChunkRefs       []string
 	ExpectedVersion int
 	MinClient       int
+	ExpireSeconds   int64
+	MaxReads        int64
 }
 
 // PackIndexEntry locates one object inside a pack: its content-address id and the
@@ -213,9 +221,16 @@ type GCResponse struct {
 	ReclaimedBytes int64 `json:"reclaimedBytes,omitempty"`
 }
 
+// PutResourceResponse acknowledges a resource write. ExpiresAt (absolute unix
+// seconds, 0 = none) and MaxReads (0 = none) echo the lifecycle policy the server
+// accepted. The echo is the enforcement handshake: an old server that ignores the
+// policy request fields echoes nothing, so a new client can fail closed rather than
+// mint a link the server will not actually expire.
 type PutResourceResponse struct {
-	ID      string `json:"id"`
-	Version int    `json:"version"`
+	ID        string `json:"id"`
+	Version   int    `json:"version"`
+	ExpiresAt int64  `json:"expiresAt,omitempty"`
+	MaxReads  int64  `json:"maxReads,omitempty"`
 }
 
 // SetVisibilityRequest flips a resource public/private without re-uploading its
@@ -223,6 +238,12 @@ type PutResourceResponse struct {
 // the content key via a full PutResource.
 type SetVisibilityRequest struct {
 	Visibility Visibility `json:"visibility"`
+	// ExpireSeconds and MaxReads apply (or replace) a lifecycle policy on the public
+	// link, so a policy can be attached after the fact by `aqt share`. Applying a
+	// policy resets the read counter; flipping to Private clears the policy entirely.
+	// Zero means "no limit". See PutResourceRequest for the TTL rationale.
+	ExpireSeconds int64 `json:"expireSeconds,omitempty"`
+	MaxReads      int64 `json:"maxReads,omitempty"`
 }
 
 // GetResourceResponse is an in-process type: on the wire it travels as the raw

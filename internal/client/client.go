@@ -29,6 +29,10 @@ var ErrNotFound = errors.New("not found")
 // resource moved under them) and retry against the new state.
 var ErrConflict = errors.New("conflict")
 
+// ErrGone maps a 410: a public link has expired, reached its read limit, or been
+// reclaimed. Callers surface it distinctly (exit code 7) from a plain not-found.
+var ErrGone = errors.New("link expired or read limit reached")
+
 // ErrQuotaExceeded maps a 507 so callers can surface "storage quota exceeded"
 // distinctly from a generic server error.
 var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the server operator to raise the quota")
@@ -230,9 +234,14 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 }
 
 // SetVisibility flips a resource public/private without re-uploading its blob.
-func (c *Client) SetVisibility(id string, vis api.Visibility) (api.PutResourceResponse, error) {
+// expireSeconds/maxReads carry an optional lifecycle policy applied on the same call
+// (meaningful only when going/staying public); zero means no limit. The response
+// echoes the accepted policy so the caller can fail closed against a server that does
+// not enforce it.
+func (c *Client) SetVisibility(id string, vis api.Visibility, expireSeconds, maxReads int64) (api.PutResourceResponse, error) {
 	var r api.PutResourceResponse
-	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility", api.SetVisibilityRequest{Visibility: vis}, &r)
+	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility",
+		api.SetVisibilityRequest{Visibility: vis, ExpireSeconds: expireSeconds, MaxReads: maxReads}, &r)
 	return r, err
 }
 
@@ -614,6 +623,8 @@ func statusError(status int, path string, body []byte) error {
 			return &SnapshotAnchoredError{Message: e.Error}
 		}
 		return ErrConflict
+	case status == http.StatusGone:
+		return ErrGone
 	case status == http.StatusInsufficientStorage:
 		return ErrQuotaExceeded
 	case status == http.StatusUpgradeRequired:

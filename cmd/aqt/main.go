@@ -59,9 +59,9 @@ func main() {
 
 // exitCode maps an error to the documented CLI contract (DESIGN.md §3):
 // 0 ok · 1 generic · 3 auth/locked · 4 sync conflict · 5 network · 6 upgrade
-// required. Scripts and cron (`--once`) use it to tell a retryable network blip
-// from re-login from a conflict needing resolution from a client too old to read
-// the remote.
+// required · 7 link gone (expired/exhausted). Scripts and cron (`--once`) use it to
+// tell a retryable network blip from re-login from a conflict needing resolution from a
+// client too old to read the remote from a link that has expired.
 func exitCode(err error) int {
 	switch {
 	case err == nil:
@@ -75,6 +75,8 @@ func exitCode(err error) int {
 		return 5
 	case errors.Is(err, client.ErrUpgradeRequired):
 		return 6
+	case errors.Is(err, client.ErrGone):
+		return 7
 	case errors.Is(err, errWatchSkipped):
 		return exitDeferred
 	default:

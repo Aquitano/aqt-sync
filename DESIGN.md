@@ -21,7 +21,7 @@ deliberately implementation-free — types and behavior, not code.
 | Default visibility | **Private.** `--public` opts into a shareable link. |
 | CLI shape | One-liner spine (`aqt push`) + explicit verbs + share/private model. |
 | Extras in v1 | `-P` password gate, clipboard auto-copy. |
-| Out of v1 | standalone `rotate`, `--expire`, `--burn`, `--max-reads`, FUSE `mount`. |
+| Out of v1 | standalone `rotate`, FUSE `mount`. |
 | Runtime | Go. CLI on cobra; server on Gin; SQLite (modernc, pure-Go) + filesystem blobs. |
 | Crypto | Argon2id (KDF), XChaCha20-Poly1305 (AEAD), HKDF-SHA256 → Ed25519 auth signing key. |
 
@@ -44,8 +44,16 @@ metadata (real name, size…) ──encrypt(contentKey)──▶ encrypted manif
 
 **What the server stores per resource:** `id`, opaque `ownerHandle`, ciphertext
 blob(s), encrypted-metadata blob, a `visibility` flag, a wrapped-key record *only
-for private resources owned by an account*, version counter, timestamps. Nothing
+for private resources owned by an account*, version counter, timestamps, and — for a
+public link with a lifecycle policy — an `expires_at` timestamp, a `max_reads` cap, a
+`reads` counter, an `exhausted_at` stamp, and a `reclaimed` tombstone flag. Nothing
 plaintext, ever.
+
+The lifecycle columns are the one deliberate, documented side channel: expiry
+timestamps and read counters are plaintext operational metadata the server necessarily
+sees to enforce a policy it cannot read the content of. The server still never sees the
+file, its name, or any key; it only knows *when* a link dies and *how many times* it has
+been fetched.
 
 **Three reference forms a user can hold:**
 
@@ -69,7 +77,8 @@ Global flags (all commands): `--server <url>` (self-host; default `https://aqt.s
 
 Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network ·
 `6` upgrade required (the remote resource is sealed in a newer format than this build
-reads) · `75` deferred (`watch --once` skipped because git was busy; retry later).
+reads) · `7` link gone (the public link has expired or reached its read limit) · `75`
+deferred (`watch --once` skipped because git was busy; retry later).
 
 ### 3.1 Push — the hero command
 
@@ -83,7 +92,20 @@ aqt push -                Read plaintext from stdin.
                       Implies --public. Recipient needs link AND password.
   -n, --name <label>  Human label shown in `aqt ls` (encrypted; not in the URL).
       --no-clip       Do not copy the resulting ref/URL to the clipboard.
+      --expire <dur>  Server-expire the public link after a duration (30m, 24h, 7d).
+      --max-reads <n> Server-expire the public link after n downloads.
+      --burn          Burn after reading (shorthand for --max-reads 1).
 ```
+
+The three lifecycle flags require an explicit `--public`/`-P` (they never silently mint
+a link) and are server-enforced: the server gates the opaque `id`, never seeing the
+plaintext or the fragment key. An expired or exhausted link returns `410 Gone` (exit
+code `7`); the ciphertext is then reclaimed and the id kept as a tombstone that keeps
+returning `410` rather than decaying to `404`. A permitted streamed pull that has
+consumed the last read gets a grace window so its already-started object fetches finish.
+The client fails closed against a server that does not echo the accepted policy (an old
+server), deleting the just-created resource rather than handing out a link that would
+never expire.
 
 Output (human default): the ref/URL (and `(copied to clipboard)` when applicable),
 then a metadata line. With `-q`: only the ref/URL on stdout (pipe-friendly). With
@@ -133,8 +155,12 @@ wrote ./.env (1.2 KB)
 
 ```
 aqt share   <id>          Make a private resource public; print the fragment link.
+                          --expire/--max-reads/--burn attach a server-enforced
+                          lifecycle policy after the fact (see push); re-sharing with a
+                          policy resets the read counter.
 aqt private <id>          Make public again private: ROTATES the content key,
                           re-encrypts, old links die. Prints the new aqt:// ref.
+                          Clears any lifecycle policy (it belongs to the public link).
 aqt ls      [--json]      List your resources: name, kind, size, visibility, id.
 aqt find    [query]       Fuzzy-search all files + folder contents in fzf; prints
                           the selected resource's ref. --json / --no-fzf for scripts.
@@ -527,12 +553,17 @@ DELETE /v1/devices/:id               Revoke a device.
 
 PUT    /v1/resources                 Create (id omitted) or replace in place (id set, owner-checked, version++).
                                      Body: { ciphertext, encryptedMeta, visibility,
-                                             wrappedKey? }   // wrappedKey only for private
-                                     → { id, version }
+                                             wrappedKey?, expireSeconds?, maxReads? }  // wrappedKey only for private;
+                                                                                       // policy only for public
+                                     → { id, version, expiresAt?, maxReads? }  // echoes the accepted policy
 GET    /v1/resources/:id             → { ciphertext, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth; private require the owner token.
-POST   /v1/resources/:id/visibility  Body: { visibility, ciphertext, encryptedMeta, wrappedKey? }
-                                     Used by `share`/`private`; rotation just replaces the blob.
+                                     410 Gone (code "gone") if the public link has expired, exhausted its
+                                     read limit, or been reclaimed. Owner reads are never counted or expired
+                                     (until reclaimed).
+POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxReads? }
+                                     Used by `share`/`private`; rotation just replaces the blob. Echoes the
+                                     accepted policy; a private flip clears it.
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility).
 POST   /v1/public/resources/:id/objects  Unauthenticated. Body: { ids } → positional length-prefixed
@@ -553,9 +584,24 @@ GET    /v1/packs/:id                  → raw pack bytes; supports Range (pull f
 POST   /v1/gc                        Pack-level mark-and-sweep → { deletedPacks, freedBytes }
 ```
 
+**Public-link lifecycle.** `PUT /v1/resources` and the visibility endpoint accept an
+optional `expireSeconds` (a TTL — the server stores `expires_at = now + expireSeconds`,
+so client clock skew never matters) and `maxReads` on a public resource. The server
+enforces both: a non-owner read past the expiry or the read limit gets `410 Gone` with
+`{ error, code: "gone" }`; only successful non-owner serves count toward `maxReads`, and
+concurrent reads cannot over-serve (the count is committed under a per-resource lock).
+Both responses **echo** the accepted policy (`expiresAt`, `maxReads`) — the enforcement
+handshake: an old server ignores the unknown request fields and echoes nothing, so a new
+client fails closed (it deletes the resource and errors) rather than mint a link that
+would never expire. Expired links (immediately) and exhausted ones (after a grace window
+so an in-flight streamed pull can finish) are reclaimed by the GC sweep: the ciphertext
+blob and its objects are deleted and the row kept as a `reclaimed` tombstone that keeps
+returning `410`. The object-read endpoint 410s on expiry/reclamation but *not* on
+`maxReads` exhaustion, so the final permitted streamed pull is never cut off mid-flight.
+
 The server enforces: ownership, visibility (a private id returns 404 to anyone but
-the owner), and integrity at the storage layer. It performs **no** decryption,
-merge, or filename inspection.
+the owner), public-link lifecycle (expiry and read limits), and integrity at the storage
+layer. It performs **no** decryption, merge, or filename inspection.
 
 Deployment hardening is env-configured (all optional; the zero value is the
 self-hosted default):

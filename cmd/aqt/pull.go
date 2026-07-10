@@ -72,6 +72,9 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	if errors.Is(err, client.ErrNotFound) {
 		return fmt.Errorf("resource %s not found (or private and you're not its owner)", id)
 	}
+	if errors.Is(err, client.ErrGone) {
+		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
+	}
 	if err != nil {
 		return err
 	}
