@@ -34,6 +34,12 @@ type Config struct {
 	// Watch configures `aqt watch` for this folder, so a tree can pin its own
 	// debounce and guard behavior in-tree (like .aqtignore) rather than per-run.
 	Watch WatchConfig `json:"watch"`
+
+	// Conflicts selects how a two-sided change is resolved: "block" (default)
+	// reports the conflict and refuses the sync, "copy" keeps the local version and
+	// writes the remote one alongside as <name>.conflict-<suffix>. Empty means block.
+	// The `--conflicts` flag overrides this per run.
+	Conflicts string `json:"conflicts"`
 }
 
 // ChunkSizes are explicit content-defined chunking bounds in bytes. min doubles as
@@ -197,6 +203,11 @@ func LoadConfig(dir string) (Config, error) {
 	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, err
+	}
+	switch c.Conflicts {
+	case "", "block", "copy":
+	default:
+		return c, fmt.Errorf("invalid conflicts %q in %s (want \"block\" or \"copy\")", c.Conflicts, configFile)
 	}
 	return c, nil
 }

@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
+  two-sided change Dropbox-style: the local version stays at its path and the remote
+  version is written alongside as `<name>.conflict-<host>-<timestamp>`, then the sync
+  continues at exit 0. The default (`--conflicts=block`) and `--force` are unchanged.
+  Copy mode is refused with `--force`, `--reconcile`, `--accept-rollback`,
+  `--push-only`/`--pull-only`, and on pack-and-seal folders.
 - Server-enforced lifecycle controls on public share links. `aqt push` and `aqt share`
   accept `--expire <dur>` (e.g. `30m`, `24h`, `7d`), `--max-reads <n>`, and `--burn`
   (shorthand for `--max-reads 1`). An expired or exhausted link returns `410 Gone`

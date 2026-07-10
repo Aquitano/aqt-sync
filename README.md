@@ -37,6 +37,10 @@ aqt push notes.md --public
 aqt init ~/vault
 aqt sync ~/vault
 
+# On a two-sided change, keep local and save the remote version alongside as
+# <name>.conflict-<host>-<timestamp> instead of blocking on the conflict.
+aqt sync ~/vault --conflicts=copy
+
 # Restore a tracked folder on another machine after `aqt login` there.
 aqt clone <folder-id> ~/vault
 

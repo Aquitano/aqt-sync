@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -90,6 +94,236 @@ func TestSyncE2E(t *testing.T) {
 		t.Fatalf("force conflict resolution did not win: %q", got)
 	}
 	assertTreeEqual(t, origin, replica)
+}
+
+// TestSyncConflictCopyBothModified covers --conflicts=copy on a two-sided edit: the
+// sync resolves without error (exit 0), local wins at the primary path, and the remote
+// version lands in exactly one conflict-copy. A following round pushes the copy and the
+// other replica pulls it, with no conflict re-triggered.
+func TestSyncConflictCopyBothModified(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "notes/todo.txt", "base")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "notes/todo.txt", "origin edit")
+	h.sync(origin)
+	writeTree(t, replica, "notes/todo.txt", "replica edit")
+
+	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+		t.Fatalf("copy-mode sync: %v", err)
+	}
+	if got := readTree(t, replica, "notes/todo.txt"); got != "replica edit" {
+		t.Fatalf("local did not win at the primary path: %q", got)
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("expected exactly one conflict-copy, got %v", copies)
+	}
+	if got := readTree(t, replica, copies[0]); got != "origin edit" {
+		t.Fatalf("conflict-copy content = %q, want the remote %q", got, "origin edit")
+	}
+
+	// The copy was written after the snapshot, so a following sync pushes it; origin
+	// then pulls both the local-wins primary and the copy.
+	h.sync(replica)
+	h.sync(origin)
+	assertTreeEqual(t, origin, replica)
+	if got := readTree(t, origin, "notes/todo.txt"); got != "replica edit" {
+		t.Fatalf("origin primary did not converge to local-wins: %q", got)
+	}
+	if got := readTree(t, origin, copies[0]); got != "origin edit" {
+		t.Fatalf("origin missing pulled conflict-copy: %q", got)
+	}
+	// Both sides are now clean: the copy is ordinary content, not a standing conflict.
+	h.sync(replica)
+	h.sync(origin)
+}
+
+// TestSyncConflictCopyRetryDoesNotDuplicate exercises the push-conflict retry with a
+// standing copy-mode conflict. The remote side is unchanged between attempts, so the
+// copy the first attempt materialized must be reused, not re-materialized under a bumped
+// suffix. A one-shot injected 409 on the folder commit stands in for another device that
+// committed first, forcing reconcileWithRetry to re-plan the same conflict.
+func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
+	var armed, injected atomic.Bool
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" &&
+			injected.CompareAndSwap(false, true) {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		pass(w, r)
+	})
+
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "notes/todo.txt", "base")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "notes/todo.txt", "origin edit")
+	h.sync(origin)
+	writeTree(t, replica, "notes/todo.txt", "replica edit")
+
+	// Arm the 409 only for the conflicting copy-mode sync, not the setup pushes above.
+	armed.Store(true)
+	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+		t.Fatalf("copy-mode sync through retry: %v", err)
+	}
+	if !injected.Load() {
+		t.Fatal("retry path never exercised: no 409 was injected on the folder commit")
+	}
+
+	if got := readTree(t, replica, "notes/todo.txt"); got != "replica edit" {
+		t.Fatalf("local did not win at the primary path: %q", got)
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("retry duplicated the conflict-copy: got %v, want exactly one", copies)
+	}
+	if got := readTree(t, replica, copies[0]); got != "origin edit" {
+		t.Fatalf("conflict-copy content = %q, want the remote %q", got, "origin edit")
+	}
+
+	// The reused copy pushes and converges like a normal one, with no second conflict.
+	h.sync(replica)
+	h.sync(origin)
+	assertTreeEqual(t, origin, replica)
+}
+
+// TestSyncConflictCopyLocalDeleteRemoteModify covers the delete-vs-modify conflict: the
+// remote edit is preserved as a copy, the primary stays absent locally, and the remote
+// primary is dropped (local delete wins), so it disappears from the other replica too.
+func TestSyncConflictCopyLocalDeleteRemoteModify(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "doc.txt", "base")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "doc.txt", "origin edit")
+	h.sync(origin)
+	removeTree(t, replica, "doc.txt")
+
+	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+		t.Fatalf("copy-mode sync: %v", err)
+	}
+	assertAbsent(t, replica, "doc.txt")
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("expected one conflict-copy, got %v", copies)
+	}
+	if got := readTree(t, replica, copies[0]); got != "origin edit" {
+		t.Fatalf("conflict-copy content = %q, want %q", got, "origin edit")
+	}
+
+	h.sync(replica) // push the copy
+	h.sync(origin)
+	assertAbsent(t, origin, "doc.txt")
+	if got := readTree(t, origin, copies[0]); got != "origin edit" {
+		t.Fatalf("origin missing pulled conflict-copy: %q", got)
+	}
+}
+
+// TestSyncConflictCopyRemoteDeleteLocalModify covers the modify-vs-delete conflict: the
+// remote has no bytes to preserve, so no copy is written; the local edit is kept and
+// pushed, resurrecting the file on the other replica.
+func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "doc.txt", "base")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	removeTree(t, origin, "doc.txt")
+	h.sync(origin)
+	writeTree(t, replica, "doc.txt", "replica edit")
+
+	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+		t.Fatalf("copy-mode sync: %v", err)
+	}
+	if copies := globConflicts(t, replica); len(copies) != 0 {
+		t.Fatalf("expected no conflict-copy when the remote deleted the file, got %v", copies)
+	}
+	if got := readTree(t, replica, "doc.txt"); got != "replica edit" {
+		t.Fatalf("local edit was not kept: %q", got)
+	}
+
+	h.sync(origin)
+	if got := readTree(t, origin, "doc.txt"); got != "replica edit" {
+		t.Fatalf("origin did not receive the local-wins push: %q", got)
+	}
+}
+
+// TestSyncConflictCopyValidation covers the flag-combination guards: copy is
+// incompatible with --force, with the baseless --reconcile/--accept-rollback plans, and
+// with a pack-and-seal folder.
+func TestSyncConflictCopyValidation(t *testing.T) {
+	h := newE2E(t)
+
+	dir := t.TempDir()
+	h.init(dir)
+	if err := runSync(dir, syncOptions{conflicts: "copy", force: true}); err == nil ||
+		!strings.Contains(err.Error(), "force") {
+		t.Fatalf("copy+force: got %v, want a contradiction error", err)
+	}
+	if err := runSync(dir, syncOptions{conflicts: "copy", reconcile: true}); err == nil ||
+		!strings.Contains(err.Error(), "three-way") {
+		t.Fatalf("copy+reconcile: got %v, want a three-way error", err)
+	}
+
+	packDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(packDir, ".aqtconfig"), []byte(`{"pack":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.init(packDir)
+	if err := runSync(packDir, syncOptions{conflicts: "copy"}); err == nil ||
+		!strings.Contains(err.Error(), "pack-and-seal") {
+		t.Fatalf("copy on a pack folder: got %v, want a pack error", err)
+	}
+}
+
+// globConflicts returns the tracked conflict-copy files under root (paths containing
+// the ".conflict-" marker), skipping the .aqt control directory.
+func globConflicts(t *testing.T, root string) []string {
+	t.Helper()
+	var out []string
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if d.Name() == ".aqt" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		if strings.Contains(filepath.ToSlash(rel), ".conflict-") {
+			out = append(out, filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // TestMixedVersionUpgradeRequired proves the point of issue #69: a client that hits a
@@ -335,6 +569,40 @@ func newE2E(t *testing.T) *e2eHarness {
 	t.Cleanup(ts.Close)
 
 	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir, store: store}
+	h.signup("e2e@example.com", "correct horse battery staple")
+	return h
+}
+
+// newE2EWithProxy is newE2E with a reverse proxy in front of the server, so a test can
+// intercept requests (e.g. inject a one-shot 409 to force a version-conflict retry).
+// intercept is called for every request and either handles it or forwards via pass.
+func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc)) *e2eHarness {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	dataDir := t.TempDir()
+	store, err := server.OpenStore(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	backend := httptest.NewServer(server.New(store).Router())
+	t.Cleanup(backend.Close)
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		intercept(w, r, proxy.ServeHTTP)
+	}))
+	t.Cleanup(front.Close)
+
+	h := &e2eHarness{t: t, url: front.URL, dataDir: dataDir, store: store}
 	h.signup("e2e@example.com", "correct horse battery staple")
 	return h
 }
