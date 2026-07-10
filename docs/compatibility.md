@@ -58,6 +58,19 @@ boundary (a pre-0.2 client is assumed to be `2` and still hits the AEAD failure 
 id-bound resource). It protects the **next** boundary, once every reader advertises a
 capability.
 
+## Public-link lifecycle (no capability bump)
+
+Server-enforced link lifecycle (`--expire`/`--max-reads`/`--burn`) is a separate
+compatibility axis from the sealed-format capability above. It changes no encrypted
+format, so `api.ClientCapability` is **not** bumped and no `min_client` is set for it.
+
+Instead it uses an **enforcement echo**: a `PUT /v1/resources` (or visibility change)
+that carries a policy gets the accepted `expiresAt`/`maxReads` echoed back in the
+response. A server that predates the feature ignores the unknown request fields and
+echoes nothing. A new client therefore **fails closed** — it deletes the just-created
+resource (or reverts the visibility flip) and errors, rather than hand out a link the
+server will never actually expire. Upgrade the server before relying on lifecycle flags.
+
 ## Rollout rules
 
 - **Upgrade the server before clients.** Older servers have no `min_client` column and

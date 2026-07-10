@@ -12,6 +12,13 @@ All notable changes to this project are documented in this file.
   continues at exit 0. The default (`--conflicts=block`) and `--force` are unchanged.
   Copy mode is refused with `--force`, `--reconcile`, `--accept-rollback`,
   `--push-only`/`--pull-only`, and on pack-and-seal folders.
+- Server-enforced lifecycle controls on public share links. `aqt push` and `aqt share`
+  accept `--expire <dur>` (e.g. `30m`, `24h`, `7d`), `--max-reads <n>`, and `--burn`
+  (shorthand for `--max-reads 1`). An expired or exhausted link returns `410 Gone`
+  (new exit code `7`); the ciphertext is then reclaimed while the link keeps reporting
+  `410`. Zero-knowledge is preserved — the server gates the opaque id and never sees the
+  plaintext or the fragment key. New clients fail closed against an older server that
+  does not enforce the policy (no capability bump; see `docs/compatibility.md`).
 - Client capability negotiation. Every request advertises which encrypted-resource
   formats the client can read (`X-Aqt-Capability`), and resource writes record the
   lowest capability that can read them. A client too old to read a resource now gets
