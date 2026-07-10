@@ -7,10 +7,14 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -138,6 +142,60 @@ func TestSyncConflictCopyBothModified(t *testing.T) {
 	// Both sides are now clean: the copy is ordinary content, not a standing conflict.
 	h.sync(replica)
 	h.sync(origin)
+}
+
+// TestSyncConflictCopyRetryDoesNotDuplicate exercises the push-conflict retry with a
+// standing copy-mode conflict. The remote side is unchanged between attempts, so the
+// copy the first attempt materialized must be reused, not re-materialized under a bumped
+// suffix. A one-shot injected 409 on the folder commit stands in for another device that
+// committed first, forcing reconcileWithRetry to re-plan the same conflict.
+func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
+	var armed, injected atomic.Bool
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" &&
+			injected.CompareAndSwap(false, true) {
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		pass(w, r)
+	})
+
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "notes/todo.txt", "base")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "notes/todo.txt", "origin edit")
+	h.sync(origin)
+	writeTree(t, replica, "notes/todo.txt", "replica edit")
+
+	// Arm the 409 only for the conflicting copy-mode sync, not the setup pushes above.
+	armed.Store(true)
+	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+		t.Fatalf("copy-mode sync through retry: %v", err)
+	}
+	if !injected.Load() {
+		t.Fatal("retry path never exercised: no 409 was injected on the folder commit")
+	}
+
+	if got := readTree(t, replica, "notes/todo.txt"); got != "replica edit" {
+		t.Fatalf("local did not win at the primary path: %q", got)
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("retry duplicated the conflict-copy: got %v, want exactly one", copies)
+	}
+	if got := readTree(t, replica, copies[0]); got != "origin edit" {
+		t.Fatalf("conflict-copy content = %q, want the remote %q", got, "origin edit")
+	}
+
+	// The reused copy pushes and converges like a normal one, with no second conflict.
+	h.sync(replica)
+	h.sync(origin)
+	assertTreeEqual(t, origin, replica)
 }
 
 // TestSyncConflictCopyLocalDeleteRemoteModify covers the delete-vs-modify conflict: the
@@ -511,6 +569,40 @@ func newE2E(t *testing.T) *e2eHarness {
 	t.Cleanup(ts.Close)
 
 	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir, store: store}
+	h.signup("e2e@example.com", "correct horse battery staple")
+	return h
+}
+
+// newE2EWithProxy is newE2E with a reverse proxy in front of the server, so a test can
+// intercept requests (e.g. inject a one-shot 409 to force a version-conflict retry).
+// intercept is called for every request and either handles it or forwards via pass.
+func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc)) *e2eHarness {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+
+	dataDir := t.TempDir()
+	store, err := server.OpenStore(dataDir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { store.Close() })
+
+	backend := httptest.NewServer(server.New(store).Router())
+	t.Cleanup(backend.Close)
+	backendURL, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatalf("parse backend url: %v", err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(backendURL)
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		intercept(w, r, proxy.ServeHTTP)
+	}))
+	t.Cleanup(front.Close)
+
+	h := &e2eHarness{t: t, url: front.URL, dataDir: dataDir, store: store}
 	h.signup("e2e@example.com", "correct horse battery staple")
 	return h
 }

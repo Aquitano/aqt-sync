@@ -672,8 +672,10 @@ func runSync(dir string, opts syncOptions) error {
 	// Stamp every conflict-copy from this sync with one host and one wall-clock time,
 	// so copies made in the same run share a suffix and a retry does not re-time them.
 	var copyHost string
+	var copyMemo conflictCopyMemo
 	if mode == conflictCopy {
 		copyHost = conflictHost()
+		copyMemo = conflictCopyMemo{}
 	}
 	syncStart := time.Now()
 
@@ -778,7 +780,7 @@ func runSync(dir string, opts syncOptions) error {
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			version: res.Version, id: st.ID,
-			mode: mode, host: copyHost, now: syncStart,
+			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo,
 		}, actions, dirActions)
 	}
 
@@ -804,21 +806,22 @@ func reconcileWithRetry(reconcile func() error) error {
 
 // applyCtx bundles the state applySync needs, keeping its signature readable.
 type applyCtx struct {
-	root    string
-	cl      *client.Client
-	opts    syncOptions
-	base    syncengine.Manifest
-	local   syncengine.Manifest
-	remote  syncengine.Manifest
-	conv    crypto.ConvergenceKey
-	ck      crypto.ContentKey
-	mk      crypto.MasterKey
-	meta    crypto.SealedBlob // the resource's existing sealed metadata, carried forward
-	version int
-	id      string
-	mode    conflictMode // conflictCopy preserves the remote side of each conflict as a copy
-	host    string       // sanitized hostname stamped into conflict-copy names (copy mode)
-	now     time.Time    // sync wall-clock, stamped into conflict-copy names (copy mode)
+	root     string
+	cl       *client.Client
+	opts     syncOptions
+	base     syncengine.Manifest
+	local    syncengine.Manifest
+	remote   syncengine.Manifest
+	conv     crypto.ConvergenceKey
+	ck       crypto.ContentKey
+	mk       crypto.MasterKey
+	meta     crypto.SealedBlob // the resource's existing sealed metadata, carried forward
+	version  int
+	id       string
+	mode     conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
+	host     string           // sanitized hostname stamped into conflict-copy names (copy mode)
+	now      time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
+	copyMemo conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
 }
 
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
@@ -950,7 +953,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	// local-wins by the action loop above. Copies land at fresh, collision-checked
 	// paths, so they never overwrite anything and skip the download drift guard.
 	if c.mode == conflictCopy {
-		if copies := planConflictCopies(c.root, actions, remoteByPath, c.host, c.now); len(copies) > 0 {
+		if copies := planConflictCopies(c.root, actions, remoteByPath, c.host, c.now, c.copyMemo); len(copies) > 0 {
 			entries := copyEntries(copies)
 			cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
 			cpErr := runDownloads(c.cl, c.root, entries, cpProg)
@@ -958,7 +961,10 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 			if cpErr != nil {
 				return cpErr
 			}
+			// Record only after the write lands, so a failed/partial download is
+			// re-planned rather than memoized as done; a retry rewrites the same path.
 			for _, cp := range copies {
+				c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
 				fmt.Printf("conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
 			}
 		}
