@@ -53,7 +53,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_AUTH_BURST` | `0` | Authenticated burst per device token. `0` = default (500). |
 | `AQT_TRUSTED_PROXIES` | loopback | Comma-separated proxy CIDRs/hosts whose `X-Forwarded-*` is trusted. `none` trusts none. |
 | `AQT_SNAPSHOT_INTERVAL` | `24h` | Scheduled snapshot cadence. `0` disables. |
-| `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. |
+| `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. Anchored snapshots (`aqt checkpoint`) are exempt and never pruned. |
 | `AQT_GC_INTERVAL` | `6h` | Scheduled garbage-collection cadence. `0` disables. |
 
 Notes:
