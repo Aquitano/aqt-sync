@@ -17,10 +17,11 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-// streamThreshold is the size at or above which a private push streams through the
-// chunk/pack pipeline rather than sealing the whole file in one inline blob. Public
-// files and stdin stay inline (public streaming needs the deferred publicly-readable
-// object store; stdin has no size to threshold on).
+// streamThreshold is the size at or above which a push streams through the
+// chunk/pack pipeline rather than sealing the whole file in one inline blob. This
+// now covers public and gated pushes too — a link holder reads a public streamed
+// file's objects through the per-resource public object endpoint. Stdin stays inline
+// (it has no size to threshold on).
 const streamThreshold = 8 << 20
 
 type pushOptions struct {
@@ -60,8 +61,8 @@ func runPush(path string, opts pushOptions) error {
 		return err
 	}
 
-	// Large private files stream; everything else takes the inline path below.
-	if path != "-" && !opts.public && opts.password == "" {
+	// Large regular files stream (private, public, or gated); stdin stays inline.
+	if path != "-" {
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Size() >= streamThreshold {
 			return runPushStream(cl, prof, path, opts)
 		}
@@ -194,13 +195,20 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return err
 	}
+	// Always wrap the content key under the master key for owner recovery; the server
+	// strips it from non-owner reads of a public resource.
 	wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 	if err != nil {
 		return err
 	}
 
+	visibility := api.Private
+	if opts.public || opts.password != "" {
+		visibility = api.Public
+	}
+
 	resp, err := cl.PutResource(api.PutResourceRequest{
-		Visibility:    api.Private,
+		Visibility:    visibility,
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
@@ -210,7 +218,11 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return err
 	}
-	printResult(resp.ID, "aqt://"+resp.ID, name, size, api.Private, opts)
+	ref, err := buildRef(prof.Server, resp.ID, visibility, ck, opts.password)
+	if err != nil {
+		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
+	}
+	printResult(resp.ID, ref, name, size, visibility, opts)
 	return nil
 }
 

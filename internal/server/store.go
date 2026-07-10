@@ -2030,6 +2030,142 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 	return out, nil
 }
 
+// PublicObjectSlices resolves object ids to their pack byte ranges for the
+// unauthenticated public-read endpoint, gated on a public resource. It enforces two
+// invariants that make a public share link safe to hand object fetch to:
+//
+//   - A private or unknown resource is indistinguishable: both return ErrNotFound, so
+//     the endpoint never confirms a private id's existence (matching GetResource).
+//   - Every requested id must be referenced by THIS resource. An id the owner stores
+//     but this resource does not reference fails the whole request with ErrNotFound,
+//     so a public link cannot be used as an oracle for the owner's unrelated objects.
+//
+// Locations are returned in request order, one per requested id (a duplicate id
+// yields a duplicate entry — the wire framing is positional), and every resolved
+// pack is touched so a concurrent GC cannot reap a pack this download is mid-read of.
+func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []api.ObjectLocation, error) {
+	var owner, vis string
+	err := s.rdb.QueryRow(
+		`SELECT owner_handle, visibility FROM resources WHERE id = ?`, resourceID,
+	).Scan(&owner, &vis)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, ErrNotFound
+	}
+	if err != nil {
+		return "", nil, err
+	}
+	if api.Visibility(vis) != api.Public {
+		return "", nil, ErrNotFound
+	}
+
+	distinct := make([]string, 0, len(ids))
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if !seen[id] {
+			seen[id] = true
+			distinct = append(distinct, id)
+		}
+	}
+
+	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
+
+	// Membership: every requested id must be a chunk root of this resource. A miss on
+	// any id fails the whole request without revealing which one.
+	member := map[string]bool{}
+	for start := 0; start < len(distinct); start += batch {
+		end := min(start+batch, len(distinct))
+		group := distinct[start:end]
+		args := make([]any, 0, len(group)+1)
+		args = append(args, resourceID)
+		for _, id := range group {
+			args = append(args, id)
+		}
+		rows, err := s.rdb.Query(
+			`SELECT chunk_id FROM resource_chunks WHERE resource_id = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		)
+		if err != nil {
+			return "", nil, err
+		}
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return "", nil, err
+			}
+			member[id] = true
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", nil, err
+		}
+		rows.Close()
+	}
+	for _, id := range distinct {
+		if !member[id] {
+			return "", nil, ErrNotFound
+		}
+	}
+
+	// Resolve locations for the owner (same query shape as LocateObjects), indexed by
+	// id so the response can be assembled in request order.
+	locByID := make(map[string]api.ObjectLocation, len(distinct))
+	seenPack := map[string]bool{}
+	var packs []string
+	for start := 0; start < len(distinct); start += batch {
+		end := min(start+batch, len(distinct))
+		group := distinct[start:end]
+		args := make([]any, 0, len(group)+1)
+		args = append(args, owner)
+		for _, id := range group {
+			args = append(args, id)
+		}
+		rows, err := s.rdb.Query(
+			`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
+			args...,
+		)
+		if err != nil {
+			return "", nil, err
+		}
+		for rows.Next() {
+			var (
+				id, packID  string
+				off, length int64
+			)
+			if err := rows.Scan(&id, &packID, &off, &length); err != nil {
+				rows.Close()
+				return "", nil, err
+			}
+			locByID[id] = api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length}
+			if !seenPack[packID] {
+				seenPack[packID] = true
+				packs = append(packs, packID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return "", nil, err
+		}
+		rows.Close()
+	}
+
+	// The resource_chunks -> objects FK guarantees a membership-verified id locates;
+	// treat any miss as not-found rather than serving a short framing.
+	out := make([]api.ObjectLocation, 0, len(ids))
+	for _, id := range ids {
+		loc, ok := locByID[id]
+		if !ok {
+			return "", nil, ErrNotFound
+		}
+		out = append(out, loc)
+	}
+
+	if err := s.touchPacks(owner, packs); err != nil {
+		return "", nil, err
+	}
+	return owner, out, nil
+}
+
 // touchPacks re-arms the GC age guard on the named packs. The id list is batched so
 // the IN clause stays well under SQLite's bound-variable limit even for a clone that
 // resolves many packs at once.

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/binary"
 	"errors"
 	"io"
 	"net/http"
@@ -11,6 +12,11 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 )
+
+// maxPublicObjectIDs caps one public-read request. It mirrors the client-side
+// locate batch cap (locateBatchSize), keeping a single response's pack-read set
+// bounded no matter how the caller frames its batches.
+const maxPublicObjectIDs = 10_000
 
 // gcMinAge is the age guard for garbage collection: a pack younger than this is
 // never swept, so an in-flight push's freshly uploaded packs survive until its
@@ -102,6 +108,72 @@ func (s *Server) locateChunks(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.LocateResponse{Locations: locations})
+}
+
+// publicObjects serves exact object slices for a public streamed resource without
+// auth. A share-link holder already has the content key (URL fragment) but object
+// fetch is otherwise owner-scoped, so this is the only unauthenticated path to the
+// packed object bytes. It answers EXACT per-object slices, never a raw pack range: a
+// pack interleaves many resources' objects, and the client's span coalescing on raw
+// ranges would let a public reader pull gap bytes belonging to a private neighbor.
+//
+// The response is a positional binary framing — for each requested id, a 4-byte
+// big-endian length followed by exactly that many bytes, in request order.
+func (s *Server) publicObjects(c *gin.Context) {
+	var req api.PublicObjectsRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.IDs) > maxPublicObjectIDs {
+		abort(c, http.StatusBadRequest, "too many object ids in one request")
+		return
+	}
+	owner, locs, err := s.store.PublicObjectSlices(c.Param("id"), req.IDs)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "locate failed")
+		return
+	}
+
+	c.Header("Content-Type", "application/octet-stream")
+	c.Status(http.StatusOK)
+
+	// Keep each pack open for the response's duration: a streamed file's objects
+	// cluster into a handful of packs, so this bounds open fds without re-opening per
+	// slice. Closed before returning.
+	open := map[string]*os.File{}
+	defer func() {
+		for _, f := range open {
+			f.Close()
+		}
+	}()
+
+	// Past the first byte the headers are committed, so a disk error can only
+	// truncate the body; the client detects the short read off the length framing.
+	var lenbuf [4]byte
+	for _, loc := range locs {
+		f, ok := open[loc.PackID]
+		if !ok {
+			f, err = os.Open(s.store.packPath(owner, loc.PackID))
+			if err != nil {
+				return
+			}
+			open[loc.PackID] = f
+		}
+		binary.BigEndian.PutUint32(lenbuf[:], uint32(loc.Len))
+		if _, err := c.Writer.Write(lenbuf[:]); err != nil {
+			return
+		}
+		if _, err := f.Seek(loc.Off, io.SeekStart); err != nil {
+			return
+		}
+		if _, err := io.CopyN(c.Writer, f, loc.Len); err != nil {
+			return
+		}
+	}
 }
 
 func (s *Server) runGC(c *gin.Context) {

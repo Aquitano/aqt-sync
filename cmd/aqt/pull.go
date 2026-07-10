@@ -97,7 +97,9 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 			"and aqt://%s/<path> pulls a single entry", meta.Name, id, id, id)
 	}
 	if meta.Streamed {
-		return pullStream(cl, res, ck, out, meta, toStdout, force)
+		// A share link (fragment present) has no account token for the authed
+		// pack-locate path, so it reads objects through the public endpoint instead.
+		return pullStream(cl, res, ck, out, meta, fragment != "", toStdout, force)
 	}
 
 	plaintext, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, id)
@@ -109,31 +111,43 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 
 // pullStream reconstructs a streamed file from its objects, writing chunks to the
 // destination as they are fetched so the whole file is never held in memory.
-func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, toStdout, force bool) error {
+func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, viaLink, toStdout, force bool) error {
 	root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
 	// A large file stores its chunk list indirectly as sealed segments; locate and
 	// open those first (they sit behind their own locate) to recover the content
-	// chunk records, then locate the content objects themselves.
+	// chunk records, then locate the content objects themselves. A link holder reads
+	// both through the unauthenticated public object endpoint; the owner uses the
+	// authed pack-locate path.
+	get := func(chunks []crypto.Chunk) (func(id string) ([]byte, error), error) {
+		if viaLink {
+			return newPublicChunkSource(cl, res.ID, chunks).get, nil
+		}
+		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
+		if err != nil {
+			return nil, err
+		}
+		return src.get, nil
+	}
 	chunks := root.Chunks
 	if root.Indirect() {
-		segSrc, err := newPackSource(cl, root.ChunkIDs())
+		segFetch, err := get(root.ChunkList)
 		if err != nil {
 			return err
 		}
-		chunks, err = root.Resolve(segSrc.get)
+		chunks, err = root.Resolve(segFetch)
 		if err != nil {
 			return err
 		}
 	}
-	src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
+	fetch, err := get(chunks)
 	if err != nil {
 		return err
 	}
 	if toStdout {
-		return syncengine.WriteFileRoot(os.Stdout, chunks, src.get)
+		return syncengine.WriteFileRoot(os.Stdout, chunks, fetch)
 	}
 	dest := out
 	if dest == "" {
@@ -145,7 +159,7 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 		}
 	}
 	if err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
-		return syncengine.WriteFileRoot(f, chunks, src.get)
+		return syncengine.WriteFileRoot(f, chunks, fetch)
 	}); err != nil {
 		return err
 	}

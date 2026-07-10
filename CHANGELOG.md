@@ -12,6 +12,12 @@ All notable changes to this project are documented in this file.
   an actionable `Upgrade Required` error (exit code `6`) before any download, instead
   of a bare decryption failure. This is forward-looking: it gates the next format
   boundary once every device advertises a capability. See `docs/compatibility.md`.
+- Streamed (large) files can now be shared publicly with `aqt share`, gated with
+  a password, and pulled by anyone holding the link — no account required.
+- `aqt push --public` (and `-P`) now streams a large file through the chunk
+  pipeline instead of sealing it whole in memory.
+- `aqt private` rotates a streamed file's key by re-wrapping its root and making
+  it private again, so a previously shared link no longer decrypts or fetches it.
 
 ## [v0.2.0] - 2026-07-09
 

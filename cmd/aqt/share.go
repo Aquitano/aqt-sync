@@ -10,6 +10,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 func shareCmd() *cobra.Command {
@@ -60,14 +61,13 @@ func runShare(idArg, password string, noClip bool) error {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
 	defer ck.Wipe()
-	// A streamed file's objects live in the owner-only pack store, so a public reader
-	// could not fetch them even with the link key.
+	// Sanity-check the unwrapped key before flipping visibility.
 	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
 	if err != nil {
 		return err
 	}
-	if meta.Streamed {
-		return errors.New("this is a streamed private file; public sharing of streamed files is not supported yet")
+	if meta.Kind == api.KindFolder {
+		return errors.New("sharing a whole folder publicly is not supported yet")
 	}
 	if res.Visibility != api.Public {
 		if _, err := cl.SetVisibility(id, api.Public); err != nil {
@@ -125,19 +125,17 @@ func runPrivate(idArg string) error {
 		return fmt.Errorf("unwrap key: %w", err)
 	}
 	defer oldCK.Wipe()
-	// A streamed file or tracked folder is object-backed: its blob is a root pointer
-	// over chunk objects, and the resource's ChunkRefs are the sole GC liveness roots
-	// for those objects. Rotating re-seals the blob and re-PUTs it; carrying no
-	// ChunkRefs would drop those roots, so the next GC unlinks the still-referenced
-	// objects — unrecoverable loss. Such resources are private-only anyway (their
-	// objects are never publicly fetchable, and `share` already refuses streamed
-	// files), so there is no public link to rotate. Refuse rather than destroy.
 	meta, err := decodeMeta(res.EncryptedMeta, oldCK, id)
 	if err != nil {
 		return err
 	}
-	if meta.Streamed || meta.Kind == api.KindFolder {
-		return errors.New("cannot rotate the key of a streamed file or tracked folder; it is private-only and has no public link to rotate")
+	// A tracked folder is private-only and has no public link to rotate; rotating it
+	// would also have to re-root its whole object graph. Refuse it.
+	if meta.Kind == api.KindFolder {
+		return errors.New("cannot rotate the key of a tracked folder; it is private-only and has no public link to rotate")
+	}
+	if meta.Streamed {
+		return rotateStreamed(cl, id, res, oldCK, mk)
 	}
 	plaintext, err := crypto.OpenBound(res.Blob, oldCK, crypto.AADBlob, id)
 	if err != nil {
@@ -178,6 +176,77 @@ func runPrivate(idArg string) error {
 		WrappedKey:      &wrapped,
 		ExpectedVersion: res.Version,
 		MinClient:       api.CapabilityIDBinding, // rotate re-seals blob and meta id-bound (v2)
+	}); err != nil {
+		if errors.Is(err, client.ErrConflict) {
+			return errors.New("resource changed while rotating its key; re-run `aqt private`")
+		}
+		return err
+	}
+
+	fmt.Println("aqt://" + id)
+	fmt.Fprintln(os.Stderr, "rotated content key — any previous public link no longer decrypts")
+	return nil
+}
+
+// rotateStreamed rotates a streamed file's key by re-wrapping the ROOT under a fresh
+// content key and flipping visibility back to private. The convergent chunk objects
+// and their per-chunk keys are untouched: re-sealing the content would break dedup and
+// re-upload the whole file, and an old link holder could have saved the plaintext
+// anyway. Access revocation is enforced server-side by the visibility flip. The re-PUT
+// must carry the resource's full ChunkRefs, since the server refuses a re-PUT that
+// drops the GC roots of an object-backed resource.
+func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey) error {
+	root, err := syncengine.OpenFileRoot(res.Blob, oldCK, id)
+	if err != nil {
+		return fmt.Errorf("decrypt: %w", err)
+	}
+	// Recover the full content chunk records so ChunkRefs mirrors what BuildFileRoot
+	// produced at push time; an indirect root's list segments sit behind their own
+	// locate, so fetch them through the authed path first.
+	chunks := root.Chunks
+	if root.Indirect() {
+		segSrc, err := newPackSource(cl, root.ChunkIDs())
+		if err != nil {
+			return err
+		}
+		chunks, err = root.Resolve(segSrc.get)
+		if err != nil {
+			return err
+		}
+	}
+	refs := root.Refs(chunks)
+
+	newCK, err := crypto.GenerateContentKey()
+	if err != nil {
+		return err
+	}
+	defer newCK.Wipe()
+	// SealFileRoot binds the root to the id even if the original create was unbound.
+	blob, err := syncengine.SealFileRoot(root, newCK, id)
+	if err != nil {
+		return err
+	}
+	metaPlain, err := crypto.OpenBound(res.EncryptedMeta, oldCK, crypto.AADMeta, id)
+	if err != nil {
+		return fmt.Errorf("decrypt metadata: %w", err)
+	}
+	metaBlob, err := crypto.SealBound(metaPlain, newCK, crypto.AADMeta, id)
+	if err != nil {
+		return err
+	}
+	wrapped, err := crypto.WrapKey(newCK, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return err
+	}
+	if _, err := cl.PutResource(api.PutResourceRequest{
+		ID:              id,
+		Visibility:      api.Private,
+		Blob:            blob,
+		EncryptedMeta:   metaBlob,
+		WrappedKey:      &wrapped,
+		ChunkRefs:       refs,
+		ExpectedVersion: res.Version,
+		MinClient:       api.CapabilityIDBinding, // SealFileRoot re-seals the root id-bound (v2)
 	}); err != nil {
 		if errors.Is(err, client.ErrConflict) {
 			return errors.New("resource changed while rotating its key; re-run `aqt private`")

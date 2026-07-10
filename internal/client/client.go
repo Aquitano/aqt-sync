@@ -5,6 +5,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -264,6 +265,61 @@ func (c *Client) LocateChunks(ids []string) ([]api.ObjectLocation, error) {
 		locations = append(locations, r.Locations...)
 	}
 	return locations, nil
+}
+
+// maxPublicFrame bounds one framed object in a public-objects response so a hostile
+// server cannot force a huge allocation off an oversized length prefix. It mirrors
+// the server's per-pack body cap (an object slice is a sub-range of one pack).
+const maxPublicFrame = 32 << 20
+
+// PublicObjects fetches exact object slices for a public streamed resource over the
+// unauthenticated public endpoint — the share-link path, where the content key lives
+// in the caller's URL fragment, not here. It issues a single POST (the CLI caller
+// batches) and returns one byte slice per requested id, in request order; a duplicate
+// id yields a duplicate slice, since the wire framing is positional. A 404 maps to
+// ErrNotFound like the other reads.
+func (c *Client) PublicObjects(resourceID string, ids []string) ([][]byte, error) {
+	body, err := json.Marshal(api.PublicObjectsRequest{IDs: ids})
+	if err != nil {
+		return nil, err
+	}
+	path := "/v1/public/resources/" + url.PathEscape(resourceID) + "/objects"
+	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/octet-stream")
+	// Same stall-guarded transport as the pack download path; the CLI-side batching
+	// keeps one response small enough to buffer.
+	_, data, err := c.send(req, path)
+	if err != nil {
+		return nil, err
+	}
+	return parsePublicFrames(data, len(ids))
+}
+
+// parsePublicFrames splits a positional length-prefixed response into exactly want
+// frames. A frame length of zero, one past the per-object cap, or a body too short
+// for the declared length is a protocol error — a truncated or hostile response.
+func parsePublicFrames(data []byte, want int) ([][]byte, error) {
+	out := make([][]byte, 0, want)
+	for i := 0; i < want; i++ {
+		if len(data) < 4 {
+			return nil, fmt.Errorf("aqt: public objects response truncated before frame %d of %d", i, want)
+		}
+		n := binary.BigEndian.Uint32(data[:4])
+		data = data[4:]
+		if n == 0 || n > maxPublicFrame {
+			return nil, fmt.Errorf("aqt: public objects frame %d declares invalid length %d", i, n)
+		}
+		if uint32(len(data)) < n {
+			return nil, fmt.Errorf("aqt: public objects frame %d truncated: want %d bytes, have %d", i, n, len(data))
+		}
+		out = append(out, data[:n])
+		data = data[n:]
+	}
+	return out, nil
 }
 
 // PutPack uploads one raw pack. The id is its content address; the server verifies

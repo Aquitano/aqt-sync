@@ -90,13 +90,16 @@ func (c Config) inviteAccepted(token string) bool {
 type Server struct {
 	store *Store
 	cfg   Config
-	// Three limiters with three keys: unauth routes by peer address (no identity
-	// yet), authed routes by device id (tokens are the identity; a NAT'd office
-	// must not share a bucket), and GC by owner (its planning cost scales with the
-	// owner's whole object table, so it gets a far smaller budget).
-	limiter     *ipRateLimiter
-	authLimiter *ipRateLimiter
-	gcLimiter   *ipRateLimiter
+	// Four limiters with four keys: unauth routes by peer address (no identity yet),
+	// authed routes by device id (tokens are the identity; a NAT'd office must not
+	// share a bucket), GC by owner (its planning cost scales with the owner's whole
+	// object table, so it gets a far smaller budget), and the public object-read by
+	// peer address but far looser than unauth (a bulk download would trip the 1-rps
+	// brute-force bucket).
+	limiter       *ipRateLimiter
+	authLimiter   *ipRateLimiter
+	gcLimiter     *ipRateLimiter
+	publicLimiter *ipRateLimiter
 }
 
 func New(store *Store) *Server { return NewWithConfig(store, Config{}) }
@@ -110,11 +113,12 @@ func NewWithConfig(store *Store, cfg Config) *Server {
 		burst = authedBurst
 	}
 	return &Server{
-		store:       store,
-		cfg:         cfg,
-		limiter:     newIPRateLimiter(unauthRatePerSec, unauthBurst),
-		authLimiter: newIPRateLimiter(rps, burst),
-		gcLimiter:   newIPRateLimiter(gcRatePerSec, gcBurst),
+		store:         store,
+		cfg:           cfg,
+		limiter:       newIPRateLimiter(unauthRatePerSec, unauthBurst),
+		authLimiter:   newIPRateLimiter(rps, burst),
+		gcLimiter:     newIPRateLimiter(gcRatePerSec, gcBurst),
+		publicLimiter: newIPRateLimiter(publicObjectsRatePerSec, publicObjectsBurst),
 	}
 }
 
@@ -176,6 +180,15 @@ func (s *Server) Router() *gin.Engine {
 		// Public resource reads need no auth; the id is unguessable and the
 		// decrypt key lives only in the caller's URL fragment.
 		v1.GET("/resources/:id", s.getResource)
+
+		// Public object read for a streamed (large) share: a link holder has the
+		// content key (URL fragment) but object fetch is otherwise owner-scoped. Gated
+		// per resource — it serves only a public resource's own referenced objects, and
+		// as EXACT per-object slices, never raw pack ranges: a pack interleaves many
+		// resources, so the client's span coalescing on raw ranges could leak a private
+		// neighbor's gap bytes. Its own limiter, far looser than the unauth bucket,
+		// which is tuned for auth brute force and would strangle a bulk download.
+		v1.POST("/public/resources/:id/objects", s.publicLimiter.middleware, limitBody(maxChunkBody), s.publicObjects)
 
 		// gzipJSON rides the authed group: it compresses the hex-id JSON of
 		// check/locate/list, and its Content-Type guard leaves the raw pack/blob
