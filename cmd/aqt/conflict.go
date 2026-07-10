@@ -62,11 +62,29 @@ type conflictCopyItem struct {
 	entry syncengine.Entry
 }
 
+// conflictCopyMemo records, per original path, the copy already materialized in an
+// earlier retry attempt and the remote hash it captured. A push conflict re-plans the
+// same standing conflict; without the memo, conflictCopyPath sees the earlier attempt's
+// copy on disk and bumps a fresh suffix each pass, so up to maxSyncAttempts byte-identical
+// duplicates accumulate. The memo makes re-planning reuse the prior copy instead.
+type conflictCopyMemo map[string]conflictCopyRecord
+
+type conflictCopyRecord struct {
+	copyPath   string
+	remoteHash string
+}
+
 // planConflictCopies turns each content conflict that has remote bytes into a copy:
 // the remote entry rewritten to a fresh <path>.conflict-<host>-<ts> path. A conflict
 // with no remote entry (local edit vs remote delete) has nothing to preserve and is
 // skipped; the caller still resolves its primary path local-wins.
-func planConflictCopies(root string, actions []syncengine.Action, remoteByPath map[string]syncengine.Entry, host string, now time.Time) []conflictCopyItem {
+//
+// The memo carries copies materialized by earlier retry attempts. A path already copied
+// for the same remote hash reuses that copy: if it still exists on disk it is skipped
+// entirely, and if it was lost it is rewritten at the same name rather than a bumped one.
+// Only a remote hash that changed since the last attempt (the racing device re-edited the
+// file) plans a fresh, collision-checked copy.
+func planConflictCopies(root string, actions []syncengine.Action, remoteByPath map[string]syncengine.Entry, host string, now time.Time, memo conflictCopyMemo) []conflictCopyItem {
 	var copies []conflictCopyItem
 	for _, a := range actions {
 		if a.Kind != syncengine.Conflict {
@@ -77,7 +95,14 @@ func planConflictCopies(root string, actions []syncengine.Action, remoteByPath m
 			continue
 		}
 		e := re
-		e.Path = conflictCopyPath(root, a.Path, host, now)
+		if rec, ok := memo[a.Path]; ok && rec.remoteHash == re.Hash {
+			if pathExists(root, rec.copyPath) {
+				continue // the earlier attempt's copy is already correct on disk
+			}
+			e.Path = rec.copyPath
+		} else {
+			e.Path = conflictCopyPath(root, a.Path, host, now)
+		}
 		copies = append(copies, conflictCopyItem{orig: a.Path, entry: e})
 	}
 	return copies

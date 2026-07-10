@@ -22,8 +22,13 @@ const htmlContentType = "text/html; charset=utf-8"
 // confirms a private resource's existence (matching the JSON API).
 func (s *Server) shareView(c *gin.Context) {
 	id := c.Param("id")
-	vis, err := s.store.ResourceVisibility(id)
+	vis, gone, err := s.store.ResourceVisibility(id)
 	switch {
+	case err == nil && vis == api.Public && gone:
+		// The link exists but its lifecycle has ended; say so with 410 rather than
+		// offering a pull command that would itself 410.
+		c.Data(http.StatusGone, htmlContentType, gonePage)
+		return
 	case errors.Is(err, ErrNotFound), err == nil && vis != api.Public:
 		c.Data(http.StatusNotFound, htmlContentType, notFoundPage)
 		return
@@ -133,6 +138,15 @@ var notFoundPage = []byte(`<!doctype html>
 <style>body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:42rem;margin:0 auto;padding:4rem 1.5rem}</style>
 </head>
 <body><h1>Not found</h1><p>No public resource lives at this link. It may be private, deleted, or the link may be incomplete.</p></body>
+</html>
+`)
+
+var gonePage = []byte(`<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="robots" content="noindex"><title>aqt · link expired</title>
+<style>body{font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;max-width:42rem;margin:0 auto;padding:4rem 1.5rem}</style>
+</head>
+<body><h1>Link expired</h1><p>This link has expired or reached its read limit. The encrypted content is no longer available.</p></body>
 </html>
 `)
 

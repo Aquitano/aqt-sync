@@ -129,7 +129,7 @@ func TestShareStreamedLinkPull(t *testing.T) {
 	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true, quiet: true})
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, "", true); err != nil {
+		if err := runShare(id, "", true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
@@ -157,7 +157,7 @@ func TestShareStreamedIndirectLinkPull(t *testing.T) {
 	}
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, "", true); err != nil {
+		if err := runShare(id, "", true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
@@ -185,7 +185,7 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 	}
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, "", true); err != nil {
+		if err := runShare(id, "", true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
@@ -248,7 +248,7 @@ func TestGatedStreamedShareLinkPull(t *testing.T) {
 	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true, quiet: true})
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, password, true); err != nil {
+		if err := runShare(id, password, true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
