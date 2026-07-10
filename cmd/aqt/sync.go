@@ -96,6 +96,7 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.reconcile, "reconcile", false, "reconcile without a base (.aqt/base.json missing): one-sided differences become conflicts to review")
 	f.BoolVar(&opts.rehash, "rehash", false, "re-hash every file instead of trusting size+mtime (catches edits that preserve them)")
 	f.BoolVar(&opts.acceptRollback, "accept-rollback", false, "proceed although the server reports an older version than previously seen (restored from backup): reconcile from scratch, one-sided differences become conflicts to review")
+	f.StringVar(&opts.conflicts, "conflicts", "", "conflict handling: block (default) or copy (keep local, write remote to <name>.conflict-<suffix>)")
 	return cmd
 }
 
@@ -450,6 +451,7 @@ type syncOptions struct {
 	reconcile      bool
 	rehash         bool
 	acceptRollback bool
+	conflicts      string // "" (use .aqtconfig, else block), "block", or "copy"
 }
 
 // errSyncNoBase signals that a sync has no last-synced state to reconcile against
@@ -566,8 +568,20 @@ func runSync(dir string, opts syncOptions) error {
 	if err != nil {
 		return err
 	}
+	mode, err := effectiveConflictMode(opts, cfg)
+	if err != nil {
+		return err
+	}
 	if cfg.Pack {
+		if mode == conflictCopy {
+			return errors.New("--conflicts=copy does not apply to a pack-and-seal folder: it reconciles the whole folder at once, so there is no per-file conflict to copy")
+		}
 		return runPackSync(root, opts)
+	}
+	if mode == conflictCopy {
+		if err := validateCopyMode(opts); err != nil {
+			return err
+		}
 	}
 	st, err := loadState(root)
 	if err != nil {
@@ -655,6 +669,14 @@ func runSync(dir string, opts syncOptions) error {
 		}
 	}
 
+	// Stamp every conflict-copy from this sync with one host and one wall-clock time,
+	// so copies made in the same run share a suffix and a retry does not re-time them.
+	var copyHost string
+	if mode == conflictCopy {
+		copyHost = conflictHost()
+	}
+	syncStart := time.Now()
+
 	// reconcile runs one pass against the current remote. It returns
 	// client.ErrConflict if another sync committed first; the loop below then
 	// re-plans against the new remote, so a concurrent write is never lost.
@@ -740,9 +762,15 @@ func runSync(dir string, opts syncOptions) error {
 			dirActions = syncengine.PlanDirsReconcile(local, remote)
 		}
 		if opts.dryRun {
-			return printPlan(coalescePlanRenames(actions, dirActions, local, base, remote))
+			acts, dacts, renames := coalescePlanRenames(actions, dirActions, local, base, remote)
+			if mode == conflictCopy {
+				return printCopyPlan(root, acts, dacts, renames, remote, copyHost, syncStart)
+			}
+			return printPlan(acts, dacts, renames)
 		}
-		if err := abortOnConflicts(actions, dirActions, opts.force); err != nil {
+		// Copy mode resolves conflicts local-wins (like --force) after preserving the
+		// remote side as a copy, so it must not abort on them.
+		if err := abortOnConflicts(actions, dirActions, opts.force || mode == conflictCopy); err != nil {
 			return err
 		}
 		return applySync(applyCtx{
@@ -750,6 +778,7 @@ func runSync(dir string, opts syncOptions) error {
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			version: res.Version, id: st.ID,
+			mode: mode, host: copyHost, now: syncStart,
 		}, actions, dirActions)
 	}
 
@@ -787,6 +816,9 @@ type applyCtx struct {
 	meta    crypto.SealedBlob // the resource's existing sealed metadata, carried forward
 	version int
 	id      string
+	mode    conflictMode // conflictCopy preserves the remote side of each conflict as a copy
+	host    string       // sanitized hostname stamped into conflict-copy names (copy mode)
+	now     time.Time    // sync wall-clock, stamped into conflict-copy names (copy mode)
 }
 
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
@@ -909,6 +941,26 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	for p, le := range localByPath {
 		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
 			newBase[p] = le
+		}
+	}
+
+	// Copy mode: preserve the remote side of every content conflict as a local copy
+	// BEFORE any local-wins remote mutation runs, so the remote bytes survive on disk
+	// even if the push below dies mid-apply. The primary path is then resolved
+	// local-wins by the action loop above. Copies land at fresh, collision-checked
+	// paths, so they never overwrite anything and skip the download drift guard.
+	if c.mode == conflictCopy {
+		if copies := planConflictCopies(c.root, actions, remoteByPath, c.host, c.now); len(copies) > 0 {
+			entries := copyEntries(copies)
+			cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
+			cpErr := runDownloads(c.cl, c.root, entries, cpProg)
+			cpProg.finish(cpErr == nil)
+			if cpErr != nil {
+				return cpErr
+			}
+			for _, cp := range copies {
+				fmt.Printf("conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
+			}
 		}
 	}
 
@@ -2195,6 +2247,36 @@ func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction, r
 		fmt.Printf("%-13s %s\n", "renamed", renameArrow(r))
 	}
 	for _, a := range actions {
+		fmt.Printf("%-13s %s\n", a.Kind, a.Path)
+	}
+	for _, a := range dirActions {
+		fmt.Printf("%-13s %s/\n", a.Kind, a.Path) // trailing slash marks a directory
+	}
+	return nil
+}
+
+// printCopyPlan is the dry-run report for --conflicts=copy: it renders like printPlan
+// but shows each content conflict as the copy it would create (conflict-copy
+// <path> -> <copy-path>) rather than a bare "conflict", without writing anything. A
+// conflict with no remote bytes (local edit vs remote delete) has no copy, so it is
+// shown as a plain conflict. Directory conflicts carry no copy (they resolve
+// local-wins) and pass through unchanged.
+func printCopyPlan(root string, actions []syncengine.Action, dirActions []syncengine.DirAction, renames []syncengine.Rename, remote syncengine.Manifest, host string, now time.Time) error {
+	if len(actions) == 0 && len(dirActions) == 0 && len(renames) == 0 {
+		fmt.Println("already in sync")
+		return nil
+	}
+	for _, r := range renames {
+		fmt.Printf("%-13s %s\n", "renamed", renameArrow(r))
+	}
+	remoteByPath := remote.ByPath()
+	for _, a := range actions {
+		if a.Kind == syncengine.Conflict {
+			if _, ok := remoteByPath[a.Path]; ok {
+				fmt.Printf("%-13s %s -> %s\n", "conflict-copy", a.Path, conflictCopyPath(root, a.Path, host, now))
+				continue
+			}
+		}
 		fmt.Printf("%-13s %s\n", a.Kind, a.Path)
 	}
 	for _, a := range dirActions {

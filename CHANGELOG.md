@@ -6,6 +6,12 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
+  two-sided change Dropbox-style: the local version stays at its path and the remote
+  version is written alongside as `<name>.conflict-<host>-<timestamp>`, then the sync
+  continues at exit 0. The default (`--conflicts=block`) and `--force` are unchanged.
+  Copy mode is refused with `--force`, `--reconcile`, `--accept-rollback`,
+  `--push-only`/`--pull-only`, and on pack-and-seal folders.
 - Client capability negotiation. Every request advertises which encrypted-resource
   formats the client can read (`X-Aqt-Capability`), and resource writes record the
   lowest capability that can read them. A client too old to read a resource now gets

@@ -24,6 +24,27 @@ func TestLoadConfigWatch(t *testing.T) {
 	}
 }
 
+func TestLoadConfigConflicts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(`{"conflicts": "copy"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Conflicts != "copy" {
+		t.Fatalf("conflicts = %q, want copy", cfg.Conflicts)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(`{"conflicts": "merge"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadConfig(dir); err == nil {
+		t.Fatal("expected an error for an unknown conflicts value")
+	}
+}
+
 // A missing .aqtconfig (or an omitted gitGuard) defaults the guard on.
 func TestWatchConfigGuardDefaultsOn(t *testing.T) {
 	cfg, err := LoadConfig(t.TempDir())
