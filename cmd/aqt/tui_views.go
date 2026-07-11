@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -17,10 +19,29 @@ type tuiFileItem struct {
 	desc string // one-line explanation shown in the detail view
 }
 
-func tuiFileDetail(it tuiFileItem) string {
+func tuiFileDetail(it tuiFileItem, root string) string {
 	var b strings.Builder
 	b.WriteString(tuiStyleTitle.Render(it.path) + "\n\n")
 	b.WriteString(tuiField("state", it.kind))
+
+	switch it.kind {
+	case "conflict":
+		b.WriteString(tuiField("direction", "kept alongside your version"))
+		b.WriteString(tuiField("yours", tuiConflictOriginal(it.path)))
+		b.WriteString(tuiField("copy", it.path))
+	case "incoming":
+		b.WriteString(tuiField("direction", "server → local (on next sync)"))
+	default:
+		b.WriteString(tuiField("direction", "local → server (on next sync)"))
+		// A single real path can be stat'd on demand; a deletion has nothing to
+		// stat and a rename's body is an arrow, not a path.
+		if it.kind == "new" || it.kind == "modified" {
+			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(it.path))); err == nil {
+				b.WriteString(tuiField("size", humanBytes(fi.Size())))
+				b.WriteString(tuiField("modified", fi.ModTime().Format("2006-01-02 15:04:05")))
+			}
+		}
+	}
 	if it.desc != "" {
 		b.WriteString("\n" + it.desc + "\n")
 	}
@@ -36,6 +57,15 @@ func tuiFileDetail(it tuiFileItem) string {
 		b.WriteString("\n" + tuiStyleDim.Render("Local change since the last sync — press s to sync."))
 	}
 	return b.String()
+}
+
+// tuiConflictOriginal recovers the path a conflict copy stands beside by dropping
+// the ".conflict-<host>-<ts>" suffix conflictCopyPath appends.
+func tuiConflictOriginal(copyPath string) string {
+	if i := strings.Index(copyPath, ".conflict-"); i >= 0 {
+		return copyPath[:i]
+	}
+	return copyPath
 }
 
 func tuiSnapshotDetail(r snapshotRow, diff *snapshotDiffResult, diffErr error, diffing bool) string {

@@ -161,6 +161,7 @@ func (d *tuiHelp) View(width int) string {
 			{"j/k, ↓/↑", "move selection"}, {"g / G", "top / bottom"},
 			{"enter", "inspect in main pane"}, {"esc", "back / close"},
 			{"/", "filter panel"}, {"@", "toggle command log"},
+			{"space", "actions menu for the panel"},
 			{"r", "refresh"}, {"q", "quit"},
 		}},
 		{"Files", [][2]string{

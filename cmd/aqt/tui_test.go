@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -582,6 +583,226 @@ func TestTUIRedactSecrets(t *testing.T) {
 	if !strings.Contains(got, "•••") {
 		t.Fatalf("expected mask in %q", got)
 	}
+}
+
+func TestTUIStatusVerdict(t *testing.T) {
+	m := testModel(t)
+
+	// Conflicts outrank pending local changes.
+	m.local = localChanges{added: []string{"a"}}
+	m.conflicts = []string{"x.conflict-h-1", "y.conflict-h-1"}
+	m.remoteOK = true
+	m.remote = tuiRemoteMsg{note: "up to date with the server"}
+	txt, style := m.statusVerdict()
+	if !strings.Contains(txt, "2 conflict copies") || !strings.Contains(txt, "resolve") {
+		t.Fatalf("conflict verdict = %q", txt)
+	}
+	if style.GetForeground() != tuiStyleConflict.GetForeground() {
+		t.Fatal("conflict verdict not conflict-styled")
+	}
+
+	// Local + file-level incoming reads as pending in both directions.
+	m.conflicts = nil
+	m.local = localChanges{added: []string{"a", "b"}}
+	m.remote = tuiRemoteMsg{fileLevel: true, incoming: incomingSummary{added: []string{"c"}}}
+	txt, style = m.statusVerdict()
+	if txt != "● needs sync — 2 up · 1 down" {
+		t.Fatalf("needs-sync verdict = %q", txt)
+	}
+	if style.GetForeground() != tuiStyleMod.GetForeground() {
+		t.Fatal("needs-sync verdict not mod-styled")
+	}
+
+	// A pack folder only knows the server is ahead, not by which files.
+	m.local = localChanges{}
+	m.remote = tuiRemoteMsg{note: "server is ahead by 2 version(s)"}
+	if txt, _ = m.statusVerdict(); txt != "● needs sync — server ahead" {
+		t.Fatalf("coarse-ahead verdict = %q", txt)
+	}
+
+	// A server problem with nothing local surfaces the note.
+	m.remote = tuiRemoteMsg{err: errors.New("boom"), note: "server check failed"}
+	txt, style = m.statusVerdict()
+	if txt != "! server check failed" {
+		t.Fatalf("error verdict = %q", txt)
+	}
+	if style.GetForeground() != tuiStyleErr.GetForeground() {
+		t.Fatal("error verdict not err-styled")
+	}
+
+	// Clean and confirmed.
+	m.remote = tuiRemoteMsg{note: "up to date with the server"}
+	txt, style = m.statusVerdict()
+	if txt != "✓ in sync" {
+		t.Fatalf("clean verdict = %q", txt)
+	}
+	if style.GetForeground() != tuiStyleAdd.GetForeground() {
+		t.Fatal("clean verdict not add-styled")
+	}
+
+	// Before the first server reply, with nothing local.
+	m.remoteOK = false
+	m.remote = tuiRemoteMsg{}
+	txt, style = m.statusVerdict()
+	if txt != "… checking server" {
+		t.Fatalf("checking verdict = %q", txt)
+	}
+	if style.GetForeground() != tuiStyleDim.GetForeground() {
+		t.Fatal("checking verdict not dim-styled")
+	}
+
+	// Before the reply but with local changes, the local-only verdict still shows.
+	m.local = localChanges{modified: []string{"z"}}
+	if txt, _ = m.statusVerdict(); txt != "● needs sync — 1 up" {
+		t.Fatalf("local-only verdict = %q", txt)
+	}
+}
+
+func TestTUIBottomBarGating(t *testing.T) {
+	// Account mode: the files panel has no tracked folder, so no sync action and
+	// no actions menu should be advertised.
+	ctx := &tuiCtx{
+		prof:     &identity.Profile{Name: "t", Email: "t@example.com", Server: "http://localhost:8080"},
+		unlocked: true,
+		exe:      "/bin/aqt-test",
+	}
+	m := newTUIModel(ctx, "fold_1", nil)
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	m.setFocus(tuiPanelFiles)
+	bar := m.bottomBar()
+	if strings.Contains(bar, "sync") {
+		t.Fatalf("account-mode files bar advertises sync: %q", bar)
+	}
+	if strings.Contains(bar, "actions") {
+		t.Fatalf("account-mode files bar advertises an empty actions menu: %q", bar)
+	}
+
+	// Inside a tracked folder the sync hint returns.
+	if fm := testModel(t); !strings.Contains(fm.bottomBar(), "sync") {
+		t.Fatal("folder-mode files bar should advertise sync")
+	}
+}
+
+func TestTUIBreadcrumbTitle(t *testing.T) {
+	m := testModel(t)
+	m.setFocus(tuiPanelFiles)
+	title := m.detailTitle()
+	for _, want := range []string{"Details", "Files", "new.txt"} {
+		if !strings.Contains(title, want) {
+			t.Fatalf("detail title %q missing %q", title, want)
+		}
+	}
+
+	// A narrow pane drops trailing segments right-to-left, keeping the head.
+	got := tuiBreadcrumb([]string{"Details", "Files", "a-very-long-selection-name"}, 18)
+	if lipgloss.Width(got) > 18 {
+		t.Fatalf("breadcrumb %q exceeds width 18", got)
+	}
+	if !strings.Contains(got, "Details") {
+		t.Fatalf("breadcrumb dropped the head: %q", got)
+	}
+}
+
+func TestTUILogFollowPauseResume(t *testing.T) {
+	m := testModel(t)
+	for i := 0; i < 100; i++ {
+		m.appendLog(fmt.Sprintf("line %d", i))
+	}
+	m.mainTab = tuiTabLog
+	m.logFollow = true
+	m.refreshMain()
+	if !strings.Contains(m.mainBox(), "following") {
+		t.Fatal("log title should show 'following' while pinned to the tail")
+	}
+
+	// A manual scroll up pauses follow so arriving lines stop yanking the view.
+	m.handleKey(key("k"))
+	if m.logFollow {
+		t.Fatal("scrolling up must pause follow")
+	}
+	if !strings.Contains(m.mainBox(), "paused") {
+		t.Fatal("paused title expected after scrolling up")
+	}
+
+	// G re-pins to the tail.
+	m.handleKey(key("G"))
+	if !m.logFollow {
+		t.Fatal("G must resume follow")
+	}
+	if !strings.Contains(m.mainBox(), "following") {
+		t.Fatal("following title expected after G")
+	}
+}
+
+func TestTUIConflictOriginalAndDetail(t *testing.T) {
+	for in, want := range map[string]string{
+		"notes.md.conflict-laptop-20260711-120000":   "notes.md",
+		"a/b.txt.conflict-desktop-20260711-120000-2": "a/b.txt",
+		"plain.txt": "plain.txt",
+	} {
+		if got := tuiConflictOriginal(in); got != want {
+			t.Errorf("tuiConflictOriginal(%q) = %q, want %q", in, got, want)
+		}
+	}
+
+	out := tuiFileDetail(tuiFileItem{kind: "conflict", path: "notes.md.conflict-host-20260711-120000"}, "/tmp/vault")
+	for _, want := range []string{"yours", "notes.md", "kept alongside your version"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("conflict detail missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestTUISpaceMenuActions(t *testing.T) {
+	m := testModel(t)
+
+	// A private file offers copy/share/delete but not make-private.
+	m.setFocus(tuiPanelResources)
+	m.handleKey(key(" "))
+	menu, ok := m.dialog.(*tuiMenu)
+	if !ok {
+		t.Fatalf("space opened %T, want a menu", m.dialog)
+	}
+	if !strings.Contains(menu.title, "Resources") {
+		t.Fatalf("menu title = %q, want a Resources heading", menu.title)
+	}
+	if ks := menuKeys(menu); ks != "y,s,x" {
+		t.Fatalf("private resource menu keys = %q, want y,s,x", ks)
+	}
+	m.handleKey(key("esc"))
+
+	// A public resource adds the make-private entry.
+	m.panels[tuiPanelResources].list.move(1)
+	m.handleKey(key(" "))
+	if ks := menuKeys(m.dialog.(*tuiMenu)); ks != "y,s,p,x" {
+		t.Fatalf("public resource menu keys = %q, want y,s,p,x", ks)
+	}
+	m.handleKey(key("esc"))
+
+	// Files: sync, sync options, checkpoint — and selecting sync reuses the exact
+	// command the s key dispatches.
+	m.setFocus(tuiPanelFiles)
+	m.handleKey(key(" "))
+	filesMenu := m.dialog.(*tuiMenu)
+	if ks := menuKeys(filesMenu); ks != "s,S,c" {
+		t.Fatalf("files menu keys = %q, want s,S,c", ks)
+	}
+	cmd, done := filesMenu.Update(key("s"))
+	if !done || cmd == nil {
+		t.Fatal("selecting sync should resolve the menu with a command")
+	}
+	req, ok := cmd().(tuiExecRequestMsg)
+	if !ok || strings.Join(req.sub, " ") != "sync /tmp/vault" {
+		t.Fatalf("sync entry produced %#v", cmd())
+	}
+}
+
+func menuKeys(m *tuiMenu) string {
+	ks := make([]string, 0, len(m.options))
+	for _, o := range m.options {
+		ks = append(ks, o.key)
+	}
+	return strings.Join(ks, ",")
 }
 
 func TestTUIConflictCopies(t *testing.T) {
