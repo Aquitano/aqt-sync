@@ -15,13 +15,6 @@ All notable changes to this project are documented in this file.
   storage: pack bytes against the quota, plus resource, snapshot, pack, object,
   and device counts. `--json` for scripts.
 
-### Fixed
-
-- A file changed on both devices to the same content but different permissions
-  is now reported as a conflict instead of being silently treated as converged,
-  matching how directory modes already reconcile. Found by a new property-based
-  test suite (pgregory.net/rapid) over the sync planner.
-
 - `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
   two-sided change Dropbox-style: the local version stays at its path and the remote
   version is written alongside as `<name>.conflict-<host>-<timestamp>`, then the sync
@@ -47,6 +40,13 @@ All notable changes to this project are documented in this file.
   pipeline instead of sealing it whole in memory.
 - `aqt private` rotates a streamed file's key by re-wrapping its root and making
   it private again, so a previously shared link no longer decrypts or fetches it.
+
+### Fixed
+
+- A file changed on both devices to the same content but different permissions
+  is now reported as a conflict instead of being silently treated as converged,
+  matching how directory modes already reconcile. Found by a new property-based
+  test suite (pgregory.net/rapid) over the sync planner.
 
 ## [v0.2.0] - 2026-07-09
 
