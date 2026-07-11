@@ -23,8 +23,14 @@ import (
 // keep-both for concurrent edits, and no data loss.
 //
 // The devices are driven one operation at a time (interleaving is operation order,
-// not goroutine parallelism), so a seed fully determines the run and any failure is
+// not goroutine parallelism) and transfers run serially (AQT_SYNC_SERIAL, set in
+// startServer), so a seed and host mode fully determine the run and any failure is
 // replayable. Override the seed set with AQT_SIM_SEED=<n> to reproduce one failure.
+//
+// Each seed runs in two host modes: distinct-host, where every device stamps its own
+// conflict-copy hostname (the common case), and shared-host, where all devices share
+// one hostname and colliding copy names must be resolved by the suffix bump (see
+// hostModes).
 //
 // It complements the example-based conflict-copy tests by exercising operation
 // orderings no hand-written case enumerates.
@@ -33,10 +39,27 @@ func TestMultiDeviceSim(t *testing.T) {
 		t.Skip("skips the multi-device sync simulation under -short")
 	}
 	for _, seed := range simSeeds(t) {
-		t.Run(fmt.Sprintf("seed-%d", seed), func(t *testing.T) {
-			runSim(t, seed)
-		})
+		for _, mode := range hostModes {
+			t.Run(fmt.Sprintf("seed-%d/%s", seed, mode.name), func(t *testing.T) {
+				runSim(t, seed, mode)
+			})
+		}
 	}
+}
+
+// hostMode selects the conflict-copy hostname each device stamps. distinct-host gives
+// every device a unique name (the common case); shared-host gives them all one name, so
+// devices mint the same <path>.conflict-<host>-<ts> candidate for the same concurrently
+// edited path within the same second, exercising the copy-name collision avoidance in
+// conflictCopyPath (bumping past disk files, remote paths, and already-planned copies).
+type hostMode struct {
+	name string
+	host func(devID int) string
+}
+
+var hostModes = []hostMode{
+	{name: "distinct-host", host: func(id int) string { return fmt.Sprintf("dev%d", id) }},
+	{name: "shared-host", host: func(int) string { return "samehost" }},
 }
 
 const (
@@ -169,6 +192,7 @@ type conflictRec struct {
 type sim struct {
 	t     *testing.T
 	seed  int64
+	mode  hostMode
 	rng   *rand.Rand
 	fault *faultInjector
 
@@ -182,8 +206,8 @@ type sim struct {
 	trace     []string
 }
 
-func runSim(t *testing.T, seed int64) {
-	s := &sim{t: t, seed: seed, rng: rand.New(rand.NewSource(seed)), server: contentMap{}}
+func runSim(t *testing.T, seed int64, mode hostMode) {
+	s := &sim{t: t, seed: seed, mode: mode, rng: rand.New(rand.NewSource(seed)), server: contentMap{}}
 	s.setup()
 
 	for step := 0; step < simSteps; step++ {
@@ -248,6 +272,10 @@ func (s *sim) startServer() {
 	t := s.t
 	gin.SetMode(gin.TestMode)
 	t.Setenv("AQT_NO_KEYCHAIN", "1")
+	// Serialize transfers so crash-fault injection is seed-deterministic: the fault
+	// injector aborts the k-th request, and with a concurrent upload/download pipeline
+	// which request is k-th depends on goroutine scheduling.
+	t.Setenv("AQT_SYNC_SERIAL", "1")
 
 	t.Setenv("AQT_CONFLICT_HOST", "") // restored by t.Setenv; use() sets it per device
 	origHome, origXDG := os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME")
@@ -273,10 +301,10 @@ func (s *sim) startServer() {
 func (s *sim) use(d *simDevice) {
 	os.Setenv("HOME", d.home)                                      // darwin config dir
 	os.Setenv("XDG_CONFIG_HOME", filepath.Join(d.home, ".config")) // linux config dir
-	// Distinct conflict-copy host per device: real devices have distinct hostnames,
-	// which the <host> suffix disambiguates. Without this every device shares the test
-	// host and mints colliding copy names for the same path within the same second.
-	os.Setenv("AQT_CONFLICT_HOST", fmt.Sprintf("dev%d", d.id))
+	// Conflict-copy host per the run's mode: distinct-host disambiguates copy names by
+	// device (the common case); shared-host makes every device stamp one name, so copy
+	// names collide and must be resolved by the suffix bump instead of the hostname.
+	os.Setenv("AQT_CONFLICT_HOST", s.mode.host(d.id))
 }
 
 func (s *sim) freshContent() string {
@@ -544,8 +572,8 @@ func (s *sim) verify() {
 			s.fatalf(-1, "keep-both violated at %s: remote content %q lost", c.path, c.remote)
 		}
 	}
-	s.t.Logf("seed %d: %d steps, %d detected conflicts, converged tree has %d files",
-		s.seed, simSteps, len(s.conflicts), len(tree))
+	s.t.Logf("seed %d (%s): %d steps, %d detected conflicts, converged tree has %d files",
+		s.seed, s.mode.name, simSteps, len(s.conflicts), len(tree))
 }
 
 // --- helpers ---

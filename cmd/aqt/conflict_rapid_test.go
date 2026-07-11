@@ -65,17 +65,27 @@ func TestConflictCopyPathIsFreshProp(t *testing.T) {
 		// Pre-create the first n candidate names so the suffix bump has to walk
 		// past real collisions.
 		stem := path + ".conflict-" + host + "-" + now.UTC().Format("20060102-150405")
-		taken := []string{stem, stem + "-1", stem + "-2"}
-		for _, rel := range taken[:rapid.IntRange(0, 3).Draw(t, "collisions")] {
+		names := []string{stem, stem + "-1", stem + "-2"}
+		for _, rel := range names[:rapid.IntRange(0, 3).Draw(t, "onDisk")] {
 			writeUnder(t, root, rel)
 		}
+		// The remaining candidates are "taken" without existing on disk: paths the
+		// sync is about to download or copy to. A copy must dodge those too, or it
+		// would be overwritten the moment the transfer stage runs.
+		taken := map[string]bool{}
+		for _, rel := range names[:rapid.IntRange(0, 3).Draw(t, "reserved")] {
+			taken[rel] = true
+		}
 
-		got := conflictCopyPath(root, path, host, now)
+		got := conflictCopyPath(root, path, host, now, taken)
 		if !strings.HasPrefix(got, stem) {
 			t.Fatalf("copy path %q does not extend %q", got, stem)
 		}
 		if pathExists(root, got) {
 			t.Fatalf("copy path %q already exists; materializing would clobber it", got)
+		}
+		if taken[got] {
+			t.Fatalf("copy path %q is a path the sync will materialize; it would be overwritten", got)
 		}
 	})
 }

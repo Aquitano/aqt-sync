@@ -1326,9 +1326,20 @@ type candidate struct {
 // both ~DefaultPackTarget).
 const uploadConcurrency = 4
 
+// syncTransferLimit is the errgroup concurrency for a transfer stage, normally the
+// given fan-out. AQT_SYNC_SERIAL=1 forces it to 1 so the multi-device sim's crash-fault
+// injection is seed-deterministic: with a single request in flight per stage, which
+// request the injector aborts no longer depends on goroutine scheduling.
+func syncTransferLimit(n int) int {
+	if os.Getenv("AQT_SYNC_SERIAL") == "1" {
+		return 1
+	}
+	return n
+}
+
 func newPackUploader(cl *client.Client, prog *progressBar) *packUploader {
 	g, ctx := errgroup.WithContext(context.Background())
-	g.SetLimit(uploadConcurrency)
+	g.SetLimit(syncTransferLimit(uploadConcurrency))
 	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}, group: g, ctx: ctx, prog: prog}
 }
 
@@ -1439,7 +1450,7 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, pr
 		return err
 	}
 	var g errgroup.Group
-	g.SetLimit(downloadConcurrency)
+	g.SetLimit(syncTransferLimit(downloadConcurrency))
 	for _, e := range entries {
 		e := e
 		g.Go(func() error {
@@ -2294,10 +2305,13 @@ func printCopyPlan(root string, actions []syncengine.Action, dirActions []syncen
 		fmt.Printf("%-13s %s\n", "renamed", renameArrow(r))
 	}
 	remoteByPath := remote.ByPath()
+	taken := takenPaths(remoteByPath) // same collision set the real apply uses
 	for _, a := range actions {
 		if a.Kind == syncengine.Conflict {
 			if _, ok := remoteByPath[a.Path]; ok {
-				fmt.Printf("%-13s %s -> %s\n", "conflict-copy", a.Path, conflictCopyPath(root, a.Path, host, now))
+				cp := conflictCopyPath(root, a.Path, host, now, taken)
+				taken[cp] = true
+				fmt.Printf("%-13s %s -> %s\n", "conflict-copy", a.Path, cp)
 				continue
 			}
 		}

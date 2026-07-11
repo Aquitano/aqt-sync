@@ -79,12 +79,19 @@ type conflictCopyRecord struct {
 // with no remote entry (local edit vs remote delete) has nothing to preserve and is
 // skipped; the caller still resolves its primary path local-wins.
 //
+// Copy names must avoid every remote path, not just what is on disk: a remote entry at
+// the candidate name (typically another device's identically-named copy, when two
+// devices share a hostname) is about to be downloaded there, and a copy landing on it
+// would be misread as drift and wedge the sync as an unresolvable conflict.
+//
 // The memo carries copies materialized by earlier retry attempts. A path already copied
 // for the same remote hash reuses that copy: if it still exists on disk it is skipped
 // entirely, and if it was lost it is rewritten at the same name rather than a bumped one.
-// Only a remote hash that changed since the last attempt (the racing device re-edited the
-// file) plans a fresh, collision-checked copy.
+// A memoed name the remote gained between attempts is not reused — it would collide with
+// that download — and a remote hash that changed since the last attempt (the racing
+// device re-edited the file) plans a fresh copy; both fall through to a new name.
 func planConflictCopies(root string, actions []syncengine.Action, remoteByPath map[string]syncengine.Entry, host string, now time.Time, memo conflictCopyMemo) []conflictCopyItem {
+	taken := takenPaths(remoteByPath)
 	var copies []conflictCopyItem
 	for _, a := range actions {
 		if a.Kind != syncengine.Conflict {
@@ -95,17 +102,28 @@ func planConflictCopies(root string, actions []syncengine.Action, remoteByPath m
 			continue
 		}
 		e := re
-		if rec, ok := memo[a.Path]; ok && rec.remoteHash == re.Hash {
+		if rec, ok := memo[a.Path]; ok && rec.remoteHash == re.Hash && !taken[rec.copyPath] {
 			if pathExists(root, rec.copyPath) {
 				continue // the earlier attempt's copy is already correct on disk
 			}
 			e.Path = rec.copyPath
 		} else {
-			e.Path = conflictCopyPath(root, a.Path, host, now)
+			e.Path = conflictCopyPath(root, a.Path, host, now, taken)
 		}
+		taken[e.Path] = true
 		copies = append(copies, conflictCopyItem{orig: a.Path, entry: e})
 	}
 	return copies
+}
+
+// takenPaths seeds the copy-name collision set with every remote path: each one either
+// already sits on disk or is about to be downloaded there.
+func takenPaths(remoteByPath map[string]syncengine.Entry) map[string]bool {
+	out := make(map[string]bool, len(remoteByPath))
+	for p := range remoteByPath {
+		out[p] = true
+	}
+	return out
 }
 
 func copyEntries(copies []conflictCopyItem) []syncengine.Entry {
@@ -118,12 +136,14 @@ func copyEntries(copies []conflictCopyItem) []syncengine.Entry {
 
 // conflictCopyPath returns the relative path for the remote side of a conflict:
 // <path>.conflict-<host>-<ts>, appended to the whole name (no extension splitting).
-// A numeric suffix is bumped until nothing exists at that path under root, so an
-// existing file is never overwritten (materialize would clobber it).
-func conflictCopyPath(root, path, host string, now time.Time) string {
+// A numeric suffix is bumped until the name neither exists under root nor is in taken
+// (paths the sync will materialize: remote entries and copies already planned this
+// pass), so a copy never overwrites an existing file and never lands where a download
+// is headed.
+func conflictCopyPath(root, path, host string, now time.Time, taken map[string]bool) string {
 	base := fmt.Sprintf("%s.conflict-%s-%s", path, host, now.UTC().Format("20060102-150405"))
 	candidate := base
-	for i := 1; pathExists(root, candidate); i++ {
+	for i := 1; pathExists(root, candidate) || taken[candidate]; i++ {
 		candidate = fmt.Sprintf("%s-%d", base, i)
 	}
 	return candidate
@@ -137,8 +157,8 @@ func pathExists(root, rel string) bool {
 // conflictHost is the sanitized hostname stamped into a conflict-copy name, so a copy
 // made on one machine reads as "the version from <host>". AQT_CONFLICT_HOST overrides
 // the OS hostname, so a device with an unstable or duplicate hostname can pin a stable,
-// distinct identity (two devices that share a hostname would otherwise mint colliding
-// copy names for the same concurrently-edited path).
+// distinct identity (copies from two devices sharing a hostname are otherwise told
+// apart only by a collision counter, not by name).
 func conflictHost() string {
 	name := os.Getenv("AQT_CONFLICT_HOST")
 	if name == "" {

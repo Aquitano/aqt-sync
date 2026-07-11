@@ -57,13 +57,13 @@ func TestSanitizeHost(t *testing.T) {
 func TestConflictCopyPathFormat(t *testing.T) {
 	root := t.TempDir()
 	ts := time.Date(2026, 7, 10, 14, 30, 5, 0, time.UTC)
-	got := conflictCopyPath(root, "notes/todo.txt", "laptop", ts)
+	got := conflictCopyPath(root, "notes/todo.txt", "laptop", ts, nil)
 	want := "notes/todo.txt.conflict-laptop-20260710-143005"
 	if got != want {
 		t.Fatalf("conflictCopyPath = %q, want %q", got, want)
 	}
 	// The suffix is appended to the whole name, extension included, not spliced in.
-	got = conflictCopyPath(root, "archive.tar.gz", "host", ts)
+	got = conflictCopyPath(root, "archive.tar.gz", "host", ts, nil)
 	if want := "archive.tar.gz.conflict-host-20260710-143005"; got != want {
 		t.Fatalf("conflictCopyPath = %q, want %q", got, want)
 	}
@@ -74,7 +74,7 @@ func TestConflictCopyPathTimestampIsUTC(t *testing.T) {
 	// A non-UTC time must still be formatted in UTC for a stable, location-free name.
 	loc := time.FixedZone("UTC-5", -5*3600)
 	ts := time.Date(2026, 7, 10, 9, 30, 5, 0, loc) // 14:30:05 UTC
-	got := conflictCopyPath(root, "f.txt", "h", ts)
+	got := conflictCopyPath(root, "f.txt", "h", ts, nil)
 	if want := "f.txt.conflict-h-20260710-143005"; got != want {
 		t.Fatalf("conflictCopyPath = %q, want %q", got, want)
 	}
@@ -86,7 +86,7 @@ func TestConflictCopyPathCollisionCounter(t *testing.T) {
 	base := "data.bin.conflict-laptop-20260710-143005"
 
 	// With nothing on disk, the base name is used verbatim.
-	if got := conflictCopyPath(root, "data.bin", "laptop", ts); got != base {
+	if got := conflictCopyPath(root, "data.bin", "laptop", ts, nil); got != base {
 		t.Fatalf("first copy path = %q, want %q", got, base)
 	}
 
@@ -96,7 +96,37 @@ func TestConflictCopyPathCollisionCounter(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got, want := conflictCopyPath(root, "data.bin", "laptop", ts), base+"-3"; got != want {
+	if got, want := conflictCopyPath(root, "data.bin", "laptop", ts, nil), base+"-3"; got != want {
 		t.Fatalf("collision copy path = %q, want %q", got, want)
+	}
+
+	// A taken name (a path this sync will materialize) blocks a candidate the same way
+	// a file on disk does; disk and taken collisions bump one shared counter.
+	taken := map[string]bool{base + "-3": true}
+	if got, want := conflictCopyPath(root, "data.bin", "laptop", ts, taken), base+"-4"; got != want {
+		t.Fatalf("taken collision copy path = %q, want %q", got, want)
+	}
+}
+
+// TestPlanConflictCopiesAvoidsRemotePaths pins the shared-hostname collision: another
+// device already pushed a copy at exactly the name this device would mint (same host,
+// same second). The planned copy must bump past it — landing on the remote's path would
+// collide with that download and wedge the sync as an unresolvable conflict.
+func TestPlanConflictCopiesAvoidsRemotePaths(t *testing.T) {
+	root := t.TempDir()
+	ts := time.Date(2026, 7, 10, 14, 30, 5, 0, time.UTC)
+	base := "f.txt.conflict-samehost-20260710-143005"
+	remote := map[string]syncengine.Entry{
+		"f.txt": {Path: "f.txt", Hash: "remote-edit"},
+		base:    {Path: base, Hash: "other-device-copy"},
+	}
+	actions := []syncengine.Action{{Path: "f.txt", Kind: syncengine.Conflict}}
+
+	copies := planConflictCopies(root, actions, remote, "samehost", ts, conflictCopyMemo{})
+	if len(copies) != 1 {
+		t.Fatalf("planned %d copies, want 1", len(copies))
+	}
+	if got, want := copies[0].entry.Path, base+"-1"; got != want {
+		t.Fatalf("copy path = %q, want %q", got, want)
 	}
 }
