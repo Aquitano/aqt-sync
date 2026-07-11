@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -230,6 +231,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.ctx.mk = msg.mk
 		m.ctx.unlocked = true
+		if msg.cacheWarn != nil {
+			return m, tea.Batch(
+				m.toastErr("session not cached — actions may fail with exit 3: "+msg.cacheWarn.Error()),
+				m.initialLoads(),
+			)
+		}
 		return m, m.initialLoads()
 
 	case tuiLocalMsg:
@@ -316,13 +323,16 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.toast("an action is already running — see the log (@)")
 		}
 		m.execBusy = true
+		// Stamped here, not on Started: a subprocess that fails to start reports
+		// Done without ever reporting Started, and a zero execStart would render
+		// the elapsed time as seconds-since-the-epoch.
+		m.execStart = time.Now()
 		return m, tuiExecCmd(m.ctx.exe, msg.sub)
 
 	case tuiExecStartedMsg:
 		m.execCh = msg.ch
 		m.execCmd = msg.cmd
 		m.execTitle = msg.title
-		m.execStart = time.Now()
 		m.logFollow = true
 		m.appendLog(tuiStyleDim.Render(m.execStart.Format("15:04:05")) + " " + tuiStyleAccent.Render("$ "+msg.title))
 		m.mainTab = tuiTabLog
@@ -354,6 +364,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			toast = m.toastStyled(note, tuiStyleAdd)
 		default:
 			note = tuiExitNote(msg.exit)
+			// A failure to even start the child (bad exe, fork failure) reports no
+			// output and no ExitError, so without this the log shows only "failed".
+			var ee *exec.ExitError
+			if msg.err != nil && !errors.As(msg.err, &ee) {
+				note = msg.err.Error()
+			}
 			m.appendLog(tuiStyleErr.Render("✗ "+note) + elapsed)
 			toast = m.toastErr(note)
 		}
@@ -366,6 +382,10 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			_ = terminateAgent(m.execCmd.Process.Pid)
 		}
 		return m, nil
+
+	case tuiKillAndQuitMsg:
+		m.terminateExec()
+		return m, tea.Quit
 
 	case tuiToastExpiredMsg:
 		if msg.seq == m.toastSeq {
@@ -411,6 +431,7 @@ func (m *tuiModel) appendLog(line string) {
 
 func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "ctrl+c" {
+		m.terminateExec()
 		return m, tea.Quit
 	}
 
@@ -567,9 +588,20 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleActionKey(msg)
 }
 
+// terminateExec stops the running action, if one is still running. The liveness
+// check reads the live model state, so a child that finished (and was reaped)
+// while a dialog was open is never signalled by pid.
+func (m *tuiModel) terminateExec() {
+	if m.execBusy && m.execCmd != nil && m.execCmd.Process != nil {
+		m.execCanceled = true
+		_ = terminateAgent(m.execCmd.Process.Pid)
+	}
+}
+
 // quitOrConfirm quits immediately when idle; while an action subprocess runs it
 // asks first — quitting tears down the output pipes and would kill e.g. a
-// restore mid-swap. ctrl+c stays an unconditional exit.
+// restore mid-swap. ctrl+c stays an unconditional exit, but still stops the
+// child rather than orphaning it against dead pipes.
 func (m *tuiModel) quitOrConfirm() (tea.Model, tea.Cmd) {
 	if !m.execBusy {
 		return m, tea.Quit
@@ -577,7 +609,7 @@ func (m *tuiModel) quitOrConfirm() (tea.Model, tea.Cmd) {
 	m.dialog = &tuiConfirm{
 		title:   "Action running",
 		body:    m.execTitle + "\nis still running. Quit anyway and kill it?",
-		confirm: tuiKillAndQuit(m.execCmd),
+		confirm: tuiKillAndQuit(),
 	}
 	return m, nil
 }

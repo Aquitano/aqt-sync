@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -32,6 +31,10 @@ type tuiCtx struct {
 type tuiUnlockResultMsg struct {
 	mk  crypto.MasterKey
 	err error
+	// cacheWarn reports a session-cache failure. It cannot be written to stderr:
+	// the alt screen is up and the renderer owns the tty, so it rides back to
+	// Update and becomes a toast.
+	cacheWarn error
 }
 
 // tuiLocalMsg is the offline half of the files panel: working tree vs base,
@@ -95,10 +98,10 @@ func (c *tuiCtx) unlockCmd(passphrase string) tea.Cmd {
 		if err != nil {
 			return tuiUnlockResultMsg{err: err}
 		}
+		// The unlock itself succeeded; a failed cache only means the next action
+		// subprocess would prompt, which it cannot — so it has to be visible.
 		if err := identity.SaveSession(prof.Name, mk, defaultSessionTTL); err != nil {
-			// The unlock itself succeeded; a failed cache only means the next
-			// action subprocess would prompt, which it cannot. Surface it there.
-			fmt.Fprintln(os.Stderr, "warning: could not cache session:", err)
+			return tuiUnlockResultMsg{mk: mk, cacheWarn: err}
 		}
 		return tuiUnlockResultMsg{mk: mk}
 	}

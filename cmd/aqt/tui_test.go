@@ -448,6 +448,37 @@ func TestTUICancelConfirmFlow(t *testing.T) {
 	}
 }
 
+// The quit confirm must not capture the running child's pid: the action can
+// finish (and be reaped) while the dialog sits open, and signalling a reaped pid
+// can hit an unrelated process once the pid is reused.
+func TestTUIQuitConfirmDoesNotCapturePid(t *testing.T) {
+	m := testModel(t)
+	m.execBusy = true
+	m.execTitle = "aqt snapshot restore --in-place"
+
+	m.quitOrConfirm()
+	c, ok := m.dialog.(*tuiConfirm)
+	if !ok {
+		t.Fatalf("quit while busy opened %T, want confirm", m.dialog)
+	}
+	if _, ok := c.confirm().(tuiKillAndQuitMsg); !ok {
+		t.Fatalf("quit confirm resolved to %T, want tuiKillAndQuitMsg", c.confirm())
+	}
+
+	// The action completes while the dialog is still open, so the child is gone.
+	m.Update(tuiExecDoneMsg{title: m.execTitle, exit: 0})
+	if m.execBusy || m.execCmd != nil {
+		t.Fatal("done should have cleared the action state")
+	}
+	// Confirming now must still quit, and must not signal the reaped pid.
+	if _, cmd := m.Update(tuiKillAndQuitMsg{}); cmd == nil {
+		t.Fatal("kill-and-quit after the action finished should still quit")
+	}
+	if m.execCanceled {
+		t.Fatal("kill-and-quit signalled a child that had already been reaped")
+	}
+}
+
 func TestTUIAccordionHeights(t *testing.T) {
 	m := testModel(t) // 100x30
 

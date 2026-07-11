@@ -48,15 +48,15 @@ func tuiCancelExec() tea.Cmd {
 	return func() tea.Msg { return tuiCancelExecMsg{} }
 }
 
-// tuiKillAndQuit signals cmd (if any) before quitting, so quitting mid-action
-// stops the child instead of leaving it running against dead output pipes.
-func tuiKillAndQuit(cmd *exec.Cmd) tea.Cmd {
-	return func() tea.Msg {
-		if cmd != nil && cmd.Process != nil {
-			_ = terminateAgent(cmd.Process.Pid)
-		}
-		return tea.Quit()
-	}
+// tuiKillAndQuitMsg asks the model to stop any running action and then quit.
+// Like tuiCancelExecMsg it carries no pid: the action can finish (and be reaped)
+// while the quit confirm sits open, so the liveness check has to happen in Update
+// against the live execBusy/execCmd, never against a pid captured when the dialog
+// was built — signalling a reaped pid can hit an unrelated process after reuse.
+type tuiKillAndQuitMsg struct{}
+
+func tuiKillAndQuit() tea.Cmd {
+	return func() tea.Msg { return tuiKillAndQuitMsg{} }
 }
 
 type tuiExecOutMsg struct {
