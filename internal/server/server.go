@@ -222,6 +222,20 @@ func (s *Server) Router() *gin.Engine {
 			// row counts. All plaintext-side metadata the owner already implies.
 			authed.GET("/account/usage", s.accountUsage)
 
+			// Account-to-account grants. The key lookup answers unknown emails with a
+			// deterministic decoy (like /account/salt), so it is not an existence
+			// oracle; it still sits behind auth to keep probing costed. Grant rows are
+			// client-sealed HPKE wraps the server stores opaquely. The grant object
+			// read reuses the public endpoint's exact-slice framing with a grant check
+			// in place of public visibility; it shares the chunk body cap.
+			authed.GET("/account/keys", s.accountKeys)
+			authed.PUT("/account/enc-key", limitBody(maxControlBody), s.publishEncKey)
+			authed.POST("/resources/:id/grants", limitBody(maxControlBody), s.createGrant)
+			authed.GET("/resources/:id/grants", s.listResourceGrants)
+			authed.DELETE("/resources/:id/grants/:grantee", s.deleteGrant)
+			authed.GET("/shares", s.listShares)
+			authed.POST("/resources/:id/objects", limitBody(maxChunkBody), s.grantObjects)
+
 			// Folder-sync packed object store: opaque, content-addressed,
 			// owner-scoped. Objects ship inside raw packs; check/locate negotiate
 			// which objects to up/download by id.
@@ -316,7 +330,16 @@ func (s *Server) createAccount(c *gin.Context) {
 		abort(c, http.StatusForbidden, "a valid invite token is required to register on this server")
 		return
 	}
-	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier)
+	// The enc key is optional (pre-grants clients omit it) but if present its
+	// identity self-signature must verify, or a bad key would poison future grants.
+	if len(req.EncPublicKey) > 0 {
+		if len(req.EncPublicKey) != crypto.EncPublicKeySize ||
+			!crypto.VerifyEncKey(req.PublicKey, req.EncPublicKey, req.EncKeySig) {
+			abort(c, http.StatusBadRequest, "enc public key must be 32 bytes and self-signed by the identity key")
+			return
+		}
+	}
+	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
 	if errors.Is(err, ErrConflict) {
 		// A duplicate email must not answer differently from a fresh signup, or the
 		// endpoint becomes an existence oracle. Return the same 201 success shape with a

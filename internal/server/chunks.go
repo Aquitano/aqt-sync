@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 )
@@ -143,7 +144,13 @@ func (s *Server) publicObjects(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "locate failed")
 		return
 	}
+	s.writeObjectFrames(c, owner, locs, s.metrics.publicObjectBytes)
+}
 
+// writeObjectFrames streams resolved object slices as the positional binary
+// framing (4-byte big-endian length + bytes per id, in request order), shared by
+// the public and grant object endpoints.
+func (s *Server) writeObjectFrames(c *gin.Context, owner string, locs []api.ObjectLocation, counter prometheus.Counter) {
 	c.Header("Content-Type", "application/octet-stream")
 	c.Status(http.StatusOK)
 
@@ -157,7 +164,7 @@ func (s *Server) publicObjects(c *gin.Context) {
 		}
 	}()
 
-	defer func() { addResponseBytes(s.metrics.publicObjectBytes, c.Writer.Size()) }()
+	defer func() { addResponseBytes(counter, c.Writer.Size()) }()
 
 	// Past the first byte the headers are committed, so a disk error can only
 	// truncate the body; the client detects the short read off the length framing.
@@ -165,6 +172,7 @@ func (s *Server) publicObjects(c *gin.Context) {
 	for _, loc := range locs {
 		f, ok := open[loc.PackID]
 		if !ok {
+			var err error
 			f, err = os.Open(s.store.packPath(owner, loc.PackID))
 			if err != nil {
 				return

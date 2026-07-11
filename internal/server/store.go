@@ -367,6 +367,24 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// protected", the same shape of leak as scheduled, while the name stays sealed.
 	// Pre-existing rows default to unanchored.
 	`ALTER TABLE snapshots ADD COLUMN anchored INTEGER NOT NULL DEFAULT 0;`,
+	// 12: account-to-account grants. enc_public_key is the account's published X25519
+	// key (derived client-side from the master key), enc_key_sig its Ed25519
+	// self-signature; both NULL until a new-enough client uploads them (signup or the
+	// lazy PUT /v1/account/enc-key backfill). A grant row wraps one resource's content
+	// key to one grantee (HPKE, client-sealed); the server stores it opaquely. No FK on
+	// grantee_handle: a grant to a decoy handle (unknown-email lookup) must be accepted
+	// indistinguishably from a real one, or grant creation becomes an existence oracle.
+	`ALTER TABLE accounts ADD COLUMN enc_public_key BLOB;
+	 ALTER TABLE accounts ADD COLUMN enc_key_sig BLOB;
+	 CREATE TABLE IF NOT EXISTS grants (
+	     resource_id    TEXT NOT NULL REFERENCES resources(id) ON DELETE CASCADE,
+	     owner_handle   TEXT NOT NULL,
+	     grantee_handle TEXT NOT NULL,
+	     wrapped_key    BLOB NOT NULL,
+	     created_at     INTEGER NOT NULL,
+	     PRIMARY KEY(resource_id, grantee_handle)
+	 );
+	 CREATE INDEX IF NOT EXISTS idx_grants_grantee ON grants(grantee_handle);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -469,8 +487,10 @@ type Account struct {
 
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
 // and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
-// already taken. The new account starts at auth epoch 1.
-func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier []byte) (Account, error) {
+// already taken. The new account starts at auth epoch 1. encPublicKey/encKeySig are
+// the optional published X25519 key and its identity self-signature (empty from a
+// pre-grants client; the caller validates the signature before storing).
+func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier, encPublicKey, encKeySig []byte) (Account, error) {
 	handle := newID(12)
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
@@ -481,10 +501,14 @@ func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []by
 		return Account{}, err
 	}
 	vh := sha256.Sum256(authVerifier)
+	var encPub, encSig any
+	if len(encPublicKey) > 0 {
+		encPub, encSig = encPublicKey, encKeySig
+	}
 	_, err = s.db.Exec(
-		`INSERT INTO accounts(owner_handle, email, kdf, public_key, wrapped_root, auth_verifier, auth_epoch)
-		 VALUES(?,?,?,?,?,?,1)`,
-		handle, email, string(kdfJSON), publicKey, string(rootJSON), vh[:],
+		`INSERT INTO accounts(owner_handle, email, kdf, public_key, wrapped_root, auth_verifier, auth_epoch, enc_public_key, enc_key_sig)
+		 VALUES(?,?,?,?,?,?,1,?,?)`,
+		handle, email, string(kdfJSON), publicKey, string(rootJSON), vh[:], encPub, encSig,
 	)
 	if err != nil {
 		if isUnique(err) {
@@ -1109,14 +1133,32 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 
 	vis := api.Visibility(visibility)
 	isOwner := requireOwner != "" && requireOwner == owner
-	if vis == api.Private && !isOwner {
+	// An authenticated non-owner may hold a grant: the content key HPKE-wrapped to
+	// their enc key, substituting for ownership on the read path only (every mutation
+	// stays owner-scoped). The lookup runs for public resources too, so a grantee can
+	// decrypt without a link fragment; a private id without a grant stays ErrNotFound,
+	// indistinguishable from a missing one.
+	var grantKey []byte
+	if !isOwner && requireOwner != "" {
+		w, ok, err := s.grantWrappedKey(id, requireOwner)
+		if err != nil {
+			return out, err
+		}
+		if ok {
+			grantKey = w
+		}
+	}
+	isGrantee := grantKey != nil
+	if vis == api.Private && !isOwner && !isGrantee {
 		return out, ErrNotFound
 	}
 	// A non-owner read of a public link is subject to the lifecycle policy. Expiry is a
 	// pure time check (no state to mutate); the max-reads count is done under the
 	// resource lock after the blob loads, so a successful serve is what increments.
-	// Owner reads are never counted or gated (until reclaimed, handled above).
-	if !isOwner {
+	// Owner reads are never counted or gated (until reclaimed, handled above), and
+	// neither are grantee reads: lifecycle is a property of the public link, and a
+	// grant is a per-account credential, not a link.
+	if !isOwner && !isGrantee {
 		now := time.Now().Unix()
 		if expiresAt.Valid && now >= expiresAt.Int64 {
 			return out, ErrGone
@@ -1127,7 +1169,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	if err != nil {
 		return out, err
 	}
-	if !isOwner && maxReads.Valid {
+	if !isOwner && !isGrantee && maxReads.Valid {
 		if err := s.countPublicRead(id); err != nil {
 			return out, err
 		}
@@ -1151,6 +1193,12 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 			return out, err
 		}
 		out.WrappedKey = &wk
+	}
+	// A grantee gets the grant wrap instead, plus the owner handle its HPKE info
+	// binding needs (a wrong handle from a hostile server just fails the unwrap).
+	if isGrantee {
+		out.GrantKey = grantKey
+		out.Owner = owner
 	}
 	return out, nil
 }
@@ -2364,7 +2412,18 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 	if reclaimed || (expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64) {
 		return "", nil, ErrGone
 	}
+	out, err := s.orderedObjectSlices(owner, resourceID, ids)
+	if err != nil {
+		return "", nil, err
+	}
+	return owner, out, nil
+}
 
+// orderedObjectSlices resolves a resource's referenced object ids to pack slices in
+// request order, enforcing membership: every id must be a chunk root of THIS
+// resource, so neither the public endpoint nor a grantee can probe the owner's
+// unrelated objects. Callers gate access (visibility or grant) before calling.
+func (s *Store) orderedObjectSlices(owner, resourceID string, ids []string) ([]api.ObjectLocation, error) {
 	distinct := make([]string, 0, len(ids))
 	seen := map[string]bool{}
 	for _, id := range ids {
@@ -2392,25 +2451,25 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 			args...,
 		)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		for rows.Next() {
 			var id string
 			if err := rows.Scan(&id); err != nil {
 				rows.Close()
-				return "", nil, err
+				return nil, err
 			}
 			member[id] = true
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return "", nil, err
+			return nil, err
 		}
 		rows.Close()
 	}
 	for _, id := range distinct {
 		if !member[id] {
-			return "", nil, ErrNotFound
+			return nil, ErrNotFound
 		}
 	}
 
@@ -2432,7 +2491,7 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 			args...,
 		)
 		if err != nil {
-			return "", nil, err
+			return nil, err
 		}
 		for rows.Next() {
 			var (
@@ -2441,7 +2500,7 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 			)
 			if err := rows.Scan(&id, &packID, &off, &length); err != nil {
 				rows.Close()
-				return "", nil, err
+				return nil, err
 			}
 			locByID[id] = api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length}
 			if !seenPack[packID] {
@@ -2451,7 +2510,7 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 		}
 		if err := rows.Err(); err != nil {
 			rows.Close()
-			return "", nil, err
+			return nil, err
 		}
 		rows.Close()
 	}
@@ -2462,15 +2521,15 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 	for _, id := range ids {
 		loc, ok := locByID[id]
 		if !ok {
-			return "", nil, ErrNotFound
+			return nil, ErrNotFound
 		}
 		out = append(out, loc)
 	}
 
 	if err := s.touchPacks(owner, packs); err != nil {
-		return "", nil, err
+		return nil, err
 	}
-	return owner, out, nil
+	return out, nil
 }
 
 // touchPacks re-arms the GC age guard on the named packs. The id list is batched so
@@ -3199,6 +3258,12 @@ func (s *Store) writePack(owner, id string, data []byte) error {
 // newID returns a URL-safe random identifier encoding nBytes of entropy.
 func newID(nBytes int) string {
 	return base64.RawURLEncoding.EncodeToString(randomBytes(nBytes))
+}
+
+// newIDFrom encodes given bytes in the newID shape, so a deterministic decoy
+// handle is indistinguishable from a freshly minted one.
+func newIDFrom(b []byte) string {
+	return base64.RawURLEncoding.EncodeToString(b)
 }
 
 func randomBytes(n int) []byte {

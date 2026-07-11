@@ -6,6 +6,21 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Account-to-account sharing: `aqt share <id> --with <email>` grants a specific
+  account read-only access to a file or chunked folder — no public link, no key
+  in any URL. Every account now publishes an X25519 encryption key (derived from
+  the master key like the signing key, self-signed with the Ed25519 identity
+  key; existing accounts backfill it on next login), and a grant is the
+  resource's content key HPKE-wrapped (RFC 9180) to the grantee, bound to
+  (resource, owner, grantee) so the server cannot replay it elsewhere. The
+  grantee sees the share under `aqt shares` and pulls or clones it read-only;
+  all mutations stay owner-scoped server-side. `--revoke <email>` deletes the
+  grant and rotates the content key (re-wrapping remaining grantees), so
+  revocation is forward-secure immediately. Grant-target lookups answer unknown
+  emails with a deterministic decoy (no account-existence oracle), and
+  `aqt contacts verify <email>` prints key fingerprints to check the
+  trust-on-first-use pin out-of-band. The server still stores only ciphertext.
+
 - Public whole-folder sharing: `aqt share <folder-id>` now mints a fragment link
   for a chunked folder (password gating, `--expire`, `--max-reads`, and `--burn`
   work as for files; a clone counts as one read). A link holder — no account

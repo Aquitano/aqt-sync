@@ -85,9 +85,9 @@ var errNotAFolder = errors.New("not a folder")
 
 // pullSubpath fetches one entry (or one subtree) out of a chunked folder without
 // downloading anything else: only the directory nodes on the path's spine, then
-// just that entry's content chunks. viaLink selects the unauthenticated public
-// object endpoint for both, the read path a share-link holder has.
-func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck crypto.ContentKey, subpath, out string, toStdout, force, viaLink bool) error {
+// just that entry's content chunks. A non-nil slices selects the exact-slice
+// transport (share link or grant) for both, instead of the owner's pack path.
+func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck crypto.ContentKey, subpath, out string, toStdout, force bool, slices sliceFetch) error {
 	root, err := openFolderRoot(res, ck)
 	if errors.Is(err, errNotAFolder) {
 		return fmt.Errorf("resource %s is not a folder; drop the /%s suffix", id, subpath)
@@ -96,8 +96,8 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		return err
 	}
 	fetch := newBatchNodeFetcher(cl, nil)
-	if viaLink {
-		fetch = newPublicBatchFetcher(cl, id)
+	if slices != nil {
+		fetch = newPublicBatchFetcher(slices)
 	}
 	child, err := syncengine.ResolveTreePath(root, subpath, fetch)
 	if errors.Is(err, syncengine.ErrPathNotFound) {
@@ -112,7 +112,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		if toStdout {
 			return fmt.Errorf("%s is a directory: `aqt ls aqt://%s/%s` lists it, `aqt pull` (without --stdout) materializes it", subpath, id, subpath)
 		}
-		return pullSubtree(cl, id, root.Version, child, fetch, subpath, out, viaLink)
+		return pullSubtree(cl, id, root.Version, child, fetch, subpath, out, slices)
 	case syncengine.ChildSymlink:
 		if toStdout {
 			return fmt.Errorf("%s is a symlink to %s; pull it without --stdout to recreate the link", subpath, child.Link)
@@ -152,8 +152,8 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		return err
 	}
 	var get func(string) ([]byte, error)
-	if viaLink {
-		get = newPublicEntrySource(cl, id, []syncengine.Entry{e})
+	if slices != nil {
+		get = newPublicEntrySource(slices, []syncengine.Entry{e})
 	} else {
 		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
 		if err != nil {
@@ -189,7 +189,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 // pullSubtree materializes one directory subtree into a fresh destination: the
 // subtree's own node is a complete content-addressed root, so the rest of the
 // folder is never fetched.
-func pullSubtree(cl *client.Client, id string, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, viaLink bool) error {
+func pullSubtree(cl *client.Client, id string, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, slices sliceFetch) error {
 	sub := syncengine.TreeRoot{Version: version, Root: *child.Node}
 	m, err := syncengine.OpenTreeBatched(sub, fetch)
 	if err != nil {
@@ -207,8 +207,8 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		return err
 	}
 	var get func(string) ([]byte, error)
-	if viaLink {
-		get = newPublicEntrySource(cl, id, m.Entries)
+	if slices != nil {
+		get = newPublicEntrySource(slices, m.Entries)
 	} else {
 		src, err := newPackSource(cl, distinctChunkIDs(m.Entries))
 		if err != nil {

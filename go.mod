@@ -4,6 +4,7 @@ go 1.25.4
 
 require (
 	github.com/atotto/clipboard v0.1.4
+	github.com/cloudflare/circl v1.6.4
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/klauspost/compress v1.19.0

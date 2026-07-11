@@ -207,6 +207,7 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 		return err
 	}
 	signing := crypto.DeriveSigningKey(rk)
+	encPub := crypto.DeriveEncKey(rk).Public()
 	resp, err := cl.CreateAccount(api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
@@ -215,6 +216,8 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   deviceName(),
 		InviteToken:  invite,
+		EncPublicKey: encPub,
+		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	})
 	if errors.Is(err, client.ErrConflict) {
 		return errors.New("an account already exists for this email; the passphrase was incorrect")
@@ -252,6 +255,15 @@ func attachDevice(cl *client.Client, server, email string, boot api.SaltResponse
 	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
 	if err := saveProfile(server, email, fingerprint, boot.Kdf, boot.WrappedRoot, resp); err != nil {
 		return err
+	}
+	// Lazy enc-key backfill for accounts created before grants existed. Best
+	// effort: an old server without the endpoint must not fail the login.
+	if authed, err := client.New(server, resp.Token); err == nil {
+		encPub := crypto.DeriveEncKey(rk).Public()
+		_ = authed.PublishEncKey(api.PublishEncKeyRequest{
+			EncPublicKey: encPub,
+			EncKeySig:    crypto.SignEncKey(signing, encPub),
+		})
 	}
 	return cacheSession(rk, ttl)
 }

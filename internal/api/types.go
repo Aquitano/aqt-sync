@@ -58,6 +58,67 @@ type CreateAccountRequest struct {
 	// InviteToken is required only when the server runs in invite-registration mode;
 	// open servers ignore it. It is a server-issued shared secret, not key material.
 	InviteToken string `json:"inviteToken,omitempty"`
+	// EncPublicKey is the X25519 half of the account's published identity (derived
+	// from the master key like the signing key), the target other accounts wrap
+	// grant keys to. EncKeySig is its Ed25519 self-signature (crypto.SignEncKey),
+	// so a client can verify the two halves belong together. Optional: an older
+	// client omits both and backfills via PUT /v1/account/enc-key on next login.
+	EncPublicKey []byte `json:"encPublicKey,omitempty"`
+	EncKeySig    []byte `json:"encKeySig,omitempty"`
+}
+
+// PublishEncKeyRequest backfills the account's X25519 encryption key (and its
+// identity self-signature) for accounts created before grants existed. The
+// server verifies the signature against the stored Ed25519 key before storing.
+type PublishEncKeyRequest struct {
+	EncPublicKey []byte `json:"encPublicKey"`
+	EncKeySig    []byte `json:"encKeySig"`
+}
+
+// AccountKeysResponse is the grant-target lookup: the opaque owner handle plus
+// both published public keys and the binding signature. Like the bootstrap
+// endpoint, an unknown email (or one whose account predates enc keys) yields an
+// indistinguishable decoy, so the lookup is not an account-existence oracle;
+// a grant wrapped to a decoy key simply never decrypts for anyone.
+type AccountKeysResponse struct {
+	Handle       string `json:"handle"`
+	PublicKey    []byte `json:"publicKey"`
+	EncPublicKey []byte `json:"encPublicKey"`
+	EncKeySig    []byte `json:"encKeySig"`
+}
+
+// CreateGrantRequest grants one account read access to a resource the caller
+// owns: the resource's content key HPKE-wrapped to the grantee's enc key
+// (crypto.WrapGrant, bound to resource id + owner handle + grantee handle).
+// The server stores the wrap opaquely; re-granting an existing grantee
+// replaces the wrap (the rotation path re-wraps for remaining grantees).
+type CreateGrantRequest struct {
+	GranteeHandle string `json:"granteeHandle"`
+	WrappedKey    []byte `json:"wrappedKey"`
+}
+
+// GrantEntry is one grant on a resource, as listed for its owner.
+type GrantEntry struct {
+	GranteeHandle string `json:"granteeHandle"`
+	CreatedAt     int64  `json:"createdAt"`
+}
+
+type ListGrantsResponse struct {
+	Grants []GrantEntry `json:"grants"`
+}
+
+// ShareItem is one incoming grant, as listed for its grantee: enough to show
+// the share (the meta decrypts under the unwrapped grant key) and to pull it.
+type ShareItem struct {
+	ResourceID    string            `json:"resourceId"`
+	OwnerHandle   string            `json:"ownerHandle"`
+	WrappedKey    []byte            `json:"wrappedKey"`
+	EncryptedMeta crypto.SealedBlob `json:"encryptedMeta"`
+	CreatedAt     int64             `json:"createdAt"`
+}
+
+type ListSharesResponse struct {
+	Shares []ShareItem `json:"shares"`
 }
 
 // ChallengeRequest asks the server for a fresh nonce to sign when attaching a
@@ -254,7 +315,14 @@ type GetResourceResponse struct {
 	Blob          crypto.SealedBlob
 	EncryptedMeta crypto.SealedBlob
 	WrappedKey    *crypto.WrappedKey
-	Version       int
+	// GrantKey is set instead of WrappedKey when the read was served through an
+	// account grant: the content key HPKE-wrapped to the caller (crypto.UnwrapGrant
+	// opens it). Owner carries the resource owner's opaque handle on those reads,
+	// which the grantee needs for the wrap's info binding; a wrong value from a
+	// hostile server just fails the unwrap.
+	GrantKey []byte
+	Owner    string
+	Version  int
 	// MinClient is the lowest client capability that can read this resource's sealed
 	// formats, so a current client can explain an incompatible remote instead of
 	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).

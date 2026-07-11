@@ -44,6 +44,8 @@ type resourceDownloadHeader struct {
 	BlobNonce     []byte             `json:"blobNonce"`
 	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	GrantKey      []byte             `json:"grantKey,omitempty"`
+	Owner         string             `json:"owner,omitempty"`
 	Version       int                `json:"version"`
 	MinClient     int                `json:"minClient,omitempty"`
 }
@@ -96,6 +98,8 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		BlobNonce:     res.Blob.Nonce,
 		EncryptedMeta: res.EncryptedMeta,
 		WrappedKey:    res.WrappedKey,
+		GrantKey:      res.GrantKey,
+		Owner:         res.Owner,
 		Version:       res.Version,
 		MinClient:     res.MinClient,
 	}, res.Blob.Ciphertext)
@@ -114,6 +118,8 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		Blob:          crypto.SealedBlob{Nonce: h.BlobNonce, Ciphertext: ct},
 		EncryptedMeta: h.EncryptedMeta,
 		WrappedKey:    h.WrappedKey,
+		GrantKey:      h.GrantKey,
+		Owner:         h.Owner,
 		Version:       h.Version,
 		MinClient:     h.MinClient,
 	}, nil

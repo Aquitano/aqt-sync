@@ -577,6 +577,29 @@ POST   /v1/public/resources/:id/objects  Unauthenticated. Body: { ids } → posi
                                      of which must be referenced by that resource (the share-link read
                                      path for a public/gated streamed file). ≤10,000 ids per call.
 
+# Account-to-account grants (read-only). A grant is the resource's content key
+# HPKE-wrapped (RFC 9180, X25519+ChaCha20-Poly1305) client-side to the grantee's
+# published enc key, bound via HPKE info to (resource id, owner handle, grantee
+# handle); the server stores and serves it opaquely. GET /v1/resources/:id honors
+# a grant like ownership on the READ path only (returns the grant wrap + owner
+# handle instead of the owner's wrapped key); every mutation stays owner-scoped:
+GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, encPublicKey, encKeySig }.
+                                     Unknown emails (or accounts predating enc keys) get a deterministic,
+                                     correctly self-signed decoy — no existence oracle.
+PUT    /v1/account/enc-key           Backfill the caller's X25519 enc key; the Ed25519 self-signature is
+                                     verified against the account identity key before storing.
+POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey }. Upsert (rotation
+                                     re-wraps by re-posting). No grantee-existence check (decoy handles
+                                     must be accepted indistinguishably).
+GET    /v1/resources/:id/grants      Owner only: [{ granteeHandle, createdAt }].
+DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
+                                     (private resources) and re-wraps surviving grantees.
+GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHandle, wrap, sealed meta).
+POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the public variant, gated on
+                                     ownership OR a grant instead of visibility — a grantee reads exact
+                                     membership-checked slices, never raw pack ranges (packs interleave
+                                     the owner's other resources).
+
 # Tracked folders: the folder's blob is a sealed ManifestRoot pointing at the
 # manifest objects, so it uses the resource routes above; PUT additionally carries
 # chunkRefs (file-object ids ∪ manifest-object ids the new root references) so the

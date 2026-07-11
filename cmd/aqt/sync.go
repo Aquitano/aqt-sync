@@ -1152,6 +1152,19 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		return err
 	}
 	if res.WrappedKey == nil {
+		// A grant read: materialize like a link clone, read-only, with the
+		// grant-wrapped key and the authed exact-slice endpoint.
+		if res.GrantKey != nil {
+			if adopt {
+				return errors.New("--adopt binds a directory to a folder you own; a granted folder is read-only, so there is nothing to sync with")
+			}
+			ck, err := contentKey(res, "", "", prof)
+			if err != nil {
+				return err
+			}
+			defer ck.Wipe()
+			return cloneReadOnly(grantFetch(cl, id), res, ck, id, dir)
+		}
 		return errors.New("not a private folder you own (no owner key)")
 	}
 	mk, err := unlockMaster(prof)
@@ -1231,6 +1244,14 @@ func runCloneLink(id, fragment, origin, dir, password string) error {
 		return err
 	}
 	defer ck.Wipe()
+	return cloneReadOnly(publicFetch(cl, id), res, ck, id, dir)
+}
+
+// cloneReadOnly materializes a shared folder over an exact-slice transport — the
+// common tail of a share-link clone and a grantee clone. The result is a plain
+// directory, not a tracked folder: neither caller can write to the resource, so
+// there is nothing to sync with.
+func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.ContentKey, id, dir string) error {
 	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
 	if err != nil {
 		return err
@@ -1239,7 +1260,7 @@ func runCloneLink(id, fragment, origin, dir, password string) error {
 		return fmt.Errorf("%s is a single file, not a folder; `aqt pull` fetches it", meta.Name)
 	}
 	if meta.Packed || !meta.Tree {
-		return errors.New("this folder's format cannot be read through a share link; ask the owner to re-share it as a chunked folder")
+		return errors.New("this folder's format cannot be read through a share; ask the owner to re-share it as a chunked folder")
 	}
 	// Decrypt the root before creating the destination, so a wrong password or
 	// corrupt link fails without leaving an empty directory behind.
@@ -1257,12 +1278,12 @@ func runCloneLink(id, fragment, origin, dir, password string) error {
 	if err := ensureEmptyDir(abs); err != nil {
 		return err
 	}
-	manifest, err := syncengine.OpenTreeBatched(root, newPublicBatchFetcher(cl, id))
+	manifest, err := syncengine.OpenTreeBatched(root, newPublicBatchFetcher(fetch))
 	if err != nil {
 		return fmt.Errorf("decrypt manifest: %w", err)
 	}
 	prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
-	dlErr := runDownloadsFrom(newPublicEntrySource(cl, id, manifest.Entries), abs, manifest.Entries, prog)
+	dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), abs, manifest.Entries, prog)
 	prog.finish(dlErr == nil)
 	if dlErr != nil {
 		return dlErr
@@ -1270,7 +1291,7 @@ func runCloneLink(id, fragment, origin, dir, password string) error {
 	if err := materializeDirs(abs, manifest.Dirs); err != nil {
 		return err
 	}
-	fmt.Printf("cloned %d files into %s (from a share link; not a tracked folder)\n", len(manifest.Entries), abs)
+	fmt.Printf("cloned %d files into %s (read-only share; not a tracked folder)\n", len(manifest.Entries), abs)
 	return nil
 }
 
