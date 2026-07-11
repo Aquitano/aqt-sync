@@ -279,6 +279,15 @@ type snapshotRow struct {
 	CreatedAt  int64  `json:"createdAt"`
 }
 
+// displayName prefers the user's checkpoint label over the resource name — the
+// label is what distinguishes one snapshot of a folder from another.
+func (r snapshotRow) displayName() string {
+	if r.Label != "" {
+		return r.Label
+	}
+	return r.Name
+}
+
 func snapshotRows(snaps []api.SnapshotInfo, mk crypto.MasterKey) []snapshotRow {
 	rows := make([]snapshotRow, 0, len(snaps))
 	for _, s := range snaps {

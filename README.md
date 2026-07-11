@@ -53,6 +53,17 @@ aqt clone --adopt <folder-id> ~/vault
 for the full command set (`ls`, `find`, `cat`, `share`, `private`, `snapshot`,
 `checkpoint`, `restore`, `watch`, `devices`, `passphrase`, …).
 
+## TUI
+
+`aqt tui` opens a lazygit-style dashboard over the tracked folder you are in:
+local and incoming changes (kept live by file events), snapshots and checkpoints,
+and every pushed resource, with single-key actions — `s` sync, `c` checkpoint,
+`d` diff a snapshot against the live tree, `R` restore, `y` copy a ref or share
+link, `s` share with expiry/burn options, `?` for all keys. Actions run the
+corresponding `aqt` command and stream its output into a log pane, so everything
+the TUI does is reproducible at the shell. Outside a tracked folder the
+resources and snapshots panels still work account-wide.
+
 `aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes,
 and `aqt restore <name>` rolls the tracked folder back to it (in place by default,
 `--into <dir>` for side-by-side). The name is sealed on this machine like any snapshot
