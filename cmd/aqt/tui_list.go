@@ -120,6 +120,19 @@ func (l *tuiList) move(delta int) {
 func (l *tuiList) home() { l.cursor = 0; l.snapToSelectable(1) }
 func (l *tuiList) end()  { l.cursor = len(l.visibleRows()) - 1; l.snapToSelectable(-1) }
 
+// clickTo moves the cursor to the visible row at content offset viewRow (rows
+// below the current scroll window). Clicks on headers or past the last row are
+// ignored, mirroring how the keyboard cursor never rests on either.
+func (l *tuiList) clickTo(viewRow int) bool {
+	rows := l.visibleRows()
+	idx := l.offset + viewRow
+	if idx < 0 || idx >= len(rows) || rows[idx].header {
+		return false
+	}
+	l.cursor = idx
+	return true
+}
+
 // current returns the selected row, or nil when the list is empty or the cursor
 // sits on a header (possible only in a headers-only list).
 func (l *tuiList) current() *tuiRow {

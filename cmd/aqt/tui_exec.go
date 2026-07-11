@@ -35,6 +35,28 @@ func tuiRequestExec(sub ...string) tea.Cmd {
 type tuiExecStartedMsg struct {
 	title string
 	ch    chan tea.Msg
+	// cmd is the running subprocess, kept so the model can signal it (cancel,
+	// or a confirmed quit tearing the action down cleanly).
+	cmd *exec.Cmd
+}
+
+// tuiCancelExecMsg is resolved by the cancel confirm dialog; the model turns it
+// into a SIGTERM to the running action and records that the stop was deliberate.
+type tuiCancelExecMsg struct{}
+
+func tuiCancelExec() tea.Cmd {
+	return func() tea.Msg { return tuiCancelExecMsg{} }
+}
+
+// tuiKillAndQuit signals cmd (if any) before quitting, so quitting mid-action
+// stops the child instead of leaving it running against dead output pipes.
+func tuiKillAndQuit(cmd *exec.Cmd) tea.Cmd {
+	return func() tea.Msg {
+		if cmd != nil && cmd.Process != nil {
+			_ = terminateAgent(cmd.Process.Pid)
+		}
+		return tea.Quit()
+	}
 }
 
 type tuiExecOutMsg struct {
@@ -111,7 +133,7 @@ func tuiExecCmd(exe string, sub []string) tea.Cmd {
 			ch <- tuiExecDoneMsg{title: title, exit: exit, err: err}
 			close(ch)
 		}()
-		return tuiExecStartedMsg{title: title, ch: ch}
+		return tuiExecStartedMsg{title: title, ch: ch, cmd: cmd}
 	}
 }
 

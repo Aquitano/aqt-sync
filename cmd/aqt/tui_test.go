@@ -25,6 +25,8 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyTab}
 	case "shift+tab":
 		return tea.KeyMsg{Type: tea.KeyShiftTab}
+	case "ctrl+x":
+		return tea.KeyMsg{Type: tea.KeyCtrlX}
 	}
 	panic("unknown key " + s)
 }
@@ -267,8 +269,9 @@ func TestTUIBusyGuardsActions(t *testing.T) {
 
 	m.execBusy = true
 	_, cmd = m.Update(req)
-	if cmd != nil {
-		t.Fatal("busy model must reject the request without a command")
+	// The rejection posts a toast (its expiry tick), never a subprocess start.
+	if _, ok := cmd().(tuiToastExpiredMsg); !ok {
+		t.Fatalf("busy rejection produced %T, want a toast tick", cmd())
 	}
 	if !strings.Contains(m.statusLine, "already running") {
 		t.Fatalf("statusLine = %q, want busy note", m.statusLine)
@@ -291,6 +294,147 @@ func TestTUIHeadersOnlyListNoPanic(t *testing.T) {
 	}
 	if m.View() == "" {
 		t.Fatal("empty view")
+	}
+}
+
+func TestTUIOverlayGeometry(t *testing.T) {
+	// A styled base grid: every cell carries a background so a naive splice would
+	// bleed that style into the dialog region.
+	bg := lipgloss.NewStyle().Background(lipgloss.Color("236"))
+	const w, h = 40, 12
+	var lines []string
+	for i := 0; i < h; i++ {
+		lines = append(lines, bg.Render(strings.Repeat("x", w)))
+	}
+	base := strings.Join(lines, "\n")
+	top := "ABC\nDEF"
+
+	out := tuiOverlay(base, top, w, h)
+	got := strings.Split(out, "\n")
+	if len(got) != h {
+		t.Fatalf("overlay line count = %d, want %d", len(got), h)
+	}
+	for i, l := range got {
+		if lw := lipgloss.Width(l); lw != w {
+			t.Fatalf("overlay line %d width = %d, want %d", i, lw, w)
+		}
+	}
+	// The dialog text survives verbatim (no escape codes spliced into it).
+	if !strings.Contains(out, "ABC") || !strings.Contains(out, "DEF") {
+		t.Fatal("dialog content missing from overlay")
+	}
+	// Rows outside the vertical span of top are copied unchanged.
+	if got[0] != lines[0] {
+		t.Fatal("first base row must be untouched")
+	}
+}
+
+func TestTUIListClickTo(t *testing.T) {
+	var l tuiList
+	l.setRows([]tuiRow{
+		{text: "head", header: true},
+		{text: "one", tag: "one"},
+		{text: "two", tag: "two"},
+		{text: "three", tag: "three"},
+	})
+	// clickTo honors the scroll offset: view row 0 maps to rows[offset].
+	l.offset = 2
+	if !l.clickTo(1) {
+		t.Fatal("clickTo(1) at offset 2 should select a row")
+	}
+	if l.current().tag != "three" {
+		t.Fatalf("selected %v, want three", l.current().tag)
+	}
+	// Headers and out-of-range rows are ignored.
+	l.offset = 0
+	if l.clickTo(0) {
+		t.Fatal("clicking a header must not select")
+	}
+	if l.clickTo(99) {
+		t.Fatal("clicking past the last row must not select")
+	}
+}
+
+func TestTUIMouseFocusAndSelect(t *testing.T) {
+	m := testModel(t) // 100x30 window
+	m.setFocus(tuiPanelResources)
+
+	// Files panel occupies rows [7,15): top border 7, first content row 8. The
+	// third content row (y=10) is the "M mod.txt" entry.
+	if id, ok := m.panelAt(3, 10); !ok || id != tuiPanelFiles {
+		t.Fatalf("panelAt(3,10) = %v,%v, want files", id, ok)
+	}
+	m.handleMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 3, Y: 10})
+	if m.focus != tuiPanelFiles {
+		t.Fatalf("click focus = %v, want files", m.focus)
+	}
+	if it := m.panels[tuiPanelFiles].list.current().tag.(tuiFileItem); it.path != "mod.txt" {
+		t.Fatalf("clicked row = %q, want mod.txt", it.path)
+	}
+
+	// A click past the left column lands in the main pane.
+	m.handleMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 80, Y: 10})
+	if !m.mainFocus {
+		t.Fatal("click in the main pane must set mainFocus")
+	}
+}
+
+func TestTUIMouseWheelMovesPanelUnderCursor(t *testing.T) {
+	m := testModel(t)
+	m.setFocus(tuiPanelResources) // r1 selected
+	// Wheel down over the resources panel (rows [21,29)) advances its cursor
+	// without the main viewport stealing the event.
+	m.handleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelDown, X: 3, Y: 23})
+	if r := m.panels[tuiPanelResources].list.current().tag.(lsRow); r.ID != "r2" {
+		t.Fatalf("wheel selection = %s, want r2", r.ID)
+	}
+}
+
+func TestTUIToastExpirySeq(t *testing.T) {
+	m := testModel(t)
+	cmd := m.toast("first")
+	if _, ok := cmd().(tuiToastExpiredMsg); !ok {
+		t.Fatal("toast must schedule an expiry tick")
+	}
+	m.toast("second") // supersedes the first
+
+	// The stale tick (seq 1) must not clear the current toast.
+	m.Update(tuiToastExpiredMsg{seq: 1})
+	if m.statusLine != "second" {
+		t.Fatalf("stale tick cleared the line: %q", m.statusLine)
+	}
+	m.Update(tuiToastExpiredMsg{seq: m.toastSeq})
+	if m.statusLine != "" {
+		t.Fatalf("matching tick left %q, want cleared", m.statusLine)
+	}
+}
+
+func TestTUICancelConfirmFlow(t *testing.T) {
+	m := testModel(t)
+
+	// ctrl+x is inert unless an action is running.
+	m.handleKey(key("ctrl+x"))
+	if m.dialog != nil {
+		t.Fatal("ctrl+x while idle must not open a dialog")
+	}
+
+	m.execBusy = true
+	m.execTitle = "aqt sync /tmp/vault"
+	m.handleKey(key("ctrl+x"))
+	c, ok := m.dialog.(*tuiConfirm)
+	if !ok {
+		t.Fatalf("ctrl+x while busy opened %T, want confirm", m.dialog)
+	}
+	if !strings.Contains(c.title, "Cancel") {
+		t.Fatalf("confirm title = %q, want a cancel prompt", c.title)
+	}
+	// Confirming resolves to a cancel command.
+	_, cmd := m.handleKey(key("y"))
+	if cmd == nil {
+		t.Fatal("y should produce the cancel command")
+	}
+	if _, ok := cmd().(tuiCancelExecMsg); !ok {
+		t.Fatalf("cancel produced %T, want tuiCancelExecMsg", cmd())
 	}
 }
 

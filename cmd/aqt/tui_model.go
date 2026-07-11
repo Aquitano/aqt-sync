@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -96,14 +97,34 @@ type tuiModel struct {
 	// start two; execCh carries the running action's output.
 	execBusy  bool
 	execCh    chan tea.Msg
+	execCmd   *exec.Cmd
 	execTitle string
-	log       []string
+	// execCanceled records that the running action was stopped by the user, so
+	// its non-zero exit reads as "canceled" rather than a failure.
+	execCanceled bool
+	log          []string
 
 	fsEvents <-chan struct{}
 	fsSeq    int
 
 	spin       spinner.Model
 	statusLine string
+	// toastSeq tags each transient status line so its expiry tick only clears
+	// the line it was scheduled for, never a newer one.
+	toastSeq int
+}
+
+// tuiToastExpiredMsg fires a few seconds after a status line is set.
+type tuiToastExpiredMsg struct{ seq int }
+
+// toast sets the transient status line and returns the command that clears it
+// once it has had its moment. Callers that already return a command should batch
+// this alongside it.
+func (m *tuiModel) toast(s string) tea.Cmd {
+	m.statusLine = s
+	m.toastSeq++
+	seq := m.toastSeq
+	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return tuiToastExpiredMsg{seq: seq} })
 }
 
 func newTUIModel(ctx *tuiCtx, folderID string, fsEvents <-chan struct{}) *tuiModel {
@@ -257,13 +278,13 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuiCopiedMsg:
-		if msg.ok {
-			m.statusLine = "copied: " + msg.ref
-		} else {
-			m.statusLine = "clipboard unavailable — " + msg.ref
+		note := "copied: " + msg.ref
+		if !msg.ok {
+			note = "clipboard unavailable — " + msg.ref
 		}
+		cmd := m.toast(note)
 		m.refreshMain()
-		return m, nil
+		return m, cmd
 
 	case tuiOpenDialogMsg:
 		m.dialog = msg.dialog
@@ -271,14 +292,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiExecRequestMsg:
 		if m.execBusy {
-			m.statusLine = "an action is already running — see the log (@)"
-			return m, nil
+			return m, m.toast("an action is already running — see the log (@)")
 		}
 		m.execBusy = true
 		return m, tuiExecCmd(m.ctx.exe, msg.sub)
 
 	case tuiExecStartedMsg:
 		m.execCh = msg.ch
+		m.execCmd = msg.cmd
 		m.execTitle = msg.title
 		m.appendLog(tuiStyleAccent.Render("$ " + msg.title))
 		m.mainTab = tuiTabLog
@@ -293,15 +314,37 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiExecDoneMsg:
 		m.execBusy = false
 		m.execCh = nil
-		note := tuiExitNote(msg.exit)
-		if msg.exit == 0 {
+		m.execCmd = nil
+		canceled := m.execCanceled
+		m.execCanceled = false
+		var note string
+		switch {
+		case canceled:
+			note = "canceled"
+			m.appendLog(tuiStyleErr.Render("✗ canceled"))
+		case msg.exit == 0:
+			note = tuiExitNote(msg.exit)
 			m.appendLog(tuiStyleAdd.Render("✓ " + note))
-		} else {
+		default:
+			note = tuiExitNote(msg.exit)
 			m.appendLog(tuiStyleErr.Render("✗ " + note))
 		}
-		m.statusLine = note
 		m.refreshMain()
-		return m, m.reloadPanels()
+		return m, tea.Batch(m.toast(note), m.reloadPanels())
+
+	case tuiCancelExecMsg:
+		if m.execBusy && m.execCmd != nil && m.execCmd.Process != nil {
+			m.execCanceled = true
+			_ = terminateAgent(m.execCmd.Process.Pid)
+		}
+		return m, nil
+
+	case tuiToastExpiredMsg:
+		if msg.seq == m.toastSeq {
+			m.statusLine = ""
+			m.refreshMain()
+		}
+		return m, nil
 
 	case tuiFsEventMsg:
 		m.fsSeq++
@@ -321,9 +364,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(m.ctx.localStatusCmd(), m.spin.Tick)
 
 	case tea.MouseMsg:
-		var cmd tea.Cmd
-		m.vp, cmd = m.vp.Update(msg)
-		return m, cmd
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -347,6 +388,17 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if !m.ctx.unlocked {
 		return m.handleUnlockKey(msg)
+	}
+
+	// ctrl+x cancels the running action from anywhere; a plain `x` is bound to
+	// delete in the snapshots and resources panels, so cancel takes the modifier.
+	if msg.String() == "ctrl+x" && m.execBusy && m.dialog == nil {
+		m.dialog = &tuiConfirm{
+			title:   "Cancel running action?",
+			body:    m.execTitle + "\nis running. Send SIGTERM to stop it?",
+			confirm: tuiCancelExec(),
+		}
+		return m, nil
 	}
 
 	if m.dialog != nil {
@@ -460,7 +512,7 @@ func (m *tuiModel) quitOrConfirm() (tea.Model, tea.Cmd) {
 	m.dialog = &tuiConfirm{
 		title:   "Action running",
 		body:    m.execTitle + "\nis still running. Quit anyway and kill it?",
-		confirm: tea.Quit,
+		confirm: tuiKillAndQuit(m.execCmd),
 	}
 	return m, nil
 }
@@ -545,8 +597,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "n":
 		if m.ctx.root == "" {
-			m.statusLine = "open the TUI inside a tracked folder to create snapshots"
-			return m, nil
+			return m, m.toast("open the TUI inside a tracked folder to create snapshots")
 		}
 		root := m.ctx.root
 		in := tuiNewInput("New snapshot", "label (optional)", func(label string) tea.Cmd {
@@ -577,8 +628,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tuiRequestExec(args...)
 	case "R":
 		if m.ctx.root == "" {
-			m.statusLine = "in-place restore needs a tracked folder — use `aqt snapshot restore --into` instead"
-			return m, nil
+			return m, m.toast("in-place restore needs a tracked folder — use `aqt snapshot restore --into` instead")
 		}
 		m.dialog = &tuiConfirm{
 			title: "Restore in place",
@@ -616,8 +666,7 @@ func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.ctx.copyRefCmd(res)
 	case "s":
 		if res.Kind == api.KindFolder {
-			m.statusLine = "folders cannot be shared publicly yet"
-			return m, nil
+			return m, m.toast("folders cannot be shared publicly yet")
 		}
 		id := res.ID
 		m.dialog = &tuiMenu{title: "Share " + res.Name, options: []tuiMenuOption{
@@ -636,8 +685,7 @@ func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "p":
 		if res.Visibility != string(api.Public) {
-			m.statusLine = "already private"
-			return m, nil
+			return m, m.toast("already private")
 		}
 		m.dialog = &tuiConfirm{
 			title:   "Make private",
@@ -946,14 +994,16 @@ func (m *tuiModel) View() string {
 		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center,
 			tuiStyleDim.Render("terminal too small for the aqt TUI"))
 	}
-	if m.dialog != nil {
-		return lipgloss.Place(m.w, m.h, lipgloss.Center, lipgloss.Center, m.dialog.View(m.w))
-	}
-
 	left := m.leftColumn()
 	main := m.mainBox()
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, main)
-	return body + "\n" + m.bottomBar()
+	screen := body + "\n" + m.bottomBar()
+	if m.dialog != nil {
+		// Composite the dialog centered over a dimmed copy of the layout, so the
+		// context behind it stays visible (lazygit-style) instead of vanishing.
+		return tuiOverlay(tuiDimBackground(screen), m.dialog.View(m.w), m.w, m.h)
+	}
+	return screen
 }
 
 func (m *tuiModel) leftWidth() int {
@@ -969,22 +1019,101 @@ func (m *tuiModel) leftWidth() int {
 
 func (m *tuiModel) mainWidth() int { return m.w - m.leftWidth() }
 
-func (m *tuiModel) leftColumn() string {
-	lw := m.leftWidth()
+// panelHeights splits the left column's outer height across its four boxes. It
+// is the single source of truth shared by the renderer (leftColumn) and the
+// mouse hit-tester, so the two cannot drift.
+func (m *tuiModel) panelHeights() [tuiPanelCount]int {
 	total := m.h - 1
 	statusH := 7
 	rest := total - statusH
 	filesH := rest * 4 / 10
 	snapsH := rest * 3 / 10
 	resH := rest - filesH - snapsH
+	return [tuiPanelCount]int{statusH, filesH, snapsH, resH}
+}
 
-	boxes := []string{
-		m.panelBox(tuiPanelStatus, lw, statusH),
-		m.panelBox(tuiPanelFiles, lw, filesH),
-		m.panelBox(tuiPanelSnapshots, lw, snapsH),
-		m.panelBox(tuiPanelResources, lw, resH),
+// panelRanges returns each left panel's outer [y0, y1) row span, stacked from
+// the top with the same heights leftColumn draws.
+func (m *tuiModel) panelRanges() [tuiPanelCount][2]int {
+	h := m.panelHeights()
+	var r [tuiPanelCount][2]int
+	y := 0
+	for i := 0; i < int(tuiPanelCount); i++ {
+		r[i] = [2]int{y, y + h[i]}
+		y += h[i]
+	}
+	return r
+}
+
+func (m *tuiModel) leftColumn() string {
+	lw := m.leftWidth()
+	h := m.panelHeights()
+	boxes := make([]string, tuiPanelCount)
+	for i := 0; i < int(tuiPanelCount); i++ {
+		boxes[i] = m.panelBox(tuiPanelID(i), lw, h[i])
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, boxes...)
+}
+
+// panelAt maps a screen cell to a left-column panel. A click in the main pane or
+// on the bottom bar returns ok == false.
+func (m *tuiModel) panelAt(x, y int) (tuiPanelID, bool) {
+	if x >= m.leftWidth() {
+		return 0, false
+	}
+	for i, r := range m.panelRanges() {
+		if y >= r[0] && y < r[1] {
+			return tuiPanelID(i), true
+		}
+	}
+	return 0, false
+}
+
+func (m *tuiModel) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	if !m.ctx.unlocked || m.dialog != nil {
+		return m, nil
+	}
+	switch msg.Button {
+	case tea.MouseButtonWheelUp, tea.MouseButtonWheelDown:
+		delta := 1
+		if msg.Button == tea.MouseButtonWheelUp {
+			delta = -1
+		}
+		if id, ok := m.panelAt(msg.X, msg.Y); ok {
+			m.panels[id].list.move(delta)
+			if id == m.focus {
+				m.onSelectionMoved()
+			}
+			return m, nil
+		}
+		var cmd tea.Cmd
+		m.vp, cmd = m.vp.Update(msg)
+		return m, cmd
+
+	case tea.MouseButtonLeft:
+		if msg.Action != tea.MouseActionPress {
+			return m, nil
+		}
+		id, ok := m.panelAt(msg.X, msg.Y)
+		if !ok {
+			// A click in the main pane routes movement keys there.
+			m.mainFocus = true
+			m.refreshMain()
+			return m, nil
+		}
+		m.mainFocus = false
+		m.setFocus(id)
+		// Map the row under the click, skipping the box border and header rows.
+		r := m.panelRanges()[id]
+		row := msg.Y - r[0] - 1
+		if row >= 0 && row < m.panelHeights()[id]-2 {
+			if m.panels[id].list.clickTo(row) {
+				m.onSelectionMoved()
+			}
+		}
+		return m, nil
+	}
+	return m, nil
 }
 
 func (m *tuiModel) panelBox(id tuiPanelID, width, height int) string {
@@ -1040,6 +1169,9 @@ func (m *tuiModel) bottomBar() string {
 			hints = []string{tuiKeyHint("y", "copy ref"), tuiKeyHint("s", "share"), tuiKeyHint("p", "private"), tuiKeyHint("x", "delete")}
 		}
 		hints = append(hints, tuiKeyHint("tab", "panel"), tuiKeyHint("/", "filter"), tuiKeyHint("?", "help"), tuiKeyHint("q", "quit"))
+	}
+	if m.execBusy {
+		hints = append(hints, tuiKeyHint("ctrl+x", "cancel"))
 	}
 	bar := strings.Join(hints, tuiStyleDim.Render(" · "))
 	if m.statusLine != "" {
