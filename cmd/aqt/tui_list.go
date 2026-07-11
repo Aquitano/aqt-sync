@@ -6,20 +6,51 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// tuiRow is one line in a side panel. Selectable rows carry a payload the detail
+// tuiRow is one line in a side panel, split into a leading mark (a status letter,
+// badge, or icon) and the body text. Each half keeps its own style so the
+// selected-row background can be re-applied per segment without an inner SGR
+// reset punching a hole in the bar. Selectable rows carry a payload the detail
 // view and the action keys act on; header rows only structure the list.
 type tuiRow struct {
-	text   string // plain text, used for filtering and the selected-row bar
-	styled string // colored variant shown when not selected ("" = use text)
-	header bool
-	tag    any
+	mark      string         // leading glyph, e.g. "A"/"M"/"D"/"★"; "" for none
+	markStyle lipgloss.Style // zero value renders the mark plain
+	body      string         // the rest of the line
+	bodyStyle lipgloss.Style // zero value renders the body plain
+	header    bool
+	tag       any
 }
 
-func (r tuiRow) display() string {
-	if r.styled != "" {
-		return r.styled
+// text is the plain, unstyled row used for filtering and width math.
+func (r tuiRow) text() string {
+	if r.mark == "" {
+		return r.body
 	}
-	return r.text
+	return r.mark + " " + r.body
+}
+
+// content renders the row for an unselected line: each segment in its own color.
+func (r tuiRow) content() string {
+	if r.mark == "" {
+		return r.bodyStyle.Render(r.body)
+	}
+	return r.markStyle.Render(r.mark) + " " + r.bodyStyle.Render(r.body)
+}
+
+// selected renders the focused cursor line: a left accent bar plus every segment
+// re-rendered over the selection background, so the bar spans the full width and
+// the mark keeps its semantic foreground instead of washing out.
+func (r tuiRow) selected(width int) string {
+	bg := tuiStyleSelected
+	bar := lipgloss.NewStyle().Foreground(tuiColAccent).Background(tuiColSelBg).Render("▌")
+	seg := r.bodyStyle.Background(tuiColSelBg).Bold(true).Render(r.body)
+	if r.mark != "" {
+		seg = r.markStyle.Background(tuiColSelBg).Render(r.mark) + bg.Render(" ") + seg
+	}
+	seg = tuiTrunc(seg, width-1)
+	if pad := width - 1 - lipgloss.Width(seg); pad > 0 {
+		seg += bg.Render(strings.Repeat(" ", pad))
+	}
+	return bar + seg
 }
 
 // tuiList is a cursor over rows with a scroll window and an optional substring
@@ -62,7 +93,7 @@ func (l *tuiList) visibleRows() []tuiRow {
 	q := strings.ToLower(l.filter)
 	out := make([]tuiRow, 0, len(l.rows))
 	for _, r := range l.rows {
-		if !r.header && strings.Contains(strings.ToLower(r.text), q) {
+		if !r.header && strings.Contains(strings.ToLower(r.text()), q) {
 			out = append(out, r)
 		}
 	}
@@ -171,13 +202,13 @@ func (l *tuiList) render(width, height int, focused bool) string {
 		r := rows[i]
 		switch {
 		case i == l.cursor && focused && !r.header:
-			b.WriteString(tuiStyleSelected.Render(tuiPadTrunc(" "+r.text, width)))
+			b.WriteString(r.selected(width))
 		case i == l.cursor && !r.header:
 			// Unfocused panels keep a quiet cursor so returning to the panel
 			// lands where you left it.
-			b.WriteString(tuiStyleDim.Render("›") + tuiTrunc(r.display(), width-1))
+			b.WriteString(tuiStyleDim.Render("›") + tuiTrunc(r.content(), width-1))
 		default:
-			b.WriteString(" " + tuiTrunc(r.display(), width-1))
+			b.WriteString(" " + tuiTrunc(r.content(), width-1))
 		}
 	}
 	return b.String()

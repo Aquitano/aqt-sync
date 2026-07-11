@@ -467,6 +467,14 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.panel().list.move(-1)
 		m.onSelectionMoved()
 		return m, nil
+	case "ctrl+d", "pgdown":
+		m.panel().list.move(m.halfPage())
+		m.onSelectionMoved()
+		return m, nil
+	case "ctrl+u", "pgup":
+		m.panel().list.move(-m.halfPage())
+		m.onSelectionMoved()
+		return m, nil
 	case "g", "home":
 		m.panel().list.home()
 		m.onSelectionMoved()
@@ -775,8 +783,8 @@ func (m *tuiModel) rebuildStatusPanel() {
 	var rows []tuiRow
 	if m.ctx.root != "" {
 		rows = append(rows,
-			tuiRow{text: tuiAbbrevHome(m.ctx.root), styled: tuiStyleTitle.Render(tuiAbbrevHome(m.ctx.root)), tag: "account"},
-			tuiRow{text: "aqt://" + m.folderID, styled: tuiStyleDim.Render("aqt://" + m.folderID), tag: "account"},
+			tuiRow{body: tuiAbbrevHome(m.ctx.root), bodyStyle: tuiStyleTitle, tag: "account"},
+			tuiRow{body: "aqt://" + m.folderID, bodyStyle: tuiStyleDim, tag: "account"},
 		)
 		fresh := "checking the server…"
 		style := tuiStyleDim
@@ -791,24 +799,24 @@ func (m *tuiModel) rebuildStatusPanel() {
 				style = tuiStyleAdd
 			}
 		}
-		rows = append(rows, tuiRow{text: fresh, styled: style.Render(fresh), tag: "account"})
+		rows = append(rows, tuiRow{body: fresh, bodyStyle: style, tag: "account"})
 		ag := "watch agent: not running"
-		agStyled := tuiStyleDim.Render(ag)
+		agStyle := tuiStyleDim
 		if m.agent.running {
 			ag = fmt.Sprintf("watch agent: running (pid %d)", m.agent.pid)
-			agStyled = tuiStyleAdd.Render(ag)
+			agStyle = tuiStyleAdd
 		}
-		rows = append(rows, tuiRow{text: ag, styled: agStyled, tag: "account"})
+		rows = append(rows, tuiRow{body: ag, bodyStyle: agStyle, tag: "account"})
 	} else {
 		rows = append(rows,
-			tuiRow{text: "not inside a tracked folder", styled: tuiStyleDim.Render("not inside a tracked folder"), tag: "account"},
-			tuiRow{text: "aqt init <dir> to track one", styled: tuiStyleDim.Render("aqt init <dir> to track one"), tag: "account"},
+			tuiRow{body: "not inside a tracked folder", bodyStyle: tuiStyleDim, tag: "account"},
+			tuiRow{body: "aqt init <dir> to track one", bodyStyle: tuiStyleDim, tag: "account"},
 		)
 	}
 	rows = append(rows, tuiRow{
-		text:   m.ctx.prof.Email + " @ " + m.ctx.prof.Server,
-		styled: tuiStyleDim.Render(m.ctx.prof.Email + " @ " + m.ctx.prof.Server),
-		tag:    "account",
+		body:      m.ctx.prof.Email + " @ " + m.ctx.prof.Server,
+		bodyStyle: tuiStyleDim,
+		tag:       "account",
 	})
 	m.panels[tuiPanelStatus].list.setRows(rows)
 }
@@ -820,31 +828,32 @@ func (m *tuiModel) rebuildFilesPanel() {
 		return
 	}
 	section := func(title string, n int) tuiRow {
-		t := fmt.Sprintf("%s (%d)", title, n)
-		return tuiRow{text: t, styled: tuiStyleTitle.Render(t), header: true}
+		return tuiRow{body: fmt.Sprintf("%s (%d)", title, n), bodyStyle: tuiStyleTitle, header: true}
 	}
 	addPaths := func(kind, mark string, style lipgloss.Style, paths []string) {
 		for _, p := range paths {
 			rows = append(rows, tuiRow{
-				text:   mark + " " + p,
-				styled: style.Render(mark) + " " + p,
-				tag:    tuiFileItem{kind: kind, path: p},
+				mark:      mark,
+				markStyle: style,
+				body:      p,
+				tag:       tuiFileItem{kind: kind, path: p},
 			})
 		}
 	}
 
 	rows = append(rows, section("Local changes", m.local.total()))
 	if m.local.total() == 0 {
-		rows = append(rows, tuiRow{text: "clean", styled: tuiStyleDim.Render("clean"), header: true})
+		rows = append(rows, tuiRow{body: "clean", bodyStyle: tuiStyleDim, header: true})
 	}
 	addPaths("new", "A", tuiStyleAdd, m.local.added)
 	addPaths("modified", "M", tuiStyleMod, m.local.modified)
 	addPaths("deleted", "D", tuiStyleDel, m.local.deleted)
 	for _, r := range m.local.renamed {
 		rows = append(rows, tuiRow{
-			text:   "R " + renameArrow(r),
-			styled: tuiStyleMod.Render("R") + " " + renameArrow(r),
-			tag:    tuiFileItem{kind: "renamed", path: renameArrow(r)},
+			mark:      "R",
+			markStyle: tuiStyleMod,
+			body:      renameArrow(r),
+			tag:       tuiFileItem{kind: "renamed", path: renameArrow(r)},
 		})
 	}
 
@@ -854,9 +863,10 @@ func (m *tuiModel) rebuildFilesPanel() {
 		addIncoming := func(mark string, style lipgloss.Style, paths []string) {
 			for _, p := range paths {
 				rows = append(rows, tuiRow{
-					text:   "↓" + mark + " " + p,
-					styled: style.Render("↓"+mark) + " " + p,
-					tag:    tuiFileItem{kind: "incoming", path: p},
+					mark:      "↓" + mark,
+					markStyle: style,
+					body:      p,
+					tag:       tuiFileItem{kind: "incoming", path: p},
 				})
 			}
 		}
@@ -865,9 +875,10 @@ func (m *tuiModel) rebuildFilesPanel() {
 		addIncoming("D", tuiStyleDel, inc.deleted)
 		for _, r := range inc.renamed {
 			rows = append(rows, tuiRow{
-				text:   "↓R " + renameArrow(r),
-				styled: tuiStyleMod.Render("↓R") + " " + renameArrow(r),
-				tag:    tuiFileItem{kind: "incoming", path: renameArrow(r)},
+				mark:      "↓R",
+				markStyle: tuiStyleMod,
+				body:      renameArrow(r),
+				tag:       tuiFileItem{kind: "incoming", path: renameArrow(r)},
 			})
 		}
 	}
@@ -876,9 +887,10 @@ func (m *tuiModel) rebuildFilesPanel() {
 		rows = append(rows, section("Conflict copies", len(m.conflicts)))
 		for _, p := range m.conflicts {
 			rows = append(rows, tuiRow{
-				text:   "! " + p,
-				styled: tuiStyleConflict.Render("!") + " " + p,
-				tag:    tuiFileItem{kind: "conflict", path: p},
+				mark:      "!",
+				markStyle: tuiStyleConflict,
+				body:      p,
+				tag:       tuiFileItem{kind: "conflict", path: p},
 			})
 		}
 	}
@@ -888,14 +900,17 @@ func (m *tuiModel) rebuildFilesPanel() {
 func (m *tuiModel) rebuildSnapshotsPanel() {
 	rows := make([]tuiRow, 0, len(m.snaps))
 	for _, s := range m.snaps {
-		name := s.displayName()
-		mark, markStyled := "  ", "  "
+		// A space mark keeps unanchored rows aligned under the ★ column.
+		mark, markStyle := " ", lipgloss.Style{}
 		if s.Anchored {
-			mark, markStyled = "★ ", tuiStyleAccent.Render("★ ")
+			mark, markStyle = "★", tuiStyleAccent
 		}
-		text := fmt.Sprintf("%s%s  %s", mark, s.Created, name)
-		styled := markStyled + tuiStyleDim.Render(s.Created) + "  " + name
-		rows = append(rows, tuiRow{text: text, styled: styled, tag: s})
+		rows = append(rows, tuiRow{
+			mark:      mark,
+			markStyle: markStyle,
+			body:      s.Created + "  " + s.displayName(),
+			tag:       s,
+		})
 	}
 	m.panels[tuiPanelSnapshots].list.setRows(rows)
 }
@@ -903,21 +918,25 @@ func (m *tuiModel) rebuildSnapshotsPanel() {
 func (m *tuiModel) rebuildResourcesPanel() {
 	rows := make([]tuiRow, 0, len(m.resources))
 	for _, r := range m.resources {
-		vis, visStyled := "", ""
-		if r.Visibility == string(api.Public) {
-			vis, visStyled = " public", tuiStylePublic.Render(" public")
-		}
+		// A resource carries one leading indicator: "/" for a folder or a filled
+		// dot for a public file. The public dot must be its own segment (not a
+		// trailing word) so its color survives the selection bar.
+		mark, markStyle := "", lipgloss.Style{}
 		size := ""
-		if r.Kind != api.KindFolder {
-			size = "  " + humanBytes(r.Size)
-		}
-		kind := ""
 		if r.Kind == api.KindFolder {
-			kind = "/ "
+			mark, markStyle = "/", tuiStyleAccent
+		} else {
+			size = "  " + humanBytes(r.Size)
+			if r.Visibility == string(api.Public) {
+				mark, markStyle = "●", tuiStylePublic
+			}
 		}
-		text := kind + r.Name + size + vis
-		styled := tuiStyleAccent.Render(kind) + r.Name + tuiStyleDim.Render(size) + visStyled
-		rows = append(rows, tuiRow{text: text, styled: styled, tag: r})
+		rows = append(rows, tuiRow{
+			mark:      mark,
+			markStyle: markStyle,
+			body:      r.Name + size,
+			tag:       r,
+		})
 	}
 	m.panels[tuiPanelResources].list.setRows(rows)
 }
@@ -1019,17 +1038,86 @@ func (m *tuiModel) leftWidth() int {
 
 func (m *tuiModel) mainWidth() int { return m.w - m.leftWidth() }
 
-// panelHeights splits the left column's outer height across its four boxes. It
-// is the single source of truth shared by the renderer (leftColumn) and the
-// mouse hit-tester, so the two cannot drift.
+// halfPage is half the focused panel's body height, for the page keys. It reads
+// the live heights so the jump matches whatever the accordion currently shows.
+func (m *tuiModel) halfPage() int {
+	half := (m.panelHeights()[m.focus] - 2) / 2
+	if half < 1 {
+		half = 1
+	}
+	return half
+}
+
+// panelHeights splits the left column's outer height across its four boxes,
+// accordion-style: the focused panel takes all the spare rows while the others
+// collapse to just fit their contents. It is the single source of truth shared
+// by the renderer (leftColumn), the mouse hit-tester (panelRanges), and the page
+// keys, so they cannot drift.
 func (m *tuiModel) panelHeights() [tuiPanelCount]int {
-	total := m.h - 1
-	statusH := 7
-	rest := total - statusH
-	filesH := rest * 4 / 10
-	snapsH := rest * 3 / 10
-	resH := rest - filesH - snapsH
-	return [tuiPanelCount]int{statusH, filesH, snapsH, resH}
+	total := m.h - 1 // the bottom bar owns the last row
+
+	rowCount := func(id tuiPanelID) int { return len(m.panels[id].list.visibleRows()) }
+
+	// A collapsed panel fits its rows up to a cap so a short list reserves no dead
+	// space; the floor of 3 keeps the title and one row visible. Status is capped
+	// lower still: its full detail lives in the main pane.
+	fit := func(id tuiPanelID, cap int) int {
+		h := rowCount(id) + 2
+		if h > cap {
+			h = cap
+		}
+		if h < 3 {
+			h = 3
+		}
+		return h
+	}
+
+	// The spare rows go to the focused list, but not to Status (fixed detail) and
+	// not while the main pane holds focus; in those cases the mode's primary list
+	// grows instead.
+	expand := m.focus
+	if m.mainFocus || m.focus == tuiPanelStatus {
+		if m.ctx.root != "" {
+			expand = tuiPanelFiles
+		} else {
+			expand = tuiPanelResources
+		}
+	}
+
+	var h [tuiPanelCount]int
+	sum := 0
+	for i := tuiPanelID(0); i < tuiPanelCount; i++ {
+		if i == tuiPanelStatus {
+			h[i] = fit(i, 6)
+		} else {
+			h[i] = fit(i, 5)
+		}
+		sum += h[i]
+	}
+
+	switch {
+	case total-sum > 0:
+		h[expand] += total - sum
+	case total-sum < 0:
+		// Not enough room: shrink the other panels to their floor first, then the
+		// focused one, so the panel you are reading stays largest the longest.
+		deficit := sum - total
+		for i := tuiPanelID(0); i < tuiPanelCount && deficit > 0; i++ {
+			if i == expand {
+				continue
+			}
+			for h[i] > 3 && deficit > 0 {
+				h[i]--
+				deficit--
+			}
+		}
+		if deficit > 0 {
+			if h[expand] -= deficit; h[expand] < 1 {
+				h[expand] = 1
+			}
+		}
+	}
+	return h
 }
 
 // panelRanges returns each left panel's outer [y0, y1) row span, stacked from
@@ -1129,12 +1217,21 @@ func (m *tuiModel) panelBox(id tuiPanelID, width, height int) string {
 	case id == tuiPanelResources:
 		title += fmt.Sprintf(" %d", len(m.resources))
 	}
-	if p.list.filter != "" && id == m.focus {
-		title += tuiStyleDim.Render(" /" + p.list.filter)
+	bodyH := height - 2
+	visible := len(p.list.visibleRows())
+	filtering := p.list.filter != "" && id == m.focus
+	if filtering {
+		title += tuiStyleDim.Render(fmt.Sprintf(" /%s %d", p.list.filter, visible))
 	}
-	body := p.list.render(width-2, height-2, m.focus == id && !m.mainFocus)
-	if p.err != nil {
+	body := p.list.render(width-2, bodyH, m.focus == id && !m.mainFocus)
+	switch {
+	case p.err != nil:
 		body = tuiStyleErr.Render(tuiTrunc("error: "+p.err.Error(), width-2))
+	case filtering && visible == 0:
+		body = tuiStyleDim.Render("no matches")
+	case visible > bodyH:
+		// Scroll position, so an overflowing list says where the cursor sits.
+		title += tuiStyleDim.Render(fmt.Sprintf(" ‹%d/%d›", p.list.cursor+1, visible))
 	}
 	return tuiBox(title, body, width, height, m.focus == id)
 }
@@ -1149,6 +1246,9 @@ func (m *tuiModel) mainBox() string {
 	}
 	m.vp.Width = m.mainWidth() - 2
 	m.vp.Height = m.h - 3
+	if m.vp.TotalLineCount() > m.vp.Height {
+		title += " " + tuiStyleDim.Render(fmt.Sprintf("%d%%", int(m.vp.ScrollPercent()*100)))
+	}
 	return tuiBox(title, m.vp.View(), m.mainWidth(), m.h-1, m.mainFocus)
 }
 

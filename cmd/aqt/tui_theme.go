@@ -8,7 +8,7 @@ import "github.com/charmbracelet/lipgloss"
 var (
 	tuiColAccent   = lipgloss.AdaptiveColor{Light: "29", Dark: "43"}   // active border, selection
 	tuiColBorder   = lipgloss.AdaptiveColor{Light: "250", Dark: "238"} // inactive border
-	tuiColDim      = lipgloss.AdaptiveColor{Light: "245", Dark: "244"}
+	tuiColDim      = lipgloss.AdaptiveColor{Light: "240", Dark: "244"}
 	tuiColAdd      = lipgloss.AdaptiveColor{Light: "28", Dark: "78"}
 	tuiColMod      = lipgloss.AdaptiveColor{Light: "130", Dark: "179"}
 	tuiColDel      = lipgloss.AdaptiveColor{Light: "124", Dark: "167"}
@@ -28,8 +28,9 @@ var (
 	tuiStyleErr      = lipgloss.NewStyle().Foreground(tuiColDel).Bold(true)
 
 	// Selected row: background bar across the panel width, like lazygit's line
-	// cursor. Rendered from the row's plain text so the bar is uniform.
-	tuiStyleSelected = lipgloss.NewStyle().Background(tuiColSelBg).Foreground(tuiColAccent).Bold(true)
+	// cursor. Background only; the selected row keeps each segment's own
+	// foreground (see tuiRow.selected) so the semantic colors survive the bar.
+	tuiStyleSelected = lipgloss.NewStyle().Background(tuiColSelBg)
 
 	// Bottom bar: "key" bright, "label" dim, joined with dim separators.
 	tuiStyleKey      = lipgloss.NewStyle().Foreground(tuiColAccent)

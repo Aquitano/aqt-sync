@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,10 @@ func key(s string) tea.KeyMsg {
 		return tea.KeyMsg{Type: tea.KeyShiftTab}
 	case "ctrl+x":
 		return tea.KeyMsg{Type: tea.KeyCtrlX}
+	case "ctrl+d":
+		return tea.KeyMsg{Type: tea.KeyCtrlD}
+	case "ctrl+u":
+		return tea.KeyMsg{Type: tea.KeyCtrlU}
 	}
 	panic("unknown key " + s)
 }
@@ -332,10 +337,10 @@ func TestTUIOverlayGeometry(t *testing.T) {
 func TestTUIListClickTo(t *testing.T) {
 	var l tuiList
 	l.setRows([]tuiRow{
-		{text: "head", header: true},
-		{text: "one", tag: "one"},
-		{text: "two", tag: "two"},
-		{text: "three", tag: "three"},
+		{body: "head", header: true},
+		{body: "one", tag: "one"},
+		{body: "two", tag: "two"},
+		{body: "three", tag: "three"},
 	})
 	// clickTo honors the scroll offset: view row 0 maps to rows[offset].
 	l.offset = 2
@@ -359,12 +364,15 @@ func TestTUIMouseFocusAndSelect(t *testing.T) {
 	m := testModel(t) // 100x30 window
 	m.setFocus(tuiPanelResources)
 
-	// Files panel occupies rows [7,15): top border 7, first content row 8. The
-	// third content row (y=10) is the "M mod.txt" entry.
-	if id, ok := m.panelAt(3, 10); !ok || id != tuiPanelFiles {
-		t.Fatalf("panelAt(3,10) = %v,%v, want files", id, ok)
+	// Positions come from panelRanges so the test tracks the accordion layout.
+	// The files list is section header, A new.txt, M mod.txt: the third content
+	// row is "M mod.txt".
+	filesTop := m.panelRanges()[tuiPanelFiles][0]
+	modY := filesTop + 1 + 2 // border, then the third (0-based row 2) content row
+	if id, ok := m.panelAt(3, modY); !ok || id != tuiPanelFiles {
+		t.Fatalf("panelAt(3,%d) = %v,%v, want files", modY, id, ok)
 	}
-	m.handleMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 3, Y: 10})
+	m.handleMouse(tea.MouseMsg{Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 3, Y: modY})
 	if m.focus != tuiPanelFiles {
 		t.Fatalf("click focus = %v, want files", m.focus)
 	}
@@ -382,9 +390,10 @@ func TestTUIMouseFocusAndSelect(t *testing.T) {
 func TestTUIMouseWheelMovesPanelUnderCursor(t *testing.T) {
 	m := testModel(t)
 	m.setFocus(tuiPanelResources) // r1 selected
-	// Wheel down over the resources panel (rows [21,29)) advances its cursor
-	// without the main viewport stealing the event.
-	m.handleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelDown, X: 3, Y: 23})
+	// Wheel down over the resources panel advances its cursor without the main
+	// viewport stealing the event.
+	resTop := m.panelRanges()[tuiPanelResources][0]
+	m.handleMouse(tea.MouseMsg{Button: tea.MouseButtonWheelDown, X: 3, Y: resTop + 1})
 	if r := m.panels[tuiPanelResources].list.current().tag.(lsRow); r.ID != "r2" {
 		t.Fatalf("wheel selection = %s, want r2", r.ID)
 	}
@@ -435,6 +444,133 @@ func TestTUICancelConfirmFlow(t *testing.T) {
 	}
 	if _, ok := cmd().(tuiCancelExecMsg); !ok {
 		t.Fatalf("cancel produced %T, want tuiCancelExecMsg", cmd())
+	}
+}
+
+func TestTUIAccordionHeights(t *testing.T) {
+	m := testModel(t) // 100x30
+
+	sum := func() int {
+		h := m.panelHeights()
+		total := 0
+		for _, v := range h {
+			total += v
+		}
+		return total
+	}
+
+	// The heights always tile the left column exactly (bottom bar owns one row).
+	if got, want := sum(), m.h-1; got != want {
+		t.Fatalf("heights sum = %d, want %d", got, want)
+	}
+
+	// The focused list swallows the spare rows; every other panel collapses.
+	m.setFocus(tuiPanelResources)
+	h := m.panelHeights()
+	for id := tuiPanelStatus; id < tuiPanelCount; id++ {
+		if id == tuiPanelResources {
+			continue
+		}
+		if h[id] > 6 {
+			t.Fatalf("unfocused panel %d = %d outer rows, want it collapsed (<=6)", id, h[id])
+		}
+		if h[tuiPanelResources] <= h[id] {
+			t.Fatalf("focused resources (%d) not larger than panel %d (%d)", h[tuiPanelResources], id, h[id])
+		}
+	}
+
+	// Focus follows the expansion: switching panels moves the tall box.
+	m.setFocus(tuiPanelSnapshots)
+	if h := m.panelHeights(); h[tuiPanelSnapshots] <= h[tuiPanelResources] {
+		t.Fatalf("after focusing snapshots it (%d) should exceed resources (%d)", h[tuiPanelSnapshots], h[tuiPanelResources])
+	}
+
+	// Focus on the main pane hands the spare rows to the mode's primary list
+	// (Files here, since the model has a tracked root).
+	m.mainFocus = true
+	if h := m.panelHeights(); h[tuiPanelFiles] <= h[tuiPanelSnapshots] {
+		t.Fatalf("main-focus should grow files (%d) over snapshots (%d)", h[tuiPanelFiles], h[tuiPanelSnapshots])
+	}
+}
+
+func TestTUIAccordionSmallTerminalFloor(t *testing.T) {
+	m := testModel(t)
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 16}) // the documented minimum
+
+	h := m.panelHeights()
+	sum := 0
+	for id, v := range h {
+		if v < 3 {
+			t.Fatalf("panel %d floored below the title+row minimum: %d", id, v)
+		}
+		sum += v
+	}
+	if sum != m.h-1 {
+		t.Fatalf("small-terminal heights sum = %d, want %d", sum, m.h-1)
+	}
+	if m.View() == "" {
+		t.Fatal("empty view at 60x16")
+	}
+}
+
+func TestTUITitleScrollIndicator(t *testing.T) {
+	m := testModel(t)
+	// Overflow the resources panel so its box cannot show every row at once.
+	var many []lsRow
+	for i := 0; i < 50; i++ {
+		many = append(many, lsRow{ID: fmt.Sprintf("r%d", i), Name: fmt.Sprintf("file%02d", i), Kind: "file", Visibility: "private", Version: 1})
+	}
+	m.resources = many
+	m.rebuildResourcesPanel()
+	m.setFocus(tuiPanelResources)
+
+	h := m.panelHeights()
+	box := m.panelBox(tuiPanelResources, m.leftWidth(), h[tuiPanelResources])
+	if !strings.Contains(box, "‹") {
+		t.Fatal("overflowing panel title should carry a ‹cursor/n› scroll indicator")
+	}
+
+	// A filter narrows the list and the title reports the match count.
+	m.panels[tuiPanelResources].list.setFilter("file0")
+	box = m.panelBox(tuiPanelResources, m.leftWidth(), h[tuiPanelResources])
+	if !strings.Contains(box, "/file0") {
+		t.Fatal("filtered title should echo the query")
+	}
+
+	// A filter with no hits says so in the body.
+	m.panels[tuiPanelResources].list.setFilter("nomatch-xyz")
+	box = m.panelBox(tuiPanelResources, m.leftWidth(), h[tuiPanelResources])
+	if !strings.Contains(box, "no matches") {
+		t.Fatal("an empty filter result should show a 'no matches' line")
+	}
+}
+
+func TestTUIPageKeysMoveByHalfPage(t *testing.T) {
+	m := testModel(t)
+	var many []lsRow
+	for i := 0; i < 50; i++ {
+		many = append(many, lsRow{ID: fmt.Sprintf("r%d", i), Name: fmt.Sprintf("file%02d", i), Kind: "file", Visibility: "private", Version: 1})
+	}
+	m.resources = many
+	m.rebuildResourcesPanel()
+	m.setFocus(tuiPanelResources)
+
+	l := &m.panels[tuiPanelResources].list
+	l.home()
+	if l.cursor != 0 {
+		t.Fatalf("home cursor = %d, want 0", l.cursor)
+	}
+	half := m.halfPage()
+	if half < 1 {
+		t.Fatalf("halfPage = %d, want >= 1", half)
+	}
+	m.handleKey(key("ctrl+d"))
+	if l.cursor != half {
+		t.Fatalf("ctrl+d cursor = %d, want %d", l.cursor, half)
+	}
+	m.handleKey(key("ctrl+u"))
+	if l.cursor != 0 {
+		t.Fatalf("ctrl+u cursor = %d, want back to 0", l.cursor)
 	}
 }
 

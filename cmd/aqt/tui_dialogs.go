@@ -128,7 +128,7 @@ func (d *tuiMenu) View(width int) string {
 			plain = o.key + "  " + o.label
 		}
 		if i == d.cursor {
-			b.WriteString(tuiStyleSelected.Render(" " + plain))
+			b.WriteString(tuiStyleSelected.Foreground(tuiColAccent).Bold(true).Render(" " + plain))
 		} else if o.key != "" {
 			b.WriteString(" " + tuiStyleKey.Render(o.key) + "  " + o.label)
 		} else {
