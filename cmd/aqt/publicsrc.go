@@ -5,9 +5,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sync"
 
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 // publicBatchBytes bounds one public-read request by estimated ciphertext bytes, so a
@@ -90,20 +92,96 @@ func (s *publicChunkSource) fetchBatch(start int) error {
 	batch := s.ids[start:end]
 	frames, err := s.cl.PublicObjects(s.resourceID, batch)
 	if err != nil {
-		if errors.Is(err, client.ErrGone) {
-			return fmt.Errorf("this link has expired or reached its read limit: %w", err)
-		}
-		if errors.Is(err, client.ErrNotFound) {
-			return errors.New("public objects unavailable: the resource is no longer public, or the server predates public streamed sharing")
-		}
-		return err
+		return publicReadErr(err)
 	}
 	for i, frame := range frames {
-		sum := sha256.Sum256(frame)
-		if hex.EncodeToString(sum[:]) != batch[i] {
-			return fmt.Errorf("public object %s failed its content-address check (truncated or corrupt frame)", batch[i])
+		if err := verifyFrame(batch[i], frame); err != nil {
+			return err
 		}
 		s.cache.put(batch[i], frame)
 	}
 	return nil
+}
+
+// publicReadErr translates a public-object fetch failure into user-facing guidance.
+func publicReadErr(err error) error {
+	if errors.Is(err, client.ErrGone) {
+		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
+	}
+	if errors.Is(err, client.ErrNotFound) {
+		return errors.New("public objects unavailable: the resource is no longer public, or the server predates public streamed sharing")
+	}
+	return err
+}
+
+// verifyFrame checks a returned frame against its content address, the same trust
+// step every object fetch pays regardless of transport.
+func verifyFrame(id string, frame []byte) error {
+	sum := sha256.Sum256(frame)
+	if hex.EncodeToString(sum[:]) != id {
+		return fmt.Errorf("public object %s failed its content-address check (truncated or corrupt frame)", id)
+	}
+	return nil
+}
+
+// newPublicBatchFetcher is the link-holder counterpart of newBatchNodeFetcher: a
+// level-batch fetch for a folder's metadata objects (directory nodes and chunk-list
+// segments) over the unauthenticated public endpoint. Every frame is verified against
+// its content address before use, so the shared on-disk node cache is exactly as
+// trustworthy here as on the authed path.
+func newPublicBatchFetcher(cl *client.Client, resourceID string) func([]string) (map[string][]byte, error) {
+	cache := map[string][]byte{}
+	disk := openNodeCache()
+	return func(ids []string) (map[string][]byte, error) {
+		var missing []string
+		for _, id := range ids {
+			if _, ok := cache[id]; ok {
+				continue
+			}
+			if ct, ok := disk.get(id); ok {
+				cache[id] = ct
+				continue
+			}
+			missing = append(missing, id)
+		}
+		for start := 0; start < len(missing); start += publicBatchIDs {
+			batch := missing[start:min(start+publicBatchIDs, len(missing))]
+			frames, err := cl.PublicObjects(resourceID, batch)
+			if err != nil {
+				return nil, publicReadErr(err)
+			}
+			for i, frame := range frames {
+				if err := verifyFrame(batch[i], frame); err != nil {
+					return nil, err
+				}
+				cache[batch[i]] = frame
+				disk.put(batch[i], frame)
+			}
+		}
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			if ct, ok := cache[id]; ok {
+				out[id] = ct
+			}
+		}
+		return out, nil
+	}
+}
+
+// newPublicEntrySource serves file-content objects for a set of folder entries to the
+// concurrent download pool over the public endpoint. publicChunkSource is built for a
+// single sequential reader, so a mutex serializes lookup+fetch; decryption and file
+// writes still overlap across the pool's workers.
+func newPublicEntrySource(cl *client.Client, resourceID string, entries []syncengine.Entry) func(id string) ([]byte, error) {
+	var chunks []crypto.Chunk
+	for _, e := range entries {
+		chunks = append(chunks, e.Chunks...)
+	}
+	src := newPublicChunkSource(cl, resourceID, chunks)
+	var mu sync.Mutex
+	return func(id string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		return src.get(id)
+	}
 }

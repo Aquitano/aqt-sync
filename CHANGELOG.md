@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Public whole-folder sharing: `aqt share <folder-id>` now mints a fragment link
+  for a chunked folder (password gating, `--expire`, `--max-reads`, and `--burn`
+  work as for files; a clone counts as one read). A link holder — no account
+  needed — runs `aqt clone <link>` to materialize the tree read-only, or
+  `aqt pull <link>/<subpath>` to fetch a single entry or subtree; all reads go
+  through the existing membership-checked public object endpoint, and there is
+  no unauthenticated write path, so links are strictly pull-only.
+  `aqt private <folder-id>` rotates the folder key root-only (nodes and chunks
+  stay deduplicated) so old links die. Pack-and-seal folders remain unshareable.
+
 - Prometheus metrics for the server, exposed on a separate operator-only listener
   (`AQT_METRICS_ADDR`, default off): per-route request/latency/status counters
   (410/426 included), pack transfer volume, GC sweep results, and per-account

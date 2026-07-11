@@ -101,21 +101,29 @@ func syncCmd() *cobra.Command {
 }
 
 func cloneCmd() *cobra.Command {
-	var adopt bool
+	var (
+		adopt bool
+		pw    passwordFlags
+	)
 	cmd := &cobra.Command{
-		Use:   "clone <id|aqt://ref> [dir]",
-		Short: "Materialize a tracked folder on this machine",
+		Use:   "clone <id|aqt://ref|share-url> [dir]",
+		Short: "Materialize a tracked folder (or a shared folder link) on this machine",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := ""
 			if len(args) == 2 {
 				dir = args[1]
 			}
-			return runClone(args[0], dir, adopt)
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
+			return runClone(args[0], dir, adopt, password)
 		},
 	}
 	cmd.Flags().BoolVar(&adopt, "adopt", false,
 		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
+	pw.bind(cmd, "password for a gated link")
 	return cmd
 }
 
@@ -1122,8 +1130,16 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 
 // --- clone ---
 
-func runClone(ref, dir string, adopt bool) error {
-	id, _, _ := parseRef(ref) // v1 folders are private; no fragment key
+func runClone(ref, dir string, adopt bool, password string) error {
+	id, fragment, origin := parseRef(ref)
+	// A ref carrying a fragment is a share link: the key comes from the link, not
+	// the master key, and the read path is the unauthenticated public endpoint.
+	if fragment != "" {
+		if adopt {
+			return errors.New("--adopt binds a directory to a folder you own; a share link is read-only, so there is nothing to sync with")
+		}
+		return runCloneLink(id, fragment, origin, dir, password)
+	}
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
@@ -1186,6 +1202,75 @@ func runClone(ref, dir string, adopt bool) error {
 		return err
 	}
 	fmt.Printf("cloned %d files into %s\n", len(base.Entries), abs)
+	return nil
+}
+
+// runCloneLink materializes a shared folder from its public link: the tree nodes and
+// file content come through the unauthenticated public-object endpoint, and the
+// folder key comes from the link fragment. The result is a plain directory, not a
+// tracked folder — a link holder has no account token, so there is nothing to sync
+// with; the link is pull-only by construction.
+func runCloneLink(id, fragment, origin, dir, password string) error {
+	prof := loadProfileOptional()
+	cl, err := newLinkClient(origin, prof)
+	if err != nil {
+		return err
+	}
+	res, err := cl.GetResource(id)
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Errorf("resource %s not found (or no longer public)", id)
+	}
+	if errors.Is(err, client.ErrGone) {
+		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
+	}
+	if err != nil {
+		return err
+	}
+	ck, err := contentKey(res, fragment, password, prof)
+	if err != nil {
+		return err
+	}
+	defer ck.Wipe()
+	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
+	if err != nil {
+		return err
+	}
+	if meta.Kind != api.KindFolder {
+		return fmt.Errorf("%s is a single file, not a folder; `aqt pull` fetches it", meta.Name)
+	}
+	if meta.Packed || !meta.Tree {
+		return errors.New("this folder's format cannot be read through a share link; ask the owner to re-share it as a chunked folder")
+	}
+	// Decrypt the root before creating the destination, so a wrong password or
+	// corrupt link fails without leaving an empty directory behind.
+	root, err := syncengine.OpenTreeRoot(res.Blob, ck, id)
+	if err != nil {
+		return fmt.Errorf("decrypt folder root: %w", err)
+	}
+	if dir == "" {
+		dir = id
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if err := ensureEmptyDir(abs); err != nil {
+		return err
+	}
+	manifest, err := syncengine.OpenTreeBatched(root, newPublicBatchFetcher(cl, id))
+	if err != nil {
+		return fmt.Errorf("decrypt manifest: %w", err)
+	}
+	prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
+	dlErr := runDownloadsFrom(newPublicEntrySource(cl, id, manifest.Entries), abs, manifest.Entries, prog)
+	prog.finish(dlErr == nil)
+	if dlErr != nil {
+		return dlErr
+	}
+	if err := materializeDirs(abs, manifest.Dirs); err != nil {
+		return err
+	}
+	fmt.Printf("cloned %d files into %s (from a share link; not a tracked folder)\n", len(manifest.Entries), abs)
 	return nil
 }
 
@@ -1449,6 +1534,13 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, pr
 	if err != nil {
 		return err
 	}
+	return runDownloadsFrom(src.get, root, entries, prog)
+}
+
+// runDownloadsFrom is runDownloads with the chunk source already chosen, so the
+// link-holder paths can materialize entries through the public object endpoint
+// with the same worker pool the authed pack path uses.
+func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries []syncengine.Entry, prog *progressBar) error {
 	var g errgroup.Group
 	g.SetLimit(syncTransferLimit(downloadConcurrency))
 	for _, e := range entries {
@@ -1458,7 +1550,7 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, pr
 				if err := syncengine.WriteSymlink(root, e); err != nil {
 					return err
 				}
-			} else if err := syncengine.MaterializeFile(root, e, src.get); err != nil {
+			} else if err := syncengine.MaterializeFile(root, e, get); err != nil {
 				return err
 			}
 			prog.add(e.Size)

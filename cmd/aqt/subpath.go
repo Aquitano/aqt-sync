@@ -15,22 +15,45 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-// splitRefPath splits an aqt://<id>/<sub/path> ref into its base ref and the path
-// inside the folder. Only the aqt:// form carries a subpath: a bare id has no
-// separator, and an http(s) share URL's path segments belong to the server route.
+// splitRefPath splits a folder ref into its base ref and the path inside the
+// folder. Two forms carry a subpath: aqt://<id>/<sub/path>, and a share URL with
+// segments after its /x/<id> route (.../x/<id>/<sub/path>#<frag>). A subpath
+// naively appended to a whole share link lands inside the fragment
+// (...#k.<key>/<sub/path>), so a slash-bearing fragment is peeled the same way.
 func splitRefPath(ref string) (baseRef, subpath string) {
 	frag := ""
 	if i := strings.Index(ref, "#"); i >= 0 {
 		frag, ref = ref[i:], ref[:i]
 	}
-	rest, ok := strings.CutPrefix(ref, "aqt://")
-	if !ok {
-		return ref + frag, ""
+	fragPath := ""
+	if i := strings.IndexByte(frag, '/'); i >= 0 {
+		frag, fragPath = frag[:i], strings.Trim(frag[i+1:], "/")
 	}
-	if i := strings.IndexByte(rest, '/'); i >= 0 {
-		return "aqt://" + rest[:i] + frag, strings.Trim(rest[i+1:], "/")
+	if rest, ok := strings.CutPrefix(ref, "aqt://"); ok {
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			return "aqt://" + rest[:i] + frag, joinSubpath(strings.Trim(rest[i+1:], "/"), fragPath)
+		}
+		return ref + frag, fragPath
 	}
-	return ref + frag, ""
+	if i := strings.LastIndex(ref, "/x/"); i >= 0 {
+		tail := ref[i+len("/x/"):]
+		if j := strings.IndexByte(tail, '/'); j >= 0 {
+			return ref[:i+len("/x/")] + tail[:j] + frag, joinSubpath(strings.Trim(tail[j+1:], "/"), fragPath)
+		}
+	}
+	return ref + frag, fragPath
+}
+
+// joinSubpath combines the URL-path and fragment-appended subpath forms; a ref
+// pathologically using both still yields one well-formed relative path.
+func joinSubpath(a, b string) string {
+	switch {
+	case a == "":
+		return b
+	case b == "":
+		return a
+	}
+	return a + "/" + b
 }
 
 // openFolderRoot validates that res is a chunked tree folder and opens its sealed
@@ -62,8 +85,9 @@ var errNotAFolder = errors.New("not a folder")
 
 // pullSubpath fetches one entry (or one subtree) out of a chunked folder without
 // downloading anything else: only the directory nodes on the path's spine, then
-// just that entry's content chunks.
-func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck crypto.ContentKey, subpath, out string, toStdout, force bool) error {
+// just that entry's content chunks. viaLink selects the unauthenticated public
+// object endpoint for both, the read path a share-link holder has.
+func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck crypto.ContentKey, subpath, out string, toStdout, force, viaLink bool) error {
 	root, err := openFolderRoot(res, ck)
 	if errors.Is(err, errNotAFolder) {
 		return fmt.Errorf("resource %s is not a folder; drop the /%s suffix", id, subpath)
@@ -72,6 +96,9 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		return err
 	}
 	fetch := newBatchNodeFetcher(cl, nil)
+	if viaLink {
+		fetch = newPublicBatchFetcher(cl, id)
+	}
 	child, err := syncengine.ResolveTreePath(root, subpath, fetch)
 	if errors.Is(err, syncengine.ErrPathNotFound) {
 		return fmt.Errorf("%w %s", err, id)
@@ -85,7 +112,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		if toStdout {
 			return fmt.Errorf("%s is a directory: `aqt ls aqt://%s/%s` lists it, `aqt pull` (without --stdout) materializes it", subpath, id, subpath)
 		}
-		return pullSubtree(cl, root.Version, child, fetch, subpath, out)
+		return pullSubtree(cl, id, root.Version, child, fetch, subpath, out, viaLink)
 	case syncengine.ChildSymlink:
 		if toStdout {
 			return fmt.Errorf("%s is a symlink to %s; pull it without --stdout to recreate the link", subpath, child.Link)
@@ -124,12 +151,18 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	if err != nil {
 		return err
 	}
-	src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
-	if err != nil {
-		return err
+	var get func(string) ([]byte, error)
+	if viaLink {
+		get = newPublicEntrySource(cl, id, []syncengine.Entry{e})
+	} else {
+		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
+		if err != nil {
+			return err
+		}
+		get = src.get
 	}
 	if toStdout {
-		return syncengine.WriteEntry(os.Stdout, e, src.get)
+		return syncengine.WriteEntry(os.Stdout, e, get)
 	}
 	dest := out
 	if dest == "" {
@@ -145,7 +178,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		perm = 0o600
 	}
 	if err := writeStreamAtomic(dest, perm, func(f *os.File) error {
-		return syncengine.WriteEntry(f, e, src.get)
+		return syncengine.WriteEntry(f, e, get)
 	}); err != nil {
 		return err
 	}
@@ -156,7 +189,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 // pullSubtree materializes one directory subtree into a fresh destination: the
 // subtree's own node is a complete content-addressed root, so the rest of the
 // folder is never fetched.
-func pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string) error {
+func pullSubtree(cl *client.Client, id string, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, viaLink bool) error {
 	sub := syncengine.TreeRoot{Version: version, Root: *child.Node}
 	m, err := syncengine.OpenTreeBatched(sub, fetch)
 	if err != nil {
@@ -173,8 +206,18 @@ func pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fet
 	if err := ensureEmptyDir(abs); err != nil {
 		return err
 	}
+	var get func(string) ([]byte, error)
+	if viaLink {
+		get = newPublicEntrySource(cl, id, m.Entries)
+	} else {
+		src, err := newPackSource(cl, distinctChunkIDs(m.Entries))
+		if err != nil {
+			return err
+		}
+		get = src.get
+	}
 	prog := newProgressBar("downloading", entriesBytes(m.Entries))
-	dlErr := runDownloads(cl, abs, m.Entries, prog)
+	dlErr := runDownloadsFrom(get, abs, m.Entries, prog)
 	prog.finish(dlErr == nil)
 	if dlErr != nil {
 		return dlErr

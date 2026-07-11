@@ -256,7 +256,7 @@ func (s *sim) setup() {
 	for i := 1; i < simDevices; i++ {
 		s.use(s.devs[i])
 		reattach(t, url, email, pass)
-		if err := runClone(folderID, s.devs[i].dir, false); err != nil {
+		if err := runClone(folderID, s.devs[i].dir, false, ""); err != nil {
 			t.Fatalf("clone device %d: %v", i, err)
 		}
 		s.devs[i].tree = s.server.clone()

@@ -80,8 +80,17 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	if err != nil {
 		return err
 	}
+	// A chunked folder shares like a streamed file: its nodes and chunks are already
+	// the resource's referenced object set, so the public endpoint serves them and
+	// the fragment key opens the tree root. Pack-and-seal folders store one opaque
+	// pack with no per-entry objects, so a link holder could never walk them.
 	if meta.Kind == api.KindFolder {
-		return errors.New("sharing a whole folder publicly is not supported yet")
+		if meta.Packed {
+			return errors.New("cannot share a pack-and-seal folder; re-create it as a chunked folder to share it")
+		}
+		if !meta.Tree {
+			return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
+		}
 	}
 	// Always call SetVisibility when a policy is requested, even if the resource is
 	// already public, so the policy is applied (and the read counter reset). A plain
@@ -156,10 +165,14 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
-	// A tracked folder is private-only and has no public link to rotate; rotating it
-	// would also have to re-root its whole object graph. Refuse it.
 	if meta.Kind == api.KindFolder {
-		return errors.New("cannot rotate the key of a tracked folder; it is private-only and has no public link to rotate")
+		if meta.Packed {
+			return errors.New("a pack-and-seal folder cannot be shared, so it has no public link to rotate")
+		}
+		if !meta.Tree {
+			return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
+		}
+		return rotateTree(cl, id, res, oldCK, mk)
 	}
 	if meta.Streamed {
 		return rotateStreamed(cl, id, res, oldCK, mk)
@@ -222,6 +235,75 @@ func runPrivate(idArg string) error {
 // anyway. Access revocation is enforced server-side by the visibility flip. The re-PUT
 // must carry the resource's full ChunkRefs, since the server refuses a re-PUT that
 // drops the GC roots of an object-backed resource.
+// rotateTree rotates a chunked folder's key the way rotateStreamed rotates a file's:
+// only the TreeRoot blob and metadata are re-sealed under a fresh content key. The
+// convergent directory nodes and chunk objects stay — their per-object keys derive
+// from the account convergence key, which a link never carried — so the visibility
+// flip plus a root the old key cannot open is what kills the link. The re-PUT must
+// carry the resource's full GC roots; they are recomputed by re-sealing the tree in
+// memory, which is deterministic under the convergence key.
+func rotateTree(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey) error {
+	root, err := syncengine.OpenTreeRoot(res.Blob, oldCK, id)
+	if err != nil {
+		return fmt.Errorf("decrypt folder root: %w", err)
+	}
+	manifest, err := syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, nil))
+	if err != nil {
+		return err
+	}
+	sealed, refs, err := syncengine.SealTree(manifest, crypto.DeriveConvergenceKey(mk), nil)
+	if err != nil {
+		return err
+	}
+	// The recomputed root must reproduce the stored one: a mismatch means the walk
+	// and the sealer disagree, and PUTting the recomputed refs could orphan live
+	// objects. Refuse rather than risk the folder's object graph.
+	if sealed.Root.ID != root.Root.ID {
+		return fmt.Errorf("recomputed tree root %s does not match stored root %s; not rotating", sealed.Root.ID, root.Root.ID)
+	}
+
+	newCK, err := crypto.GenerateContentKey()
+	if err != nil {
+		return err
+	}
+	defer newCK.Wipe()
+	blob, err := syncengine.SealTreeRoot(root, newCK, id)
+	if err != nil {
+		return err
+	}
+	metaPlain, err := crypto.OpenBound(res.EncryptedMeta, oldCK, crypto.AADMeta, id)
+	if err != nil {
+		return fmt.Errorf("decrypt metadata: %w", err)
+	}
+	metaBlob, err := crypto.SealBound(metaPlain, newCK, crypto.AADMeta, id)
+	if err != nil {
+		return err
+	}
+	wrapped, err := crypto.WrapKey(newCK, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return err
+	}
+	if _, err := cl.PutResource(api.PutResourceRequest{
+		ID:              id,
+		Visibility:      api.Private,
+		Blob:            blob,
+		EncryptedMeta:   metaBlob,
+		WrappedKey:      &wrapped,
+		ChunkRefs:       refs,
+		ExpectedVersion: res.Version,
+		MinClient:       api.CapabilityIDBinding, // SealTreeRoot re-seals the root id-bound (v2)
+	}); err != nil {
+		if errors.Is(err, client.ErrConflict) {
+			return errors.New("resource changed while rotating its key; re-run `aqt private`")
+		}
+		return err
+	}
+
+	fmt.Println("aqt://" + id)
+	fmt.Fprintln(os.Stderr, "rotated content key — any previous public link no longer decrypts")
+	return nil
+}
+
 func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey) error {
 	root, err := syncengine.OpenFileRoot(res.Blob, oldCK, id)
 	if err != nil {

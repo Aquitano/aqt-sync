@@ -93,10 +93,11 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	}
 	defer ck.Wipe()
 
-	// An aqt://<id>/<path> ref addresses one entry inside a folder: only the
-	// path's spine nodes and that entry's chunks are fetched, never the tree.
+	// An aqt://<id>/<path> ref (or a share URL with segments after /x/<id>)
+	// addresses one entry inside a folder: only the path's spine nodes and that
+	// entry's chunks are fetched, never the tree.
 	if subpath != "" {
-		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force)
+		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force, fragment != "")
 	}
 
 	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
@@ -104,6 +105,9 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 	if meta.Kind == api.KindFolder {
+		if fragment != "" {
+			return fmt.Errorf("%s is a folder: `aqt clone '<link>'` materializes it, and '<link>/<path>' pulls a single entry", meta.Name)
+		}
 		return fmt.Errorf("%s is a folder: `aqt clone aqt://%s` materializes it, `aqt ls aqt://%s` lists it, "+
 			"and aqt://%s/<path> pulls a single entry", meta.Name, id, id, id)
 	}
