@@ -100,6 +100,7 @@ type Server struct {
 	authLimiter   *ipRateLimiter
 	gcLimiter     *ipRateLimiter
 	publicLimiter *ipRateLimiter
+	metrics       *Metrics
 }
 
 func New(store *Store) *Server { return NewWithConfig(store, Config{}) }
@@ -119,6 +120,7 @@ func NewWithConfig(store *Store, cfg Config) *Server {
 		authLimiter:   newIPRateLimiter(rps, burst),
 		gcLimiter:     newIPRateLimiter(gcRatePerSec, gcBurst),
 		publicLimiter: newIPRateLimiter(publicObjectsRatePerSec, publicObjectsBurst),
+		metrics:       newMetrics(store),
 	}
 }
 
@@ -153,7 +155,7 @@ func (s *Server) Router() *gin.Engine {
 	// The engine-wide cap is the loosest; stacked limiters apply the smallest, so
 	// per-route middleware below only tightens it (a forgotten route is still
 	// bounded, never unlimited).
-	r.Use(gin.Recovery(), limitBody(maxResourceBody))
+	r.Use(gin.Recovery(), s.metrics.middleware, limitBody(maxResourceBody))
 
 	// Liveness probe for load balancers, container HEALTHCHECKs, and systemd. It
 	// reads no state and needs no auth, so it stays cheap and can be hit before a
@@ -215,6 +217,10 @@ func (s *Server) Router() *gin.Engine {
 			// Re-wrap the account's root key under a new passphrase. Small body
 			// (KDF params + a wrapped key + verifiers), so it keeps the control cap.
 			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.changePassphrase)
+
+			// Storage summary for the calling account: pack bytes against quota plus
+			// row counts. All plaintext-side metadata the owner already implies.
+			authed.GET("/account/usage", s.accountUsage)
 
 			// Folder-sync packed object store: opaque, content-addressed,
 			// owner-scoped. Objects ship inside raw packs; check/locate negotiate
@@ -514,6 +520,24 @@ func (s *Server) changePassphrase(c *gin.Context) {
 	// The calling device's token is unchanged (its epoch was advanced with the
 	// account's), so no new token is issued; the client keeps using it.
 	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Epoch: newEpoch})
+}
+
+func (s *Server) accountUsage(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	u, err := s.store.AccountUsage(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.UsageResponse{
+		StorageBytes: u.StorageBytes,
+		QuotaBytes:   s.cfg.QuotaBytes,
+		Packs:        u.Packs,
+		Objects:      u.Objects,
+		Resources:    u.Resources,
+		Snapshots:    u.Snapshots,
+		Devices:      u.Devices,
+	})
 }
 
 func (s *Server) listDevices(c *gin.Context) {
@@ -917,9 +941,13 @@ func (s *Server) StartGC(interval time.Duration, stop <-chan struct{}) {
 			case <-stop:
 				return
 			case <-t.C:
-				if res, err := s.store.RunGCAll(gcMinAge); err != nil {
+				res, err := s.store.RunGCAll(gcMinAge)
+				if err != nil {
 					log.Printf("scheduled gc: %v", err)
-				} else if res.DeletedPacks > 0 || res.RepackedPacks > 0 {
+					continue
+				}
+				s.metrics.observeGC("scheduled", res)
+				if res.DeletedPacks > 0 || res.RepackedPacks > 0 {
 					log.Printf("scheduled gc: swept %d pack(s) / %d bytes, repacked %d / %d bytes",
 						res.DeletedPacks, res.FreedBytes, res.RepackedPacks, res.ReclaimedBytes)
 				}

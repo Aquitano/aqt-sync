@@ -21,6 +21,7 @@ type harness struct {
 	t      *testing.T
 	router *gin.Engine
 	store  *Store
+	srv    *Server
 }
 
 func newHarness(t *testing.T) *harness {
@@ -31,7 +32,8 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	return &harness{t: t, router: New(store).Router(), store: store}
+	srv := New(store)
+	return &harness{t: t, router: srv.Router(), store: store, srv: srv}
 }
 
 // do issues a request and decodes the JSON response into out (if non-nil).

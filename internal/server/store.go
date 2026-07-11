@@ -736,6 +736,65 @@ func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
 	return err
 }
 
+// AccountUsage summarizes what one account has stored. StorageBytes is the
+// pack-byte quota counter; the rest are row counts. Resources counts live rows
+// only — a reclaimed tombstone holds no content and exists just to keep its link
+// answering 410.
+type AccountUsage struct {
+	Owner        string
+	StorageBytes int64
+	Packs        int64
+	Objects      int64
+	Resources    int64
+	Snapshots    int64
+	Devices      int64
+}
+
+const accountUsageColumns = `
+	a.owner_handle,
+	a.pack_bytes,
+	(SELECT COUNT(*) FROM packs p WHERE p.owner_handle = a.owner_handle),
+	(SELECT COUNT(*) FROM objects o WHERE o.owner_handle = a.owner_handle),
+	(SELECT COUNT(*) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0),
+	(SELECT COUNT(*) FROM snapshots sn WHERE sn.owner_handle = a.owner_handle),
+	(SELECT COUNT(*) FROM devices d WHERE d.owner_handle = a.owner_handle)`
+
+func scanAccountUsage(row interface{ Scan(...any) error }) (AccountUsage, error) {
+	var u AccountUsage
+	err := row.Scan(&u.Owner, &u.StorageBytes, &u.Packs, &u.Objects, &u.Resources, &u.Snapshots, &u.Devices)
+	return u, err
+}
+
+// AccountUsage returns the storage summary for one account.
+func (s *Store) AccountUsage(owner string) (AccountUsage, error) {
+	u, err := scanAccountUsage(s.rdb.QueryRow(
+		`SELECT `+accountUsageColumns+` FROM accounts a WHERE a.owner_handle = ?`, owner))
+	if errors.Is(err, sql.ErrNoRows) {
+		return AccountUsage{}, ErrNotFound
+	}
+	return u, err
+}
+
+// AccountUsageAll returns the storage summary for every account, for the metrics
+// collector and any operator-side reporting.
+func (s *Store) AccountUsageAll() ([]AccountUsage, error) {
+	rows, err := s.rdb.Query(
+		`SELECT ` + accountUsageColumns + ` FROM accounts a ORDER BY a.owner_handle`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AccountUsage
+	for rows.Next() {
+		u, err := scanAccountUsage(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, u)
+	}
+	return out, rows.Err()
+}
+
 // OwnerByToken resolves a bearer token to its owning account handle, but only while
 // the token's epoch still matches its account's — a passphrase change bumps the
 // account epoch, so every token issued before it stops authenticating (ErrNotFound).
