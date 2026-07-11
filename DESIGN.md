@@ -279,7 +279,7 @@ deferred operation.
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, cat, ls, info, find, share, private, rm, watch/agent  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, cat, ls, info, find, share, private, rm, watch/agent, tui  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]

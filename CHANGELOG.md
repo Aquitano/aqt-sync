@@ -14,7 +14,15 @@ All notable changes to this project are documented in this file.
 - `aqt usage` (and `GET /v1/account/usage`) shows the account's server-side
   storage: pack bytes against the quota, plus resource, snapshot, pack, object,
   and device counts. `--json` for scripts.
-
+- `aqt tui` — a lazygit-style terminal dashboard. Four panels (status, files,
+  snapshots, resources) over a main detail pane: local changes stay live via
+  kernel file events, incoming changes are decrypted client-side exactly like
+  `aqt status`, snapshots diff against the live tree on demand, and resources
+  can be shared (with expiry/burn), rotated private, or deleted. Every mutating
+  action re-runs the corresponding `aqt` command and streams its output into a
+  log pane, so the TUI adds no new write paths and everything it does is
+  reproducible at the shell. Requires an unlocked session or prompts for the
+  passphrase in-app; reads happen in-process against the existing client layer.
 - `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
   two-sided change Dropbox-style: the local version stays at its path and the remote
   version is written alongside as `<name>.conflict-<host>-<timestamp>`, then the sync

@@ -105,7 +105,12 @@ func TestSnapshotDiffRename(t *testing.T) {
 	renameOnDisk(t, src, "a.txt", "b.txt")
 	h.sync(src)
 
-	got, err := computeSnapshotDiff(cl, prof, snap.ID, "")
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	got, err := computeSnapshotDiff(cl, mk, snap.ID, "")
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}

@@ -214,28 +214,14 @@ func runStatus(dir string, opts statusOptions) error {
 
 	// The local half is offline: it compares the working tree to the last synced
 	// manifest. Conflicts (both sides changed) still surface only during `sync`.
-	baseByPath := base.ByPath()
-	var added, modified, deleted []string
-	for _, a := range syncengine.Plan(local, base, base) {
-		switch a.Kind {
-		case syncengine.Upload:
-			if _, ok := baseByPath[a.Path]; ok {
-				modified = append(modified, a.Path)
-			} else {
-				added = append(added, a.Path)
-			}
-		case syncengine.DeleteRemote:
-			deleted = append(deleted, a.Path)
-		}
-	}
-	renamed, added, deleted := syncengine.DetectRenames(added, deleted, local, base)
-	if len(added)+len(modified)+len(deleted)+len(renamed) == 0 {
+	ch := computeLocalChanges(local, base)
+	if ch.total() == 0 {
 		fmt.Println("clean (no local changes since last sync)")
 	} else {
-		printPaths("new", added)
-		printPaths("modified", modified)
-		printPaths("deleted", deleted)
-		for _, r := range renamed {
+		printPaths("new", ch.added)
+		printPaths("modified", ch.modified)
+		printPaths("deleted", ch.deleted)
+		for _, r := range ch.renamed {
 			fmt.Printf("%-9s %s\n", "renamed", renameArrow(r))
 		}
 	}
@@ -245,6 +231,38 @@ func runStatus(dir string, opts statusOptions) error {
 	}
 	reportIncoming(root, base)
 	return nil
+}
+
+// localChanges classifies the working tree against the last-synced base manifest:
+// the offline half of `status`, shared with the TUI's files panel.
+type localChanges struct {
+	added    []string
+	modified []string
+	deleted  []string
+	renamed  []syncengine.Rename
+}
+
+func (c localChanges) total() int {
+	return len(c.added) + len(c.modified) + len(c.deleted) + len(c.renamed)
+}
+
+func computeLocalChanges(local, base syncengine.Manifest) localChanges {
+	baseByPath := base.ByPath()
+	var c localChanges
+	for _, a := range syncengine.Plan(local, base, base) {
+		switch a.Kind {
+		case syncengine.Upload:
+			if _, ok := baseByPath[a.Path]; ok {
+				c.modified = append(c.modified, a.Path)
+			} else {
+				c.added = append(c.added, a.Path)
+			}
+		case syncengine.DeleteRemote:
+			c.deleted = append(c.deleted, a.Path)
+		}
+	}
+	c.renamed, c.added, c.deleted = syncengine.DetectRenames(c.added, c.deleted, local, base)
+	return c
 }
 
 // incomingSummary is the file-level view of what the server holds that this machine

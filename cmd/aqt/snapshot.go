@@ -279,6 +279,15 @@ type snapshotRow struct {
 	CreatedAt  int64  `json:"createdAt"`
 }
 
+// displayName prefers the user's checkpoint label over the resource name — the
+// label is what distinguishes one snapshot of a folder from another.
+func (r snapshotRow) displayName() string {
+	if r.Label != "" {
+		return r.Label
+	}
+	return r.Name
+}
+
 func snapshotRows(snaps []api.SnapshotInfo, mk crypto.MasterKey) []snapshotRow {
 	rows := make([]snapshotRow, 0, len(snaps))
 	for _, s := range snaps {
@@ -677,7 +686,12 @@ type snapshotDiffResult struct {
 }
 
 func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
-	result, err := computeSnapshotDiff(cl, prof, leftID, against)
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	result, err := computeSnapshotDiff(cl, mk, leftID, against)
 	if err != nil {
 		return err
 	}
@@ -688,7 +702,9 @@ func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against 
 	return nil
 }
 
-func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) (snapshotDiffResult, error) {
+// computeSnapshotDiff needs the already-unlocked master key: it must never
+// prompt, because the TUI calls it from inside a raw-mode terminal session.
+func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against string) (snapshotDiffResult, error) {
 	var zero snapshotDiffResult
 	left, err := cl.GetSnapshot(leftID)
 	if errors.Is(err, client.ErrNotFound) {
@@ -727,12 +743,6 @@ func computeSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, agai
 		rightLabel = "live"
 		rightVer = r.Version
 	}
-
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		return zero, err
-	}
-	defer mk.Wipe()
 
 	diff, err := diffResources(cl, mk, snapshotAsResource(left), rightRes, leftID, rightLabel)
 	if err != nil {
