@@ -25,11 +25,21 @@ import (
 // launch two subprocesses.
 type tuiExecRequestMsg struct {
 	sub []string
+	// stdin is fed to the child instead of /dev/null. It carries the share password,
+	// which is the whole point: an argv password is world-readable in ps for as long
+	// as the command runs.
+	stdin string
 }
 
 // tuiRequestExec is what action keys and dialogs resolve to.
 func tuiRequestExec(sub ...string) tea.Cmd {
 	return func() tea.Msg { return tuiExecRequestMsg{sub: sub} }
+}
+
+// tuiRequestExecStdin is tuiRequestExec for an action whose secret must stay out of
+// the process table.
+func tuiRequestExecStdin(stdin string, sub ...string) tea.Cmd {
+	return func() tea.Msg { return tuiExecRequestMsg{sub: sub, stdin: stdin} }
 }
 
 type tuiExecStartedMsg struct {
@@ -85,12 +95,18 @@ func tuiExecArgs(sub []string) []string {
 
 // tuiExecCmd starts `exe args...` and returns the started message; output lines
 // and the final result arrive on the channel via tuiExecListen.
-func tuiExecCmd(exe string, sub []string) tea.Cmd {
+func tuiExecCmd(exe string, sub []string, stdin string) tea.Cmd {
 	args := tuiExecArgs(sub)
 	title := "aqt " + joinArgs(redactSecrets(args))
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 64)
 		cmd := exec.Command(exe, args...)
+		// Without a payload stdin stays nil (/dev/null), so a child that would
+		// otherwise prompt fails fast (exit 3) rather than hanging on a terminal
+		// the TUI owns.
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
 		stdout, err := cmd.StdoutPipe()
 		if err != nil {
 			return tuiExecDoneMsg{title: title, exit: 1, err: err}

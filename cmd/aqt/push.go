@@ -38,6 +38,7 @@ type pushOptions struct {
 func pushCmd() *cobra.Command {
 	var (
 		opts     pushOptions
+		pw       passwordFlags
 		expire   string
 		maxReads int64
 		burn     bool
@@ -47,6 +48,16 @@ func pushCmd() *cobra.Command {
 		Short: "Encrypt and upload a file (private by default)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// `push -` streams the content itself from stdin, so stdin cannot also
+			// carry the password.
+			if pw.fromStdin && args[0] == "-" {
+				return errors.New("--password-stdin cannot be used with `push -` (stdin carries the content)")
+			}
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
+			opts.password = password
 			// A password gate only makes sense on a shareable link.
 			if opts.password != "" {
 				opts.public = true
@@ -66,7 +77,7 @@ func pushCmd() *cobra.Command {
 	}
 	f := cmd.Flags()
 	f.BoolVar(&opts.public, "public", false, "mint a shareable public link instead of a private ref")
-	f.StringVarP(&opts.password, "password", "P", "", "password-gate a public link (implies --public)")
+	pw.bind(cmd, "password-gate a public link (implies --public)")
 	f.StringVarP(&opts.name, "name", "n", "", "label shown in `aqt ls` (encrypted)")
 	f.BoolVar(&opts.noClip, "no-clip", false, "do not copy the result to the clipboard")
 	f.StringVar(&expire, "expire", "", "expire the public link after a duration (e.g. 30m, 24h, 7d)")

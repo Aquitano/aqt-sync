@@ -15,7 +15,7 @@ import (
 
 func shareCmd() *cobra.Command {
 	var (
-		password string
+		pw       passwordFlags
 		noClip   bool
 		expire   string
 		maxReads int64
@@ -30,10 +30,14 @@ func shareCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
 			return runShare(args[0], password, noClip, policy)
 		},
 	}
-	cmd.Flags().StringVarP(&password, "password", "P", "", "password-gate the share link")
+	pw.bind(cmd, "password-gate the share link")
 	cmd.Flags().BoolVar(&noClip, "no-clip", false, "do not copy the link to the clipboard")
 	cmd.Flags().StringVar(&expire, "expire", "", "expire the link after a duration (e.g. 30m, 24h, 7d)")
 	cmd.Flags().Int64Var(&maxReads, "max-reads", 0, "expire the link after this many downloads")

@@ -11,16 +11,20 @@ import (
 )
 
 func infoCmd() *cobra.Command {
-	var password string
+	var pw passwordFlags
 	cmd := &cobra.Command{
 		Use:   "info <id|url>",
 		Short: "Show one resource's metadata (name, kind, size, visibility)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
 			return runInfo(args[0], password, flagJSON)
 		},
 	}
-	cmd.Flags().StringVarP(&password, "password", "P", "", "password for a gated link")
+	pw.bind(cmd, "password for a gated link")
 	return cmd
 }
 

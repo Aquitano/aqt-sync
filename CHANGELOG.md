@@ -48,6 +48,11 @@ All notable changes to this project are documented in this file.
   pipeline instead of sealing it whole in memory.
 - `aqt private` rotates a streamed file's key by re-wrapping its root and making
   it private again, so a previously shared link no longer decrypts or fetches it.
+- `--password-stdin` on `push`, `share`, `pull`, `cat`, and `info` reads a link
+  password from stdin instead of the command line. `-P/--password` still works,
+  but it puts the secret in the process's argv, which is world-readable on the
+  local machine; prefer the new flag in scripts. `aqt tui` now uses it for
+  password-gated shares.
 
 ### Fixed
 
@@ -55,6 +60,15 @@ All notable changes to this project are documented in this file.
   is now reported as a conflict instead of being silently treated as converged,
   matching how directory modes already reconcile. Found by a new property-based
   test suite (pgregory.net/rapid) over the sync planner.
+- The expiry sweep could reclaim a link that had just been re-shared. Between the
+  unlocked scan and the per-resource lock, a concurrent update can reset the
+  link's lifecycle while leaving `reclaimed = 0`; the under-lock re-check tested
+  only that flag, so it still tombstoned the row and destroyed its only wrapped
+  key. It now re-runs the full lifecycle predicate under the lock.
+- A conflict copy could be planned onto a path the same sync was about to write
+  (a remote entry due for download, or another copy planned in the same pass),
+  so one side's bytes were overwritten moments after being saved. Copy names now
+  bump past everything the sync will materialize, not just what is already on disk.
 
 ## [v0.2.0] - 2026-07-09
 

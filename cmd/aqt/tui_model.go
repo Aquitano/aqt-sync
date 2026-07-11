@@ -327,7 +327,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Done without ever reporting Started, and a zero execStart would render
 		// the elapsed time as seconds-since-the-epoch.
 		m.execStart = time.Now()
-		return m, tuiExecCmd(m.ctx.exe, msg.sub)
+		return m, tuiExecCmd(m.ctx.exe, msg.sub, msg.stdin)
 
 	case tuiExecStartedMsg:
 		m.execCh = msg.ch
@@ -919,7 +919,9 @@ func (m *tuiModel) shareDialog(res lsRow) tuiDialog {
 		{key: "b", label: "burn after reading (one download)", cmd: tuiRequestExec("share", id, "--burn")},
 		{key: "p", label: "password-gated link…", cmd: func() tea.Msg {
 			in := tuiNewInput("Share password", "recipients need link and password", func(pw string) tea.Cmd {
-				return tuiRequestExec("share", id, "-P", pw)
+				// Over stdin, not -P: argv is world-readable in ps, and a masked
+				// prompt promising secrecy has to actually deliver it.
+				return tuiRequestExecStdin(pw+"\n", "share", id, "--password-stdin")
 			})
 			in.input.EchoMode = textinput.EchoPassword
 			return tuiOpenDialogMsg{dialog: in}

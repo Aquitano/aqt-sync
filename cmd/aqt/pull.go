@@ -21,7 +21,7 @@ import (
 func pullCmd() *cobra.Command {
 	var (
 		out      string
-		password string
+		pw       passwordFlags
 		toStdout bool
 		force    bool
 	)
@@ -30,27 +30,35 @@ func pullCmd() *cobra.Command {
 		Short: "Fetch and decrypt a resource, or a single entry inside a folder",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
 			return runPull(args[0], out, password, toStdout, force)
 		},
 	}
 	cmd.Flags().StringVarP(&out, "out", "o", "", "write to this path")
-	cmd.Flags().StringVarP(&password, "password", "P", "", "password for a gated link")
+	pw.bind(cmd, "password for a gated link")
 	cmd.Flags().BoolVar(&toStdout, "stdout", false, "write decrypted content to stdout")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the destination if it exists")
 	return cmd
 }
 
 func catCmd() *cobra.Command {
-	var password string
+	var pw passwordFlags
 	cmd := &cobra.Command{
 		Use:   "cat <url|id|aqt://ref>[/path]",
 		Short: "Decrypt a resource (or one file inside a folder) to stdout",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
 			return runPull(args[0], "", password, true, false)
 		},
 	}
-	cmd.Flags().StringVarP(&password, "password", "P", "", "password for a gated link")
+	pw.bind(cmd, "password for a gated link")
 	return cmd
 }
 
