@@ -311,6 +311,104 @@ func TestSweepExhaustedGrace(t *testing.T) {
 	}
 }
 
+// A link resurrected by SetVisibility between the sweep's scan and reclaimResource's
+// lock must survive: reclaiming on the stale scan verdict would tombstone the fresh
+// link and destroy its only wrapped key. reclaimResource is called directly with the
+// scan's now to reproduce the race deterministically.
+func TestReclaimResourceSkipsResurrectedLink(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "resurrect@example.com")
+	packID, data, ids := packOf("streamed object bytes")
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	id := s.publicResource(t, owner, ids)
+	s.pokeExpiry(t, id, time.Now().Add(-time.Minute).Unix())
+
+	// The scan picks the id under this now (row is expired here).
+	now := time.Now().Unix()
+	graceCutoff := now - int64(gcMinAge/time.Second)
+
+	// The race: a re-share lands before reclaim takes the lock, setting a fresh future
+	// expiry (and clearing any exhaustion), so the row no longer matches the predicate.
+	if _, err := s.SetVisibility(owner, id, api.Public, 3600, 0); err != nil {
+		t.Fatalf("re-share: %v", err)
+	}
+
+	if err := s.reclaimResource(owner, id, now, graceCutoff); err != nil {
+		t.Fatalf("reclaimResource: %v", err)
+	}
+
+	var reclaimed bool
+	var wrappedKey []byte
+	if err := s.db.QueryRow(`SELECT reclaimed, wrapped_key FROM resources WHERE id = ?`, id).
+		Scan(&reclaimed, &wrappedKey); err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed {
+		t.Fatal("resurrected link was reclaimed")
+	}
+	if len(wrappedKey) == 0 {
+		t.Fatal("wrapped_key was cleared on a resurrected link")
+	}
+	var rooted int
+	if err := s.db.QueryRow(`SELECT count(*) FROM resource_chunks WHERE resource_id = ?`, id).
+		Scan(&rooted); err != nil {
+		t.Fatal(err)
+	}
+	if rooted != len(ids) {
+		t.Fatalf("resource roots %d chunks after skip, want %d", rooted, len(ids))
+	}
+	if matches, _ := filepath.Glob(filepath.Join(s.blobDir(id), id+".*.bin")); len(matches) == 0 {
+		t.Fatal("blob file was removed on a resurrected link")
+	}
+	if _, err := s.GetResource(id, ""); err != nil {
+		t.Fatalf("resurrected link no longer serves: %v", err)
+	}
+}
+
+// The exhaustion variant of the resurrection race: SetVisibility clears exhausted_at on
+// re-share, so a stale reclaim keyed on the pre-share exhaustion must skip.
+func TestReclaimResourceSkipsResurrectedExhaustedLink(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "resurrect-exhaust@example.com")
+	id := s.putPublic(t, owner, "burned", 0, 1)
+	if _, err := s.GetResource(id, ""); err != nil {
+		t.Fatalf("burn read: %v", err)
+	}
+	// Push exhausted_at past the grace window so the scan would have picked it.
+	past := time.Now().Add(-2 * gcMinAge).Unix()
+	if _, err := s.db.Exec(`UPDATE resources SET exhausted_at = ? WHERE id = ?`, past, id); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	graceCutoff := now - int64(gcMinAge/time.Second)
+
+	if _, err := s.SetVisibility(owner, id, api.Public, 0, 2); err != nil {
+		t.Fatalf("re-share: %v", err)
+	}
+
+	if err := s.reclaimResource(owner, id, now, graceCutoff); err != nil {
+		t.Fatalf("reclaimResource: %v", err)
+	}
+
+	var reclaimed bool
+	var wrappedKey []byte
+	if err := s.db.QueryRow(`SELECT reclaimed, wrapped_key FROM resources WHERE id = ?`, id).
+		Scan(&reclaimed, &wrappedKey); err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed {
+		t.Fatal("resurrected exhausted link was reclaimed")
+	}
+	if len(wrappedKey) == 0 {
+		t.Fatal("wrapped_key was cleared on a resurrected exhausted link")
+	}
+	if _, err := s.GetResource(id, ""); err != nil {
+		t.Fatalf("resurrected exhausted link no longer serves: %v", err)
+	}
+}
+
 // GC runs the expiry sweep, so a manual POST /v1/gc (or the scheduled RunGCAll)
 // reclaims expired links, not only the direct SweepExpired call.
 func TestGCTriggersExpirySweep(t *testing.T) {

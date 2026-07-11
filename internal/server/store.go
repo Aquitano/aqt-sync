@@ -2578,7 +2578,7 @@ func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 
 	var swept int
 	for _, id := range ids {
-		if err := s.reclaimResource(owner, id); err != nil {
+		if err := s.reclaimResource(owner, id, now, graceCutoff); err != nil {
 			return swept, err
 		}
 		swept++
@@ -2591,26 +2591,34 @@ func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 // wrapped key, marks the row reclaimed, and bumps the version. The encrypted metadata
 // is left intact so the owner can still see (and `aqt rm`) the tombstone; only the
 // content ciphertext is reclaimed. Held under the resource lock so it serializes
-// against a concurrent update/delete of the same id.
-func (s *Store) reclaimResource(owner, id string) error {
+// against a concurrent update/delete of the same id. now/graceCutoff are the sweep's,
+// so the under-lock re-check tests the same lifecycle predicate the scan used.
+func (s *Store) reclaimResource(owner, id string, now, graceCutoff int64) error {
 	defer s.resLocks.lock(id)()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
-	// A concurrent update may have already resurrected or removed this id since the
-	// unlocked scan picked it; re-check under the lock.
-	var reclaimed bool
+	// A concurrent SetVisibility or version-pinned re-PUT can resurrect the link between
+	// the unlocked scan and this lock — resetting expires_at/reads/exhausted_at while
+	// leaving reclaimed = 0 — so re-testing reclaimed alone would still tombstone a
+	// freshly re-shared link and destroy its only wrapped key. Re-run the full lifecycle
+	// predicate under the lock and skip if the row no longer matches.
+	var stillExpired bool
 	if err := tx.QueryRow(
-		`SELECT reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, id, owner,
-	).Scan(&reclaimed); err != nil {
+		`SELECT reclaimed = 0
+		   AND ((expires_at IS NOT NULL AND expires_at <= ?)
+		     OR (exhausted_at IS NOT NULL AND exhausted_at < ?))
+		 FROM resources WHERE id = ? AND owner_handle = ?`,
+		now, graceCutoff, id, owner,
+	).Scan(&stillExpired); err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return err
 	}
-	if reclaimed {
+	if !stillExpired {
 		tx.Rollback()
 		return nil
 	}
