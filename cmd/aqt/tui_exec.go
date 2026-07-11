@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -16,6 +17,20 @@ import (
 // and — like lazygit's command log — shows the user the exact command they could
 // have typed. The subprocess never prompts: the TUI unlocked the session first,
 // and stdin is closed so a lost session fails fast (exit 3) instead of hanging.
+
+// tuiExecRequestMsg asks the model to start an action. Routing every action
+// through the model (instead of spawning from the key handler) makes the
+// one-action-at-a-time guard race-free: the guard flag is set synchronously in
+// Update before the subprocess Cmd ever runs, so a double-tapped key cannot
+// launch two subprocesses.
+type tuiExecRequestMsg struct {
+	sub []string
+}
+
+// tuiRequestExec is what action keys and dialogs resolve to.
+func tuiRequestExec(sub ...string) tea.Cmd {
+	return func() tea.Msg { return tuiExecRequestMsg{sub: sub} }
+}
 
 type tuiExecStartedMsg struct {
 	title string
@@ -50,7 +65,7 @@ func tuiExecArgs(sub []string) []string {
 // and the final result arrive on the channel via tuiExecListen.
 func tuiExecCmd(exe string, sub []string) tea.Cmd {
 	args := tuiExecArgs(sub)
-	title := "aqt " + joinArgs(args)
+	title := "aqt " + joinArgs(redactSecrets(args))
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 64)
 		cmd := exec.Command(exe, args...)
@@ -75,6 +90,13 @@ func tuiExecCmd(exe string, sub []string) tea.Cmd {
 				for sc.Scan() {
 					ch <- tuiExecOutMsg{line: sc.Text(), ch: ch}
 				}
+				// A scanner error (e.g. a line over the buffer cap) must not
+				// wedge the action: keep draining so the child never blocks on
+				// a full pipe and cmd.Wait() can return.
+				if serr := sc.Err(); serr != nil {
+					ch <- tuiExecOutMsg{line: "[output dropped: " + serr.Error() + "]", ch: ch}
+					_, _ = io.Copy(io.Discard, r)
+				}
 			}(r)
 		}
 		go func() {
@@ -91,6 +113,18 @@ func tuiExecCmd(exe string, sub []string) tea.Cmd {
 		}()
 		return tuiExecStartedMsg{title: title, ch: ch}
 	}
+}
+
+// redactSecrets masks the value following a password flag so it never appears
+// in the command log.
+func redactSecrets(args []string) []string {
+	out := append([]string(nil), args...)
+	for i, a := range out {
+		if (a == "-P" || a == "--password") && i+1 < len(out) {
+			out[i+1] = "•••"
+		}
+	}
+	return out
 }
 
 // tuiExecListen delivers the next line (or the completion) from a running action.
@@ -132,20 +166,11 @@ func joinArgs(args []string) string {
 		if i > 0 {
 			out += " "
 		}
-		if a == "" || containsSpace(a) {
+		if a == "" || strings.ContainsAny(a, " \t") {
 			out += fmt.Sprintf("%q", a)
 		} else {
 			out += a
 		}
 	}
 	return out
-}
-
-func containsSpace(s string) bool {
-	for _, r := range s {
-		if r == ' ' || r == '\t' {
-			return true
-		}
-	}
-	return false
 }

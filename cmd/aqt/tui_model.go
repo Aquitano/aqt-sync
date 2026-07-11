@@ -91,7 +91,10 @@ type tuiModel struct {
 	filtering bool
 	filterIn  textinput.Model
 
-	// one action at a time; execCh != nil while one runs
+	// One action at a time. execBusy is set synchronously when a request is
+	// accepted (before the subprocess Cmd runs) so a double-tapped key cannot
+	// start two; execCh carries the running action's output.
+	execBusy  bool
 	execCh    chan tea.Msg
 	execTitle string
 	log       []string
@@ -131,21 +134,28 @@ func (m *tuiModel) Init() tea.Cmd {
 }
 
 func (m *tuiModel) initialLoads() tea.Cmd {
-	cmds := []tea.Cmd{m.ctx.resourcesCmd(), m.ctx.snapshotsCmd(), m.ctx.devicesCmd(), m.spin.Tick}
-	m.panels[tuiPanelResources].loading = true
-	m.panels[tuiPanelSnapshots].loading = true
-	if m.ctx.root != "" {
-		cmds = append(cmds, m.ctx.localStatusCmd(), m.ctx.remoteStatusCmd(), m.ctx.agentStatusCmd())
-		m.panels[tuiPanelFiles].loading = true
-	}
+	cmds := []tea.Cmd{m.reloadPanels(), m.ctx.devicesCmd()}
 	if m.fsEvents != nil {
 		cmds = append(cmds, tuiWaitFs(m.fsEvents))
 	}
 	return tea.Batch(cmds...)
 }
 
+// reloadPanels refreshes every data panel: the initial load, and again after
+// each action (which may have moved data on both sides).
+func (m *tuiModel) reloadPanels() tea.Cmd {
+	cmds := []tea.Cmd{m.ctx.resourcesCmd(), m.ctx.snapshotsCmd(), m.spin.Tick}
+	m.panels[tuiPanelResources].loading = true
+	m.panels[tuiPanelSnapshots].loading = true
+	if m.ctx.root != "" {
+		cmds = append(cmds, m.ctx.localStatusCmd(), m.ctx.remoteStatusCmd(), m.ctx.agentStatusCmd())
+		m.panels[tuiPanelFiles].loading = true
+	}
+	return tea.Batch(cmds...)
+}
+
 func (m *tuiModel) busy() bool {
-	if m.execCh != nil || m.diffing || m.unlocking {
+	if m.execBusy || m.diffing || m.unlocking {
 		return true
 	}
 	for i := range m.panels {
@@ -159,9 +169,12 @@ func (m *tuiModel) busy() bool {
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		first := m.w == 0
 		m.w, m.h = msg.Width, msg.Height
-		m.vp = viewport.New(m.mainWidth()-2, m.h-3)
-		m.refreshMain()
+		m.vp.Width, m.vp.Height = m.mainWidth()-2, m.h-3
+		if first {
+			m.refreshMain() // later resizes keep content and scroll position
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -256,6 +269,14 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.dialog = msg.dialog
 		return m, textinput.Blink
 
+	case tuiExecRequestMsg:
+		if m.execBusy {
+			m.statusLine = "an action is already running — see the log (@)"
+			return m, nil
+		}
+		m.execBusy = true
+		return m, tuiExecCmd(m.ctx.exe, msg.sub)
+
 	case tuiExecStartedMsg:
 		m.execCh = msg.ch
 		m.execTitle = msg.title
@@ -270,6 +291,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tuiExecListen(msg.ch)
 
 	case tuiExecDoneMsg:
+		m.execBusy = false
 		m.execCh = nil
 		note := tuiExitNote(msg.exit)
 		if msg.exit == 0 {
@@ -279,8 +301,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.statusLine = note
 		m.refreshMain()
-		// Any action may have moved data on both sides; reload everything.
-		return m, m.reloadAfterAction()
+		return m, m.reloadPanels()
 
 	case tuiFsEventMsg:
 		m.fsSeq++
@@ -293,7 +314,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tuiFsSettledMsg:
 		// Only the last event of a burst triggers the rescan, and never while an
 		// action is running (its own completion reloads).
-		if msg.seq != m.fsSeq || m.execCh != nil || m.ctx.root == "" {
+		if msg.seq != m.fsSeq || m.execBusy || m.ctx.root == "" {
 			return m, nil
 		}
 		m.panels[tuiPanelFiles].loading = true
@@ -308,17 +329,6 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleKey(msg)
 	}
 	return m, nil
-}
-
-func (m *tuiModel) reloadAfterAction() tea.Cmd {
-	cmds := []tea.Cmd{m.ctx.resourcesCmd(), m.ctx.snapshotsCmd(), m.spin.Tick}
-	m.panels[tuiPanelResources].loading = true
-	m.panels[tuiPanelSnapshots].loading = true
-	if m.ctx.root != "" {
-		cmds = append(cmds, m.ctx.localStatusCmd(), m.ctx.remoteStatusCmd(), m.ctx.agentStatusCmd())
-		m.panels[tuiPanelFiles].loading = true
-	}
-	return tea.Batch(cmds...)
 }
 
 func (m *tuiModel) appendLog(line string) {
@@ -372,7 +382,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mainFocus = false
 			return m, nil
 		case "q":
-			return m, tea.Quit
+			return m.quitOrConfirm()
 		case "@":
 			m.toggleTab()
 			return m, nil
@@ -384,7 +394,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "q":
-		return m, tea.Quit
+		return m.quitOrConfirm()
 	case "?":
 		m.dialog = &tuiHelp{}
 		return m, nil
@@ -440,6 +450,21 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m.handleActionKey(msg)
 }
 
+// quitOrConfirm quits immediately when idle; while an action subprocess runs it
+// asks first — quitting tears down the output pipes and would kill e.g. a
+// restore mid-swap. ctrl+c stays an unconditional exit.
+func (m *tuiModel) quitOrConfirm() (tea.Model, tea.Cmd) {
+	if !m.execBusy {
+		return m, tea.Quit
+	}
+	m.dialog = &tuiConfirm{
+		title:   "Action running",
+		body:    m.execTitle + "\nis still running. Quit anyway and kill it?",
+		confirm: tea.Quit,
+	}
+	return m, nil
+}
+
 func (m *tuiModel) handleUnlockKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.unlocking {
 		return m, nil
@@ -461,16 +486,10 @@ func (m *tuiModel) handleUnlockKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleActionKey dispatches the focused panel's contextual actions.
+// handleActionKey dispatches the focused panel's contextual actions. Mutating
+// actions resolve to tuiExecRequestMsg, where the busy guard lives; read-only
+// ones (copy, diff) stay usable while an action runs.
 func (m *tuiModel) handleActionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.execCh != nil {
-		switch msg.String() {
-		case "s", "S", "c", "n", "a", "R", "x", "p":
-			m.statusLine = "an action is already running — see the log (@)"
-			return m, nil
-		}
-		return m, nil
-	}
 	switch m.focus {
 	case tuiPanelFiles:
 		return m.filesAction(msg)
@@ -486,32 +505,29 @@ func (m *tuiModel) filesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.ctx.root == "" {
 		return m, nil
 	}
+	root := m.ctx.root
 	switch msg.String() {
 	case "s":
-		return m, tuiExecCmd(m.ctx.exe, []string{"sync", m.ctx.root})
+		return m, tuiRequestExec("sync", root)
 	case "S":
-		root := m.ctx.root
-		exe := m.ctx.exe
 		m.dialog = &tuiMenu{title: "Sync options", options: []tuiMenuOption{
-			{key: "s", label: "sync (two-way)", cmd: tuiExecCmd(exe, []string{"sync", root})},
-			{key: "d", label: "dry-run — plan only, change nothing", cmd: tuiExecCmd(exe, []string{"sync", root, "--dry-run"})},
-			{key: "c", label: "sync, keep conflict copies (conflicts=copy)", cmd: tuiExecCmd(exe, []string{"sync", root, "--conflicts=copy"})},
-			{key: "u", label: "push only", cmd: tuiExecCmd(exe, []string{"sync", root, "--push-only"})},
-			{key: "l", label: "pull only", cmd: tuiExecCmd(exe, []string{"sync", root, "--pull-only"})},
+			{key: "s", label: "sync (two-way)", cmd: tuiRequestExec("sync", root)},
+			{key: "d", label: "dry-run — plan only, change nothing", cmd: tuiRequestExec("sync", root, "--dry-run")},
+			{key: "c", label: "sync, keep conflict copies (conflicts=copy)", cmd: tuiRequestExec("sync", root, "--conflicts=copy")},
+			{key: "u", label: "push only", cmd: tuiRequestExec("sync", root, "--push-only")},
+			{key: "l", label: "pull only", cmd: tuiRequestExec("sync", root, "--pull-only")},
 			{key: "f", label: "force — local wins every conflict", cmd: func() tea.Msg {
 				return tuiOpenDialogMsg{dialog: &tuiConfirm{
 					title:   "Force sync",
 					body:    "Conflicting remote versions are discarded in favor of local files.",
-					confirm: tuiExecCmd(exe, []string{"sync", root, "--force"}),
+					confirm: tuiRequestExec("sync", root, "--force"),
 				}}
 			}},
 		}}
 		return m, nil
 	case "c":
-		root := m.ctx.root
-		exe := m.ctx.exe
 		m.dialog = tuiNewInput("Checkpoint", "name (e.g. before-refactor)", func(name string) tea.Cmd {
-			return tuiExecCmd(exe, []string{"checkpoint", name, root})
+			return tuiRequestExec("checkpoint", name, root)
 		})
 		return m, textinput.Blink
 	}
@@ -526,7 +542,6 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			snap = &s
 		}
 	}
-	exe := m.ctx.exe
 	switch msg.String() {
 	case "n":
 		if m.ctx.root == "" {
@@ -539,7 +554,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			if label != "" {
 				args = append(args, "-l", label)
 			}
-			return tuiExecCmd(exe, args)
+			return tuiRequestExec(args...)
 		})
 		in.allowEmpty = true
 		m.dialog = in
@@ -559,7 +574,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if snap.Anchored {
 			args = append(args, "--remove")
 		}
-		return m, tuiExecCmd(exe, args)
+		return m, tuiRequestExec(args...)
 	case "R":
 		if m.ctx.root == "" {
 			m.statusLine = "in-place restore needs a tracked folder — use `aqt snapshot restore --into` instead"
@@ -569,7 +584,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			title: "Restore in place",
 			body: fmt.Sprintf("Roll %s back to %q (version %d)?\nThe rollback syncs to every device.",
 				tuiAbbrevHome(m.ctx.root), snap.displayName(), snap.Version),
-			confirm: tuiExecCmd(exe, []string{"snapshot", "restore", snap.ID, "--in-place", "--dir", m.ctx.root, "-y"}),
+			confirm: tuiRequestExec("snapshot", "restore", snap.ID, "--in-place", "--dir", m.ctx.root, "-y"),
 		}
 		return m, nil
 	case "x":
@@ -580,7 +595,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.dialog = &tuiConfirm{
 			title:   "Delete snapshot",
 			body:    body,
-			confirm: tuiExecCmd(exe, []string{"snapshot", "prune", snap.ID, "-y"}),
+			confirm: tuiRequestExec("snapshot", "prune", snap.ID, "-y"),
 		}
 		return m, nil
 	}
@@ -596,7 +611,6 @@ func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if !ok {
 		return m, nil
 	}
-	exe := m.ctx.exe
 	switch msg.String() {
 	case "y":
 		return m, m.ctx.copyRefCmd(res)
@@ -607,13 +621,13 @@ func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		id := res.ID
 		m.dialog = &tuiMenu{title: "Share " + res.Name, options: []tuiMenuOption{
-			{key: "s", label: "share — public link", cmd: tuiExecCmd(exe, []string{"share", id})},
-			{key: "d", label: "share for 24 hours", cmd: tuiExecCmd(exe, []string{"share", id, "--expire", "24h"})},
-			{key: "w", label: "share for 7 days", cmd: tuiExecCmd(exe, []string{"share", id, "--expire", "7d"})},
-			{key: "b", label: "burn after reading (one download)", cmd: tuiExecCmd(exe, []string{"share", id, "--burn"})},
+			{key: "s", label: "share — public link", cmd: tuiRequestExec("share", id)},
+			{key: "d", label: "share for 24 hours", cmd: tuiRequestExec("share", id, "--expire", "24h")},
+			{key: "w", label: "share for 7 days", cmd: tuiRequestExec("share", id, "--expire", "7d")},
+			{key: "b", label: "burn after reading (one download)", cmd: tuiRequestExec("share", id, "--burn")},
 			{key: "p", label: "password-gated link…", cmd: func() tea.Msg {
 				in := tuiNewInput("Share password", "recipients need link and password", func(pw string) tea.Cmd {
-					return tuiExecCmd(exe, []string{"share", id, "-P", pw})
+					return tuiRequestExec("share", id, "-P", pw)
 				})
 				in.input.EchoMode = textinput.EchoPassword
 				return tuiOpenDialogMsg{dialog: in}
@@ -628,14 +642,14 @@ func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.dialog = &tuiConfirm{
 			title:   "Make private",
 			body:    fmt.Sprintf("Rotate %q's content key? Existing share links stop working.", res.Name),
-			confirm: tuiExecCmd(exe, []string{"private", res.ID}),
+			confirm: tuiRequestExec("private", res.ID),
 		}
 		return m, nil
 	case "x":
 		m.dialog = &tuiConfirm{
 			title:   "Delete resource",
 			body:    fmt.Sprintf("Delete %q from the server? Ciphertext and metadata are removed.", res.Name),
-			confirm: tuiExecCmd(exe, []string{"rm", res.ID}),
+			confirm: tuiRequestExec("rm", res.ID),
 		}
 		return m, nil
 	}

@@ -95,7 +95,12 @@ func TestSnapshotDiffAgainstLive(t *testing.T) {
 	writeTree(t, src, "c.txt", "new C")
 	h.sync(src)
 
-	got, err := computeSnapshotDiff(cl, prof, snap.ID, "")
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	got, err := computeSnapshotDiff(cl, mk, snap.ID, "")
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}
@@ -135,7 +140,12 @@ func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := computeSnapshotDiff(cl, prof, first.ID, second.ID)
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	got, err := computeSnapshotDiff(cl, mk, first.ID, second.ID)
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}

@@ -249,13 +249,58 @@ func TestTUIViewSmoke(t *testing.T) {
 func TestTUIBusyGuardsActions(t *testing.T) {
 	m := testModel(t)
 	m.setFocus(tuiPanelFiles)
-	m.execCh = make(chan tea.Msg)
+
+	// The action key resolves to a request message; the busy guard lives in
+	// Update, synchronously, so a second request cannot start a subprocess even
+	// before the first one's started-message arrives.
 	_, cmd := m.handleKey(key("s"))
+	if cmd == nil {
+		t.Fatal("s should produce an exec request")
+	}
+	req, ok := cmd().(tuiExecRequestMsg)
+	if !ok {
+		t.Fatalf("s produced %T, want tuiExecRequestMsg", cmd())
+	}
+	if strings.Join(req.sub, " ") != "sync /tmp/vault" {
+		t.Fatalf("request args = %v", req.sub)
+	}
+
+	m.execBusy = true
+	_, cmd = m.Update(req)
 	if cmd != nil {
-		t.Fatal("sync must not start while another action runs")
+		t.Fatal("busy model must reject the request without a command")
 	}
 	if !strings.Contains(m.statusLine, "already running") {
 		t.Fatalf("statusLine = %q, want busy note", m.statusLine)
+	}
+}
+
+// A clean tracked folder renders a headers-only files list; moving the cursor
+// backwards through it must not walk past the end (regression: index panic).
+func TestTUIHeadersOnlyListNoPanic(t *testing.T) {
+	m := testModel(t)
+	m.local = localChanges{}
+	m.conflicts = nil
+	m.rebuildFilesPanel()
+	m.setFocus(tuiPanelFiles)
+	for _, k := range []string{"k", "j", "G", "g"} {
+		m.handleKey(key(k))
+	}
+	if cur := m.panels[tuiPanelFiles].list.current(); cur != nil {
+		t.Fatalf("headers-only list reports a selection: %+v", cur)
+	}
+	if m.View() == "" {
+		t.Fatal("empty view")
+	}
+}
+
+func TestTUIRedactSecrets(t *testing.T) {
+	got := joinArgs(redactSecrets([]string{"share", "id1", "-P", "hunter2"}))
+	if strings.Contains(got, "hunter2") {
+		t.Fatalf("password leaked into title: %q", got)
+	}
+	if !strings.Contains(got, "•••") {
+		t.Fatalf("expected mask in %q", got)
 	}
 }
 

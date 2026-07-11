@@ -30,12 +30,14 @@ func tuiCmd() *cobra.Command {
 			if len(args) == 1 {
 				dir = args[0]
 			}
-			return runTUI(dir)
+			return runTUI(dir, len(args) == 1)
 		},
 	}
 }
 
-func runTUI(dir string) error {
+// explicitDir reports whether the user named the directory themselves: then a
+// non-tracked path is an error, not a silent fall-back to account-wide mode.
+func runTUI(dir string, explicitDir bool) error {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		return errors.New("the TUI needs a terminal")
 	}
@@ -62,9 +64,14 @@ func runTUI(dir string) error {
 		}
 	}()
 
-	// Outside a tracked folder the TUI still opens; the folder panels explain.
+	// Outside a tracked folder the TUI still opens account-wide; the folder
+	// panels explain. But a directory the user named explicitly must resolve.
 	folderID := ""
-	if root, rerr := trackedRoot(dir); rerr == nil {
+	root, rerr := trackedRoot(dir)
+	if rerr != nil && explicitDir {
+		return fmt.Errorf("%s is not (inside) a tracked folder: %w", dir, rerr)
+	}
+	if rerr == nil {
 		ctx.root = root
 		if st, serr := loadState(root); serr == nil {
 			folderID = st.ID

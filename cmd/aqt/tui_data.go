@@ -145,7 +145,7 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 	return func() tea.Msg {
 		st, err := loadState(ctx.root)
 		if err != nil {
-			return tuiRemoteMsg{err: err}
+			return tuiRemoteMsg{err: err, note: "cannot read .aqt/state.json — " + err.Error()}
 		}
 		res, err := ctx.cl.GetResource(st.ID)
 		if err != nil {
@@ -177,8 +177,8 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 	}
 }
 
-// tuiRemoteErrNote compresses a failed server check into the short status line;
-// the full error still lands in the files panel.
+// tuiRemoteErrNote compresses a failed server check into the short status-panel
+// freshness line.
 func tuiRemoteErrNote(err error) string {
 	switch {
 	case errors.Is(err, client.ErrNotFound):
@@ -241,7 +241,7 @@ func (c *tuiCtx) agentStatusCmd() tea.Cmd {
 func (c *tuiCtx) diffCmd(snapshotID string) tea.Cmd {
 	ctx := *c
 	return func() tea.Msg {
-		result, err := computeSnapshotDiff(ctx.cl, ctx.prof, snapshotID, "")
+		result, err := computeSnapshotDiff(ctx.cl, ctx.mk, snapshotID, "")
 		return tuiDiffMsg{snapshotID: snapshotID, result: result, err: err}
 	}
 }

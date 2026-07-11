@@ -85,16 +85,18 @@ func (l *tuiList) clamp() {
 }
 
 // snapToSelectable moves the cursor in direction dir (+1/-1) until it rests on a
-// selectable row, so headers are skipped transparently.
+// selectable row, so headers are skipped transparently. In a list with no
+// selectable rows at all the cursor parks on a header and current() reports nil.
 func (l *tuiList) snapToSelectable(dir int) {
 	rows := l.visibleRows()
-	for l.cursor >= 0 && l.cursor < len(rows) && rows[l.cursor].header {
+	inBounds := func() bool { return l.cursor >= 0 && l.cursor < len(rows) }
+	for inBounds() && rows[l.cursor].header {
 		l.cursor += dir
 	}
 	l.clamp()
 	if len(rows) > 0 && rows[l.cursor].header {
 		// Ran off the end (e.g. trailing headers): search the other way.
-		for l.cursor >= 0 && rows[l.cursor].header {
+		for inBounds() && rows[l.cursor].header {
 			l.cursor -= dir
 		}
 		l.clamp()
