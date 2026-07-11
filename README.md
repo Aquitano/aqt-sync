@@ -75,6 +75,9 @@ AQT_DATA_DIR=/var/lib/aqt-server AQT_ADDR=:443 \
 ```
 
 `GET /healthz` returns `200 {"status":"ok"}` for load-balancer and container probes.
+`AQT_METRICS_ADDR` exposes Prometheus metrics (request rates, GC activity,
+per-account storage) on a private listener, and `aqt usage` shows an account its
+own storage footprint.
 
 The full operator runbook — every environment variable, TLS options (static certs,
 built-in Let's Encrypt, or a reverse proxy), a systemd unit, Docker/Compose, and the

@@ -61,6 +61,27 @@ func main() {
 		api.StartGC(gcInterval, nil)
 	}
 
+	// Prometheus metrics on their own listener, off by default. The metrics
+	// enumerate opaque per-account owner handles and storage totals, so the
+	// endpoint belongs on a loopback or private interface, never on AQT_ADDR;
+	// keeping it a separate plain-HTTP server makes that binding explicit.
+	if maddr := os.Getenv("AQT_METRICS_ADDR"); maddr != "" {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", api.MetricsHandler())
+		msrv := &http.Server{
+			Addr:              maddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
+		}
+		log.Printf("metrics on http://%s/metrics", maddr)
+		go func() {
+			if err := msrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Fatalf("metrics server exited: %v", err)
+			}
+		}()
+	}
+
 	tlsSet, err := loadTLSSettings()
 	if err != nil {
 		log.Fatalf("tls config: %v", err)

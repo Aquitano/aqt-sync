@@ -69,7 +69,10 @@ func Plan(local, base, remote Manifest) []Action {
 				actions = append(actions, Action{p, DeleteLocal})
 			}
 		default: // both changed
-			if lok && rok && l.Hash == r.Hash {
+			// Mode is part of the comparison: hash-identical entries with divergent
+			// modes have not converged (changed() counts a mode edit as a change, and
+			// PlanDirs compares its whole attribute set the same way).
+			if lok && rok && l.Hash == r.Hash && l.Mode == r.Mode {
 				break // converged to the same content independently; nothing to do
 			}
 			actions = append(actions, Action{p, Conflict})
@@ -100,7 +103,7 @@ func PlanReconcile(local, remote Manifest) []Action {
 	for p := range paths {
 		l, lok := lp[p]
 		r, rok := rp[p]
-		if lok && rok && l.Hash == r.Hash {
+		if lok && rok && l.Hash == r.Hash && l.Mode == r.Mode {
 			continue // identical on both sides; nothing to reconcile
 		}
 		actions = append(actions, Action{p, Conflict})
