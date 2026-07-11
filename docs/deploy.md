@@ -55,6 +55,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_SNAPSHOT_INTERVAL` | `24h` | Scheduled snapshot cadence. `0` disables. |
 | `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. Anchored snapshots (`aqt checkpoint`) are exempt and never pruned. |
 | `AQT_GC_INTERVAL` | `6h` | Scheduled garbage-collection cadence. `0` disables. |
+| `AQT_METRICS_ADDR` | unset | Prometheus `/metrics` listen address (e.g. `127.0.0.1:9091`). Unset disables. See [Monitoring](#monitoring). |
 
 Notes:
 
@@ -233,6 +234,48 @@ executable, a Unicode name, a tracked `.git`), takes a cold backup, stands up a 
 server from the copy, recovers on a clean client config from email + passphrase,
 clones, and diffs the result against the original. `go test ./cmd/aqt -run
 TestFullBackupRestoreDrill` is the in-process twin that runs on every CI build.
+
+## Monitoring
+
+Set `AQT_METRICS_ADDR` to expose Prometheus metrics on a separate plain-HTTP
+listener:
+
+```
+AQT_METRICS_ADDR=127.0.0.1:9091 ./aqt-server
+```
+
+```yaml
+# prometheus.yml
+scrape_configs:
+  - job_name: aqt
+    static_configs:
+      - targets: ["127.0.0.1:9091"]
+```
+
+Bind it to loopback or a private interface, never to the public address: the
+metrics carry no plaintext, names, or emails, but they do enumerate per-account
+opaque owner handles with storage totals, which is operator data. There is no
+auth on the endpoint; the binding is the access control.
+
+What you get:
+
+- `aqt_http_requests_total{method,route,status}` and
+  `aqt_http_request_duration_seconds` — request rates, latencies, and error
+  counts per route (expired-link `410`s and upgrade-required `426`s show up as
+  status labels).
+- `aqt_pack_bytes_received_total` / `aqt_pack_bytes_served_total` /
+  `aqt_public_object_bytes_served_total` — transfer volume.
+- `aqt_gc_runs_total{trigger}`, `aqt_gc_packs_deleted_total`,
+  `aqt_gc_bytes_freed_total`, `aqt_gc_packs_repacked_total`,
+  `aqt_gc_bytes_reclaimed_total` — reclamation activity.
+- `aqt_accounts` and per-account gauges keyed by owner handle:
+  `aqt_account_storage_bytes` (the quota counter), `aqt_account_objects`,
+  `aqt_account_resources`, `aqt_account_snapshots`, `aqt_account_devices`.
+- Standard Go runtime and process metrics.
+
+Per-account gauges are computed from SQLite at scrape time, so they are exact
+with no refresh lag. Users can see their own numbers without operator access
+via `aqt usage` (`GET /v1/account/usage`).
 
 ## Health checks and upgrades
 

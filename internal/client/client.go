@@ -175,6 +175,13 @@ func (c *Client) DeleteDevice(id string) error {
 	return c.do(http.MethodDelete, "/v1/devices/"+url.PathEscape(id), nil, nil)
 }
 
+// Usage fetches the account's storage summary.
+func (c *Client) Usage() (api.UsageResponse, error) {
+	var r api.UsageResponse
+	err := c.do(http.MethodGet, "/v1/account/usage", nil, &r)
+	return r, err
+}
+
 // Bootstrap fetches the new-device bootstrap for an email: the KDF params and the
 // wrapped root key. The server returns an indistinguishable decoy for an unknown
 // email (not a 404), so the caller cannot read account existence off the response;

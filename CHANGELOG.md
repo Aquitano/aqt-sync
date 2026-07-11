@@ -6,6 +6,14 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Prometheus metrics for the server, exposed on a separate operator-only listener
+  (`AQT_METRICS_ADDR`, default off): per-route request/latency/status counters
+  (410/426 included), pack transfer volume, GC sweep results, and per-account
+  storage gauges computed from SQLite at scrape time. See "Monitoring" in
+  `docs/deploy.md`.
+- `aqt usage` (and `GET /v1/account/usage`) shows the account's server-side
+  storage: pack bytes against the quota, plus resource, snapshot, pack, object,
+  and device counts. `--json` for scripts.
 - `aqt tui` — a lazygit-style terminal dashboard. Four panels (status, files,
   snapshots, resources) over a main detail pane: local changes stay live via
   kernel file events, incoming changes are decrypted client-side exactly like
@@ -15,7 +23,6 @@ All notable changes to this project are documented in this file.
   log pane, so the TUI adds no new write paths and everything it does is
   reproducible at the shell. Requires an unlocked session or prompts for the
   passphrase in-app; reads happen in-process against the existing client layer.
-
 - `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
   two-sided change Dropbox-style: the local version stays at its path and the remote
   version is written alongside as `<name>.conflict-<host>-<timestamp>`, then the sync
@@ -41,6 +48,13 @@ All notable changes to this project are documented in this file.
   pipeline instead of sealing it whole in memory.
 - `aqt private` rotates a streamed file's key by re-wrapping its root and making
   it private again, so a previously shared link no longer decrypts or fetches it.
+
+### Fixed
+
+- A file changed on both devices to the same content but different permissions
+  is now reported as a conflict instead of being silently treated as converged,
+  matching how directory modes already reconcile. Found by a new property-based
+  test suite (pgregory.net/rapid) over the sync planner.
 
 ## [v0.2.0] - 2026-07-09
 

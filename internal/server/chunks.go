@@ -62,6 +62,7 @@ func (s *Server) putPack(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "store pack failed")
 		return
 	}
+	s.metrics.packBytesIn.Add(float64(len(data)))
 	c.JSON(http.StatusOK, api.PutPackResponse{StoredObjects: stored})
 }
 
@@ -93,6 +94,7 @@ func (s *Server) getPack(c *gin.Context) {
 	// The pack is opaque ciphertext; set the type so ServeContent does not sniff it.
 	c.Header("Content-Type", "application/octet-stream")
 	http.ServeContent(c.Writer, c.Request, c.Param("id"), info.ModTime(), f)
+	addResponseBytes(s.metrics.packBytesOut, c.Writer.Size())
 }
 
 // locateChunks resolves object ids to pack byte ranges for the pull path.
@@ -155,6 +157,8 @@ func (s *Server) publicObjects(c *gin.Context) {
 		}
 	}()
 
+	defer func() { addResponseBytes(s.metrics.publicObjectBytes, c.Writer.Size()) }()
+
 	// Past the first byte the headers are committed, so a disk error can only
 	// truncate the body; the client detects the short read off the length framing.
 	var lenbuf [4]byte
@@ -190,5 +194,6 @@ func (s *Server) runGC(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "gc failed")
 		return
 	}
+	s.metrics.observeGC("client", res)
 	c.JSON(http.StatusOK, res)
 }

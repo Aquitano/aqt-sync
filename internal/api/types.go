@@ -292,6 +292,19 @@ type ListDevicesResponse struct {
 	Devices []Device `json:"devices"`
 }
 
+// UsageResponse summarizes the calling account's storage: pack bytes stored
+// against the server's per-owner quota (0 = unlimited) plus row counts.
+// Resources counts live entries only, not reclaimed link tombstones.
+type UsageResponse struct {
+	StorageBytes int64 `json:"storageBytes"`
+	QuotaBytes   int64 `json:"quotaBytes,omitempty"`
+	Packs        int64 `json:"packs"`
+	Objects      int64 `json:"objects"`
+	Resources    int64 `json:"resources"`
+	Snapshots    int64 `json:"snapshots"`
+	Devices      int64 `json:"devices"`
+}
+
 // --- snapshots ---
 
 // SnapshotInfo describes one retained snapshot: a frozen, GC-pinned copy of a
