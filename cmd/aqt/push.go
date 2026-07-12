@@ -62,7 +62,9 @@ func pushCmd() *cobra.Command {
 			if opts.password != "" {
 				opts.public = true
 			}
-			policy, err := resolveLinkPolicy(expire, maxReads, burn)
+			// A push mints the resource and its link together, so the link's expiry is
+			// the resource's: reclaiming the ciphertext is the point of --burn.
+			policy, err := resolveLinkPolicy(expire, maxReads, burn, api.ExpiryReclaim)
 			if err != nil {
 				return err
 			}
@@ -131,6 +133,7 @@ func runPush(path string, opts pushOptions) error {
 		req.Visibility = api.Public
 		req.ExpireSeconds = opts.policy.expireSeconds
 		req.MaxReads = opts.policy.maxReads
+		req.OnExpiry = opts.policy.onExpiry
 	} else {
 		req.Visibility = api.Private
 	}
@@ -239,11 +242,15 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	}
 
 	visibility := api.Private
-	var expireSeconds, maxReads int64
+	var (
+		expireSeconds, maxReads int64
+		onExpiry                api.OnExpiry
+	)
 	if opts.public || opts.password != "" {
 		visibility = api.Public
 		expireSeconds = opts.policy.expireSeconds
 		maxReads = opts.policy.maxReads
+		onExpiry = opts.policy.onExpiry
 	}
 
 	resp, err := cl.PutResource(api.PutResourceRequest{
@@ -255,6 +262,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		MinClient:     api.CapabilityBaseline, // create seals the FileRoot unbound (id not assigned yet)
 		ExpireSeconds: expireSeconds,
 		MaxReads:      maxReads,
+		OnExpiry:      onExpiry,
 	})
 	if err != nil {
 		return err

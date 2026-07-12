@@ -805,7 +805,7 @@ func runSync(dir string, opts syncOptions) error {
 			root: root, cl: cl, opts: opts,
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
-			version: res.Version, id: st.ID,
+			visibility: res.Visibility, version: res.Version, id: st.ID,
 			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo,
 		}, actions, dirActions)
 	}
@@ -832,22 +832,23 @@ func reconcileWithRetry(reconcile func() error) error {
 
 // applyCtx bundles the state applySync needs, keeping its signature readable.
 type applyCtx struct {
-	root     string
-	cl       *client.Client
-	opts     syncOptions
-	base     syncengine.Manifest
-	local    syncengine.Manifest
-	remote   syncengine.Manifest
-	conv     crypto.ConvergenceKey
-	ck       crypto.ContentKey
-	mk       crypto.MasterKey
-	meta     crypto.SealedBlob // the resource's existing sealed metadata, carried forward
-	version  int
-	id       string
-	mode     conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
-	host     string           // sanitized hostname stamped into conflict-copy names (copy mode)
-	now      time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
-	copyMemo conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
+	root       string
+	cl         *client.Client
+	opts       syncOptions
+	base       syncengine.Manifest
+	local      syncengine.Manifest
+	remote     syncengine.Manifest
+	conv       crypto.ConvergenceKey
+	ck         crypto.ContentKey
+	mk         crypto.MasterKey
+	meta       crypto.SealedBlob // the resource's existing sealed metadata, carried forward
+	visibility api.Visibility    // the resource's current visibility, carried forward (a shared folder stays shared)
+	version    int
+	id         string
+	mode       conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
+	host       string           // sanitized hostname stamped into conflict-copy names (copy mode)
+	now        time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
+	copyMemo   conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
 }
 
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
@@ -1005,7 +1006,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	if push && remoteChanged {
 		manifest := manifestFrom(merged, c.version+1)
 		manifest.Dirs = dirsFrom(mergedDirs)
-		resp, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version)
+		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
 		if err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
@@ -2013,7 +2014,13 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 // The encrypted metadata (the folder name sealed at init) is carried forward
 // unchanged, so a sync never clobbers it; metadata that predates id binding is
 // re-sealed bound to the id once (init seals before the server assigns the id).
-func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
+//
+// vis is the resource's current visibility, carried forward for the same reason: a
+// sync pushes content, it does not re-share or un-share. Hardcoding private here made
+// the first sync after `aqt share` silently kill the link (the server takes visibility
+// from every PUT). The link's lifecycle policy is preserved server-side, since this
+// request carries none.
+func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
@@ -2031,7 +2038,7 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m
 		return api.PutResourceResponse{}, err
 	}
 	return cl.PutResource(api.PutResourceRequest{
-		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
+		ID: id, Visibility: vis, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
 	})

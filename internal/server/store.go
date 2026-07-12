@@ -92,13 +92,24 @@ func normalizeMinClient(declared int) int {
 // resolvePolicy validates a lifecycle request and turns it into the stored columns.
 // expireSeconds is a TTL: the absolute expires_at is now + TTL, so a client never has
 // to agree with the server's clock. A policy is legal only on a public resource. A
-// zero field means "no limit" (NULL). Negative values are a client bug.
-func resolvePolicy(vis api.Visibility, expireSeconds, maxReads, now int64) (expiresAt, max sql.NullInt64, err error) {
+// zero field means "no limit" (NULL). Negative values, or an unknown on-expiry action,
+// are a client bug.
+func resolvePolicy(vis api.Visibility, expireSeconds, maxReads int64, onExpiry api.OnExpiry, now int64) (expiresAt, max sql.NullInt64, action string, err error) {
 	if expireSeconds < 0 || maxReads < 0 {
-		return sql.NullInt64{}, sql.NullInt64{}, ErrBadPolicy
+		return sql.NullInt64{}, sql.NullInt64{}, "", ErrBadPolicy
 	}
 	if (expireSeconds > 0 || maxReads > 0) && vis != api.Public {
-		return sql.NullInt64{}, sql.NullInt64{}, ErrPolicyOnPrivate
+		return sql.NullInt64{}, sql.NullInt64{}, "", ErrPolicyOnPrivate
+	}
+	// An absent action is reclaim: that is what every client written before the field
+	// existed meant, and what the server did for them.
+	switch onExpiry {
+	case "", api.ExpiryReclaim:
+		action = string(api.ExpiryReclaim)
+	case api.ExpiryRetire:
+		action = string(api.ExpiryRetire)
+	default:
+		return sql.NullInt64{}, sql.NullInt64{}, "", ErrBadPolicy
 	}
 	if expireSeconds > 0 {
 		expiresAt = sql.NullInt64{Int64: now + expireSeconds, Valid: true}
@@ -106,7 +117,7 @@ func resolvePolicy(vis api.Visibility, expireSeconds, maxReads, now int64) (expi
 	if maxReads > 0 {
 		max = sql.NullInt64{Int64: maxReads, Valid: true}
 	}
-	return expiresAt, max, nil
+	return expiresAt, max, action, nil
 }
 
 // Store persists accounts, devices, and resource metadata in SQLite, with the
@@ -385,6 +396,13 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	     PRIMARY KEY(resource_id, grantee_handle)
 	 );
 	 CREATE INDEX IF NOT EXISTS idx_grants_grantee ON grants(grantee_handle);`,
+	// 13: on_expiry is what happens when a link's lifecycle policy fires. Migration 10
+	// only ever reclaimed (destroy the ciphertext, leave a 410 tombstone), which is
+	// right for an ephemeral `push --public --burn` but destroys the content behind a
+	// link over a resource that existed first — a shared synced folder above all. The
+	// writer now says which it meant. Existing rows default to 'reclaim', the behavior
+	// they were written under.
+	`ALTER TABLE resources ADD COLUMN on_expiry TEXT NOT NULL DEFAULT 'reclaim';`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -944,7 +962,7 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	id := newID(8)
 	const version = 1
 
-	expiresAt, maxReads, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, time.Now().Unix())
+	expiresAt, maxReads, onExpiry, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, req.OnExpiry, time.Now().Unix())
 	if err != nil {
 		return "", 0, err
 	}
@@ -970,9 +988,9 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		return "", 0, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads,
+		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, on_expiry)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry,
 	); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -989,7 +1007,7 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 }
 
 func (s *Store) updateResource(owner string, capability int, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
-	expiresAt, maxReads, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, time.Now().Unix())
+	expiresAt, maxReads, onExpiry, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, req.OnExpiry, time.Now().Unix())
 	if err != nil {
 		return "", 0, err
 	}
@@ -997,10 +1015,11 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	var (
 		current   int
 		storedMin int
+		reclaimed bool
 	)
 	err = s.db.QueryRow(
-		`SELECT version, min_client FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
-	).Scan(&current, &storedMin)
+		`SELECT version, min_client, reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
+	).Scan(&current, &storedMin, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, ErrNotFound
 	}
@@ -1046,15 +1065,35 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// An update may lower min_client: a capable client legitimately rewrites a
 	// resource in an older (baseline) format, and that state is then readable by
 	// older clients again.
-	// A replace fully re-specifies the resource, so the lifecycle policy is taken from
-	// this request: reset the read counter and clear the exhausted/reclaimed marks so a
-	// re-PUT resurrects a tombstone and never inherits a stale count.
-	res, err := tx.Exec(
-		`UPDATE resources SET visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?,
-		   expires_at=?, max_reads=?, reads=0, exhausted_at=NULL, reclaimed=0
-		 WHERE id=? AND owner_handle=? AND version=?`,
-		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads, req.ID, owner, current,
-	)
+	//
+	// A replace re-specifies the resource's content, but not necessarily its link, so
+	// the lifecycle policy is taken from this request only when the request carries one
+	// (a re-share), flips the resource private (a policy belongs to the public link and
+	// dies with it), or resurrects a tombstone (whose policy already fired, and whose
+	// stale read count must not carry over). Every other write preserves the policy: a
+	// folder sync pushing a new manifest is not a re-share, and clearing the expiry —
+	// or restarting the read counter — behind the owner's back would quietly un-share
+	// the folder they shared.
+	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?`
+	replacePolicy := req.Visibility != api.Public || req.ExpireSeconds > 0 || req.MaxReads > 0 || reclaimed
+
+	var res sql.Result
+	if replacePolicy {
+		res, err = tx.Exec(
+			`UPDATE resources SET `+setContent+`,
+			   expires_at=?, max_reads=?, on_expiry=?, reads=0, exhausted_at=NULL, reclaimed=0
+			 WHERE id=? AND owner_handle=? AND version=?`,
+			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient),
+			expiresAt, maxReads, onExpiry, req.ID, owner, current,
+		)
+	} else {
+		res, err = tx.Exec(
+			`UPDATE resources SET `+setContent+`
+			 WHERE id=? AND owner_handle=? AND version=?`,
+			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient),
+			req.ID, owner, current,
+		)
+	}
 	if err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -1087,6 +1126,20 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
 		tx.Rollback()
 		return "", 0, err
+	}
+	// A revocation is a key rotation and a grant delete, and this is what makes them one
+	// operation. Split across two requests, a rotation that commits while the delete is
+	// lost leaves the revoked account still listed as a grantee — so the next rotation
+	// dutifully re-wraps the new key to it. Deleting a grant that is already gone is a
+	// no-op, which keeps a retried rotation idempotent.
+	if req.RevokeGrantee != "" {
+		if _, err := tx.Exec(
+			`DELETE FROM grants WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
+			req.ID, owner, req.RevokeGrantee,
+		); err != nil {
+			tx.Rollback()
+			return "", 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return "", 0, err
@@ -1281,23 +1334,23 @@ func (s *Store) ResourceVisibility(id string) (vis api.Visibility, gone bool, er
 }
 
 // SetVisibility flips a resource public/private in place (owner-checked, version
-// bumped) without touching the blob or its wrapped key. expireSeconds/maxReads carry
-// an optional lifecycle policy applied on the same flip: keeping/turning public with a
-// policy replaces it and resets the read counter (and clears any exhausted mark), so a
-// re-share starts fresh; turning private clears the policy entirely, since lifecycle is
-// a property of the public link. A policy on a private flip is a client bug
-// (ErrPolicyOnPrivate).
-func (s *Store) SetVisibility(owner, id string, vis api.Visibility, expireSeconds, maxReads int64) (int, error) {
-	expiresAt, maxReadsCol, err := resolvePolicy(vis, expireSeconds, maxReads, time.Now().Unix())
+// bumped) without touching the blob or its wrapped key. The request's
+// ExpireSeconds/MaxReads/OnExpiry carry an optional lifecycle policy applied on the
+// same flip: keeping/turning public with a policy replaces it and resets the read
+// counter (and clears any exhausted mark), so a re-share starts fresh; turning private
+// clears the policy entirely, since lifecycle is a property of the public link. A
+// policy on a private flip is a client bug (ErrPolicyOnPrivate).
+func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (int, error) {
+	expiresAt, maxReadsCol, onExpiry, err := resolvePolicy(req.Visibility, req.ExpireSeconds, req.MaxReads, req.OnExpiry, time.Now().Unix())
 	if err != nil {
 		return 0, err
 	}
 	defer s.resLocks.lock(id)()
 	res, err := s.db.Exec(
 		`UPDATE resources SET visibility = ?, version = version + 1,
-		   expires_at = ?, max_reads = ?, reads = 0, exhausted_at = NULL
+		   expires_at = ?, max_reads = ?, on_expiry = ?, reads = 0, exhausted_at = NULL
 		 WHERE id = ? AND owner_handle = ?`,
-		string(vis), expiresAt, maxReadsCol, id, owner,
+		string(req.Visibility), expiresAt, maxReadsCol, onExpiry, id, owner,
 	)
 	if err != nil {
 		return 0, err
@@ -1405,6 +1458,15 @@ func (s *Store) SetResourceMinClientForTest(id string, minClient int) error {
 func (s *Store) SetResourceExpiryForTest(id string, expiresAt int64) error {
 	_, err := s.db.Exec(`UPDATE resources SET expires_at = ? WHERE id = ?`, expiresAt, id)
 	return err
+}
+
+// ResourcePolicyForTest reports whether a resource carries a lifecycle policy, so a
+// test can assert a failed policy write left nothing armed behind it.
+func (s *Store) ResourcePolicyForTest(id string) (hasExpiry, hasMaxReads bool, err error) {
+	var expiresAt, maxReads sql.NullInt64
+	err = s.rdb.QueryRow(`SELECT expires_at, max_reads FROM resources WHERE id = ?`, id).
+		Scan(&expiresAt, &maxReads)
+	return expiresAt.Valid, maxReads.Valid, err
 }
 
 // --- snapshots ---
@@ -2601,13 +2663,11 @@ func (s *Store) packExists(owner, id string) (bool, error) {
 // have the loser's stale-plan branch delete the winner's now-live compacted pack. The
 // single DB connection serializes the transactions, but not the pack-file writes and
 // removes around them, so this lock is what makes the swap safe.
-// SweepExpired reclaims the owner's public links whose lifecycle has ended: expired
-// ones immediately, and exhausted ones only after a grace window (gcMinAge) so an
-// in-flight permitted streamed pull can finish fetching its objects before they unroot.
-// Reclaiming deletes the ciphertext blob files, unroots the resource's objects (which
-// the age-guarded pack GC then reaps), and leaves the row as a reclaimed tombstone that
-// keeps returning 410. Returns how many rows it reclaimed. now is passed so tests can
-// drive the clock.
+// SweepExpired ends the life of the owner's public links whose lifecycle has run out:
+// expired ones immediately, and exhausted ones only after a grace window (gcMinAge) so
+// an in-flight permitted streamed pull can finish fetching its objects before they
+// unroot. What "ending" means is the resource's own on_expiry action — see endOfLife.
+// Returns how many rows it acted on. now is passed so tests can drive the clock.
 func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 	graceCutoff := now - int64(gcMinAge/time.Second)
 	rows, err := s.rdb.Query(
@@ -2637,7 +2697,7 @@ func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 
 	var swept int
 	for _, id := range ids {
-		if err := s.reclaimResource(owner, id, now, graceCutoff); err != nil {
+		if err := s.endOfLife(owner, id, now, graceCutoff); err != nil {
 			return swept, err
 		}
 		swept++
@@ -2645,14 +2705,25 @@ func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 	return swept, nil
 }
 
-// reclaimResource turns one resource into a tombstone: it drops the GC roots (so the
-// objects become collectable), removes the ciphertext blob files, clears the owner's
-// wrapped key, marks the row reclaimed, and bumps the version. The encrypted metadata
-// is left intact so the owner can still see (and `aqt rm`) the tombstone; only the
-// content ciphertext is reclaimed. Held under the resource lock so it serializes
-// against a concurrent update/delete of the same id. now/graceCutoff are the sweep's,
-// so the under-lock re-check tests the same lifecycle predicate the scan used.
-func (s *Store) reclaimResource(owner, id string, now, graceCutoff int64) error {
+// endOfLife applies one resource's on_expiry action, now that its lifecycle policy has
+// fired.
+//
+// Retire takes the link down and keeps the resource: visibility flips back to private
+// and the policy clears, so the link stops resolving while the blobs, objects and the
+// owner's wrapped key stay exactly as they were. This is what a link over an existing
+// resource means — a shared synced folder is still the authoritative copy every other
+// device pulls from, and an expiring link must not delete it.
+//
+// Reclaim destroys the content, which is what an ephemeral upload (`push --public
+// --burn`) asks for: it drops the GC roots (so the objects become collectable), removes
+// the ciphertext blob files, clears the owner's wrapped key, marks the row reclaimed,
+// and bumps the version. The encrypted metadata is left intact so the owner can still
+// see (and `aqt rm`) the tombstone.
+//
+// Held under the resource lock so it serializes against a concurrent update/delete of
+// the same id. now/graceCutoff are the sweep's, so the under-lock re-check tests the
+// same lifecycle predicate the scan used.
+func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 	defer s.resLocks.lock(id)()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -2662,15 +2733,19 @@ func (s *Store) reclaimResource(owner, id string, now, graceCutoff int64) error 
 	// the unlocked scan and this lock — resetting expires_at/reads/exhausted_at while
 	// leaving reclaimed = 0 — so re-testing reclaimed alone would still tombstone a
 	// freshly re-shared link and destroy its only wrapped key. Re-run the full lifecycle
-	// predicate under the lock and skip if the row no longer matches.
-	var stillExpired bool
+	// predicate under the lock and skip if the row no longer matches. The action is read
+	// in the same statement, so it is the one the surviving policy was written with.
+	var (
+		stillExpired bool
+		action       string
+	)
 	if err := tx.QueryRow(
 		`SELECT reclaimed = 0
 		   AND ((expires_at IS NOT NULL AND expires_at <= ?)
-		     OR (exhausted_at IS NOT NULL AND exhausted_at < ?))
+		     OR (exhausted_at IS NOT NULL AND exhausted_at < ?)), on_expiry
 		 FROM resources WHERE id = ? AND owner_handle = ?`,
 		now, graceCutoff, id, owner,
-	).Scan(&stillExpired); err != nil {
+	).Scan(&stillExpired, &action); err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -2680,6 +2755,18 @@ func (s *Store) reclaimResource(owner, id string, now, graceCutoff int64) error 
 	if !stillExpired {
 		tx.Rollback()
 		return nil
+	}
+	if api.OnExpiry(action) == api.ExpiryRetire {
+		if _, err := tx.Exec(
+			`UPDATE resources SET visibility = ?, expires_at = NULL, max_reads = NULL, reads = 0,
+			   exhausted_at = NULL, version = version + 1
+			 WHERE id = ?`,
+			string(api.Private), id,
+		); err != nil {
+			tx.Rollback()
+			return err
+		}
+		return tx.Commit()
 	}
 	dropped, err := resourceChunkIDs(tx, id)
 	if err != nil {

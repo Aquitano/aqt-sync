@@ -46,24 +46,24 @@ func TestParseDuration(t *testing.T) {
 
 func TestResolveLinkPolicy(t *testing.T) {
 	// --burn is shorthand for --max-reads 1.
-	if p, err := resolveLinkPolicy("", 0, true); err != nil || p.maxReads != 1 {
+	if p, err := resolveLinkPolicy("", 0, true, api.ExpiryReclaim); err != nil || p.maxReads != 1 {
 		t.Fatalf("burn: p=%+v err=%v", p, err)
 	}
 	// --burn and --max-reads together conflict.
-	if _, err := resolveLinkPolicy("", 3, true); err == nil {
+	if _, err := resolveLinkPolicy("", 3, true, api.ExpiryReclaim); err == nil {
 		t.Fatal("burn + max-reads should conflict")
 	}
 	// A negative read cap is rejected.
-	if _, err := resolveLinkPolicy("", -1, false); err == nil {
+	if _, err := resolveLinkPolicy("", -1, false, api.ExpiryReclaim); err == nil {
 		t.Fatal("negative max-reads should error")
 	}
 	// A duration is parsed into seconds.
-	p, err := resolveLinkPolicy("1h", 0, false)
+	p, err := resolveLinkPolicy("1h", 0, false, api.ExpiryReclaim)
 	if err != nil || p.expireSeconds != 3600 {
 		t.Fatalf("expire: p=%+v err=%v", p, err)
 	}
 	// An empty policy is not "requested".
-	if p, _ := resolveLinkPolicy("", 0, false); p.requested() {
+	if p, _ := resolveLinkPolicy("", 0, false, api.ExpiryReclaim); p.requested() {
 		t.Fatal("empty policy should not be requested")
 	}
 }
@@ -89,6 +89,40 @@ func TestVerifyPolicyEcho(t *testing.T) {
 	// A mismatched read cap is a protocol error.
 	if err := verifyPolicyEcho(burn, api.PutResourceResponse{MaxReads: 9}); err == nil {
 		t.Fatal("mismatched maxReads should error")
+	}
+}
+
+// A share asks for a link whose expiry only retires the link. A server that would
+// instead reclaim the content — an old one, which echoes no action at all, or any server
+// answering with `reclaim` — must be refused: honoring it would destroy the resource
+// (a synced folder, say) when the link expired.
+func TestVerifyPolicyEchoRequiresRetire(t *testing.T) {
+	retire := linkPolicy{expireSeconds: 3600, onExpiry: api.ExpiryRetire}
+	echo := api.PutResourceResponse{ExpiresAt: time.Now().Unix() + 3600}
+
+	// A lifecycle-capable but pre-retire server echoes the expiry but no action.
+	if err := verifyPolicyEcho(retire, echo); !errors.Is(err, errNoRetire) {
+		t.Fatalf("pre-retire server (expiry echoed, no onExpiry): got %v, want errNoRetire", err)
+	}
+	// A server with no lifecycle at all echoes nothing: errNoLifecycle is the accurate
+	// message, not errNoRetire — the retire check must not preempt the existence check.
+	if err := verifyPolicyEcho(retire, api.PutResourceResponse{}); !errors.Is(err, errNoLifecycle) {
+		t.Fatalf("no-lifecycle server against a retire policy: got %v, want errNoLifecycle", err)
+	}
+	reclaimEcho := echo
+	reclaimEcho.OnExpiry = api.ExpiryReclaim
+	if err := verifyPolicyEcho(retire, reclaimEcho); !errors.Is(err, errNoRetire) {
+		t.Fatalf("server answering reclaim: got %v, want errNoRetire", err)
+	}
+	retireEcho := echo
+	retireEcho.OnExpiry = api.ExpiryRetire
+	if err := verifyPolicyEcho(retire, retireEcho); err != nil {
+		t.Fatalf("valid retire echo rejected: %v", err)
+	}
+	// A push asks for reclaim, and an old server's silence means exactly that.
+	reclaim := linkPolicy{expireSeconds: 3600, onExpiry: api.ExpiryReclaim}
+	if err := verifyPolicyEcho(reclaim, echo); err != nil {
+		t.Fatalf("reclaim policy against a silent server rejected: %v", err)
 	}
 }
 

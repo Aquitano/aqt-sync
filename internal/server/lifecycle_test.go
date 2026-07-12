@@ -11,9 +11,14 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// putPublic creates a public inline resource with an optional lifecycle policy and
-// returns its id. Zero policy fields mean no limit.
+// putPublic creates a public inline resource with an optional lifecycle policy that
+// reclaims at end of life, and returns its id. Zero policy fields mean no limit.
 func (s *Store) putPublic(t *testing.T, owner, body string, expireSeconds, maxReads int64) string {
+	t.Helper()
+	return s.putPublicOnExpiry(t, owner, body, expireSeconds, maxReads, api.ExpiryReclaim)
+}
+
+func (s *Store) putPublicOnExpiry(t *testing.T, owner, body string, expireSeconds, maxReads int64, onExpiry api.OnExpiry) string {
 	t.Helper()
 	ck, _ := crypto.GenerateContentKey()
 	blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
@@ -21,12 +26,141 @@ func (s *Store) putPublic(t *testing.T, owner, body string, expireSeconds, maxRe
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 	id, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
 		Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
-		ExpireSeconds: expireSeconds, MaxReads: maxReads,
+		ExpireSeconds: expireSeconds, MaxReads: maxReads, OnExpiry: onExpiry,
 	})
 	if err != nil {
 		t.Fatalf("put public resource: %v", err)
 	}
 	return id
+}
+
+// linkState reads the columns the sweep acts on.
+func (s *Store) linkState(t *testing.T, id string) (vis string, expiresAt, maxReads *int64, reads int, reclaimed bool, hasKey bool) {
+	t.Helper()
+	var wrapped *string
+	if err := s.db.QueryRow(
+		`SELECT visibility, expires_at, max_reads, reads, reclaimed, wrapped_key FROM resources WHERE id = ?`, id,
+	).Scan(&vis, &expiresAt, &maxReads, &reads, &reclaimed, &wrapped); err != nil {
+		t.Fatalf("read link state: %v", err)
+	}
+	return vis, expiresAt, maxReads, reads, reclaimed, wrapped != nil
+}
+
+// A retire policy ends the LINK, not the resource: the sweep flips it private and clears
+// the policy, but the ciphertext, the owner's wrapped key and the GC roots all survive.
+// This is what a link over a synced folder needs — reclaiming it would delete the copy
+// every other device pulls from.
+func TestSweepRetiresLinkAndKeepsContent(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "retire@example.com")
+	id := s.putPublicOnExpiry(t, owner, "keep me", 3600, 0, api.ExpiryRetire)
+
+	now := time.Now().Unix()
+	s.pokeExpiry(t, id, now-1)
+	swept, err := s.SweepExpired(owner, now)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if swept != 1 {
+		t.Fatalf("swept = %d, want 1", swept)
+	}
+
+	// The owner still has the resource, ciphertext and key intact.
+	res, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatalf("owner read after retire: %v, want the resource", err)
+	}
+	if len(res.Blob.Ciphertext) == 0 {
+		t.Fatal("retire deleted the blob")
+	}
+	if res.WrappedKey == nil {
+		t.Fatal("retire cleared the owner's wrapped key")
+	}
+	vis, expiresAt, maxReads, _, reclaimed, hasKey := s.linkState(t, id)
+	if reclaimed || !hasKey {
+		t.Fatalf("retire tombstoned the row: reclaimed=%v hasKey=%v", reclaimed, hasKey)
+	}
+	if api.Visibility(vis) != api.Private {
+		t.Fatalf("visibility = %q, want private (the link must be down)", vis)
+	}
+	if expiresAt != nil || maxReads != nil {
+		t.Fatalf("policy not cleared: expires_at=%v max_reads=%v", expiresAt, maxReads)
+	}
+
+	// The link is down: an anonymous read gets nothing (and not a 410 tombstone).
+	if _, err := s.GetResource(id, ""); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("anonymous read after retire: got %v, want ErrNotFound", err)
+	}
+	// The policy is gone, so a second pass has nothing left to do.
+	if swept, err := s.SweepExpired(owner, now); err != nil || swept != 0 {
+		t.Fatalf("second sweep: swept=%d err=%v, want 0", swept, err)
+	}
+}
+
+// The reclaim action still destroys the content — an ephemeral `push --public --burn`
+// depends on it. This is the counterpart of the retire case above.
+func TestSweepReclaimStillDestroysContent(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "reclaim@example.com")
+	id := s.putPublicOnExpiry(t, owner, "burn me", 3600, 0, api.ExpiryReclaim)
+
+	now := time.Now().Unix()
+	s.pokeExpiry(t, id, now-1)
+	if _, err := s.SweepExpired(owner, now); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if _, err := s.GetResource(id, owner); !errors.Is(err, ErrGone) {
+		t.Fatalf("owner read after reclaim: got %v, want ErrGone", err)
+	}
+	_, _, _, _, reclaimed, hasKey := s.linkState(t, id)
+	if !reclaimed || hasKey {
+		t.Fatalf("reclaim did not tombstone: reclaimed=%v hasKey=%v", reclaimed, hasKey)
+	}
+}
+
+// A content write that carries no policy of its own preserves the live link's: the
+// folder sync path re-PUTs the whole manifest on every change, and taking the policy
+// (and the visibility) from those writes silently un-shared a folder on its next sync.
+func TestPutResourceKeepsLiveLinkPolicy(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "sync@example.com")
+	id := s.putPublicOnExpiry(t, owner, "v1", 3600, 5, api.ExpiryRetire)
+
+	// One non-owner read, so the counter is non-zero and a reset would show.
+	if _, err := s.GetResource(id, ""); err != nil {
+		t.Fatalf("public read: %v", err)
+	}
+	res, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("v2"), ck, crypto.AADBlob)
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+		ID: id, Visibility: api.Public, Blob: blob, EncryptedMeta: res.EncryptedMeta,
+		WrappedKey: res.WrappedKey, ExpectedVersion: res.Version,
+	}); err != nil {
+		t.Fatalf("content re-put: %v", err)
+	}
+
+	vis, expiresAt, maxReads, reads, _, _ := s.linkState(t, id)
+	if api.Visibility(vis) != api.Public {
+		t.Fatalf("visibility = %q, want public (a content write must not un-share)", vis)
+	}
+	if expiresAt == nil || maxReads == nil || *maxReads != 5 {
+		t.Fatalf("policy cleared by a content write: expires_at=%v max_reads=%v", expiresAt, maxReads)
+	}
+	if reads != 1 {
+		t.Fatalf("reads = %d, want 1 (a content write must not restart the counter)", reads)
+	}
+	var onExpiry string
+	if err := s.db.QueryRow(`SELECT on_expiry FROM resources WHERE id = ?`, id).Scan(&onExpiry); err != nil {
+		t.Fatal(err)
+	}
+	if api.OnExpiry(onExpiry) != api.ExpiryRetire {
+		t.Fatalf("on_expiry = %q, want retire", onExpiry)
+	}
 }
 
 func (s *Store) pokeExpiry(t *testing.T, id string, ts int64) {
@@ -207,7 +341,7 @@ func TestSetVisibilityPolicyLifecycle(t *testing.T) {
 		t.Fatalf("post-burn read: got %v, want ErrGone", err)
 	}
 	// Re-sharing with a new policy resets the counter, so reads flow again.
-	if _, err := s.SetVisibility(owner, id, api.Public, 0, 2); err != nil {
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, MaxReads: 2}); err != nil {
 		t.Fatalf("set visibility public with policy: %v", err)
 	}
 	for i := 0; i < 2; i++ {
@@ -219,7 +353,7 @@ func TestSetVisibilityPolicyLifecycle(t *testing.T) {
 		t.Fatalf("read past new limit: got %v, want ErrGone", err)
 	}
 	// Flipping private clears the policy columns.
-	if _, err := s.SetVisibility(owner, id, api.Private, 0, 0); err != nil {
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Private}); err != nil {
 		t.Fatalf("set visibility private: %v", err)
 	}
 	var expiresAt, maxReads *int64
@@ -331,12 +465,12 @@ func TestReclaimResourceSkipsResurrectedLink(t *testing.T) {
 
 	// The race: a re-share lands before reclaim takes the lock, setting a fresh future
 	// expiry (and clearing any exhaustion), so the row no longer matches the predicate.
-	if _, err := s.SetVisibility(owner, id, api.Public, 3600, 0); err != nil {
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, ExpireSeconds: 3600}); err != nil {
 		t.Fatalf("re-share: %v", err)
 	}
 
-	if err := s.reclaimResource(owner, id, now, graceCutoff); err != nil {
-		t.Fatalf("reclaimResource: %v", err)
+	if err := s.endOfLife(owner, id, now, graceCutoff); err != nil {
+		t.Fatalf("endOfLife: %v", err)
 	}
 
 	var reclaimed bool
@@ -384,12 +518,12 @@ func TestReclaimResourceSkipsResurrectedExhaustedLink(t *testing.T) {
 	now := time.Now().Unix()
 	graceCutoff := now - int64(gcMinAge/time.Second)
 
-	if _, err := s.SetVisibility(owner, id, api.Public, 0, 2); err != nil {
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, MaxReads: 2}); err != nil {
 		t.Fatalf("re-share: %v", err)
 	}
 
-	if err := s.reclaimResource(owner, id, now, graceCutoff); err != nil {
-		t.Fatalf("reclaimResource: %v", err)
+	if err := s.endOfLife(owner, id, now, graceCutoff); err != nil {
+		t.Fatalf("endOfLife: %v", err)
 	}
 
 	var reclaimed bool
@@ -422,5 +556,57 @@ func TestGCTriggersExpirySweep(t *testing.T) {
 	}
 	if _, err := s.GetResource(id, owner); !errors.Is(err, ErrGone) {
 		t.Fatalf("resource not reclaimed by GC: got %v, want ErrGone", err)
+	}
+}
+
+// A revocation is a key rotation plus a grant delete, and the two commit together or not
+// at all. Split apart, a rotation whose delete is lost leaves the revoked account still
+// listed as a grantee — and the next rotation's re-wrap would hand it the new key.
+func TestPutResourceRevokesGranteeAtomically(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "rotate@example.com")
+	id := s.putPublic(t, owner, "v1", 0, 0)
+	if err := s.PutGrant(owner, id, "grantee-handle", []byte("wrapped-to-grantee")); err != nil {
+		t.Fatalf("put grant: %v", err)
+	}
+
+	res, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("rotated"), ck, crypto.AADBlob)
+	rotate := func(expectedVersion int) error {
+		_, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: res.EncryptedMeta,
+			WrappedKey: res.WrappedKey, ExpectedVersion: expectedVersion,
+			RevokeGrantee: "grantee-handle",
+		})
+		return err
+	}
+	grantCount := func() int {
+		t.Helper()
+		grants, err := s.ListResourceGrants(owner, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(grants)
+	}
+
+	// A rotation that loses its optimistic-concurrency race must not take the grant with
+	// it: the whole write rolls back, so a retry still finds something to revoke.
+	if err := rotate(res.Version + 99); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale rotation: got %v, want ErrVersionConflict", err)
+	}
+	if n := grantCount(); n != 1 {
+		t.Fatalf("grants after a rolled-back rotation = %d, want 1", n)
+	}
+
+	// The rotation that commits drops the grant in the same transaction.
+	if err := rotate(res.Version); err != nil {
+		t.Fatalf("rotation: %v", err)
+	}
+	if n := grantCount(); n != 0 {
+		t.Fatalf("grants after the rotation = %d, want 0", n)
 	}
 }

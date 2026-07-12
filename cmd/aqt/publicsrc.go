@@ -26,15 +26,29 @@ const (
 
 // sliceFetch fetches exact object slices for one resource, one frame per requested
 // id in request order. It abstracts the two non-owner transports: the
-// unauthenticated public endpoint (share links) and the authed grant endpoint.
+// unauthenticated public endpoint (share links) and the authed grant endpoint. Each
+// maps its own transport's failures, since the same status means different things on
+// the two: a 404 is a dead link on one and a revoked grant on the other.
 type sliceFetch func(ids []string) ([][]byte, error)
 
 func publicFetch(cl *client.Client, resourceID string) sliceFetch {
-	return func(ids []string) ([][]byte, error) { return cl.PublicObjects(resourceID, ids) }
+	return func(ids []string) ([][]byte, error) {
+		frames, err := cl.PublicObjects(resourceID, ids)
+		if err != nil {
+			return nil, publicReadErr(err)
+		}
+		return frames, nil
+	}
 }
 
 func grantFetch(cl *client.Client, resourceID string) sliceFetch {
-	return func(ids []string) ([][]byte, error) { return cl.ResourceObjects(resourceID, ids) }
+	return func(ids []string) ([][]byte, error) {
+		frames, err := cl.ResourceObjects(resourceID, ids)
+		if err != nil {
+			return nil, grantReadErr(err)
+		}
+		return frames, nil
+	}
 }
 
 // remoteFetch picks the exact-slice transport for a non-owner read: public when the
@@ -118,7 +132,7 @@ func (s *publicChunkSource) fetchBatch(start int) error {
 	batch := s.ids[start:end]
 	frames, err := s.fetch(batch)
 	if err != nil {
-		return publicReadErr(err)
+		return err
 	}
 	for i, frame := range frames {
 		if err := verifyFrame(batch[i], frame); err != nil {
@@ -129,13 +143,26 @@ func (s *publicChunkSource) fetchBatch(start int) error {
 	return nil
 }
 
-// publicReadErr translates a public-object fetch failure into user-facing guidance.
+// publicReadErr translates a share-link object fetch failure into user-facing guidance.
 func publicReadErr(err error) error {
 	if errors.Is(err, client.ErrGone) {
 		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
 	}
 	if errors.Is(err, client.ErrNotFound) {
 		return errors.New("public objects unavailable: the resource is no longer public, or the server predates public streamed sharing")
+	}
+	return err
+}
+
+// grantReadErr translates a grant object fetch failure into user-facing guidance. The
+// grantee is authenticated and holds no link, so link lifecycle never applies to them:
+// their reads stop because the owner revoked the grant or deleted the resource.
+func grantReadErr(err error) error {
+	if errors.Is(err, client.ErrGone) {
+		return fmt.Errorf("the owner deleted this resource's content: %w", err)
+	}
+	if errors.Is(err, client.ErrNotFound) {
+		return errors.New("this resource is no longer shared with you: the owner revoked your grant, or removed it")
 	}
 	return err
 }
@@ -174,7 +201,7 @@ func newPublicBatchFetcher(fetch sliceFetch) func([]string) (map[string][]byte, 
 			batch := missing[start:min(start+publicBatchIDs, len(missing))]
 			frames, err := fetch(batch)
 			if err != nil {
-				return nil, publicReadErr(err)
+				return nil, err
 			}
 			for i, frame := range frames {
 				if err := verifyFrame(batch[i], frame); err != nil {

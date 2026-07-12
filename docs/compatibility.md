@@ -71,6 +71,33 @@ echoes nothing. A new client therefore **fails closed** — it deletes the just-
 resource (or reverts the visibility flip) and errors, rather than hand out a link the
 server will never actually expire. Upgrade the server before relying on lifecycle flags.
 
+### What expiry does to the resource (`onExpiry`)
+
+A policy also says what firing it means, and the two answers are not interchangeable:
+
+- `reclaim` — destroy the content: blobs deleted, objects unrooted, the owner's wrapped
+  key cleared, and a tombstone that returns `410` forever. `aqt push --public` (with
+  `--burn`/`--expire`) asks for this: the resource and its link were minted together.
+- `retire` — take only the link down: visibility flips back to private and the policy
+  clears, leaving the content, keys and objects untouched. `aqt share` asks for this,
+  because the resource it links to existed first and outlives the link. A shared synced
+  folder is still the copy every other device pulls from.
+
+`onExpiry` rides the same echo. A server that predates it echoes nothing and reclaims
+unconditionally, so a client that asked to `retire` fails closed rather than mint a link
+whose expiry would delete the folder behind it. `reclaim` is the default everywhere, so
+old clients and old servers keep their existing behavior.
+
+Retiring does not rotate the content key — the server holds none — so an expired link's
+fragment is dormant, not dead: it opens the resource again if the resource is ever made
+public again. `aqt private <id>` rotates the key, which is what kills every link ever
+issued for a resource.
+
+Upgrade the **client** too, not just the server. A client that predates `onExpiry` cannot
+ask for `retire`, so its `aqt share <folder> --expire` still reclaims the folder when the
+link fires, and the server cannot second-guess it: resource metadata is sealed, so it
+cannot tell a folder from an ephemeral paste.
+
 ## Rollout rules
 
 - **Upgrade the server before clients.** Older servers have no `min_client` column and

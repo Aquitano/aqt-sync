@@ -240,15 +240,14 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 	return res, nil
 }
 
-// SetVisibility flips a resource public/private without re-uploading its blob.
-// expireSeconds/maxReads carry an optional lifecycle policy applied on the same call
-// (meaningful only when going/staying public); zero means no limit. The response
-// echoes the accepted policy so the caller can fail closed against a server that does
-// not enforce it.
-func (c *Client) SetVisibility(id string, vis api.Visibility, expireSeconds, maxReads int64) (api.PutResourceResponse, error) {
+// SetVisibility flips a resource public/private without re-uploading its blob. The
+// request's ExpireSeconds/MaxReads/OnExpiry carry an optional lifecycle policy applied
+// on the same call (meaningful only when going/staying public); zero means no limit.
+// The response echoes the accepted policy so the caller can fail closed against a
+// server that does not enforce it.
+func (c *Client) SetVisibility(id string, req api.SetVisibilityRequest) (api.PutResourceResponse, error) {
 	var r api.PutResourceResponse
-	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility",
-		api.SetVisibilityRequest{Visibility: vis, ExpireSeconds: expireSeconds, MaxReads: maxReads}, &r)
+	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility", req, &r)
 	return r, err
 }
 

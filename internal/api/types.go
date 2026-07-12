@@ -204,7 +204,8 @@ type PassphraseChangeRequest struct {
 // public link. ExpireSeconds is a TTL in seconds (not an absolute time, so server
 // clock skew is irrelevant); the server computes expires_at = now + ExpireSeconds.
 // MaxReads caps the number of non-owner reads. Both are meaningful only on a public
-// resource; a policy on a private put is rejected. Zero means "no limit".
+// resource; a policy on a private put is rejected. Zero means "no limit". OnExpiry
+// selects what happens when the policy fires.
 type PutResourceRequest struct {
 	ID              string
 	Visibility      Visibility
@@ -216,7 +217,34 @@ type PutResourceRequest struct {
 	MinClient       int
 	ExpireSeconds   int64
 	MaxReads        int64
+	OnExpiry        OnExpiry
+	// RevokeGrantee drops that grantee's grant in the same transaction as the write.
+	// Revocation is a key rotation plus a row delete, and the two must not be separable:
+	// if the rotation lands and the delete is lost, the stale row is still listed as a
+	// grant, so the next rotation re-wraps the new key to the account that was revoked.
+	// Ignored on a create (a new resource has no grants). Empty means revoke nobody.
+	RevokeGrantee string
 }
+
+// OnExpiry selects what a server does with a resource once its link's lifecycle
+// policy fires (the expiry passes, or the read limit is reached). The server cannot
+// choose for itself: the metadata is sealed, so it cannot tell an ephemeral upload
+// from a link over content the owner still depends on.
+type OnExpiry string
+
+const (
+	// ExpiryReclaim destroys the content: blobs deleted, objects unrooted, the owner's
+	// wrapped key cleared, and the row left as a tombstone that returns 410 forever.
+	// This is what `push --public --burn` asks for, and what every server that predates
+	// the field does unconditionally — so it is also the zero value.
+	ExpiryReclaim OnExpiry = "reclaim"
+	// ExpiryRetire only takes the link down: visibility flips back to private and the
+	// policy clears, leaving the blobs, objects and wrapped key untouched. Sharing a
+	// resource that already exists — above all a synced folder, whose server-side copy
+	// every other device pulls from — must not let a link's expiry destroy the data
+	// behind it.
+	ExpiryRetire OnExpiry = "retire"
+)
 
 // PackIndexEntry locates one object inside a pack: its content-address id and the
 // byte slice [Off, Off+Len) of its ciphertext, relative to the start of the pack.
@@ -283,15 +311,17 @@ type GCResponse struct {
 }
 
 // PutResourceResponse acknowledges a resource write. ExpiresAt (absolute unix
-// seconds, 0 = none) and MaxReads (0 = none) echo the lifecycle policy the server
-// accepted. The echo is the enforcement handshake: an old server that ignores the
-// policy request fields echoes nothing, so a new client can fail closed rather than
-// mint a link the server will not actually expire.
+// seconds, 0 = none), MaxReads (0 = none) and OnExpiry echo the lifecycle policy the
+// server accepted. The echo is the enforcement handshake: an old server that ignores
+// the policy request fields echoes nothing, so a new client can fail closed rather
+// than mint a link the server will not actually expire — or, for OnExpiry, one whose
+// expiry would destroy content the client meant to keep.
 type PutResourceResponse struct {
-	ID        string `json:"id"`
-	Version   int    `json:"version"`
-	ExpiresAt int64  `json:"expiresAt,omitempty"`
-	MaxReads  int64  `json:"maxReads,omitempty"`
+	ID        string   `json:"id"`
+	Version   int      `json:"version"`
+	ExpiresAt int64    `json:"expiresAt,omitempty"`
+	MaxReads  int64    `json:"maxReads,omitempty"`
+	OnExpiry  OnExpiry `json:"onExpiry,omitempty"`
 }
 
 // SetVisibilityRequest flips a resource public/private without re-uploading its
@@ -302,9 +332,12 @@ type SetVisibilityRequest struct {
 	// ExpireSeconds and MaxReads apply (or replace) a lifecycle policy on the public
 	// link, so a policy can be attached after the fact by `aqt share`. Applying a
 	// policy resets the read counter; flipping to Private clears the policy entirely.
-	// Zero means "no limit". See PutResourceRequest for the TTL rationale.
-	ExpireSeconds int64 `json:"expireSeconds,omitempty"`
-	MaxReads      int64 `json:"maxReads,omitempty"`
+	// Zero means "no limit". See PutResourceRequest for the TTL rationale. OnExpiry
+	// selects what firing the policy does; `aqt share` asks for ExpiryRetire, since the
+	// resource it is sharing existed before the link and must outlive it.
+	ExpireSeconds int64    `json:"expireSeconds,omitempty"`
+	MaxReads      int64    `json:"maxReads,omitempty"`
+	OnExpiry      OnExpiry `json:"onExpiry,omitempty"`
 }
 
 // GetResourceResponse is an in-process type: on the wire it travels as the raw

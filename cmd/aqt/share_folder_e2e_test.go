@@ -1,11 +1,15 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -209,7 +213,7 @@ func TestFolderLinkBurnCountsCloneAsOneRead(t *testing.T) {
 	h := newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
-	policy, err := resolveLinkPolicy("", 0, true)
+	policy, err := resolveLinkPolicy("", 0, true, api.ExpiryRetire)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -251,7 +255,7 @@ func TestFolderLinkIsReadOnly(t *testing.T) {
 	if _, err := anon.PutResource(api.PutResourceRequest{ID: id, Visibility: api.Public}); err == nil {
 		t.Fatal("tokenless PutResource succeeded on a public folder")
 	}
-	if _, err := anon.SetVisibility(id, api.Private, 0, 0); err == nil {
+	if _, err := anon.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Private}); err == nil {
 		t.Fatal("tokenless SetVisibility succeeded on a public folder")
 	}
 	if err := anon.DeleteResource(id); err == nil {
@@ -291,5 +295,137 @@ func TestSplitRefPathShareURLForms(t *testing.T) {
 		if base != c.base || sub != c.sub {
 			t.Errorf("splitRefPath(%q) = (%q, %q), want (%q, %q)", c.ref, base, sub, c.base, c.sub)
 		}
+	}
+}
+
+// A shared folder is a live sync target, and nothing about sharing it may take it away.
+// Two separate bugs said otherwise: the sync PUT hardcoded private, so the first change
+// after `aqt share` silently killed the link, and the link's expiry reclaimed the whole
+// resource, so `--expire` deleted the folder every device syncs against.
+func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
+	h := newE2E(t)
+	id, origin := pushSharedFolder(t, h)
+
+	// Drive the real command, so the end-of-life action `aqt share` asks for is under
+	// test and not just the server's handling of it.
+	cmd := shareCmd()
+	cmd.SetArgs([]string{id, "--expire", "1h", "--no-clip"})
+	captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("share --expire: %v", err)
+		}
+	})
+
+	cl, _, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Syncing a change does not un-share the folder.
+	writeTree(t, origin, "docs/second.txt", "written after sharing")
+	h.sync(origin)
+	res, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatalf("owner read after sync: %v", err)
+	}
+	if res.Visibility != api.Public {
+		t.Fatal("the sync reverted the shared folder to private, killing the link")
+	}
+
+	// The link's expiry takes the link down and leaves the folder alone.
+	if err := h.store.SetResourceExpiryForTest(id, time.Now().Unix()-1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.GC(); err != nil {
+		t.Fatalf("gc: %v", err)
+	}
+	res, err = cl.GetResource(id)
+	if err != nil {
+		t.Fatalf("the folder was destroyed by its own link expiring: %v", err)
+	}
+	if res.Visibility != api.Private {
+		t.Fatal("the expired link is still public")
+	}
+	if res.WrappedKey == nil {
+		t.Fatal("the expiry cleared the owner's wrapped key")
+	}
+
+	// It still syncs, and its objects survived: a fresh clone reads every file back.
+	writeTree(t, origin, "docs/third.txt", "written after the link expired")
+	h.sync(origin)
+	dst := t.TempDir()
+	h.clone(id, dst)
+	for _, f := range []string{"docs/readme.txt", "docs/second.txt", "docs/third.txt", "data/big.bin"} {
+		if _, err := os.Stat(filepath.Join(dst, filepath.FromSlash(f))); err != nil {
+			t.Fatalf("clone after link expiry is missing %s: %v", f, err)
+		}
+	}
+}
+
+// A pre-retire server (lifecycle-capable, but it ignores onExpiry and would reclaim)
+// must not be left holding an armed reclaim policy after a failed `aqt share --expire`.
+// The fail-closed check errors, but the visibility flip already stored the policy, so
+// erroring without disarming would still destroy an already-public folder on expiry.
+// The proxy here strips onExpiry from the visibility response to imitate that server.
+func TestShareExpireDisarmsPolicyOnPreRetireServer(t *testing.T) {
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/visibility") {
+			rec := httptest.NewRecorder()
+			pass(rec, r)
+			var body map[string]any
+			if json.Unmarshal(rec.Body.Bytes(), &body) == nil {
+				delete(body, "onExpiry") // an old server never echoes it
+			}
+			out, _ := json.Marshal(body)
+			for k, vs := range rec.Header() {
+				if k == "Content-Length" {
+					continue
+				}
+				for _, v := range vs {
+					w.Header().Add(k, v)
+				}
+			}
+			w.WriteHeader(rec.Code)
+			w.Write(out)
+			return
+		}
+		pass(w, r)
+	})
+	id, _ := pushSharedFolder(t, h)
+
+	// Share it plain first, so the resource is already public with a live link.
+	shareFolder(t, id, "", linkPolicy{})
+
+	// Now attach an expiry. The stripped echo makes the client see a pre-retire server.
+	cmd := shareCmd()
+	cmd.SetArgs([]string{id, "--expire", "1h", "--no-clip"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("share --expire against a pre-retire server should fail closed")
+	}
+	if !errors.Is(err, errNoRetire) {
+		t.Fatalf("share --expire error = %v, want errNoRetire", err)
+	}
+
+	// The failed attempt must not leave a policy armed: on this server every policy
+	// reclaims, so an armed one would destroy the folder at expiry.
+	hasExpiry, hasMaxReads, perr := h.store.ResourcePolicyForTest(id)
+	if perr != nil {
+		t.Fatal(perr)
+	}
+	if hasExpiry || hasMaxReads {
+		t.Fatalf("policy left armed after a failed share: expiry=%v maxReads=%v", hasExpiry, hasMaxReads)
+	}
+	// And the pre-existing link is untouched — the resource is still public.
+	cl, _, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Visibility != api.Public {
+		t.Fatal("the disarm took the pre-existing link down")
 	}
 }

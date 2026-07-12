@@ -35,7 +35,10 @@ func splitRefPath(ref string) (baseRef, subpath string) {
 		}
 		return ref + frag, fragPath
 	}
-	if i := strings.LastIndex(ref, "/x/"); i >= 0 {
+	// The route is the FIRST /x/ segment. A later one belongs to the subpath — a
+	// directory named x is ordinary (src/x/util.go) — and splitting there would take
+	// the last path segment for the resource id.
+	if i := strings.Index(ref, "/x/"); i >= 0 {
 		tail := ref[i+len("/x/"):]
 		if j := strings.IndexByte(tail, '/'); j >= 0 {
 			return ref[:i+len("/x/")] + tail[:j] + frag, joinSubpath(strings.Trim(tail[j+1:], "/"), fragPath)

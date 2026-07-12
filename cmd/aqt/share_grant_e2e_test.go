@@ -3,10 +3,16 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -145,7 +151,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := cl.SetVisibility(id, api.Public, 0, 0); !errors.Is(err, client.ErrNotFound) {
+		if _, err := cl.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Public}); !errors.Is(err, client.ErrNotFound) {
 			t.Fatalf("grantee SetVisibility: got %v, want ErrNotFound", err)
 		}
 		if err := cl.DeleteResource(id); !errors.Is(err, client.ErrNotFound) {
@@ -349,4 +355,221 @@ func TestAccountKeysDecoy(t *testing.T) {
 	if !crypto.VerifyEncKey(got.PublicKey, got.EncPublicKey, got.EncKeySig) {
 		t.Fatal("legacy-account decoy is not self-consistent")
 	}
+}
+
+// Revocation rotates the content key before it deletes the grant, so a rotation that
+// fails leaves a state the same command can retry out of. The old order deleted first:
+// a rotation that then failed left the revoked account holding a working key, and the
+// re-run its own error message told you to make hit the "no grant for ..." early return
+// and stopped — so forward secrecy stayed broken with no way back.
+func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
+	var failRotation atomic.Bool
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if failRotation.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		pass(w, r)
+	})
+	id := pushSecretFile(t, "revoke-retry.txt", "rotate me")
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	if err := runShareWith(id, "carol@example.com"); err != nil {
+		t.Fatalf("share --with: %v", err)
+	}
+	cl, _, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	failRotation.Store(true)
+	err = runShareRevoke(id, "carol@example.com")
+	if err == nil {
+		t.Fatal("revoke reported success while the key rotation was failing")
+	}
+	// The message must not falsely assert an outcome (the atomic PUT's fate is unknown
+	// under a lost response) and must point at a recovery that reconciles survivors.
+	if !strings.Contains(err.Error(), "may not have taken effect") || !strings.Contains(err.Error(), "aqt private") {
+		t.Fatalf("revoke error = %v, want it to admit the uncertain outcome and point at `aqt private`", err)
+	}
+	// The grant is still there: the retry has something left to find, and the revoked
+	// account's access is unchanged rather than half-removed.
+	grants, err := cl.ListGrants(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 {
+		t.Fatalf("grants after the failed revoke = %d, want 1 (the grant must survive a failed rotation)", len(grants))
+	}
+
+	// The recovery the error points at actually works.
+	failRotation.Store(false)
+	if err := runShareRevoke(id, "carol@example.com"); err != nil {
+		t.Fatalf("re-run after a failed rotation: %v", err)
+	}
+	grants, err = cl.ListGrants(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 0 {
+		t.Fatalf("grants after a successful revoke = %d, want 0", len(grants))
+	}
+}
+
+// Sharing with someone who has not registered yet pins the decoy the server returns for
+// an unknown email — it is self-signed and indistinguishable from a real key on purpose,
+// or the lookup would become an account-existence oracle. The grant is accepted and opens
+// for nobody, and once they do register their honest key mismatches the pin, so every
+// later share fails as if the server were substituting keys. `aqt contacts remove` is the
+// way out, and the mismatch error has to say so.
+func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
+	h := newE2E(t)
+	const (
+		email   = "dave@example.com"
+		content = "shared too early"
+	)
+	id := pushSecretFile(t, "early.txt", content)
+
+	// Dave has no account yet: this pins a placeholder.
+	if err := runShareWith(id, email); err != nil {
+		t.Fatalf("share --with an unregistered email: %v", err)
+	}
+	grantSignup(t, h, email, "dave", "dave horse battery staple")
+
+	err := runShareWith(id, email)
+	if err == nil {
+		t.Fatal("re-share after registration should refuse: the real key cannot match the pinned decoy")
+	}
+	if !strings.Contains(err.Error(), "contacts remove") {
+		t.Fatalf("mismatch error = %v, want it to point at `aqt contacts remove`", err)
+	}
+
+	cmd := contactsCmd()
+	cmd.SetArgs([]string{"remove", email})
+	captureStdout(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("contacts remove: %v", err)
+		}
+	})
+
+	// With the placeholder dropped, the share re-pins Dave's real key and reaches him.
+	if err := runShareWith(id, email); err != nil {
+		t.Fatalf("re-share after `aqt contacts remove`: %v", err)
+	}
+	asProfile("dave", func() {
+		dest := filepath.Join(t.TempDir(), "out.txt")
+		if err := runPull("aqt://"+id, dest, "", false, false); err != nil {
+			t.Fatalf("grantee pull after recovery: %v", err)
+		}
+		got, err := os.ReadFile(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != content {
+			t.Fatalf("grantee pulled %q, want %q", got, content)
+		}
+	})
+}
+
+// Revocation rotates the key and re-wraps the surviving grantees, and it must not
+// re-wrap the revoked one — even if a hostile server ignores the delete and keeps
+// listing them. Otherwise the re-wrap hands that server a wrap of the NEW key for the
+// revoked account, undoing the rotation the revoke just performed. The proxy here
+// injects the revoked grantee back into every grant listing to force the issue.
+func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
+	var (
+		revoked         atomic.Value // string: the handle a hostile server keeps listing
+		recording       atomic.Bool  // gate CreateGrant recording to the revoke, past the setup shares
+		createGrantsFor sync.Map     // handle -> true: CreateGrant POSTs seen while recording
+	)
+
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/grants"):
+			raw, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewReader(raw))
+			var req api.CreateGrantRequest
+			if recording.Load() && json.Unmarshal(raw, &req) == nil {
+				createGrantsFor.Store(req.GranteeHandle, true)
+			}
+			pass(w, r)
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/grants"):
+			rec := httptest.NewRecorder()
+			pass(rec, r)
+			handle, _ := revoked.Load().(string)
+			var body map[string]any
+			if handle == "" || json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+				copyRecorded(w, rec)
+				return
+			}
+			grants, _ := body["grants"].([]any)
+			present := false
+			for _, g := range grants {
+				if m, ok := g.(map[string]any); ok && m["granteeHandle"] == handle {
+					present = true
+				}
+			}
+			if !present {
+				body["grants"] = append(grants, map[string]any{"granteeHandle": handle, "createdAt": 1})
+			}
+			out, _ := json.Marshal(body)
+			for k := range rec.Header() {
+				if k != "Content-Length" {
+					w.Header().Set(k, rec.Header().Get(k))
+				}
+			}
+			w.WriteHeader(rec.Code)
+			w.Write(out)
+		default:
+			pass(w, r)
+		}
+	})
+
+	id := pushSecretFile(t, "hostile.txt", "rotate away")
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	grantSignup(t, h, "dave@example.com", "dave", "dave horse battery staple")
+	if err := runShareWith(id, "carol@example.com"); err != nil {
+		t.Fatalf("share --with carol: %v", err)
+	}
+	if err := runShareWith(id, "dave@example.com"); err != nil {
+		t.Fatalf("share --with dave: %v", err)
+	}
+
+	cl, _, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	carolKeys, err := fetchAccountKeys(cl, "carol@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	daveKeys, err := fetchAccountKeys(cl, "dave@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked.Store(carolKeys.Handle) // from here the "server" keeps listing carol
+	recording.Store(true)           // and from here we watch which re-wraps the client emits
+
+	if err := runShareRevoke(id, "carol@example.com"); err != nil {
+		t.Fatalf("revoke carol: %v", err)
+	}
+
+	// Dave survives, so the re-wrap must have re-granted him the new key: proof the
+	// re-wrap actually ran and iterated the (injected) list.
+	if _, ok := createGrantsFor.Load(daveKeys.Handle); !ok {
+		t.Fatal("surviving grantee dave was not re-wrapped onto the new key")
+	}
+	// Carol was revoked. Even though the server kept listing her, the re-wrap must not
+	// have handed the server a wrap of the new key for her handle. Recording started
+	// after the setup shares, so any hit here is a re-wrap of the revoked account.
+	if _, ok := createGrantsFor.Load(carolKeys.Handle); ok {
+		t.Fatal("revoked grantee carol was re-wrapped onto the new key against a hostile server")
+	}
+}
+
+func copyRecorded(w http.ResponseWriter, rec *httptest.ResponseRecorder) {
+	for k := range rec.Header() {
+		w.Header().Set(k, rec.Header().Get(k))
+	}
+	w.WriteHeader(rec.Code)
+	w.Write(rec.Body.Bytes())
 }
