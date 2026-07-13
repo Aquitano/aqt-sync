@@ -3,8 +3,12 @@
 import { useGSAP } from "@gsap/react";
 import gsap from "gsap";
 import { ScrollTrigger } from "gsap/ScrollTrigger";
+import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
 
-gsap.registerPlugin(useGSAP, ScrollTrigger);
+gsap.registerPlugin(useGSAP, ScrollTrigger, ScrambleTextPlugin);
+
+// Restricted to glyphs Pixelify Sans covers, so scrambled frames never fall back to another font.
+const cipherChars = "ABCDEFGHJKMNPQRSTUVWXYZ0123456789#/*";
 
 export function MotionLayer() {
   useGSAP(() => {
@@ -28,10 +32,20 @@ export function MotionLayer() {
         const hero = gsap.timeline({ defaults: { ease: "power4.out" } });
         hero
           .from("[data-hero-kicker]", { opacity: 0, y: 12, duration: 0.45 })
-          .from(
+          .to(
             "[data-hero-line]",
-            { yPercent: 115, duration: 0.9, stagger: 0.08 },
-            "-=0.2",
+            {
+              duration: 1.05,
+              stagger: 0.22,
+              ease: "none",
+              scrambleText: {
+                text: "{original}",
+                chars: cipherChars,
+                speed: 0.55,
+                tweenLength: false,
+              },
+            },
+            0,
           )
           .from(
             "[data-hero-copy], [data-hero-actions]",
@@ -76,20 +90,35 @@ export function MotionLayer() {
           },
         });
 
-        gsap.fromTo(
-          "[data-triptych-image]",
-          { scale: 1.12 },
-          {
-            scale: 1,
-            ease: "none",
-            scrollTrigger: {
-              trigger: "[data-triptych]",
-              start: "top bottom",
-              end: "bottom top",
-              scrub: 0.8,
-            },
+        gsap.from("[data-triptych-panel]", {
+          opacity: 0,
+          y: 48,
+          duration: 0.8,
+          stagger: 0.12,
+          ease: "power3.out",
+          scrollTrigger: {
+            trigger: "[data-triptych]",
+            start: "top 74%",
+            once: true,
           },
-        );
+        });
+
+        gsap.utils.toArray<HTMLElement>("[data-triptych-image]").forEach((image) => {
+          gsap.fromTo(
+            image,
+            { scale: 1.12 },
+            {
+              scale: 1,
+              ease: "none",
+              scrollTrigger: {
+                trigger: image,
+                start: "top bottom",
+                end: "bottom top",
+                scrub: 0.8,
+              },
+            },
+          );
+        });
 
         if (desktop) {
           const wrapper = document.querySelector<HTMLElement>("[data-horizontal]");
