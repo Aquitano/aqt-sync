@@ -718,7 +718,6 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 
 // CreateDevice issues a device token tagged with the account's current auth epoch.
 // It returns the plaintext token once; only its hash is stored.
-// CreateDevice issues a device token tagged with the account's current auth epoch.
 // maxDevices > 0 caps the account's device count: the count and the insert run in one
 // transaction, so a signup's first device and a concurrent attach cannot both slip
 // past the cap. Returns ErrDeviceLimit when the cap is already reached.
@@ -2207,8 +2206,8 @@ func placeholders(n int) string {
 // object already stored (in this or another pack, by content address) is left where
 // it is — dedup keys on chunk_id, so a second home is just harmless dead space.
 // Returns how many objects were newly stored.
-// PutPack verifies and stores one raw pack, returning how many of its objects were
-// newly stored. quotaBytes > 0 caps the owner's total stored pack bytes: a new pack
+//
+// quotaBytes > 0 caps the owner's total stored pack bytes: a new pack
 // that would push the owner past it is rejected with ErrQuotaExceeded (a re-PUT of an
 // already-stored pack is idempotent and never counted twice). The byte counter is
 // adjusted in the same transaction that inserts the pack row, so it can never drift
@@ -2655,14 +2654,6 @@ func (s *Store) packExists(owner, id string) (bool, error) {
 	return true, nil
 }
 
-// GC reclaims the owner's dead pack space under one owner-scoped lock: it sweeps
-// fully-dead packs (GCPacks), then compacts the dead objects trapped in still-live
-// ones (RepackOwner). The lock serializes the whole sequence so two concurrent passes
-// — two folders syncing at once, two devices, or a manual sync racing the watch
-// daemon, each of which triggers a GC — cannot both pick the same repack candidate and
-// have the loser's stale-plan branch delete the winner's now-live compacted pack. The
-// single DB connection serializes the transactions, but not the pack-file writes and
-// removes around them, so this lock is what makes the swap safe.
 // SweepExpired ends the life of the owner's public links whose lifecycle has run out:
 // expired ones immediately, and exhausted ones only after a grace window (gcMinAge) so
 // an in-flight permitted streamed pull can finish fetching its objects before they
@@ -2794,6 +2785,14 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 	return nil
 }
 
+// GC reclaims the owner's dead pack space under one owner-scoped lock: it sweeps
+// fully-dead packs (GCPacks), then compacts the dead objects trapped in still-live
+// ones (RepackOwner). The lock serializes the whole sequence so two concurrent passes
+// — two folders syncing at once, two devices, or a manual sync racing the watch
+// daemon, each of which triggers a GC — cannot both pick the same repack candidate and
+// have the loser's stale-plan branch delete the winner's now-live compacted pack. The
+// single DB connection serializes the transactions, but not the pack-file writes and
+// removes around them, so this lock is what makes the swap safe.
 func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	defer s.gcLocks.lock(owner)()
 	// Reclaim expired/exhausted links first, so the objects they unroot become dead and
