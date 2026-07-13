@@ -309,7 +309,7 @@ func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
 	// Drive the real command, so the end-of-life action `aqt share` asks for is under
 	// test and not just the server's handling of it.
 	cmd := shareCmd()
-	cmd.SetArgs([]string{id, "--expire", "1h", "--no-clip"})
+	cmd.SetArgs([]string{"--expire", "1h", "--no-clip", "--", id})
 	captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("share --expire: %v", err)
