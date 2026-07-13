@@ -72,7 +72,7 @@ var aadChunk = []byte("aqt-chunk-aad-v1")
 // file chunk with byte-identical plaintext would otherwise share one object id; the
 // distinct tag keeps the roles apart (identical directory nodes still dedup against
 // each other, since the tag is constant). See DESIGN.md section 5 (AEAD domain
-// separation) and docs/phase4-merkle-dag.md section 9.6.
+// separation).
 var aadTreeNode = []byte("aqt-treenode-v1")
 
 // aadChunkList domain-separates a sealed chunk-list segment — the indirect form of

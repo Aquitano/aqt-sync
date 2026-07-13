@@ -14,7 +14,8 @@ import (
 // children (name-sorted) and is sealed through the convergent pipeline, so the
 // node's content address (crypto.Chunk.ID) is the subtree's Merkle hash. Two
 // identical subtrees seal to the same object id and dedup on the server for free;
-// a three-way diff skips any subtree whose hashes agree. See docs/phase4-merkle-dag.md.
+// a three-way diff skips any subtree whose hashes agree. See DESIGN.md §5
+// (manifest size / subtree dedup) for the full design.
 
 // TreeManifestVersion is the Merkle-DAG manifest version, bumped from the flat
 // manifest's 1 so the format is detectable.
