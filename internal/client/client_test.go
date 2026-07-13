@@ -117,9 +117,6 @@ func TestListSnapshotsRejectsForeignResource(t *testing.T) {
 	}
 }
 
-// An empty id set must not hit the network at all, matching the old behavior the
-// pull path relies on (callers already short-circuit, but a stray request would 400
-// nothing useful).
 // writeFrame emits one length-prefixed object frame, the server side of the
 // positional framing PublicObjects decodes.
 func writeFrame(w http.ResponseWriter, b []byte) {

@@ -72,7 +72,8 @@ key directly or prompt for a password to unwrap it. The server sees only `<id>`.
 
 `aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>`.
 
-Global flags (all commands): `--server <url>` (self-host; default `https://aqt.sh`),
+Global flags (all commands): `--server <url>` (default `http://localhost:8080`; the
+`aqt.sh` URLs below stand in for wherever you host it),
 `--profile <name>`, `--json`, `-q/--quiet`, `-v/--verbose`, `-h/--help`, `-V/--version`.
 
 Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network ·
@@ -279,7 +280,7 @@ deferred operation.
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, devices, push, pull, cat, ls, info, find, share, private, rm, watch/agent, tui  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, private, rm, snapshot, checkpoint, restore, usage, watch/agent, tui  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
@@ -436,7 +437,7 @@ sealed with **keyed convergent encryption**:
 ```
 convergenceKey = HKDF(masterKey, "aqt-convergence-v1")     // account-scoped, never sent
 chunkKey       = HKDF(convergenceKey, sha256(plaintext))    // unique per distinct plaintext
-ciphertext     = XChaCha20-Poly1305(chunkKey, nonce=0, plaintext)   // deterministic
+ciphertext     = XChaCha20-Poly1305(chunkKey, nonce=0, compress(plaintext))   // deterministic
 chunkID        = hex(sha256(ciphertext))                    // server storage address
 ```
 
@@ -448,18 +449,19 @@ never repeats for distinct plaintext. The per-chunk `chunkKey` lives only in the
 sealed manifest; the server holds ciphertext addressed by `chunkID` and nothing
 else. Hex (not base64url) IDs avoid collisions on case-insensitive filesystems.
 
-**Chunk granularity is a per-folder tradeoff.** The default profile targets an ~8 KiB
-average chunk (min 2K / normal 8K / max 64K), tuned for source trees: fine dedup, but
-a large binary pays it in metadata — a 500 MB file is ~64,000 chunks, and every chunk
-costs a manifest entry, a server-side SHA-256 verify, and an object-index row. Folders
-of large binaries (media, datasets, VM images) can set `chunkProfile: "large"` (64K /
-256K / 1M, ~256K average) for ~32x fewer chunks per MB, trading dedup resolution for
-far less per-MB metadata and ingest CPU; a `chunk` block sets explicit sizes when
-neither preset fits. Because boundaries are derived from these sizes, the choice is
-sticky: changing a folder's profile re-chunks it once, with no dedup against the old
-profile, so it is a deliberate per-folder decision (and `.aqtconfig` syncs in-tree, so
-every clone agrees). Note the profile's `min` is also the inline cutoff, so a coarse
-profile inlines larger small files into the (sealed) manifest.
+**Chunk granularity is a per-folder tradeoff.** By default the chunker scales with
+file size: files up to 8 MiB use the fine profile (~8 KiB average, min 2K / normal 8K /
+max 64K, tuned for source trees), files over 8 MiB use the "large" sizes (64K / 256K /
+1M, ~256K average), and files over 1 GiB use "huge" (256K / 1M / 4M, ~1 MiB average) —
+every chunk costs a manifest entry, a server-side SHA-256 verify, and an object-index
+row, so a large binary is not shredded into hundreds of thousands of records while
+small files keep byte-level dedup. Setting `chunkProfile` to `"large"` or `"huge"`
+pins that granularity for every file in the folder, and a `chunk` block sets explicit
+sizes when no preset fits. Because boundaries are derived from these sizes, a pinned
+choice is sticky: changing a folder's profile re-chunks it once, with no dedup against
+the old profile, so it is a deliberate per-folder decision (and `.aqtconfig` syncs
+in-tree, so every clone agrees). Note the profile's `min` is also the inline cutoff,
+so a coarse profile inlines larger small files into the (sealed) manifest.
 
 **Storage layout.** Sealed-blob resources keep `blobs/<id>.bin`. Objects (chunks)
 are not one file each: they are concatenated into **packs** (~16 MiB), one
@@ -488,7 +490,7 @@ a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options
 ```jsonc
 {
   "pack": false,                 // pack-and-seal instead of chunked sync (see below)
-  "chunkProfile": "default",     // CDC granularity: "default" (~8K avg) or "large" (~256K avg)
+  "chunkProfile": "default",     // "default" scales with file size; "large"/"huge" pin one granularity
   "chunk": { "min": 65536, "normal": 262144, "max": 1048576 }, // explicit sizes; overrides chunkProfile
   "watch": {
     "interval": "5s",            // watch debounce floor; --interval overrides it
@@ -549,11 +551,14 @@ status-quo AEAD failure on id-bound resources only. A declared `minClient` above
 writer's own capability is rejected `400`; an omitted declaration stores the baseline.
 
 ```
-POST   /v1/account                  Create account. Body: { email, kdf, publicKey, deviceName }
+POST   /v1/account                  Create account. Body: { email, kdf, publicKey, wrappedRoot,
+                                     authVerifier, deviceName, inviteToken? }
                                      → { ownerHandle, deviceId, token }  (stores kdf + Ed25519 public key)
-GET    /v1/account/salt?email=…      → { kdf }           (needed to re-derive on a new machine)
+GET    /v1/account/salt?email=…      → { kdf, wrappedRoot }  (needed to re-derive on a new machine;
+                                     an unknown email gets an indistinguishable decoy, see §3.6)
 POST   /v1/auth/challenge            Body: { email } → { challengeId, nonce }  (one-time, short-lived)
-POST   /v1/devices                   Attach device. Body: { email, challengeId, signature, deviceName }.
+POST   /v1/devices                   Attach device. Body: { email, challengeId, signature,
+                                     authVerifier, deviceName }.
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
 DELETE /v1/devices/:id               Revoke a device.
 
@@ -676,7 +681,7 @@ function currentSession(): Session | null;                                 // fo
 ## 5. Open implementation questions (not blocking the interface)
 
 - **Large single files / streaming** — a private single file at or above ~8 MiB now streams: `push` chunks it (FastCDC), convergent-seals and packs it in a bounded-memory pass, and stores a tiny sealed `FileRoot` (the resource blob) naming the objects; `pull`/`cat` range-fetch the packs and materialize straight to disk. Memory is O(one pack), and the inline body cap no longer bounds private file size. Smaller files keep the one-shot inline path. Public and gated single files now stream the same way — a link holder reads their objects through the per-resource public object endpoint (`POST /v1/public/resources/:id/objects`), and `share`/`private` re-wrap only the root, so the content bytes are never re-sealed. Stdin still seals in memory under the body cap.
-- **Manifest size / subtree dedup** — *implemented (Phase 4):* a chunked folder is now a Merkle DAG of directory nodes. Each directory node lists its name-sorted children and is sealed through the convergent pipeline under a distinct `aqt-treenode-v1` AAD, so a node's content address is its subtree Merkle hash and a moved/copied/renamed directory dedups for free (its node and file chunks are already on the server). The resource blob is a tiny sealed `TreeRoot` under `AADTreeRoot`. Directories are first-class: empty directories round-trip and directory modes propagate. The format is a clean break (`tree` metadata flag, v2); older folders are not read. Spec: `docs/phase4-merkle-dag.md`. The reconcile's remote read is lazy: because directory nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares with it is served from those bytes, so an unchanged subtree is reconstructed without a fetch and only the nodes on a spine that changed since the base hit the network — a no-op sync does zero node round-trips. The level-batched fetch shares one pack source (object locations, spans, and the byte-bounded LRU) across the whole walk, so a pack carrying nodes from several levels is range-fetched once, and a node landing inside an already-fetched span is served from memory. Directory-mode conflicts surface like file conflicts (a plain sync aborts; `--force` takes local; `--conflicts=copy` keeps the local file and preserves the remote one as a `<name>.conflict-<host>-<timestamp>` copy, but a directory-mode conflict has no copy and always resolves local-wins). Rename detection is reporting-only: a move dedups its bytes and still executes as delete+add, but `status`, `sync --dry-run`, and `snapshot diff` coalesce an unambiguous delete+add pair (same content address, one path per side) into `renamed old -> new`, with whole-directory moves collapsing to one entry via the stable subtree hash.
+- **Manifest size / subtree dedup** — *implemented (Phase 4):* a chunked folder is now a Merkle DAG of directory nodes. Each directory node lists its name-sorted children and is sealed through the convergent pipeline under a distinct `aqt-treenode-v1` AAD, so a node's content address is its subtree Merkle hash and a moved/copied/renamed directory dedups for free (its node and file chunks are already on the server). The resource blob is a tiny sealed `TreeRoot` under `AADTreeRoot`. Directories are first-class: empty directories round-trip and directory modes propagate. The format is a clean break (`tree` metadata flag, v2); older folders are not read. The reconcile's remote read is lazy: because directory nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares with it is served from those bytes, so an unchanged subtree is reconstructed without a fetch and only the nodes on a spine that changed since the base hit the network — a no-op sync does zero node round-trips. The level-batched fetch shares one pack source (object locations, spans, and the byte-bounded LRU) across the whole walk, so a pack carrying nodes from several levels is range-fetched once, and a node landing inside an already-fetched span is served from memory. Directory-mode conflicts surface like file conflicts (a plain sync aborts; `--force` takes local; `--conflicts=copy` keeps the local file and preserves the remote one as a `<name>.conflict-<host>-<timestamp>` copy, but a directory-mode conflict has no copy and always resolves local-wins). Rename detection is reporting-only: a move dedups its bytes and still executes as delete+add, but `status`, `sync --dry-run`, and `snapshot diff` coalesce an unambiguous delete+add pair (same content address, one path per side) into `renamed old -> new`, with whole-directory moves collapsing to one entry via the stable subtree hash.
 - **Persistent metadata cache** — *resolved:* every remote tree walk (clone, cold reconcile, `find`, snapshot diff) shares an on-disk, content-addressed cache of directory-node and chunk-list ciphertexts (default `~/.cache/aqt/nodes`, `AQT_NODE_CACHE_DIR` overrides, `AQT_NO_NODE_CACHE=1` disables). An object's id is the sha256 of its ciphertext, so entries are immutable (no invalidation, ever) and self-verifying (a corrupt file fails its hash check and is dropped); `OpenNode` re-verifies on open either way, so a disk hit is exactly as trustworthy as a server fetch. Only ciphertext is stored — the same bytes the server keeps — and the cache is LRU-pruned to a 256 MiB budget. A repeated `find` or diff over a large account therefore fetches only nodes it has never seen.
 - **Subpath addressing** — *resolved:* `aqt://<id>/<path>` addresses one entry inside a chunked folder. `pull`/`cat` walk only the path's spine (one directory node per segment) and fetch just that entry's chunks; pulling a directory materializes its subtree from the subtree's own content-addressed node without touching the rest of the folder; `aqt ls <folder>[/<path>]` lists one directory by fetching the spine plus that node. Pack-and-seal folders refuse with guidance (no per-entry objects exist — the privacy trade-off working as intended).
 - **Repack** — *resolved:* `RepackOwner` compacts partially-dead packs (copies live objects into a fresh pack under a bounded byte budget, swapping atomically after a re-check of age and liveness), so dead objects inside still-live packs are now reclaimed.

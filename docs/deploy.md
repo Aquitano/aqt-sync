@@ -113,13 +113,16 @@ persistent storage so restarts do not re-issue.
 ### 3. Reverse proxy
 
 Terminate TLS at Caddy, nginx, or a load balancer and forward plain HTTP to the
-server bound on loopback. Example `deploy/Caddyfile`:
+server bound on loopback. A minimal Caddyfile for a host install:
 
 ```
 aqt.example.com {
     reverse_proxy 127.0.0.1:8080
 }
 ```
+
+(The committed `deploy/Caddyfile` targets the compose service `aqt-server:8080`
+instead; see [Docker](#docker).)
 
 Run the server with `AQT_ADDR=127.0.0.1:8080` and set
 `AQT_TRUSTED_PROXIES` to the proxy's address. An equivalent nginx location:

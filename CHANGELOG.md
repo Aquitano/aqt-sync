@@ -48,6 +48,11 @@ All notable changes to this project are documented in this file.
   log pane, so the TUI adds no new write paths and everything it does is
   reproducible at the shell. Requires an unlocked session or prompts for the
   passphrase in-app; reads happen in-process against the existing client layer.
+- `aqt checkpoint <name>` saves a named, anchored snapshot that retention never
+  prunes, and `aqt restore <name>` rolls the tracked folder back to it — in place
+  by default, or side-by-side with `--into <dir>`. `aqt snapshot anchor <id>
+  [--remove]` anchors or unanchors an existing snapshot. Anchoring fails closed
+  against an older server that would silently ignore it.
 - `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
   two-sided change Dropbox-style: the local version stays at its path and the remote
   version is written alongside as `<name>.conflict-<host>-<timestamp>`, then the sync
