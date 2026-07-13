@@ -583,7 +583,7 @@ func runRootKeyRotation() error {
 	if err != nil {
 		return err
 	}
-	prof.Token, prof.Kdf, prof.WrappedRoot, prof.AuthEpoch = resp.Token, prof.Kdf, newWrapped, resp.Epoch
+	prof.Token, prof.WrappedRoot, prof.AuthEpoch = resp.Token, newWrapped, resp.Epoch
 	prof.Fingerprint = crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
 	if err := identity.Save(prof); err != nil {
 		return err
