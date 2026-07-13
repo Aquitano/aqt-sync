@@ -115,6 +115,32 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 			}
 			return nil
 		}
+		reconcileMatchedChildren := func(prefix string, l, r TreeChild) error {
+			path := joinChild(prefix, l.Name)
+			switch {
+			case l.Type == ChildDir && r.Type == ChildDir:
+				if l.Hash == r.Hash {
+					return nil // identical subtree: pruned, never fetched
+				}
+				if l.Node == nil || r.Node == nil {
+					return fmt.Errorf("directory child %q has no node reference", path)
+				}
+				nextPairs = append(nextPairs, pair{prefix: path, left: *l.Node, right: *r.Node})
+			case l.Type == r.Type:
+				if l.Type == ChildFile && l.Hash != r.Hash {
+					d.Modified = append(d.Modified, path)
+				}
+			default:
+				// Type changed: whatever was there is gone, the new thing appeared.
+				if err := oneSided(prefix, l, false); err != nil {
+					return err
+				}
+				if err := oneSided(prefix, r, true); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 
 		for _, p := range pairs {
 			lc, err := open(p.left)
@@ -141,28 +167,8 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 				default:
 					l, r := lc[i], rc[j]
 					i, j = i+1, j+1
-					path := joinChild(p.prefix, l.Name)
-					switch {
-					case l.Type == ChildDir && r.Type == ChildDir:
-						if l.Hash == r.Hash {
-							continue // identical subtree: pruned, never fetched
-						}
-						if l.Node == nil || r.Node == nil {
-							return TreeDiff{}, fmt.Errorf("directory child %q has no node reference", path)
-						}
-						nextPairs = append(nextPairs, pair{prefix: path, left: *l.Node, right: *r.Node})
-					case l.Type == r.Type:
-						if l.Type == ChildFile && l.Hash != r.Hash {
-							d.Modified = append(d.Modified, path)
-						}
-					default:
-						// Type changed: whatever was there is gone, the new thing appeared.
-						if err := oneSided(p.prefix, l, false); err != nil {
-							return TreeDiff{}, err
-						}
-						if err := oneSided(p.prefix, r, true); err != nil {
-							return TreeDiff{}, err
-						}
+					if err := reconcileMatchedChildren(p.prefix, l, r); err != nil {
+						return TreeDiff{}, err
 					}
 				}
 			}

@@ -1014,73 +1014,10 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		reclaimPacks(c.root, c.cl)
 	}
 
-	// Re-verify the on-disk bytes of every file we are about to overwrite or delete
-	// still match what the snapshot saw. A mtime-preserving edit (cp -p, touch -r,
-	// archive extract) or any edit landing in the snapshot->apply window would
-	// otherwise be silently clobbered by a remote download or delete. A target whose
-	// content drifted is downgraded to a conflict: its destructive op is skipped and
-	// its base entry left untouched, so the next sync re-plans it as a both-sides
-	// change to resolve (or --force to take local).
-	baseByPath := c.base.ByPath()
-	checkSafe := func(path string, isDownload bool) (bool, error) {
-		h, exists, isDir, err := syncengine.HashOnDisk(c.root, path)
-		if err != nil {
-			return false, err
-		}
-		if !exists {
-			return true, nil // nothing on disk to destroy
-		}
-		if isDir {
-			// A download onto a directory is the dir->file replacement materialize
-			// performs once its children are deleted; a delete whose target became a
-			// directory is a window change and is not safe to remove.
-			return isDownload, nil
-		}
-		if prev, ok := localByPath[path]; ok && h == prev.Hash {
-			return true, nil // unchanged since the snapshot
-		}
-		if isDownload {
-			if re, ok := remoteByPath[path]; ok && h == re.Hash {
-				return true, nil // already converged to the remote content
-			}
-		}
-		return false, nil // drifted in the snapshot->apply window
+	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, downloads, localDeletes, localByPath, remoteByPath, c.base.ByPath(), newBase)
+	if err != nil {
+		return err
 	}
-	var conflicts []string
-	restore := func(path string) {
-		if e, ok := baseByPath[path]; ok {
-			newBase[path] = e
-		} else {
-			delete(newBase, path)
-		}
-		conflicts = append(conflicts, path)
-	}
-	keptDownloads := make([]syncengine.Entry, 0, len(downloads))
-	for _, e := range downloads {
-		safe, err := checkSafe(e.Path, true)
-		if err != nil {
-			return err
-		}
-		if safe {
-			keptDownloads = append(keptDownloads, e)
-		} else {
-			restore(e.Path)
-		}
-	}
-	downloads = keptDownloads
-	keptDeletes := make([]string, 0, len(localDeletes))
-	for _, p := range localDeletes {
-		safe, err := checkSafe(p, false)
-		if err != nil {
-			return err
-		}
-		if safe {
-			keptDeletes = append(keptDeletes, p)
-		} else {
-			restore(p)
-		}
-	}
-	localDeletes = keptDeletes
 
 	// Server is updated; now bring the local tree in line. A local file or symlink the
 	// remote turned into a directory must be removed before the download that creates
@@ -1127,6 +1064,74 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		return errConflictsRemain
 	}
 	return nil
+}
+
+// filterDriftedTargets re-verifies the on-disk bytes of every file we are about to
+// overwrite or delete still match what the snapshot saw. A mtime-preserving edit
+// (cp -p, touch -r, archive extract) or any edit landing in the snapshot->apply
+// window would otherwise be silently clobbered by a remote download or delete. A
+// target whose content drifted is downgraded to a conflict: its destructive op is
+// skipped and its base entry left untouched, so the next sync re-plans it as a
+// both-sides change to resolve (or --force to take local).
+func filterDriftedTargets(root string, downloads []syncengine.Entry, localDeletes []string, localByPath, remoteByPath, baseByPath, newBase map[string]syncengine.Entry) ([]syncengine.Entry, []string, []string, error) {
+	checkSafe := func(path string, isDownload bool) (bool, error) {
+		h, exists, isDir, err := syncengine.HashOnDisk(root, path)
+		if err != nil {
+			return false, err
+		}
+		if !exists {
+			return true, nil // nothing on disk to destroy
+		}
+		if isDir {
+			// A download onto a directory is the dir->file replacement materialize
+			// performs once its children are deleted; a delete whose target became a
+			// directory is a window change and is not safe to remove.
+			return isDownload, nil
+		}
+		if prev, ok := localByPath[path]; ok && h == prev.Hash {
+			return true, nil // unchanged since the snapshot
+		}
+		if isDownload {
+			if re, ok := remoteByPath[path]; ok && h == re.Hash {
+				return true, nil // already converged to the remote content
+			}
+		}
+		return false, nil // drifted in the snapshot->apply window
+	}
+	var conflicts []string
+	restore := func(path string) {
+		if e, ok := baseByPath[path]; ok {
+			newBase[path] = e
+		} else {
+			delete(newBase, path)
+		}
+		conflicts = append(conflicts, path)
+	}
+	keptDownloads := make([]syncengine.Entry, 0, len(downloads))
+	for _, e := range downloads {
+		safe, err := checkSafe(e.Path, true)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if safe {
+			keptDownloads = append(keptDownloads, e)
+		} else {
+			restore(e.Path)
+		}
+	}
+	keptDeletes := make([]string, 0, len(localDeletes))
+	for _, p := range localDeletes {
+		safe, err := checkSafe(p, false)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if safe {
+			keptDeletes = append(keptDeletes, p)
+		} else {
+			restore(p)
+		}
+	}
+	return keptDownloads, keptDeletes, conflicts, nil
 }
 
 // --- clone ---
@@ -2489,24 +2494,13 @@ func coalescePlanRenames(actions []syncengine.Action, dirActions []syncengine.Di
 	}
 	keepActions := actions[:0:0]
 	for _, a := range actions {
-		drop := false
-		for _, r := range localRen {
-			if (a.Kind == syncengine.Upload && covers(r, a.Path, "", true)) ||
-				(a.Kind == syncengine.DeleteRemote && covers(r, "", a.Path, false)) {
-				drop = true
-				break
+		match := func(r syncengine.Rename, add bool) bool {
+			if add {
+				return covers(r, a.Path, "", true)
 			}
+			return covers(r, "", a.Path, false)
 		}
-		for _, r := range remoteRen {
-			if drop {
-				break
-			}
-			if (a.Kind == syncengine.Download && covers(r, a.Path, "", true)) ||
-				(a.Kind == syncengine.DeleteLocal && covers(r, "", a.Path, false)) {
-				drop = true
-			}
-		}
-		if !drop {
+		if !renameCovers(a.Kind, localRen, remoteRen, match) {
 			keepActions = append(keepActions, a)
 		}
 	}
@@ -2515,30 +2509,43 @@ func coalescePlanRenames(actions []syncengine.Action, dirActions []syncengine.Di
 	}
 	keepDirs := dirActions[:0:0]
 	for _, a := range dirActions {
-		drop := false
-		for _, r := range localRen {
-			if r.Dir && ((a.Kind == syncengine.Upload && atOrUnder(a.Path, r.To)) ||
-				(a.Kind == syncengine.DeleteRemote && atOrUnder(a.Path, r.From))) {
-				drop = true
-				break
+		match := func(r syncengine.Rename, add bool) bool {
+			if !r.Dir {
+				return false
 			}
+			if add {
+				return atOrUnder(a.Path, r.To)
+			}
+			return atOrUnder(a.Path, r.From)
 		}
-		for _, r := range remoteRen {
-			if drop {
-				break
-			}
-			if r.Dir && ((a.Kind == syncengine.Download && atOrUnder(a.Path, r.To)) ||
-				(a.Kind == syncengine.DeleteLocal && atOrUnder(a.Path, r.From))) {
-				drop = true
-			}
-		}
-		if !drop {
+		if !renameCovers(a.Kind, localRen, remoteRen, match) {
 			keepDirs = append(keepDirs, a)
 		}
 	}
 	renames := append(localRen, remoteRen...)
 	sort.Slice(renames, func(i, j int) bool { return renames[i].From < renames[j].From })
 	return keepActions, keepDirs, renames
+}
+
+// renameCovers reports whether a detected rename subsumes an action of the given
+// kind. match tests one rename against the action's path, distinguishing the added
+// (To) side from the deleted (From) side. Local renames cover the push side of an
+// action (Upload/DeleteRemote); remote renames cover the pull side
+// (Download/DeleteLocal).
+func renameCovers(kind syncengine.ActionKind, localRen, remoteRen []syncengine.Rename, match func(r syncengine.Rename, add bool) bool) bool {
+	for _, r := range localRen {
+		if (kind == syncengine.Upload && match(r, true)) ||
+			(kind == syncengine.DeleteRemote && match(r, false)) {
+			return true
+		}
+	}
+	for _, r := range remoteRen {
+		if (kind == syncengine.Download && match(r, true)) ||
+			(kind == syncengine.DeleteLocal && match(r, false)) {
+			return true
+		}
+	}
+	return false
 }
 
 func printPaths(label string, paths []string) {

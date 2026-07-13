@@ -2007,26 +2007,30 @@ func resourceChunkIDs(tx *sql.Tx, resourceID string) ([]string, error) {
 
 // symmetricDiff returns the ids present in exactly one of the two sets.
 func symmetricDiff(a, b []string) []string {
-	inA := make(map[string]bool, len(a))
+	setA := make(map[string]bool, len(a))
 	for _, id := range a {
-		inA[id] = true
+		setA[id] = true
+	}
+	setB := make(map[string]bool, len(b))
+	for _, id := range b {
+		setB[id] = true
 	}
 	var out []string
-	seenB := make(map[string]bool, len(b))
+	emittedB := make(map[string]bool, len(b))
 	for _, id := range b {
-		if seenB[id] {
+		if setA[id] || emittedB[id] {
 			continue
 		}
-		seenB[id] = true
-		if !inA[id] {
-			out = append(out, id)
-		}
+		emittedB[id] = true
+		out = append(out, id)
 	}
+	emittedA := make(map[string]bool, len(a))
 	for _, id := range a {
-		if inA[id] && !seenB[id] {
-			out = append(out, id)
-			inA[id] = false // dedup repeats within a
+		if setB[id] || emittedA[id] {
+			continue
 		}
+		emittedA[id] = true
+		out = append(out, id)
 	}
 	return out
 }
@@ -2040,37 +2044,23 @@ func recountPacksForChunks(tx *sql.Tx, owner string, chunkIDs []string) error {
 	packSet := map[string]bool{}
 	var packs []string
 	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
-	for start := 0; start < len(chunkIDs); start += batch {
-		end := min(start+batch, len(chunkIDs))
-		group := chunkIDs[start:end]
-		args := make([]any, 0, len(group)+1)
-		args = append(args, owner)
-		for _, id := range group {
-			args = append(args, id)
-		}
-		rows, err := tx.Query(
-			`SELECT DISTINCT pack_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
-			args...,
-		)
-		if err != nil {
-			return err
-		}
-		for rows.Next() {
+	err := queryIDsBatched(tx,
+		`SELECT DISTINCT pack_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
+		[]any{owner}, chunkIDs, batch,
+		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				rows.Close()
 				return err
 			}
 			if !packSet[id] {
 				packSet[id] = true
 				packs = append(packs, id)
 			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return err
-		}
-		rows.Close()
+			return nil
+		},
+	)
+	if err != nil {
+		return err
 	}
 	return recountPacks(tx, owner, packs)
 }
@@ -2126,34 +2116,19 @@ const objectIsLive = `(EXISTS(SELECT 1 FROM resource_chunks rc
 func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 	present := make(map[string]bool, len(ids))
 	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
-	for start := 0; start < len(ids); start += batch {
-		end := min(start+batch, len(ids))
-		group := ids[start:end]
-		args := make([]any, 0, len(group)+1)
-		args = append(args, owner)
-		for _, id := range group {
-			args = append(args, id)
-		}
-		rows, err := s.rdb.Query(
-			`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
+	if err := queryIDsBatched(s.rdb,
+		`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
+		[]any{owner}, ids, batch,
+		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
+				return err
 			}
 			present[id] = true
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	var missing []string
@@ -2196,6 +2171,44 @@ func (s *Store) touchPacksFor(owner string, objIDs []string) error {
 // placeholders returns "?,?,..." with n entries for an IN clause.
 func placeholders(n int) string {
 	return strings.TrimPrefix(strings.Repeat(",?", n), ",")
+}
+
+// rowQueryer is the subset of *sql.DB and *sql.Tx that queryIDsBatched needs.
+type rowQueryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+}
+
+// queryIDsBatched runs query once per batch-size group of ids, keeping the IN clause
+// well under SQLite's bound-variable limit. It prepends lead to the bound args and
+// splices the group's placeholder list plus closing paren onto query, so callers pass
+// the SELECT up to and including "IN (". Each batch's rows are closed before the next
+// runs, and the first scan error aborts.
+func queryIDsBatched(q rowQueryer, query string, lead []any, ids []string, batch int, scan func(*sql.Rows) error) error {
+	for start := 0; start < len(ids); start += batch {
+		end := min(start+batch, len(ids))
+		group := ids[start:end]
+		args := make([]any, 0, len(lead)+len(group))
+		args = append(args, lead...)
+		for _, id := range group {
+			args = append(args, id)
+		}
+		rows, err := q.Query(query+placeholders(len(group))+`)`, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			if err := scan(rows); err != nil {
+				rows.Close()
+				return err
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	return nil
 }
 
 // PutPack stores one self-describing pack for the owner. It verifies the pack
@@ -2393,41 +2406,26 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 	seenPack := map[string]bool{}
 	var packs []string
 	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
-	for start := 0; start < len(ids); start += batch {
-		end := min(start+batch, len(ids))
-		group := ids[start:end]
-		args := make([]any, 0, len(group)+1)
-		args = append(args, owner)
-		for _, id := range group {
-			args = append(args, id)
-		}
-		rows, err := s.rdb.Query(
-			`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
+	if err := queryIDsBatched(s.rdb,
+		`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
+		[]any{owner}, ids, batch,
+		func(rows *sql.Rows) error {
 			var (
 				id, packID  string
 				off, length int64
 			)
 			if err := rows.Scan(&id, &packID, &off, &length); err != nil {
-				rows.Close()
-				return nil, err
+				return err
 			}
 			out = append(out, api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length})
 			if !seenPack[packID] {
 				seenPack[packID] = true
 				packs = append(packs, packID)
 			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 	if err := s.touchPacks(owner, packs); err != nil {
 		return nil, err
