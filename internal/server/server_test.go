@@ -906,30 +906,15 @@ func TestCapabilityReadBelowMinClientIs426(t *testing.T) {
 	}
 }
 
-// TestCapabilityMissingHeaderAssumesTwo pins the header-less fallback: a request with
-// no capability header is treated as capability 2, so it reads a min_client=2 resource
-// but is refused a min_client=3 one.
-func TestCapabilityMissingHeaderAssumesTwo(t *testing.T) {
+// TestCapabilityMissingHeaderFailsClosed ensures a header-less legacy client never
+// receives an id-bound encrypted resource.
+func TestCapabilityMissingHeaderFailsClosed(t *testing.T) {
 	h := newHarness(t)
-	token, _ := h.signup("cap-missing@example.com", "a good long passphrase here")
-
-	req2, _ := sealResource(t, api.CapabilityIDBinding)
-	id2 := mustPutID(t, h.putCap(token, "2", req2))
-	if rec := h.getCap(id2, token, ""); rec.Code != http.StatusOK {
-		t.Fatalf("header-less read of min_client=2: got %d, want 200", rec.Code)
-	}
-
-	// A future capability-3 client writes a capability-3 resource.
-	req3, _ := sealResource(t, 3)
-	id3 := mustPutID(t, h.putCap(token, "3", req3))
-	rec := h.getCap(id3, token, "")
-	if rec.Code != http.StatusUpgradeRequired {
-		t.Fatalf("header-less read of min_client=3: got %d, want 426", rec.Code)
-	}
-	var e api.ErrorResponse
-	_ = json.Unmarshal(rec.Body.Bytes(), &e)
-	if e.MinClient != 3 {
-		t.Fatalf("error min_client = %d, want 3", e.MinClient)
+	token, _ := h.signup("cap-missing.com", "a good long passphrase here")
+	req, _ := sealResource(t, api.CapabilityIDBinding)
+	id := mustPutID(t, h.putCap(token, "2", req))
+	if rec := h.getCap(id, token, ""); rec.Code != http.StatusUpgradeRequired {
+		t.Fatalf("header-less read of min_client=2: got %d, want 426", rec.Code)
 	}
 }
 

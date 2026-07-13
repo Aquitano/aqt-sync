@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `aqt passphrase rotate-root` performs account-compromise recovery: it creates a new root key, atomically rewraps all recoverable resource and snapshot keys plus incoming grants, migrates the account signing/encryption identities, and revokes every device except the initiating one (which receives a fresh token). Future convergent writes use the new root-derived identity.
+
+- Capability negotiation now fails closed for missing or malformed headers. Header-less legacy clients are baseline-only and receive `426 Upgrade Required` before an id-bound or newer resource is served.
+
 - Account-to-account sharing: `aqt share <id> --with <email>` grants a specific
   account read-only access to a file or chunked folder — no public link, no key
   in any URL. Every account now publishes an X25519 encryption key (derived from

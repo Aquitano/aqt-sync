@@ -259,7 +259,7 @@ Because a typo'd first passphrase is **unrecoverable** (zero-knowledge), first r
 requires a confirm prompt and an explicit "this cannot be reset" warning.
 
 **Wrapped-root key model (implemented).** The account's *master key* is a random
-root key (`RK`), minted once at signup and never changed; it wraps content keys and
+root key (`RK`), minted at signup and rotated only during compromise recovery; it wraps content keys and
 derives the signing and convergence keys. The passphrase derives an *unlock key*
 (`UK = Argon2id(passphrase, salt)`) whose only job is to wrap `RK` — `wrappedRoot =
 seal(RK, UK)`, stored server-side (opaque, zero-knowledge) and cached locally. So a
@@ -271,9 +271,7 @@ hashed. A device re-attaches by presenting both an Ed25519 challenge signature (
 `RK`) *and* the verifier (proves the *current* passphrase), so a stale passphrase or a
 cached root key alone cannot re-attach after a change. The new-device bootstrap
 (`GET /account/salt`) returns `{kdf, wrappedRoot}` and serves an **indistinguishable
-decoy** for an unknown email, so it no longer reveals which emails have accounts. True
-root-key rotation (re-wrap every resource, for compromise recovery) is a separate,
-deferred operation.
+decoy** for an unknown email, so it no longer reveals which emails have accounts. `aqt passphrase rotate-root` is the compromise-recovery operation: it mints a fresh RK, rewraps every recoverable resource and snapshot content key plus incoming grant, migrates the derived signing/encryption identities, and atomically switches the account record. The server issues a fresh token only to the initiating device and removes every other device; they recover by logging in again with the passphrase. Existing convergent objects remain readable because their per-object keys are sealed in their roots; future writes derive convergence from the new RK.
 
 ---
 

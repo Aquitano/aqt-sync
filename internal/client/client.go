@@ -201,6 +201,14 @@ func (c *Client) ChangePassphrase(req api.PassphraseChangeRequest) (api.AuthResp
 	return r, err
 }
 
+// RotateRootKey replaces the account root key and every server-held key wrap that
+// depends on it. A successful rotation returns a fresh token for the current device.
+func (c *Client) RotateRootKey(req api.RootKeyRotationRequest) (api.AuthResponse, error) {
+	var r api.AuthResponse
+	err := c.do(http.MethodPut, "/v1/account/root-key", req, &r)
+	return r, err
+}
+
 // PutResource uploads a resource as a raw envelope (JSON header + ciphertext),
 // so the blob never pays the base64-in-JSON tax.
 func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceResponse, error) {
