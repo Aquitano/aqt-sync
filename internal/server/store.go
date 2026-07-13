@@ -669,6 +669,161 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	return newEpoch, nil
 }
 
+// RotateRootKey atomically swaps every root-dependent server record. The client has
+// already rewrapped each opaque key; this method checks the set is complete before
+// changing identity, then gives the initiating device a fresh token and removes all
+// other devices.
+func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationRequest) (string, int, error) {
+	kdfJSON, err := json.Marshal(req.Kdf)
+	if err != nil {
+		return "", 0, err
+	}
+	rootJSON, err := json.Marshal(req.WrappedRoot)
+	if err != nil {
+		return "", 0, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", 0, err
+	}
+	fail := func(e error) (string, int, error) { _ = tx.Rollback(); return "", 0, e }
+	var epoch int
+	var verifier []byte
+	if err := tx.QueryRow(`SELECT auth_epoch, auth_verifier FROM accounts WHERE owner_handle = ?`, owner).Scan(&epoch, &verifier); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fail(ErrNotFound)
+		}
+		return fail(err)
+	}
+	oldHash := sha256.Sum256(req.OldAuthVerifier)
+	if subtle.ConstantTimeCompare(oldHash[:], verifier) != 1 {
+		return fail(ErrNotFound)
+	}
+	if req.ExpectedEpoch != epoch {
+		return fail(ErrVersionConflict)
+	}
+	if err := verifyKeyMigrations(tx, owner, req.Resources, req.Snapshots, req.IncomingGrants); err != nil {
+		return fail(err)
+	}
+	for _, m := range req.Resources {
+		b, err := json.Marshal(m.WrappedKey)
+		if err != nil {
+			return fail(err)
+		}
+		if _, err := tx.Exec(`UPDATE resources SET wrapped_key = ? WHERE id = ? AND owner_handle = ?`, string(b), m.ID, owner); err != nil {
+			return fail(err)
+		}
+	}
+	for _, m := range req.Snapshots {
+		b, err := json.Marshal(m.WrappedKey)
+		if err != nil {
+			return fail(err)
+		}
+		if _, err := tx.Exec(`UPDATE snapshots SET wrapped_key = ? WHERE snapshot_id = ? AND owner_handle = ?`, string(b), m.ID, owner); err != nil {
+			return fail(err)
+		}
+	}
+	for _, m := range req.IncomingGrants {
+		if _, err := tx.Exec(`UPDATE grants SET wrapped_key = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`, m.WrappedKey, m.ResourceID, m.OwnerHandle, owner); err != nil {
+			return fail(err)
+		}
+	}
+	newEpoch := epoch + 1
+	newVerifier := sha256.Sum256(req.NewAuthVerifier)
+	if _, err := tx.Exec(`UPDATE accounts SET kdf=?, wrapped_root=?, auth_verifier=?, auth_epoch=?, public_key=?, enc_public_key=?, enc_key_sig=? WHERE owner_handle=?`, string(kdfJSON), string(rootJSON), newVerifier[:], newEpoch, req.PublicKey, req.EncPublicKey, req.EncKeySig, owner); err != nil {
+		return fail(err)
+	}
+	token := newID(32)
+	th := sha256.Sum256([]byte(token))
+	if _, err := tx.Exec(`DELETE FROM devices WHERE owner_handle = ? AND device_id <> ?`, owner, deviceID); err != nil {
+		return fail(err)
+	}
+	res, err := tx.Exec(`UPDATE devices SET token_hash = ?, auth_epoch = ? WHERE owner_handle = ? AND device_id = ?`, th[:], newEpoch, owner, deviceID)
+	if err != nil {
+		return fail(err)
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fail(ErrNotFound)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", 0, err
+	}
+	s.auth.invalidateOwner(owner)
+	return token, newEpoch, nil
+}
+
+func verifyKeyMigrations(tx *sql.Tx, owner string, resources, snapshots []api.KeyWrapMigration, grants []api.GrantKeyMigration) error {
+	seen := map[string]bool{}
+	for _, m := range resources {
+		if m.ID == "" || seen[m.ID] {
+			return ErrVersionConflict
+		}
+		seen[m.ID] = true
+		var version int
+		err := tx.QueryRow(`SELECT version FROM resources WHERE id=? AND owner_handle=? AND wrapped_key IS NOT NULL AND reclaimed=0`, m.ID, owner).Scan(&version)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrVersionConflict
+		}
+		if err != nil {
+			return err
+		}
+		if version != m.ExpectedVersion {
+			return ErrVersionConflict
+		}
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM resources WHERE owner_handle=? AND wrapped_key IS NOT NULL AND reclaimed=0`, owner).Scan(&n); err != nil {
+		return err
+	}
+	if n != len(resources) {
+		return ErrVersionConflict
+	}
+	seen = map[string]bool{}
+	for _, m := range snapshots {
+		if m.ID == "" || seen[m.ID] {
+			return ErrVersionConflict
+		}
+		seen[m.ID] = true
+		var exists int
+		err := tx.QueryRow(`SELECT 1 FROM snapshots WHERE snapshot_id=? AND owner_handle=? AND wrapped_key IS NOT NULL`, m.ID, owner).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrVersionConflict
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM snapshots WHERE owner_handle=? AND wrapped_key IS NOT NULL`, owner).Scan(&n); err != nil {
+		return err
+	}
+	if n != len(snapshots) {
+		return ErrVersionConflict
+	}
+	seen = map[string]bool{}
+	for _, m := range grants {
+		k := m.ResourceID + "\x00" + m.OwnerHandle
+		if m.ResourceID == "" || m.OwnerHandle == "" || len(m.WrappedKey) == 0 || seen[k] {
+			return ErrVersionConflict
+		}
+		seen[k] = true
+		var exists int
+		err := tx.QueryRow(`SELECT 1 FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.resource_id=? AND g.owner_handle=? AND g.grantee_handle=? AND r.reclaimed=0`, m.ResourceID, m.OwnerHandle, owner).Scan(&exists)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrVersionConflict
+		}
+		if err != nil {
+			return err
+		}
+	}
+	if err := tx.QueryRow(`SELECT count(*) FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.grantee_handle=? AND r.reclaimed=0`, owner).Scan(&n); err != nil {
+		return err
+	}
+	if n != len(grants) {
+		return ErrVersionConflict
+	}
+	return nil
+}
+
 // challengeTTL bounds how long an issued nonce remains valid.
 const challengeTTL = 2 * time.Minute
 

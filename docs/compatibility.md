@@ -16,9 +16,9 @@ API layer, *before* any payload is served.
 | ---------- | ------- | ------------------- |
 | `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata |
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
+| `3` (root rotation) | unreleased | account root-key rotation and migrated identities |
 
-`api.ClientCapability` is the highest a build supports; it is `2` today. Negotiation
-itself changes no encrypted format, so shipping it did not bump the number.
+`api.ClientCapability` is `3` today. Capability 3 is required for the root-key recovery API because it changes the account signing and encryption identities.
 
 ## Negotiation flow
 
@@ -44,19 +44,9 @@ itself changes no encrypted format, so shipping it did not bump the number.
 
 ### The missing-header rule
 
-A request with no `X-Aqt-Capability` header, or an unparseable one, is assumed to be
-capability **2**. The header ships only after v0.2.0, so any header-less request comes
-from a client no newer than v0.2.x, whose newest release reads capability-2 (id-bound)
-resources. Assuming `2` keeps released v0.2.0 binaries working against id-bound
-resources; genuinely pre-0.2 clients are indistinguishable from v0.2.x on the wire, so
-they keep the status-quo AEAD failure — but only on capability-2 resources, the
-boundary that predates the mechanism. A malformed value is a client bug, not an attack
-surface, so it also assumes `2` rather than rejecting.
+Missing or malformed `X-Aqt-Capability` values are treated as capability **1** (baseline), not as v0.2. This deliberately ends header-less compatibility at the id-binding boundary: a legacy client trying to read a capability-2 or newer resource receives `426 Upgrade Required` before any ciphertext is served, rather than a downstream AEAD failure.
 
-Because of this rule, negotiation cannot retroactively protect the v0.2.0 id-binding
-boundary (a pre-0.2 client is assumed to be `2` and still hits the AEAD failure on an
-id-bound resource). It protects the **next** boundary, once every reader advertises a
-capability.
+This is a breaking server policy for header-less v0.2-era binaries. Upgrade every client before deploying it.
 
 ## Public-link lifecycle (no capability bump)
 

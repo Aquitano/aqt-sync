@@ -179,6 +179,42 @@ type PassphraseChangeRequest struct {
 	ExpectedEpoch   int               `json:"expectedEpoch"`
 }
 
+// KeyWrapMigration replaces an owner-wrapped content key during an account root
+// key rotation. ExpectedVersion prevents a stale client from silently replacing a
+// resource that changed while it prepared the migration.
+type KeyWrapMigration struct {
+	ID              string            `json:"id"`
+	WrappedKey      crypto.WrappedKey `json:"wrappedKey"`
+	ExpectedVersion int               `json:"expectedVersion,omitempty"`
+}
+
+// GrantKeyMigration replaces an incoming grant's HPKE wrap after the grantee's
+// derived X25519 identity changes with its root key.
+type GrantKeyMigration struct {
+	ResourceID  string `json:"resourceId"`
+	OwnerHandle string `json:"ownerHandle"`
+	WrappedKey  []byte `json:"wrappedKey"`
+}
+
+// RootKeyRotationRequest atomically changes the account root key. Every owner
+// resource and snapshot that has a recoverable wrapped key, plus every incoming
+// grant, must be included so the old root is not needed after the account identity
+// switches. The server stores these values opaquely and verifies only membership,
+// versions, the current-passphrase proof, and the new public-key binding.
+type RootKeyRotationRequest struct {
+	Kdf             crypto.KdfParams    `json:"kdf"`
+	WrappedRoot     crypto.SealedBlob   `json:"wrappedRoot"`
+	OldAuthVerifier []byte              `json:"oldAuthVerifier"`
+	NewAuthVerifier []byte              `json:"newAuthVerifier"`
+	ExpectedEpoch   int                 `json:"expectedEpoch"`
+	PublicKey       []byte              `json:"publicKey"`
+	EncPublicKey    []byte              `json:"encPublicKey"`
+	EncKeySig       []byte              `json:"encKeySig"`
+	Resources       []KeyWrapMigration  `json:"resources"`
+	Snapshots       []KeyWrapMigration  `json:"snapshots"`
+	IncomingGrants  []GrantKeyMigration `json:"incomingGrants"`
+}
+
 // PutResourceRequest creates a resource (ID empty) or replaces an existing one
 // in place (ID set, must be owned by the caller). WrappedKey is present only for
 // private resources (the content key wrapped under the owner's master key); for

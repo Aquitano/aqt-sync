@@ -217,6 +217,7 @@ func (s *Server) Router() *gin.Engine {
 			// Re-wrap the account's root key under a new passphrase. Small body
 			// (KDF params + a wrapped key + verifiers), so it keeps the control cap.
 			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.changePassphrase)
+			authed.PUT("/account/root-key", s.rotateRootKey)
 
 			// Storage summary for the calling account: pack bytes against quota plus
 			// row counts. All plaintext-side metadata the owner already implies.
@@ -543,6 +544,40 @@ func (s *Server) changePassphrase(c *gin.Context) {
 	// The calling device's token is unchanged (its epoch was advanced with the
 	// account's), so no new token is issued; the client keeps using it.
 	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Epoch: newEpoch})
+}
+
+// rotateRootKey performs the account-wide recovery operation. It requires the
+// current capability because old clients cannot safely recover a post-rotation
+// account identity.
+func (s *Server) rotateRootKey(c *gin.Context) {
+	if requestCapability(c) < api.CapabilityRootKeyRotation {
+		abortUpgradeRequired(c, api.CapabilityRootKeyRotation, requestCapability(c))
+		return
+	}
+	owner := c.GetString(ownerContextKey)
+	deviceID := c.GetString(deviceContextKey)
+	var req api.RootKeyRotationRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 || len(req.PublicKey) != ed25519.PublicKeySize || len(req.EncPublicKey) != crypto.EncPublicKeySize || !crypto.VerifyEncKey(ed25519.PublicKey(req.PublicKey), req.EncPublicKey, req.EncKeySig) {
+		abort(c, http.StatusBadRequest, "complete, self-consistent new account identity is required")
+		return
+	}
+	token, epoch, err := s.store.RotateRootKey(owner, deviceID, req)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusForbidden, "current passphrase proof did not match")
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abort(c, http.StatusConflict, "account or a protected key changed while rotating; re-run root-key rotation")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "root-key rotation failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
 }
 
 func (s *Server) accountUsage(c *gin.Context) {
@@ -1014,22 +1049,16 @@ func abort(c *gin.Context, code int, msg string) {
 	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg})
 }
 
-// requestCapability reads the client's declared capability from the request header.
-// A missing or unparseable value is treated as CapabilityIDBinding (2): the header
-// ships only after v0.2.0, so any header-less request comes from a client no newer
-// than v0.2.x, whose newest release reads capability-2 (id-bound) resources. Assuming
-// 2 keeps released v0.2.0 binaries working against id-bound resources; pre-0.2 clients
-// are indistinguishable, so they keep the status-quo AEAD failure on capability-2
-// resources only. A malformed value is a client bug, not an attack surface, so it also
-// assumes 2 rather than rejecting.
+// requestCapability fails closed for clients that predate capability headers.
+// The old header-less fallback made a pre-v0.2 binary indistinguishable from a
+// v0.2 reader and could hand it an id-bound root that only failed at AEAD open.
+// Treating absent or malformed values as baseline makes the server gate that
+// boundary before any encrypted payload is served.
 func requestCapability(c *gin.Context) int {
 	v := c.GetHeader(api.CapabilityHeader)
-	if v == "" {
-		return api.CapabilityIDBinding
-	}
 	n, err := strconv.Atoi(v)
-	if err != nil {
-		return api.CapabilityIDBinding
+	if err != nil || n < api.CapabilityBaseline {
+		return api.CapabilityBaseline
 	}
 	return n
 }

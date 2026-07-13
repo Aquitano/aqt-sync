@@ -10,14 +10,16 @@ const (
 	CapabilityBaseline = 1
 	// CapabilityIDBinding is v0.2.0: resource-id-bound (v2 AAD) roots and metadata.
 	CapabilityIDBinding = 2
-	// ClientCapability is the highest format this build can read. Negotiation itself
-	// changes no encrypted format, so it tops out at CapabilityIDBinding.
-	ClientCapability = CapabilityIDBinding
+	// CapabilityRootKeyRotation is the first release that can rotate an account
+	// root key and migrate the identities derived from it.
+	CapabilityRootKeyRotation = 3
+	// ClientCapability is the highest format this build can read.
+	ClientCapability = CapabilityRootKeyRotation
 )
 
-// CapabilityHeader carries a request's client capability. A missing or unparseable
-// value is treated as CapabilityIDBinding by the server; see the server's request
-// capability helper for the rationale.
+// CapabilityHeader carries a request's client capability. Missing or malformed
+// values are treated as baseline-only: legacy clients can never receive a format
+// they cannot read.
 const CapabilityHeader = "X-Aqt-Capability"
 
 // ErrCodeUpgradeRequired is the stable ErrorResponse.Code the server returns with an

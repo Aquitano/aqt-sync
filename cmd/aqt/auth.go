@@ -338,6 +338,14 @@ func passphraseCmd() *cobra.Command {
 	addKdfFlags(calibrate, &calibrateKc)
 	cmd.AddCommand(calibrate)
 
+	rotateRoot := &cobra.Command{
+		Use:   "rotate-root",
+		Short: "Replace the account root key after compromise (revokes every other device)",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return runRootKeyRotation() },
+	}
+	cmd.AddCommand(rotateRoot)
+
 	return cmd
 }
 
@@ -460,6 +468,130 @@ func runPassphraseCalibrate(kc kdfChoice) error {
 	}
 	fmt.Fprintf(os.Stderr, "argon2id re-tuned (time=%d memory=%dMiB threads=%d); other devices must re-login\n",
 		newKdf.Time, newKdf.Memory/1024, newKdf.Threads)
+	return nil
+}
+
+// runRootKeyRotation recovers every content key with the current root, wraps each
+// under a newly generated root, and asks the server to switch the full account
+// identity in one transaction. Existing convergent objects remain readable because
+// their per-object keys live in the sealed roots; future writes derive convergence
+// from the new root.
+func runRootKeyRotation() error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	pass, err := promptPassphrase("Current passphrase: ")
+	if err != nil {
+		return err
+	}
+	uk, err := crypto.DeriveUnlockKey(pass, prof.Kdf)
+	if err != nil {
+		return err
+	}
+	defer uk.Wipe()
+	oldRoot, err := crypto.UnwrapRoot(prof.WrappedRoot, uk)
+	if err != nil {
+		return errors.New("current passphrase is incorrect")
+	}
+	defer oldRoot.Wipe()
+	if interactiveStdin() {
+		ok, err := promptYesNo("Rotate the account root key and revoke every other device? [y/N] ", false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("root-key rotation cancelled")
+		}
+	}
+	newRoot, err := crypto.GenerateMasterKey()
+	if err != nil {
+		return err
+	}
+	defer newRoot.Wipe()
+	newWrapped, err := crypto.WrapRoot(newRoot, uk)
+	if err != nil {
+		return err
+	}
+	resources, err := cl.ListResources()
+	if err != nil {
+		return err
+	}
+	resourceMigrations := make([]api.KeyWrapMigration, 0, len(resources))
+	for _, r := range resources {
+		if r.WrappedKey == nil {
+			continue
+		}
+		ck, err := crypto.UnwrapKey(*r.WrappedKey, [crypto.KeySize]byte(oldRoot))
+		if err != nil {
+			return fmt.Errorf("unwrap resource %s: %w", r.ID, err)
+		}
+		wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(newRoot))
+		ck.Wipe()
+		if err != nil {
+			return fmt.Errorf("rewrap resource %s: %w", r.ID, err)
+		}
+		resourceMigrations = append(resourceMigrations, api.KeyWrapMigration{ID: r.ID, WrappedKey: wrapped, ExpectedVersion: r.Version})
+	}
+	snaps, err := cl.ListSnapshots("")
+	if err != nil {
+		return err
+	}
+	snapshotMigrations := make([]api.KeyWrapMigration, 0, len(snaps))
+	for _, snap := range snaps {
+		if snap.WrappedKey == nil {
+			continue
+		}
+		ck, err := crypto.UnwrapKey(*snap.WrappedKey, [crypto.KeySize]byte(oldRoot))
+		if err != nil {
+			return fmt.Errorf("unwrap snapshot %s: %w", snap.ID, err)
+		}
+		wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(newRoot))
+		ck.Wipe()
+		if err != nil {
+			return fmt.Errorf("rewrap snapshot %s: %w", snap.ID, err)
+		}
+		snapshotMigrations = append(snapshotMigrations, api.KeyWrapMigration{ID: snap.ID, WrappedKey: wrapped})
+	}
+	shares, err := cl.ListShares()
+	if err != nil {
+		return err
+	}
+	newEnc := crypto.DeriveEncKey(newRoot).Public()
+	grantMigrations := make([]api.GrantKeyMigration, 0, len(shares))
+	for _, share := range shares {
+		ck, err := crypto.UnwrapGrant(share.WrappedKey, oldRoot, share.ResourceID, share.OwnerHandle, prof.OwnerHandle)
+		if err != nil {
+			return fmt.Errorf("unwrap incoming grant %s: %w", share.ResourceID, err)
+		}
+		wrapped, err := crypto.WrapGrant(ck, newEnc, share.ResourceID, share.OwnerHandle, prof.OwnerHandle)
+		ck.Wipe()
+		if err != nil {
+			return fmt.Errorf("rewrap incoming grant %s: %w", share.ResourceID, err)
+		}
+		grantMigrations = append(grantMigrations, api.GrantKeyMigration{ResourceID: share.ResourceID, OwnerHandle: share.OwnerHandle, WrappedKey: wrapped})
+	}
+	signing := crypto.DeriveSigningKey(newRoot)
+	resp, err := cl.RotateRootKey(api.RootKeyRotationRequest{
+		Kdf: prof.Kdf, WrappedRoot: newWrapped, OldAuthVerifier: crypto.DeriveAuthVerifier(uk), NewAuthVerifier: crypto.DeriveAuthVerifier(uk), ExpectedEpoch: prof.AuthEpoch,
+		PublicKey: signing.Public().(ed25519.PublicKey), EncPublicKey: newEnc, EncKeySig: crypto.SignEncKey(signing, newEnc),
+		Resources: resourceMigrations, Snapshots: snapshotMigrations, IncomingGrants: grantMigrations,
+	})
+	if errors.Is(err, client.ErrConflict) {
+		return errors.New("account data changed while preparing root-key rotation; re-run it")
+	}
+	if err != nil {
+		return err
+	}
+	prof.Token, prof.Kdf, prof.WrappedRoot, prof.AuthEpoch = resp.Token, prof.Kdf, newWrapped, resp.Epoch
+	prof.Fingerprint = crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
+	if err := identity.Save(prof); err != nil {
+		return err
+	}
+	if err := cacheSession(newRoot, defaultSessionTTL); err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "account root key rotated; all other devices were revoked and must re-login")
 	return nil
 }
 
