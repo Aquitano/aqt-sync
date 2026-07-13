@@ -28,6 +28,8 @@ type Metrics struct {
 	packBytesIn       prometheus.Counter
 	packBytesOut      prometheus.Counter
 	publicObjectBytes prometheus.Counter
+	grantObjectBytes  prometheus.Counter
+	grantWrites       prometheus.Counter
 
 	gcRuns           *prometheus.CounterVec
 	gcPacksDeleted   prometheus.Counter
@@ -60,6 +62,14 @@ func newMetrics(store *Store) *Metrics {
 			Name: "aqt_public_object_bytes_served_total",
 			Help: "Bytes served by the unauthenticated public object-slice endpoint.",
 		}),
+		grantObjectBytes: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "aqt_grant_object_bytes_served_total",
+			Help: "Bytes served by the authenticated grant object-slice endpoint.",
+		}),
+		grantWrites: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "aqt_grant_writes_total",
+			Help: "Grants created or re-wrapped via POST /v1/resources/:id/grants.",
+		}),
 		gcRuns: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "aqt_gc_runs_total",
 			Help: "GC sweeps by trigger (client POST /v1/gc vs the scheduled timer).",
@@ -83,7 +93,7 @@ func newMetrics(store *Store) *Metrics {
 	}
 	m.registry.MustRegister(
 		m.requests, m.duration,
-		m.packBytesIn, m.packBytesOut, m.publicObjectBytes,
+		m.packBytesIn, m.packBytesOut, m.publicObjectBytes, m.grantObjectBytes, m.grantWrites,
 		m.gcRuns, m.gcPacksDeleted, m.gcBytesFreed, m.gcPacksRepacked, m.gcBytesReclaimed,
 		&accountCollector{store: store},
 		collectors.NewGoCollector(),

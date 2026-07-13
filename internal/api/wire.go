@@ -34,6 +34,8 @@ type resourceUploadHeader struct {
 	MinClient       int                `json:"minClient,omitempty"`
 	ExpireSeconds   int64              `json:"expireSeconds,omitempty"`
 	MaxReads        int64              `json:"maxReads,omitempty"`
+	OnExpiry        OnExpiry           `json:"onExpiry,omitempty"`
+	RevokeGrantee   string             `json:"revokeGrantee,omitempty"`
 }
 
 // resourceDownloadHeader is the JSON header of a GET /v1/resources/:id
@@ -44,6 +46,8 @@ type resourceDownloadHeader struct {
 	BlobNonce     []byte             `json:"blobNonce"`
 	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	GrantKey      []byte             `json:"grantKey,omitempty"`
+	Owner         string             `json:"owner,omitempty"`
 	Version       int                `json:"version"`
 	MinClient     int                `json:"minClient,omitempty"`
 }
@@ -62,6 +66,8 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		MinClient:       req.MinClient,
 		ExpireSeconds:   req.ExpireSeconds,
 		MaxReads:        req.MaxReads,
+		OnExpiry:        req.OnExpiry,
+		RevokeGrantee:   req.RevokeGrantee,
 	}, req.Blob.Ciphertext)
 }
 
@@ -84,6 +90,8 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		MinClient:       h.MinClient,
 		ExpireSeconds:   h.ExpireSeconds,
 		MaxReads:        h.MaxReads,
+		OnExpiry:        h.OnExpiry,
+		RevokeGrantee:   h.RevokeGrantee,
 	}, nil
 }
 
@@ -96,6 +104,8 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		BlobNonce:     res.Blob.Nonce,
 		EncryptedMeta: res.EncryptedMeta,
 		WrappedKey:    res.WrappedKey,
+		GrantKey:      res.GrantKey,
+		Owner:         res.Owner,
 		Version:       res.Version,
 		MinClient:     res.MinClient,
 	}, res.Blob.Ciphertext)
@@ -114,6 +124,8 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		Blob:          crypto.SealedBlob{Nonce: h.BlobNonce, Ciphertext: ct},
 		EncryptedMeta: h.EncryptedMeta,
 		WrappedKey:    h.WrappedKey,
+		GrantKey:      h.GrantKey,
+		Owner:         h.Owner,
 		Version:       h.Version,
 		MinClient:     h.MinClient,
 	}, nil

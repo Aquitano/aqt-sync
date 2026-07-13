@@ -101,21 +101,29 @@ func syncCmd() *cobra.Command {
 }
 
 func cloneCmd() *cobra.Command {
-	var adopt bool
+	var (
+		adopt bool
+		pw    passwordFlags
+	)
 	cmd := &cobra.Command{
-		Use:   "clone <id|aqt://ref> [dir]",
-		Short: "Materialize a tracked folder on this machine",
+		Use:   "clone <id|aqt://ref|share-url> [dir]",
+		Short: "Materialize a tracked folder (or a shared folder link) on this machine",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := ""
 			if len(args) == 2 {
 				dir = args[1]
 			}
-			return runClone(args[0], dir, adopt)
+			password, err := pw.resolve()
+			if err != nil {
+				return err
+			}
+			return runClone(args[0], dir, adopt, password)
 		},
 	}
 	cmd.Flags().BoolVar(&adopt, "adopt", false,
 		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
+	pw.bind(cmd, "password for a gated link")
 	return cmd
 }
 
@@ -797,7 +805,7 @@ func runSync(dir string, opts syncOptions) error {
 			root: root, cl: cl, opts: opts,
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
-			version: res.Version, id: st.ID,
+			visibility: res.Visibility, version: res.Version, id: st.ID,
 			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo,
 		}, actions, dirActions)
 	}
@@ -824,22 +832,23 @@ func reconcileWithRetry(reconcile func() error) error {
 
 // applyCtx bundles the state applySync needs, keeping its signature readable.
 type applyCtx struct {
-	root     string
-	cl       *client.Client
-	opts     syncOptions
-	base     syncengine.Manifest
-	local    syncengine.Manifest
-	remote   syncengine.Manifest
-	conv     crypto.ConvergenceKey
-	ck       crypto.ContentKey
-	mk       crypto.MasterKey
-	meta     crypto.SealedBlob // the resource's existing sealed metadata, carried forward
-	version  int
-	id       string
-	mode     conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
-	host     string           // sanitized hostname stamped into conflict-copy names (copy mode)
-	now      time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
-	copyMemo conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
+	root       string
+	cl         *client.Client
+	opts       syncOptions
+	base       syncengine.Manifest
+	local      syncengine.Manifest
+	remote     syncengine.Manifest
+	conv       crypto.ConvergenceKey
+	ck         crypto.ContentKey
+	mk         crypto.MasterKey
+	meta       crypto.SealedBlob // the resource's existing sealed metadata, carried forward
+	visibility api.Visibility    // the resource's current visibility, carried forward (a shared folder stays shared)
+	version    int
+	id         string
+	mode       conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
+	host       string           // sanitized hostname stamped into conflict-copy names (copy mode)
+	now        time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
+	copyMemo   conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
 }
 
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
@@ -997,7 +1006,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	if push && remoteChanged {
 		manifest := manifestFrom(merged, c.version+1)
 		manifest.Dirs = dirsFrom(mergedDirs)
-		resp, err := putFolderUpdate(c.cl, c.conv, c.id, manifest, c.meta, c.ck, c.mk, c.version)
+		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
 		if err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
@@ -1122,8 +1131,16 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 
 // --- clone ---
 
-func runClone(ref, dir string, adopt bool) error {
-	id, _, _ := parseRef(ref) // v1 folders are private; no fragment key
+func runClone(ref, dir string, adopt bool, password string) error {
+	id, fragment, origin := parseRef(ref)
+	// A ref carrying a fragment is a share link: the key comes from the link, not
+	// the master key, and the read path is the unauthenticated public endpoint.
+	if fragment != "" {
+		if adopt {
+			return errors.New("--adopt binds a directory to a folder you own; a share link is read-only, so there is nothing to sync with")
+		}
+		return runCloneLink(id, fragment, origin, dir, password)
+	}
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
@@ -1136,6 +1153,19 @@ func runClone(ref, dir string, adopt bool) error {
 		return err
 	}
 	if res.WrappedKey == nil {
+		// A grant read: materialize like a link clone, read-only, with the
+		// grant-wrapped key and the authed exact-slice endpoint.
+		if res.GrantKey != nil {
+			if adopt {
+				return errors.New("--adopt binds a directory to a folder you own; a granted folder is read-only, so there is nothing to sync with")
+			}
+			ck, err := contentKey(res, "", "", prof)
+			if err != nil {
+				return err
+			}
+			defer ck.Wipe()
+			return cloneReadOnly(grantFetch(cl, id), res, ck, id, dir)
+		}
 		return errors.New("not a private folder you own (no owner key)")
 	}
 	mk, err := unlockMaster(prof)
@@ -1186,6 +1216,83 @@ func runClone(ref, dir string, adopt bool) error {
 		return err
 	}
 	fmt.Printf("cloned %d files into %s\n", len(base.Entries), abs)
+	return nil
+}
+
+// runCloneLink materializes a shared folder from its public link: the tree nodes and
+// file content come through the unauthenticated public-object endpoint, and the
+// folder key comes from the link fragment. The result is a plain directory, not a
+// tracked folder — a link holder has no account token, so there is nothing to sync
+// with; the link is pull-only by construction.
+func runCloneLink(id, fragment, origin, dir, password string) error {
+	prof := loadProfileOptional()
+	cl, err := newLinkClient(origin, prof)
+	if err != nil {
+		return err
+	}
+	res, err := cl.GetResource(id)
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Errorf("resource %s not found (or no longer public)", id)
+	}
+	if errors.Is(err, client.ErrGone) {
+		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
+	}
+	if err != nil {
+		return err
+	}
+	ck, err := contentKey(res, fragment, password, prof)
+	if err != nil {
+		return err
+	}
+	defer ck.Wipe()
+	return cloneReadOnly(publicFetch(cl, id), res, ck, id, dir)
+}
+
+// cloneReadOnly materializes a shared folder over an exact-slice transport — the
+// common tail of a share-link clone and a grantee clone. The result is a plain
+// directory, not a tracked folder: neither caller can write to the resource, so
+// there is nothing to sync with.
+func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.ContentKey, id, dir string) error {
+	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
+	if err != nil {
+		return err
+	}
+	if meta.Kind != api.KindFolder {
+		return fmt.Errorf("%s is a single file, not a folder; `aqt pull` fetches it", meta.Name)
+	}
+	if meta.Packed || !meta.Tree {
+		return errors.New("this folder's format cannot be read through a share; ask the owner to re-share it as a chunked folder")
+	}
+	// Decrypt the root before creating the destination, so a wrong password or
+	// corrupt link fails without leaving an empty directory behind.
+	root, err := syncengine.OpenTreeRoot(res.Blob, ck, id)
+	if err != nil {
+		return fmt.Errorf("decrypt folder root: %w", err)
+	}
+	if dir == "" {
+		dir = id
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	if err := ensureEmptyDir(abs); err != nil {
+		return err
+	}
+	manifest, err := syncengine.OpenTreeBatched(root, newPublicBatchFetcher(fetch))
+	if err != nil {
+		return fmt.Errorf("decrypt manifest: %w", err)
+	}
+	prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
+	dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), abs, manifest.Entries, prog)
+	prog.finish(dlErr == nil)
+	if dlErr != nil {
+		return dlErr
+	}
+	if err := materializeDirs(abs, manifest.Dirs); err != nil {
+		return err
+	}
+	fmt.Printf("cloned %d files into %s (read-only share; not a tracked folder)\n", len(manifest.Entries), abs)
 	return nil
 }
 
@@ -1449,6 +1556,13 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, pr
 	if err != nil {
 		return err
 	}
+	return runDownloadsFrom(src.get, root, entries, prog)
+}
+
+// runDownloadsFrom is runDownloads with the chunk source already chosen, so the
+// link-holder paths can materialize entries through the public object endpoint
+// with the same worker pool the authed pack path uses.
+func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries []syncengine.Entry, prog *progressBar) error {
 	var g errgroup.Group
 	g.SetLimit(syncTransferLimit(downloadConcurrency))
 	for _, e := range entries {
@@ -1458,7 +1572,7 @@ func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, pr
 				if err := syncengine.WriteSymlink(root, e); err != nil {
 					return err
 				}
-			} else if err := syncengine.MaterializeFile(root, e, src.get); err != nil {
+			} else if err := syncengine.MaterializeFile(root, e, get); err != nil {
 				return err
 			}
 			prog.add(e.Size)
@@ -1900,7 +2014,13 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 // The encrypted metadata (the folder name sealed at init) is carried forward
 // unchanged, so a sync never clobbers it; metadata that predates id binding is
 // re-sealed bound to the id once (init seals before the server assigns the id).
-func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
+//
+// vis is the resource's current visibility, carried forward for the same reason: a
+// sync pushes content, it does not re-share or un-share. Hardcoding private here made
+// the first sync after `aqt share` silently kill the link (the server takes visibility
+// from every PUT). The link's lifecycle policy is preserved server-side, since this
+// request carries none.
+func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
@@ -1918,7 +2038,7 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, m
 		return api.PutResourceResponse{}, err
 	}
 	return cl.PutResource(api.PutResourceRequest{
-		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
+		ID: id, Visibility: vis, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
 	})

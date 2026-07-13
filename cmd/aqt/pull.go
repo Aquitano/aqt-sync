@@ -93,10 +93,11 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	}
 	defer ck.Wipe()
 
-	// An aqt://<id>/<path> ref addresses one entry inside a folder: only the
-	// path's spine nodes and that entry's chunks are fetched, never the tree.
+	// An aqt://<id>/<path> ref (or a share URL with segments after /x/<id>)
+	// addresses one entry inside a folder: only the path's spine nodes and that
+	// entry's chunks are fetched, never the tree.
 	if subpath != "" {
-		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force)
+		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force, remoteFetch(cl, res, fragment))
 	}
 
 	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
@@ -104,13 +105,16 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 	if meta.Kind == api.KindFolder {
+		if fragment != "" {
+			return fmt.Errorf("%s is a folder: `aqt clone '<link>'` materializes it, and '<link>/<path>' pulls a single entry", meta.Name)
+		}
 		return fmt.Errorf("%s is a folder: `aqt clone aqt://%s` materializes it, `aqt ls aqt://%s` lists it, "+
 			"and aqt://%s/<path> pulls a single entry", meta.Name, id, id, id)
 	}
 	if meta.Streamed {
-		// A share link (fragment present) has no account token for the authed
-		// pack-locate path, so it reads objects through the public endpoint instead.
-		return pullStream(cl, res, ck, out, meta, fragment != "", toStdout, force)
+		// A share link has no account token for the authed pack-locate path, and a
+		// grantee has a token but no pack access; both read exact object slices.
+		return pullStream(cl, res, ck, out, meta, remoteFetch(cl, res, fragment), toStdout, force)
 	}
 
 	plaintext, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, id)
@@ -122,7 +126,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 
 // pullStream reconstructs a streamed file from its objects, writing chunks to the
 // destination as they are fetched so the whole file is never held in memory.
-func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, viaLink, toStdout, force bool) error {
+func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, slices sliceFetch, toStdout, force bool) error {
 	root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
@@ -133,8 +137,8 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	// both through the unauthenticated public object endpoint; the owner uses the
 	// authed pack-locate path.
 	get := func(chunks []crypto.Chunk) (func(id string) ([]byte, error), error) {
-		if viaLink {
-			return newPublicChunkSource(cl, res.ID, chunks).get, nil
+		if slices != nil {
+			return newPublicChunkSource(slices, chunks).get, nil
 		}
 		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 		if err != nil {
@@ -190,6 +194,20 @@ func contentKey(res api.GetResourceResponse, fragment, password string, prof *id
 			password = p
 		}
 		return crypto.DecodeFragment(fragment, password)
+	}
+	// A grant read carries the content key HPKE-wrapped to this account instead of
+	// the owner's wrap; the info binding pins it to (resource, owner, this handle),
+	// so a hostile server cannot splice another grant's wrap onto this resource.
+	if res.WrappedKey == nil && res.GrantKey != nil {
+		if prof == nil {
+			return crypto.ContentKey{}, errors.New("granted resource: run `aqt login` to decrypt it")
+		}
+		mk, err := unlockMaster(prof)
+		if err != nil {
+			return crypto.ContentKey{}, err
+		}
+		defer mk.Wipe()
+		return crypto.UnwrapGrant(res.GrantKey, mk, res.ID, res.Owner, prof.OwnerHandle)
 	}
 	if res.WrappedKey == nil {
 		return crypto.ContentKey{}, errors.New("no decryption key: this looks like a public resource but the link had no #key")

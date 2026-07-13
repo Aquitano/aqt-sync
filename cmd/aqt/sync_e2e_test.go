@@ -347,7 +347,7 @@ func TestMixedVersionUpgradeRequired(t *testing.T) {
 		t.Fatalf("bump min_client: %v", err)
 	}
 
-	err := runClone(id, filepath.Join(t.TempDir(), "replica"), false)
+	err := runClone(id, filepath.Join(t.TempDir(), "replica"), false, "")
 	if !errors.Is(err, client.ErrUpgradeRequired) {
 		t.Fatalf("clone error = %v, want client.ErrUpgradeRequired", err)
 	}
@@ -684,7 +684,7 @@ func (h *e2eHarness) init(dir string) {
 
 func (h *e2eHarness) clone(id, dir string) {
 	h.t.Helper()
-	if err := runClone(id, dir, false); err != nil {
+	if err := runClone(id, dir, false, ""); err != nil {
 		h.t.Fatalf("clone %s: %v", id, err)
 	}
 }

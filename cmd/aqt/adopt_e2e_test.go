@@ -25,7 +25,7 @@ func TestAdoptReusesLocalFiles(t *testing.T) {
 	copyTreeExclAqt(t, origin, adoptee)
 
 	before := h.countPacks()
-	if err := runClone(id, adoptee, true); err != nil {
+	if err := runClone(id, adoptee, true, ""); err != nil {
 		t.Fatalf("adopt: %v", err)
 	}
 	if got := h.countPacks(); got != before {
@@ -67,7 +67,7 @@ func TestAdoptDivergenceConflicts(t *testing.T) {
 	writeTree(t, adoptee, "local-only.txt", "only here") // extra local file
 	removeTree(t, adoptee, "remote-only.txt")            // missing locally
 
-	if err := runClone(id, adoptee, true); !errors.Is(err, errConflictsRemain) {
+	if err := runClone(id, adoptee, true, ""); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("adopt of a diverging tree: want errConflictsRemain, got %v", err)
 	}
 	// Tracking must survive the conflict abort so the user can resolve and re-run.
@@ -104,14 +104,14 @@ func TestAdoptGuards(t *testing.T) {
 	id := h.folderID(origin)
 
 	// Adopting a directory that is already tracked is refused.
-	if err := runClone(id, origin, true); err == nil {
+	if err := runClone(id, origin, true, ""); err == nil {
 		t.Fatal("adopt of an already-tracked folder did not error")
 	}
 
 	// A plain clone into a non-empty directory still refuses.
 	nonEmpty := t.TempDir()
 	writeTree(t, nonEmpty, "stray.txt", "in the way")
-	if err := runClone(id, nonEmpty, false); err == nil {
+	if err := runClone(id, nonEmpty, false, ""); err == nil {
 		t.Fatal("plain clone into a non-empty directory did not error")
 	}
 
@@ -125,7 +125,7 @@ func TestAdoptGuards(t *testing.T) {
 
 	adoptee := t.TempDir()
 	writeTree(t, adoptee, "p.txt", "packed")
-	if err := runClone(packID, adoptee, true); err == nil {
+	if err := runClone(packID, adoptee, true, ""); err == nil {
 		t.Fatal("adopt of a pack-and-seal folder did not error")
 	}
 
@@ -134,7 +134,7 @@ func TestAdoptGuards(t *testing.T) {
 	mismatched := t.TempDir()
 	writePackConfig(t, mismatched)
 	writeTree(t, mismatched, "a.txt", "data")
-	if err := runClone(id, mismatched, true); err == nil {
+	if err := runClone(id, mismatched, true, ""); err == nil {
 		t.Fatal("adopt with a pack .aqtconfig against a chunked remote did not error")
 	}
 	if _, err := os.Stat(controlPath(mismatched, stateFile)); !errors.Is(err, os.ErrNotExist) {

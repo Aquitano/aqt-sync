@@ -19,6 +19,11 @@ func TestSplitRefPath(t *testing.T) {
 		{"abc123", "abc123", ""},
 		{"https://host/x/abc123#key", "https://host/x/abc123#key", ""},
 		{"aqt://abc123/docs#frag", "aqt://abc123#frag", "docs"},
+		{"https://host/x/abc123/docs/notes.txt#key", "https://host/x/abc123#key", "docs/notes.txt"},
+		// A directory named x inside the folder is ordinary, and its own /x/ must not be
+		// mistaken for the route: splitting there took "util.go" for the resource id.
+		{"https://host/x/abc123/src/x/util.go#key", "https://host/x/abc123#key", "src/x/util.go"},
+		{"aqt://abc123/src/x/util.go", "aqt://abc123", "src/x/util.go"},
 	}
 	for _, c := range cases {
 		base, sub := splitRefPath(c.ref)
