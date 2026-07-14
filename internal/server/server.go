@@ -162,8 +162,10 @@ func (s *Server) Router() *gin.Engine {
 	// device token exists (e.g. a deploy readiness check).
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 
-	// Human-facing landing page for a public share link. Decryption runs in the
-	// CLI; the content key is in the URL fragment, which never reaches the server.
+	// Human-facing landing page for a public share link. Its pinned crypto assets
+	// decrypt inline files in the browser; the content key remains in the URL
+	// fragment, which never reaches the server.
+	r.GET("/x-assets/:name", s.shareAsset)
 	r.GET("/x/:id", s.shareView)
 
 	v1 := r.Group("/v1")
