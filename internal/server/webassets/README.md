@@ -9,6 +9,9 @@ They are vendored rather than loaded from a CDN so a share recipient's fragment
 key and plaintext stay inside code shipped by the aqt server. The original MIT
 and ISC license texts are stored alongside the assets.
 
+`share.js` is the page's own state machine and decrypt flow. It is served as an
+asset (not inlined) so the share CSP can omit `'unsafe-inline'` for scripts.
+
 Source package SHA-512 digests:
 
 - `libsodium@0.7.10`: `798fb3ee10eb0cac6400af9029954dbfdd80e4a624c5fbc8b21b412649a0e534a20a762a64fde2f4e3bdc2113bf4fc209b88c66a81e090ce1aa3f6fd0b2bb8cd`

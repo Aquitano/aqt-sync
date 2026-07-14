@@ -39,6 +39,11 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 			t.Errorf("CSP missing %q (got %q)", directive, csp)
 		}
 	}
+	// blob: documents (Raw/Download) inherit this CSP; unsafe-inline scripts
+	// would let a hostile shared SVG run in this origin.
+	if strings.Contains(strings.SplitAfter(csp, "style-src")[0], "'unsafe-inline'") {
+		t.Errorf("script-src must not allow 'unsafe-inline' (got %q)", csp)
+	}
 
 	body := rec.Body.String()
 	for _, want := range []string{
@@ -51,11 +56,24 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		`name="robots" content="noindex`, // share pages stay out of indexes
 		`src="/x-assets/libsodium-0.7.10.js"`,
 		`src="/x-assets/hash-wasm-argon2-4.9.0.js"`,
-		"crypto_aead_xchacha20poly1305_ietf_decrypt",
-		"hashwasm.argon2id",
+		`src="/x-assets/share.js"`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page missing %q", want)
+		}
+	}
+	if strings.Contains(body, "AqtCrypto") {
+		t.Error("page script must be served as an asset, not inlined (CSP has no script-src 'unsafe-inline')")
+	}
+
+	// The decryptor logic ships in the external page script.
+	script := h.get("/x-assets/share.js")
+	if script.Code != http.StatusOK {
+		t.Fatalf("share.js: got %d, want 200", script.Code)
+	}
+	for _, want := range []string{"crypto_aead_xchacha20poly1305_ietf_decrypt", "hashwasm.argon2id"} {
+		if !strings.Contains(script.Body.String(), want) {
+			t.Errorf("share.js missing %q", want)
 		}
 	}
 	if strings.Contains(body, "The server stores only ciphertext") {
@@ -74,6 +92,7 @@ func TestShareCryptoAssetsAreSelfHostedAndAllowlisted(t *testing.T) {
 		"libsodium-0.7.10.js",
 		"libsodium-wrappers-0.7.10.js",
 		"hash-wasm-argon2-4.9.0.js",
+		"share.js",
 	} {
 		rec := h.get("/x-assets/" + name)
 		if rec.Code != http.StatusOK {

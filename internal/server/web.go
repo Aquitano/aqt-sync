@@ -15,38 +15,55 @@ import (
 
 const htmlContentType = "text/html; charset=utf-8"
 
-// shareCSP locks the share page down: the inline decryptor may only talk to
-// this origin, so the fragment key cannot be exfiltrated by anything the page
-// loads. blob: is needed for the Raw/Download object URLs of decrypted files.
-const shareCSP = "default-src 'none'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; " +
-	"connect-src 'self'; img-src blob:; media-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+// shareCSP locks the share page down: the decryptor may only talk to this
+// origin, so the fragment key cannot be exfiltrated by anything the page loads.
+// blob: is needed for the Raw/Download object URLs of decrypted files. Script
+// comes only from 'self' (the page script is a served asset, never inline):
+// blob: documents inherit this CSP, so 'unsafe-inline' would let a hostile
+// shared SVG opened via Raw run script in this origin.
+// connect-src data: lets libsodium fetch its embedded WASM (a data: URL);
+// without it the runtime silently falls back to asm.js. data: fetches carry
+// nothing off the page.
+const shareCSP = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'unsafe-inline'; " +
+	"connect-src 'self' data:; img-src blob:; media-src blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
 
 //go:embed webassets/*
 var webAssets embed.FS
 
 var shareTmpl = template.Must(template.ParseFS(webAssets, "webassets/share.html"))
 
-var shareScriptAssets = map[string]string{
-	"libsodium-0.7.10.js":          "webassets/libsodium-0.7.10.js",
-	"libsodium-wrappers-0.7.10.js": "webassets/libsodium-wrappers-0.7.10.js",
-	"hash-wasm-argon2-4.9.0.js":    "webassets/hash-wasm-argon2-4.9.0.js",
+// The value marks whether the asset's filename pins its content (version-named
+// vendor builds), which decides how aggressively it may be cached.
+var shareScriptAssets = map[string]struct {
+	path      string
+	immutable bool
+}{
+	"libsodium-0.7.10.js":          {"webassets/libsodium-0.7.10.js", true},
+	"libsodium-wrappers-0.7.10.js": {"webassets/libsodium-wrappers-0.7.10.js", true},
+	"hash-wasm-argon2-4.9.0.js":    {"webassets/hash-wasm-argon2-4.9.0.js", true},
+	"share.js":                     {"webassets/share.js", false},
 }
 
-// shareAsset serves the pinned, vendored crypto runtime used by the browser
-// decryptor. Keeping the allowlist here avoids turning the embedded directory
-// (which also contains license files and the HTML template) into a file server.
+// shareAsset serves the pinned crypto runtime and the page script used by the
+// browser decryptor. Keeping the allowlist here avoids turning the embedded
+// directory (which also contains license files and the HTML template) into a
+// file server.
 func (s *Server) shareAsset(c *gin.Context) {
-	path, ok := shareScriptAssets[c.Param("name")]
+	asset, ok := shareScriptAssets[c.Param("name")]
 	if !ok {
 		c.Status(http.StatusNotFound)
 		return
 	}
-	body, err := webAssets.ReadFile(path)
+	body, err := webAssets.ReadFile(asset.path)
 	if err != nil {
 		c.Status(http.StatusInternalServerError)
 		return
 	}
-	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	if asset.immutable {
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		c.Header("Cache-Control", "no-cache")
+	}
 	c.Header("Cross-Origin-Resource-Policy", "same-origin")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Data(http.StatusOK, "application/javascript; charset=utf-8", body)
