@@ -44,6 +44,7 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	for _, want := range []string{
 		resp.ID,                          // page is bound to the resource
 		"state-locked",                   // consent-before-fetch state exists
+		"is-decrypted",                   // successful state expands into the file workspace
 		"Decrypt in browser",             // primary action
 		"aqt pull",                       // CLI fallback stays available
 		`name="robots" content="noindex`, // share pages stay out of indexes
@@ -55,6 +56,9 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page missing %q", want)
 		}
+	}
+	if strings.Contains(body, "The server stores only ciphertext") {
+		t.Error("share page still contains the removed explanatory lede")
 	}
 
 	// The error pages keep the same guarantees they had before the redesign.
