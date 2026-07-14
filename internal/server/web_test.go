@@ -45,6 +45,7 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		resp.ID,                          // page is bound to the resource
 		"state-locked",                   // consent-before-fetch state exists
 		"is-decrypted",                   // successful state expands into the file workspace
+		"line-numbers",                   // text previews include an accessible, non-selectable gutter
 		"Decrypt in browser",             // primary action
 		"aqt pull",                       // CLI fallback stays available
 		`name="robots" content="noindex`, // share pages stay out of indexes

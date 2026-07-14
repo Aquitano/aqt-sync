@@ -338,13 +338,34 @@
 
   .file-body { max-height: 32rem; overflow: auto; }
 
-  .file-body pre {
-    margin: 0;
-    padding: 1rem 1.1rem;
+  .code-view {
+    display: grid;
+    min-width: max-content;
+    grid-template-columns: auto 1fr;
     font-family: var(--mono);
     font-size: 0.8rem;
     line-height: 1.6;
+  }
+
+  .code-view pre {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    font: inherit;
+    line-height: inherit;
     tab-size: 4;
+  }
+
+  .code-view .line-numbers {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    padding-right: 0.8rem;
+    padding-left: 0.8rem;
+    border-right: 1px solid rgb(29 28 25 / 22%);
+    color: rgb(29 28 25 / 48%);
+    background: var(--paper-pale);
+    text-align: right;
+    user-select: none;
   }
 
   .file-body img {
@@ -436,11 +457,11 @@
     flex: 1;
   }
 
-  body.is-decrypted .file-body pre {
-    min-width: max-content;
-    padding: 1.25rem 1.4rem;
+  body.is-decrypted .code-view {
     font-size: clamp(0.82rem, 1vw, 0.95rem);
   }
+
+  body.is-decrypted .code-view pre { padding-top: 1.25rem; padding-bottom: 1.25rem; }
 
   body.is-decrypted .footnote { display: none; }
 
@@ -804,6 +825,40 @@
     }
   }
 
+  // Keep the gutter lightweight for hostile or unusually newline-heavy files.
+  // The text remains fully readable when the line-count ceiling is exceeded.
+  var MAX_NUMBERED_LINES = 10000;
+
+  function lineNumberText(text) {
+    var count = 1;
+    for (var i = 0; i < text.length; i++) {
+      if (text.charCodeAt(i) === 10 && ++count > MAX_NUMBERED_LINES) return null;
+    }
+    var numbers = new Array(count);
+    for (var line = 0; line < count; line++) numbers[line] = String(line + 1);
+    return numbers.join("\n");
+  }
+
+  function renderTextFile(body, text) {
+    var view = document.createElement("div");
+    view.className = "code-view";
+
+    var numbers = lineNumberText(text);
+    if (numbers !== null) {
+      var gutter = document.createElement("pre");
+      gutter.className = "line-numbers";
+      gutter.setAttribute("aria-hidden", "true");
+      gutter.textContent = numbers;
+      view.appendChild(gutter);
+    }
+
+    var pre = document.createElement("pre");
+    pre.className = "code-content";
+    pre.textContent = text;
+    view.appendChild(pre);
+    body.appendChild(view);
+  }
+
   function renderFile(meta, plain) {
     var name = meta.name || RES_ID;
     var ext = name.indexOf(".") > 0 ? name.split(".").pop().toLowerCase() : "";
@@ -827,9 +882,7 @@
       try { text = new TextDecoder("utf-8", { fatal: true }).decode(plain); } catch (e) { /* binary */ }
     }
     if (text !== null && mime.indexOf("image/") !== 0) {
-      var pre = document.createElement("pre");
-      pre.textContent = text;
-      body.appendChild(pre);
+      renderTextFile(body, text);
       wireCopy("act-copy", function () { return text; });
     } else if (mime.indexOf("image/") === 0) {
       var img = document.createElement("img");
