@@ -304,12 +304,15 @@ button:focus-visible {
 
 .hero-copy {
   max-width: 42rem;
+  container-type: inline-size;
 }
 
 .hero h1 {
   margin: 0;
   font-family: var(--font-pixel);
-  font-size: clamp(4.2rem, 8.6vw, 9.2rem);
+  /* Sized against the copy column, not the viewport; vw units overflow the
+     grid column and .hero-line clips the last glyphs. */
+  font-size: clamp(4.2rem, 19.4cqw, 9.2rem);
   font-weight: 600;
   letter-spacing: -0.065em;
   line-height: 0.76;
