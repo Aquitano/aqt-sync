@@ -1,0 +1,614 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>aqt · encrypted resource</title>
+<style>
+  :root {
+    --paper: #f3dea3;
+    --paper-deep: #e6c979;
+    --paper-pale: #f9ecc4;
+    --ink: #1d1c19;
+    --ink-soft: #292824;
+    --ink-muted: #615b4d;
+    --line: rgb(29 28 25 / 32%);
+    --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    min-height: 100dvh;
+    color: var(--ink);
+    background-color: var(--paper);
+    background-image: radial-gradient(circle, rgb(29 28 25 / 9%) 0 1px, transparent 1.5px);
+    background-size: 9px 9px;
+    font-family: var(--sans);
+    line-height: 1.55;
+  }
+
+  ::selection { color: var(--paper); background: var(--ink); }
+
+  a { color: inherit; }
+
+  a:focus-visible, button:focus-visible, input:focus-visible {
+    outline: 3px solid #0d55d9;
+    outline-offset: 3px;
+  }
+
+  main {
+    position: relative;
+    max-width: 52rem;
+    margin: 0 auto;
+    padding: clamp(1.5rem, 4vw, 3.5rem) clamp(1rem, 3vw, 2rem) 4rem;
+  }
+
+  /* Poster frame around the whole page content */
+  .sheet {
+    position: relative;
+    padding: clamp(1.5rem, 4vw, 3rem);
+    border: 1px dashed var(--line);
+  }
+
+  .corner { position: absolute; width: 9px; height: 9px; background: var(--ink); }
+  .corner.tl { top: -5px; left: -5px; }
+  .corner.tr { top: -5px; right: -5px; }
+  .corner.bl { bottom: -5px; left: -5px; }
+  .corner.br { bottom: -5px; right: -5px; }
+
+  .masthead {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: clamp(2rem, 5vw, 3rem);
+  }
+
+  .brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.65rem;
+    font-family: var(--mono);
+    font-weight: 700;
+    font-size: 1.05rem;
+    letter-spacing: -0.02em;
+    text-decoration: none;
+  }
+
+  .pixel-mark {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    width: 1.5rem;
+    aspect-ratio: 1;
+  }
+  .pixel-mark i { background: transparent; }
+  .pixel-mark i.on { background: currentColor; }
+
+  .masthead-label {
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    opacity: 0.65;
+  }
+
+  .hatch {
+    height: 8px;
+    background-image: repeating-linear-gradient(115deg, currentColor 0 1px, transparent 1px 4px);
+    opacity: 0.65;
+  }
+
+  h1 {
+    margin: 0 0 0.75rem;
+    font-size: clamp(1.6rem, 4.5vw, 2.4rem);
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    line-height: 1.1;
+    text-wrap: balance;
+  }
+
+  .resource-line {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.25rem;
+    margin: 0 0 1.5rem;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+
+  /* Dark poster card that hosts the current state */
+  .card {
+    position: relative;
+    padding: clamp(1.4rem, 3.5vw, 2.25rem);
+    color: var(--paper);
+    background-color: var(--ink);
+    background-image: radial-gradient(circle, rgb(243 222 163 / 11%) 0 1px, transparent 1.5px);
+    background-size: 9px 9px;
+  }
+  .card .corner { background: var(--paper); }
+
+  .card-top {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    margin-bottom: 1.4rem;
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .card-top .dim { opacity: 0.55; }
+
+  .card h2 {
+    margin: 0 0 0.6rem;
+    font-size: clamp(1.25rem, 3vw, 1.7rem);
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1.15;
+  }
+
+  .card p { margin: 0.4rem 0 0; font-size: 0.95rem; opacity: 0.8; max-width: 40rem; }
+
+  .card .hint {
+    margin-top: 1.1rem;
+    font-size: 0.82rem;
+    opacity: 0.6;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.9rem;
+    margin-top: 1.6rem;
+  }
+
+  button, .btn {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 42px;
+    padding: 0.6rem 1.05rem;
+    border: 1px solid var(--paper);
+    color: var(--ink);
+    background: var(--paper);
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    line-height: 1;
+    text-transform: uppercase;
+    text-decoration: none;
+    cursor: pointer;
+    transition: transform 140ms ease, background-color 140ms ease, color 140ms ease;
+  }
+  button:hover, .btn:hover { background: var(--paper-pale); }
+  button:active, .btn:active { transform: scale(0.97); }
+  button.ghost, .btn.ghost {
+    color: var(--paper);
+    background: transparent;
+    border-color: rgb(243 222 163 / 55%);
+  }
+  button.ghost:hover, .btn.ghost:hover { border-color: var(--paper); background: transparent; }
+  button[disabled] { opacity: 0.45; cursor: not-allowed; }
+
+  .cmd {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    align-items: stretch;
+    margin-top: 1.4rem;
+    border: 1px solid rgb(243 222 163 / 45%);
+  }
+  .cmd > code {
+    padding: 0.95rem 1rem;
+    overflow-x: auto;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    white-space: nowrap;
+  }
+  .cmd > button {
+    min-height: 100%;
+    border: 0;
+    border-left: 1px solid rgb(243 222 163 / 45%);
+    color: var(--paper);
+    background: transparent;
+  }
+  .cmd > button:hover { background: rgb(243 222 163 / 12%); }
+
+  .password-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1.4rem;
+  }
+  .password-row input {
+    flex: 1 1 14rem;
+    min-height: 42px;
+    padding: 0.55rem 0.9rem;
+    border: 1px solid rgb(243 222 163 / 55%);
+    border-radius: 0;
+    color: var(--paper);
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 0.85rem;
+  }
+  .password-row input::placeholder { color: rgb(243 222 163 / 45%); }
+
+  .field-error {
+    margin-top: 0.7rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    color: #ffb4a1;
+  }
+
+  .progress {
+    display: grid;
+    gap: 0.7rem;
+    margin-top: 1.5rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+  }
+  .progress .bar {
+    height: 8px;
+    background-image: repeating-linear-gradient(115deg, currentColor 0 1px, transparent 1px 4px);
+    animation: hatch-march 0.8s linear infinite;
+  }
+  @keyframes hatch-march {
+    from { background-position: 0 0; }
+    to { background-position: 8px 0; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .progress .bar { animation: none; }
+  }
+
+  /* Decrypted file panel */
+  .file-panel {
+    position: relative;
+    margin-top: 1.5rem;
+    border: 1px solid var(--ink);
+    color: var(--ink);
+    background: var(--paper-pale);
+  }
+
+  .file-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    padding: 0.8rem 1rem;
+    border-bottom: 1px solid var(--ink);
+  }
+
+  .file-name {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.75rem;
+    min-width: 0;
+    font-family: var(--mono);
+  }
+  .file-name strong {
+    font-size: 0.9rem;
+    font-weight: 700;
+    overflow-wrap: anywhere;
+  }
+  .file-name span {
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    opacity: 0.6;
+  }
+
+  .toolbar {
+    display: inline-flex;
+    border: 1px solid var(--ink);
+  }
+  .toolbar > * {
+    appearance: none;
+    display: inline-flex;
+    align-items: center;
+    min-height: 34px;
+    padding: 0.35rem 0.85rem;
+    border: 0;
+    color: var(--ink);
+    background: transparent;
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+  .toolbar > * + * { border-left: 1px solid var(--ink); }
+  .toolbar > *:hover:not([disabled]) { color: var(--paper-pale); background: var(--ink); }
+  .toolbar > [disabled] { opacity: 0.4; cursor: not-allowed; }
+
+  .file-body { max-height: 32rem; overflow: auto; }
+
+  .code-view {
+    display: grid;
+    min-width: max-content;
+    grid-template-columns: auto 1fr;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.6;
+  }
+
+  .code-view pre {
+    margin: 0;
+    padding: 1rem 1.1rem;
+    font: inherit;
+    line-height: inherit;
+    tab-size: 4;
+  }
+
+  .code-view .line-numbers {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    padding-right: 0.8rem;
+    padding-left: 0.8rem;
+    border-right: 1px solid rgb(29 28 25 / 22%);
+    color: rgb(29 28 25 / 48%);
+    background: var(--paper-pale);
+    text-align: right;
+    user-select: none;
+  }
+
+  .file-body img {
+    display: block;
+    max-width: 100%;
+    margin: 0 auto;
+    padding: 1rem;
+  }
+
+  .file-note {
+    padding: 2.25rem 1.1rem;
+    font-family: var(--mono);
+    font-size: 0.75rem;
+    letter-spacing: 0.05em;
+    text-align: center;
+    text-transform: uppercase;
+    opacity: 0.6;
+  }
+
+  .footnote {
+    display: grid;
+    gap: 0.6rem;
+    max-width: 26rem;
+    margin-top: clamp(2rem, 5vw, 3rem);
+  }
+  .footnote p {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.7;
+  }
+  .footnote .hatch { width: 11rem; }
+
+  /* Once decryption succeeds, the poster becomes a focused file workspace. */
+  body.is-decrypted { overflow: hidden; }
+
+  body.is-decrypted main {
+    width: 100%;
+    max-width: none;
+    height: 100dvh;
+    padding: clamp(0.75rem, 1.5vw, 1.25rem);
+  }
+
+  body.is-decrypted .sheet {
+    display: grid;
+    grid-template-rows: auto auto auto minmax(0, 1fr);
+    height: 100%;
+    padding: clamp(1rem, 1.8vw, 1.5rem);
+  }
+
+  body.is-decrypted .masthead { margin-bottom: 0.75rem; }
+
+  body.is-decrypted h1 {
+    margin-bottom: 0.45rem;
+    font-size: clamp(1.6rem, 3vw, 2.6rem);
+  }
+
+  body.is-decrypted .resource-line { margin-bottom: 0.85rem; }
+
+  body.is-decrypted .card {
+    display: flex;
+    min-height: 0;
+    padding: clamp(0.9rem, 1.5vw, 1.3rem);
+    flex-direction: column;
+  }
+
+  body.is-decrypted .card-top { margin-bottom: 0.75rem; }
+
+  body.is-decrypted #state-file {
+    display: flex;
+    min-height: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  body.is-decrypted .file-panel {
+    display: flex;
+    min-height: 0;
+    margin-top: 0;
+    flex: 1;
+    flex-direction: column;
+  }
+
+  body.is-decrypted .file-body {
+    min-height: 0;
+    max-height: none;
+    flex: 1;
+  }
+
+  body.is-decrypted .code-view {
+    font-size: clamp(0.82rem, 1vw, 0.95rem);
+  }
+
+  body.is-decrypted .code-view pre { padding-top: 1.25rem; padding-bottom: 1.25rem; }
+
+  body.is-decrypted .footnote { display: none; }
+
+  [hidden] { display: none !important; }
+
+  @media (max-width: 560px) {
+    .sheet { padding: 1.1rem; }
+    .file-head { align-items: flex-start; flex-direction: column; }
+
+    body.is-decrypted { overflow: auto; }
+    body.is-decrypted main { min-height: 100dvh; height: auto; padding: 0; }
+    body.is-decrypted .sheet {
+      min-height: 100dvh;
+      height: auto;
+      padding: 0.75rem;
+      border: 0;
+      grid-template-rows: auto auto auto minmax(65dvh, 1fr);
+    }
+    body.is-decrypted .sheet > .corner { display: none; }
+    body.is-decrypted .toolbar {
+      display: grid;
+      width: 100%;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+    }
+    body.is-decrypted .toolbar > * { justify-content: center; }
+    body.is-decrypted .file-body { min-height: 60dvh; }
+  }
+</style>
+</head>
+<body data-resource="{{.ID}}">
+<main>
+  <div class="sheet">
+    <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+
+    <header class="masthead">
+      <a class="brand" href="https://github.com/aquitano/aqt-sync" rel="noopener">
+        <span class="pixel-mark" aria-hidden="true"></span>
+        <span>aqt</span>
+      </a>
+      <span class="masthead-label">Encrypted resource</span>
+    </header>
+
+    <h1 id="headline">This file is sealed.</h1>
+
+    <p class="resource-line">
+      <span>resource {{.ID}}</span>
+      <span id="meta-size" hidden></span>
+    </p>
+
+    <section class="card" aria-live="polite">
+      <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+      <div class="card-top">
+        <span>END-TO-END ENCRYPTED</span>
+        <span class="dim" id="card-state">LOCKED</span>
+      </div>
+
+      <!-- State: no fragment in the URL -->
+      <div id="state-cli">
+        <h2>The link is incomplete.</h2>
+        <p>This page needs the part after <code>#</code> to decrypt anything. Open the full link you
+        were given, or pull it with the CLI:</p>
+        <div class="cmd">
+          <code id="cli-cmd">aqt pull '{{.PullURL}}#…'</code>
+          <button type="button" id="cli-copy" hidden>Copy</button>
+        </div>
+        <p class="hint" id="nojs-hint">The part after <code>#</code> is the decryption key. It stays in
+        your browser and is never sent to the server.</p>
+      </div>
+
+      <!-- State: key present, waiting for consent to fetch -->
+      <div id="state-locked" hidden>
+        <h2>Ready to decrypt in your browser.</h2>
+        <p>The ciphertext is fetched once and decrypted locally. If this link has a read limit,
+        fetching counts as one read.</p>
+        <div class="actions">
+          <button type="button" id="decrypt-btn">Decrypt in browser</button>
+          <button type="button" class="ghost" id="show-cli-btn">Use the CLI instead</button>
+        </div>
+      </div>
+
+      <!-- State: password-protected link -->
+      <div id="state-password" hidden>
+        <h2>This link is password-protected.</h2>
+        <p>The password unwraps the file key locally. Deriving it is deliberately slow.</p>
+        <form class="password-row" id="password-form">
+          <input type="password" id="password-input" placeholder="share password"
+                 autocomplete="off" spellcheck="false" aria-label="Share password">
+          <button type="submit">Unlock</button>
+        </form>
+        <p class="field-error" id="password-error" hidden></p>
+      </div>
+
+      <!-- State: working -->
+      <div id="state-busy" hidden>
+        <h2 id="busy-title">Decrypting.</h2>
+        <div class="progress">
+          <span id="busy-step">FETCHING CIPHERTEXT</span>
+          <span class="bar"></span>
+        </div>
+      </div>
+
+      <!-- State: decrypted file -->
+      <div id="state-file" hidden>
+        <div class="file-panel">
+          <div class="file-head">
+            <p class="file-name">
+              <strong id="file-name"></strong>
+              <span id="file-size"></span>
+            </p>
+            <div class="toolbar" role="group" aria-label="File actions">
+              <a id="act-raw" target="_blank" rel="noopener">Raw</a>
+              <button type="button" id="act-copy">Copy</button>
+              <a id="act-download">Download</a>
+            </div>
+          </div>
+          <div class="file-body" id="file-body"></div>
+        </div>
+      </div>
+
+      <!-- State: error / unsupported -->
+      <div id="state-error" hidden>
+        <h2 id="error-title">Could not decrypt.</h2>
+        <p id="error-body"></p>
+        <div class="cmd">
+          <code id="error-cmd">aqt pull '{{.PullURL}}#…'</code>
+          <button type="button" id="error-copy">Copy</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="footnote">
+      <p>Private by default. Public by intent.</p>
+      <span class="hatch" aria-hidden="true"></span>
+    </div>
+  </div>
+</main>
+
+<!-- Pinned and served from this origin; no fragment is part of these requests.
+     The page script is external so the CSP needs no 'unsafe-inline' for scripts:
+     blob: documents (Raw/Download) inherit this CSP, and dropping unsafe-inline
+     keeps a hostile shared SVG from running script in this origin. -->
+<script src="/x-assets/libsodium-0.7.10.js"></script>
+<script src="/x-assets/libsodium-wrappers-0.7.10.js"></script>
+<script src="/x-assets/hash-wasm-argon2-4.9.0.js"></script>
+<script src="/x-assets/share.js"></script>
+<noscript>
+  <style>#state-cli { display: block !important; }</style>
+</noscript>
+</body>
+</html>

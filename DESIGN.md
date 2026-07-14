@@ -297,8 +297,10 @@ folder contents), and a `login`-cached session key so the passphrase is entered
 once per session (`logout` clears it). Every push wraps the content key
 under the owner's master key, so even public resources can later be shared/rotated.
 Verified by `go test ./...` plus live multi-machine cycles. A public share link
-(`/x/<id>`) opens a landing page that resolves the resource and shows the `aqt
-pull` command; in-browser decryption is deferred (the CLI does the decrypt).
+(`/x/<id>`) opens a landing page that decrypts inline single files locally from
+the `#k.` key or a password-gated `#p.` wrap; streamed files and folders keep the
+`aqt pull` fallback. The pinned XChaCha20-Poly1305 and Argon2id browser runtimes
+are self-hosted, and the fragment is never sent to the server.
 
 Tracked folders (`init`/`status`/`sync`/`clone`) sync a directory by chunking its
 files (FastCDC), deduplicating objects per account, packing them into raw pack
@@ -320,8 +322,6 @@ and an edit that lands mid-sync is not lost. `-d/--daemon` detaches the watcher
 `aqt agent status|stop|logs` manages it (and won't signal a recycled PID);
 `--once` is the cron-friendly single guarded sync. Per-folder defaults
 (`watch.interval`, `watch.gitGuard`) live in `.aqtconfig`.
-
-Not yet built: in-browser decryption on the `/x/<id>` page.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `:8080`, `AQT_DATA_DIR`/`AQT_ADDR`
 to override), then `aqt --server http://localhost:8080 login`.
