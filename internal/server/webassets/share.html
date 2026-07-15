@@ -536,6 +536,8 @@
         <h2>Ready to decrypt in your browser.</h2>
         <p>The ciphertext is fetched once and decrypted locally. If this link has a read limit,
         fetching counts as one read.</p>
+        <p class="hint">Browser decryption supports single inline files only. Folders and large
+        streamed files require the CLI.</p>
         <div class="actions">
           <button type="button" id="decrypt-btn">Decrypt in browser</button>
           <button type="button" class="ghost" id="show-cli-btn">Use the CLI instead</button>
@@ -546,6 +548,8 @@
       <div id="state-password" hidden>
         <h2>This link is password-protected.</h2>
         <p>The password unwraps the file key locally. Deriving it is deliberately slow.</p>
+        <p class="hint">Browser decryption supports single inline files only. Folders and large
+        streamed files require the CLI.</p>
         <form class="password-row" id="password-form">
           <input type="password" id="password-input" placeholder="share password"
                  autocomplete="off" spellcheck="false" aria-label="Share password">

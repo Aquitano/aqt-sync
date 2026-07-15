@@ -57,6 +57,7 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		`src="/x-assets/libsodium-0.7.10.js"`,
 		`src="/x-assets/hash-wasm-argon2-4.9.0.js"`,
 		`src="/x-assets/share.js"`,
+		"Browser decryption supports single inline files only.",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page missing %q", want)
