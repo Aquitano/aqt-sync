@@ -176,14 +176,21 @@ has no shell, so define health checks in your orchestrator against `GET /healthz
 rather than a container `HEALTHCHECK`.
 
 `deploy/docker-compose.yml` wires the server to a Caddy sidecar that terminates TLS
-and auto-provisions a certificate:
+and auto-provisions a certificate. Before starting, copy `.env.example` to `.env`,
+replace the invite token with a
+cryptographically random value, and choose a per-account quota and device limit:
 
 ```
-cd deploy && docker compose up -d
+cd deploy
+cp .env.example .env
+# Edit .env, then protect it because it contains the invite token.
+chmod 600 .env
+docker compose up -d
 ```
 
-Edit the `Caddyfile` hostname and set `AQT_TRUSTED_PROXIES` to the compose network
-subnet before exposing it.
+The Compose stack deliberately refuses to start without all three values. Edit the
+`Caddyfile` hostname and set `AQT_TRUSTED_PROXIES` to the compose network subnet
+before exposing it.
 
 ## Backup and restore
 

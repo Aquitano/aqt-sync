@@ -8,12 +8,15 @@ services:
     restart: unless-stopped
     environment:
       AQT_DATA_DIR: /data
+      # This public-facing Compose stack refuses to start until these limits are
+      # explicitly chosen. Copy .env.example to .env and replace every value.
+      AQT_REGISTRATION: invite
+      AQT_INVITE_TOKENS: ${AQT_INVITE_TOKENS:?set AQT_INVITE_TOKENS in deploy/.env}
+      AQT_QUOTA_BYTES: ${AQT_QUOTA_BYTES:?set AQT_QUOTA_BYTES in deploy/.env}
+      AQT_MAX_DEVICES: ${AQT_MAX_DEVICES:?set AQT_MAX_DEVICES in deploy/.env}
       # Trust the compose network so the share-page URL honors X-Forwarded-Proto.
       # Adjust to your network's subnet (docker network inspect <net> to find it).
       AQT_TRUSTED_PROXIES: 172.16.0.0/12
-      # Uncomment to gate signups on an invite token:
-      # AQT_REGISTRATION: invite
-      # AQT_INVITE_TOKENS: change-me
     volumes:
       - aqt-data:/data
     # Reachable only from the caddy sidecar, never published directly.
