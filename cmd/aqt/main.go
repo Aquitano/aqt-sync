@@ -121,6 +121,9 @@ func rootCmd() *cobra.Command {
 		// (`aqt statsu`) must never silently upload a file that happens to match it.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
+				if flagJSON {
+					return errors.New("aqt does not support --json without a command or path")
+				}
 				return cmd.Help()
 			}
 			return runPushSugar(args[0])

@@ -91,6 +91,24 @@ func TestJSONGateErrorsOnUnsupported(t *testing.T) {
 	}
 }
 
+func TestJSONGateRejectsRootWithoutPath(t *testing.T) {
+	previous := flagJSON
+	flagJSON = false
+	defer func() { flagJSON = previous }()
+
+	root := rootCmd()
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetArgs([]string{"--json"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "does not support --json") {
+		t.Fatalf("aqt --json err = %v, want the unsupported-json error", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("aqt --json printed prose to stdout:\n%s", out.String())
+	}
+}
+
 // Destructive commands must abort on a non-terminal stdin without -y, before
 // touching the server.
 func TestDestructiveConfirmRequiredNonTTY(t *testing.T) {
