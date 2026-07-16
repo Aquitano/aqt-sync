@@ -207,6 +207,7 @@ func (s *Server) Router() *gin.Engine {
 			// large payload; it keeps the engine-wide maxResourceBody.
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
+			authed.PUT("/resources/:id/metadata", limitBody(maxControlBody), s.updateResourceMetadata)
 			authed.POST("/resources/:id/visibility", limitBody(maxControlBody), s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
 
@@ -814,6 +815,32 @@ func (s *Server) listResources(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.ListResourcesResponse{Resources: items})
+}
+
+func (s *Server) updateResourceMetadata(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.UpdateResourceMetadataRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.EncryptedMeta.Nonce) == 0 || len(req.EncryptedMeta.Ciphertext) == 0 || req.ExpectedVersion <= 0 {
+		abort(c, http.StatusBadRequest, "encrypted metadata and expectedVersion are required")
+		return
+	}
+	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), req)
+	if errors.Is(err, ErrVersionConflict) {
+		abort(c, http.StatusConflict, "resource changed since you last fetched it; retry the rename")
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusNotFound, "not found")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "metadata update failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.PutResourceResponse{ID: c.Param("id"), Version: version})
 }
 
 func (s *Server) setVisibility(c *gin.Context) {

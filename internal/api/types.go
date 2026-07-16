@@ -376,6 +376,14 @@ type SetVisibilityRequest struct {
 	OnExpiry      OnExpiry `json:"onExpiry,omitempty"`
 }
 
+// UpdateResourceMetadataRequest replaces only the client-sealed metadata blob.
+// The server cannot inspect it; ExpectedVersion prevents a rename based on stale
+// metadata from racing a sync or another rename.
+type UpdateResourceMetadataRequest struct {
+	EncryptedMeta   crypto.SealedBlob `json:"encryptedMeta"`
+	ExpectedVersion int               `json:"expectedVersion"`
+}
+
 // GetResourceResponse is an in-process type: on the wire it travels as the raw
 // envelope in wire.go (JSON header + ciphertext), never as JSON.
 type GetResourceResponse struct {
@@ -396,6 +404,11 @@ type GetResourceResponse struct {
 	// formats, so a current client can explain an incompatible remote instead of
 	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).
 	MinClient int
+	ExpiresAt int64
+	MaxReads  int64
+	Reads     int64
+	CreatedAt int64
+	UpdatedAt int64
 }
 
 // ResourceListItem describes one of the owner's resources. WrappedKey (the
@@ -418,6 +431,8 @@ type ResourceListItem struct {
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
 	MaxReads  int64 `json:"maxReads,omitempty"`
 	Reads     int64 `json:"reads,omitempty"`
+	CreatedAt int64 `json:"createdAt,omitempty"`
+	UpdatedAt int64 `json:"updatedAt,omitempty"`
 }
 
 type ListResourcesResponse struct {

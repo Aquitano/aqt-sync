@@ -403,6 +403,11 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// writer now says which it meant. Existing rows default to 'reclaim', the behavior
 	// they were written under.
 	`ALTER TABLE resources ADD COLUMN on_expiry TEXT NOT NULL DEFAULT 'reclaim';`,
+	// 14: resource timestamps support stable date sorting in the CLI. Existing
+	// rows receive the migration time; subsequent writes maintain updated_at.
+	`ALTER TABLE resources ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE resources ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
+	 UPDATE resources SET created_at = unixepoch(), updated_at = unixepoch();`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -1141,10 +1146,11 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
+	now := time.Now().Unix()
 	if _, err := tx.Exec(
-		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, on_expiry)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry,
+		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now,
 	); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -1228,7 +1234,7 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// folder sync pushing a new manifest is not a re-share, and clearing the expiry —
 	// or restarting the read counter — behind the owner's back would quietly un-share
 	// the folder they shared.
-	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?`
+	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?, updated_at=unixepoch()`
 	replacePolicy := req.Visibility != api.Public || req.ExpireSeconds > 0 || req.MaxReads > 0 || reclaimed
 
 	var res sql.Result
@@ -1318,12 +1324,15 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		minClient   int
 		expiresAt   sql.NullInt64
 		maxReads    sql.NullInt64
+		reads       int64
 		reclaimed   bool
+		createdAt   int64
+		updatedAt   int64
 	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, reclaimed
+		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, reads, reclaimed, created_at, updated_at
 		 FROM resources WHERE id = ?`, id,
-	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient, &expiresAt, &maxReads, &reclaimed)
+	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient, &expiresAt, &maxReads, &reads, &reclaimed, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, ErrNotFound
 	}
@@ -1377,9 +1386,11 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		return out, err
 	}
 	if !isOwner && !isGrantee && maxReads.Valid {
-		if err := s.countPublicRead(id); err != nil {
+		counted, err := s.countPublicRead(id)
+		if err != nil {
 			return out, err
 		}
+		reads = counted
 	}
 	out = api.GetResourceResponse{
 		ID:         id,
@@ -1387,6 +1398,11 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext},
 		Version:    version,
 		MinClient:  minClient,
+		ExpiresAt:  expiresAt.Int64,
+		MaxReads:   maxReads.Int64,
+		Reads:      reads,
+		CreatedAt:  createdAt,
+		UpdatedAt:  updatedAt,
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &out.EncryptedMeta); err != nil {
 		return out, err
@@ -1415,11 +1431,11 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 // concurrent fetches can never both slip past the last permitted read: the Nth reader
 // commits reads == max_reads and stamps exhausted_at, the (N+1)th sees the limit and
 // gets ErrGone. A policy the update path cleared (max_reads now NULL) means no limit.
-func (s *Store) countPublicRead(id string) error {
+func (s *Store) countPublicRead(id string) (int64, error) {
 	defer s.resLocks.lock(id)()
 	tx, err := s.db.Begin()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	var (
 		reads     int64
@@ -1431,21 +1447,21 @@ func (s *Store) countPublicRead(id string) error {
 	).Scan(&reads, &maxReads, &reclaimed); err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
-			return ErrNotFound
+			return 0, ErrNotFound
 		}
-		return err
+		return 0, err
 	}
 	if reclaimed {
 		tx.Rollback()
-		return ErrGone
+		return 0, ErrGone
 	}
 	if !maxReads.Valid {
 		tx.Rollback()
-		return nil
+		return reads, nil
 	}
 	if reads >= maxReads.Int64 {
 		tx.Rollback()
-		return ErrGone
+		return 0, ErrGone
 	}
 	reads++
 	var exhaustedAt sql.NullInt64
@@ -1457,9 +1473,12 @@ func (s *Store) countPublicRead(id string) error {
 		reads, exhaustedAt, id,
 	); err != nil {
 		tx.Rollback()
-		return err
+		return 0, err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return reads, nil
 }
 
 // ResourceVisibility returns a resource's visibility without loading its blob.
@@ -1501,7 +1520,7 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	}
 	defer s.resLocks.lock(id)()
 	res, err := s.db.Exec(
-		`UPDATE resources SET visibility = ?, version = version + 1,
+		`UPDATE resources SET visibility = ?, version = version + 1, updated_at = unixepoch(),
 		   expires_at = ?, max_reads = ?, on_expiry = ?, reads = 0, exhausted_at = NULL
 		 WHERE id = ? AND owner_handle = ?`,
 		string(req.Visibility), expiresAt, maxReadsCol, onExpiry, id, owner,
@@ -1519,10 +1538,40 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	return version, nil
 }
 
+// UpdateResourceMetadata atomically replaces the opaque metadata blob without
+// touching content, chunk roots, visibility, grants, or lifecycle policy.
+func (s *Store) UpdateResourceMetadata(owner, id string, req api.UpdateResourceMetadataRequest) (int, error) {
+	metaJSON, err := json.Marshal(req.EncryptedMeta)
+	if err != nil {
+		return 0, err
+	}
+	defer s.resLocks.lock(id)()
+	res, err := s.db.Exec(
+		`UPDATE resources SET encrypted_meta = ?, version = version + 1, updated_at = unixepoch()
+		 WHERE id = ? AND owner_handle = ? AND version = ? AND reclaimed = 0`,
+		string(metaJSON), id, owner, req.ExpectedVersion,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		var current int
+		err := s.rdb.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ? AND reclaimed = 0`, id, owner).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, ErrNotFound
+		}
+		if err != nil {
+			return 0, err
+		}
+		return 0, ErrVersionConflict
+	}
+	return req.ExpectedVersion + 1, nil
+}
+
 func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 	rows, err := s.rdb.Query(
 		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot,
-		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0)
+		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at
 		 FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
 	)
 	if err != nil {
@@ -1539,7 +1588,7 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 			wrappedJSON sql.NullString
 		)
 		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot,
-			&item.ExpiresAt, &item.MaxReads, &item.Reads); err != nil {
+			&item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, err
 		}
 		item.Visibility = api.Visibility(vis)

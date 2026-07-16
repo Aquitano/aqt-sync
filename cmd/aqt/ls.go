@@ -1,9 +1,12 @@
 package main
 
 import (
+	"cmp"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -13,8 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// lsRow is one resource as shown by `aqt ls`, with its name and size decrypted
-// locally from the sealed metadata.
+// lsRow is one resource as shown by `aqt ls`, with metadata decrypted locally.
 type lsRow struct {
 	ID         string `json:"id"`
 	Name       string `json:"name"`
@@ -22,18 +24,34 @@ type lsRow struct {
 	Size       int64  `json:"size"`
 	Visibility string `json:"visibility"`
 	Version    int    `json:"version"`
+	CreatedAt  int64  `json:"createdAt,omitempty"`
+	UpdatedAt  int64  `json:"updatedAt,omitempty"`
+}
+
+type lsOptions struct {
+	long       bool
+	filter     string
+	kind       string
+	visibility string
+	sortBy     string
+	reverse    bool
 }
 
 func lsCmd() *cobra.Command {
+	opts := lsOptions{sortBy: "name"}
 	cmd := &cobra.Command{
 		Use:   "ls [folder-ref[/path]]",
-		Short: "List your resources, or the entries at a path inside a folder",
+		Short: "List resources, with filtering and sorting, or entries inside a folder",
 		Long: "Without arguments, lists every resource with its decrypted name and size.\n" +
-			"With a folder ref (aqt://<id>, optionally aqt://<id>/<path>), lists the\n" +
-			"entries at that path by fetching only the directory\n" +
-			"nodes on its spine — the rest of the tree is never downloaded.",
+			"Use --filter, --kind, or --visibility to narrow the list; --sort accepts\n" +
+			"name, size, or date. Size/date sorts are newest/largest first by default.\n" +
+			"With a folder ref (aqt://<id>, optionally aqt://<id>/<path>), lists entries\n" +
+			"at that path without downloading the tree.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 && opts != (lsOptions{sortBy: "name"}) {
+				return errors.New("resource list flags cannot be used when listing inside a folder")
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
@@ -47,15 +65,26 @@ func lsCmd() *cobra.Command {
 			if len(args) > 0 {
 				return runLsFolder(cl, mk, args[0])
 			}
-			return listResources(cl, mk)
+			return listResources(cl, mk, opts)
 		},
 	}
+	f := cmd.Flags()
+	f.BoolVarP(&opts.long, "long", "l", false, "show update time and version")
+	f.StringVarP(&opts.filter, "filter", "f", "", "show names containing this text (case-insensitive)")
+	f.StringVar(&opts.kind, "kind", "", "show only file or folder resources")
+	f.StringVar(&opts.visibility, "visibility", "", "show only private or public resources")
+	f.StringVar(&opts.sortBy, "sort", "name", "sort by name, size, or date")
+	f.BoolVarP(&opts.reverse, "reverse", "r", false, "reverse the selected sort order")
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func listResources(cl *client.Client, mk crypto.MasterKey) error {
+func listResources(cl *client.Client, mk crypto.MasterKey, opts lsOptions) error {
 	rows, err := collectResources(cl, mk)
+	if err != nil {
+		return err
+	}
+	rows, err = selectResourceRows(rows, opts)
 	if err != nil {
 		return err
 	}
@@ -63,20 +92,30 @@ func listResources(cl *client.Client, mk crypto.MasterKey) error {
 		return printJSON(rows)
 	}
 	if len(rows) == 0 {
-		fmt.Fprintln(os.Stderr, "no resources yet")
+		emptyMessage := "no resources yet"
+		if opts.filter != "" || opts.kind != "" || opts.visibility != "" {
+			emptyMessage = "no matching resources"
+		}
+		fmt.Fprintln(os.Stderr, emptyMessage)
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tKIND\tSIZE\tVISIBILITY\tID")
-	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.Kind, sizeCell(r.Kind, r.Size), r.Visibility, r.ID)
+	if opts.long {
+		fmt.Fprintln(w, "NAME\tKIND\tSIZE\tVISIBILITY\tUPDATED\tVERSION\tID")
+		for _, r := range rows {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\tv%d\t%s\n",
+				r.Name, r.Kind, sizeCell(r.Kind, r.Size), r.Visibility, formatTime(r.UpdatedAt), r.Version, r.ID)
+		}
+	} else {
+		fmt.Fprintln(w, "NAME\tKIND\tSIZE\tVISIBILITY\tID")
+		for _, r := range rows {
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.Kind, sizeCell(r.Kind, r.Size), r.Visibility, r.ID)
+		}
 	}
 	return w.Flush()
 }
 
-// collectResources lists the owner's resources and decrypts each one's metadata
-// with the master key, sorted by name. A resource whose metadata cannot be
-// decrypted is still listed, with a placeholder name.
+// collectResources decrypts owner-only metadata and returns a stable name sort.
 func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 	items, err := cl.ListResources()
 	if err != nil {
@@ -98,19 +137,71 @@ func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 		rows = append(rows, lsRow{
 			ID: it.ID, Name: name, Kind: kind, Size: meta.Size,
 			Visibility: string(it.Visibility), Version: it.Version,
+			CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
 		})
 	}
-	sort.Slice(rows, func(i, j int) bool {
-		if rows[i].Name != rows[j].Name {
-			return rows[i].Name < rows[j].Name
-		}
-		return rows[i].ID < rows[j].ID
-	})
+	sortResourceRows(rows, "name", false)
 	return rows, nil
 }
 
-// sizeCell renders a resource's size, leaving folders (whose size is not tracked)
-// as a dash.
+func selectResourceRows(rows []lsRow, opts lsOptions) ([]lsRow, error) {
+	switch opts.sortBy {
+	case "name", "size", "date":
+	default:
+		return nil, fmt.Errorf("invalid --sort %q (want name, size, or date)", opts.sortBy)
+	}
+	if opts.kind != "" && opts.kind != api.KindFile && opts.kind != api.KindFolder {
+		return nil, fmt.Errorf("invalid --kind %q (want file or folder)", opts.kind)
+	}
+	if opts.visibility != "" && opts.visibility != string(api.Private) && opts.visibility != string(api.Public) {
+		return nil, fmt.Errorf("invalid --visibility %q (want private or public)", opts.visibility)
+	}
+	needle := strings.ToLower(opts.filter)
+	filtered := make([]lsRow, 0, len(rows))
+	for _, row := range rows {
+		if needle != "" && !strings.Contains(strings.ToLower(row.Name), needle) {
+			continue
+		}
+		if opts.kind != "" && row.Kind != opts.kind {
+			continue
+		}
+		if opts.visibility != "" && row.Visibility != opts.visibility {
+			continue
+		}
+		filtered = append(filtered, row)
+	}
+	sortResourceRows(filtered, opts.sortBy, opts.reverse)
+	return filtered, nil
+}
+
+func sortResourceRows(rows []lsRow, by string, reverse bool) {
+	descending := by == "size" || by == "date"
+	if reverse {
+		descending = !descending
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		comparison := 0
+		switch by {
+		case "size":
+			comparison = cmp.Compare(rows[i].Size, rows[j].Size)
+		case "date":
+			comparison = cmp.Compare(rows[i].UpdatedAt, rows[j].UpdatedAt)
+		default:
+			comparison = strings.Compare(rows[i].Name, rows[j].Name)
+		}
+		if comparison == 0 {
+			comparison = strings.Compare(rows[i].Name, rows[j].Name)
+		}
+		if comparison == 0 {
+			comparison = strings.Compare(rows[i].ID, rows[j].ID)
+		}
+		if descending {
+			return comparison > 0
+		}
+		return comparison < 0
+	})
+}
+
 func sizeCell(kind string, size int64) string {
 	if kind == api.KindFolder {
 		return "-"

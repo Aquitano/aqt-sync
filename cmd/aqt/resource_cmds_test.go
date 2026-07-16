@@ -163,3 +163,113 @@ func captureStdout(t *testing.T, fn func()) string {
 	os.Stdout = orig
 	return <-done
 }
+
+// TestEverydayResourceRefsAndRename covers issue #90's common loop end to end:
+// rename by name, inspect/share/delete by the renamed name, and retain content.
+func TestEverydayResourceRefsAndRename(t *testing.T) {
+	newE2E(t)
+	path := filepath.Join(t.TempDir(), "original.txt")
+	const body = "metadata-only rename keeps these bytes"
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPush(path, pushOptions{noClip: true, quiet: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	if err := runShare("original.txt", "", true, linkPolicy{maxReads: 3, onExpiry: "retire"}); err != nil {
+		t.Fatalf("share by name: %v", err)
+	}
+	if err := runRename("original.txt", "renamed.txt"); err != nil {
+		t.Fatalf("rename by name: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := runInfo("renamed.txt", "", false); err != nil {
+			t.Fatalf("info by name: %v", err)
+		}
+	})
+	if !strings.Contains(out, "renamed.txt") {
+		t.Fatalf("info did not resolve renamed name: %q", out)
+	}
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := resolveOwnedResourceIDWithProfile(cl, prof, "renamed.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	out = captureStdout(t, func() {
+		if err := runPull(id, "", "", true, false); err != nil {
+			t.Fatalf("cat renamed resource: %v", err)
+		}
+	})
+	if out != body {
+		t.Fatalf("renamed content = %q, want %q", out, body)
+	}
+	out = captureStdout(t, func() {
+		if err := runInfo("renamed.txt", "", false); err != nil {
+			t.Fatalf("info lifecycle: %v", err)
+		}
+	})
+	if !strings.Contains(out, "0/3") || !strings.Contains(out, "3 remaining") {
+		t.Fatalf("info omitted read lifecycle: %q", out)
+	}
+	if err := runRemove([]string{"renamed.txt"}, false); err != nil {
+		t.Fatalf("rm by name: %v", err)
+	}
+}
+
+// TestResolveTrackedResourcePath confirms a path anywhere under a tracked root
+// resolves directly to that root's resource id.
+func TestResolveTrackedResourcePath(t *testing.T) {
+	h := newE2E(t)
+	root := t.TempDir()
+	h.init(root)
+	nested := filepath.Join(root, "not-yet-created", "file.txt")
+
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, ok := identity.LoadSession(prof.Name)
+	if !ok {
+		t.Fatal("expected cached master key")
+	}
+	t.Chdir(root)
+	if _, ok, err := trackedResourceID("remote-name"); ok || err != nil {
+		t.Fatalf("bare name treated as tracked path: ok=%v err=%v", ok, err)
+	}
+	got, err := resolveOwnedResourceID(cl, mk, nested)
+	if err != nil {
+		t.Fatalf("resolve tracked path: %v", err)
+	}
+	if want := h.folderID(root); got != want {
+		t.Fatalf("resolved id = %q, want %q", got, want)
+	}
+}
+
+// TestFriendlyNameMustBeUnique prevents an arbitrary same-name resource from
+// being selected for a destructive or sharing command.
+func TestFriendlyNameMustBeUnique(t *testing.T) {
+	newE2E(t)
+	for _, body := range []string{"one", "two"} {
+		path := filepath.Join(t.TempDir(), "source.txt")
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := runPush(path, pushOptions{name: "duplicate", noClip: true, quiet: true}); err != nil {
+			t.Fatalf("push duplicate: %v", err)
+		}
+	}
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, ok := identity.LoadSession(prof.Name)
+	if !ok {
+		t.Fatal("expected cached master key")
+	}
+	if _, err := resolveOwnedResourceID(cl, mk, "duplicate"); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("duplicate name err = %v, want ambiguity", err)
+	}
+}

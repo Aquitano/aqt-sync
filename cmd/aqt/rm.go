@@ -16,7 +16,7 @@ func rmCmd() *cobra.Command {
 		yes           bool
 	)
 	cmd := &cobra.Command{
-		Use:   "rm <id>...",
+		Use:   "rm <name-or-id|tracked-path>...",
 		Short: "Delete the server-side ciphertext and metadata for one or more resources",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -44,13 +44,20 @@ type rmResult struct {
 }
 
 func runRemove(refs []string, withSnapshots bool) error {
-	cl, _, err := authedClient()
+	cl, prof, err := authedClient()
 	if err != nil {
 		return err
 	}
-	results := make([]rmResult, 0, len(refs))
+	ids := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		id, _, _ := parseRef(ref)
+		id, err := resolveOwnedResourceIDWithProfile(cl, prof, ref)
+		if err != nil {
+			return err
+		}
+		ids = append(ids, id)
+	}
+	results := make([]rmResult, 0, len(ids))
+	for _, id := range ids {
 		if err := cl.DeleteResource(id); err != nil {
 			if errors.Is(err, client.ErrNotFound) {
 				return fmt.Errorf("resource %s not found (or not yours); run `aqt ls` to list yours", id)

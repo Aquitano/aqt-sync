@@ -27,7 +27,7 @@ func shareCmd() *cobra.Command {
 		with     string
 	)
 	cmd := &cobra.Command{
-		Use:   "share <id>",
+		Use:   "share <name-or-id|tracked-path>",
 		Short: "Share a resource: publicly via a link, or read-only with a specific account (--with)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -202,7 +202,7 @@ func unshareCmd() *cobra.Command {
 		yes  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "unshare <id>",
+		Use:   "unshare <name-or-id|tracked-path>",
 		Short: "Take back access: kill the public link (rotates the key), or revoke one grant (--with)",
 		Long: "Bare `aqt unshare <id>` makes the resource private again and ROTATES its content\n" +
 			"key, so every link ever issued for it stops decrypting. With --with <email> it\n" +
@@ -257,7 +257,10 @@ func runShareWith(idArg, email string) error {
 	if err != nil {
 		return err
 	}
-	id, _, _ := parseRef(idArg)
+	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	if err != nil {
+		return err
+	}
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
@@ -325,7 +328,10 @@ func runShareRevoke(idArg, email string) error {
 	if err != nil {
 		return err
 	}
-	id, _, _ := parseRef(idArg)
+	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	if err != nil {
+		return err
+	}
 
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {
@@ -425,7 +431,10 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	if err != nil {
 		return err
 	}
-	id, _, _ := parseRef(idArg)
+	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	if err != nil {
+		return err
+	}
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
@@ -528,7 +537,10 @@ func runPrivate(idArg string) error {
 	if err != nil {
 		return err
 	}
-	id, _, _ := parseRef(idArg)
+	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	if err != nil {
+		return err
+	}
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
