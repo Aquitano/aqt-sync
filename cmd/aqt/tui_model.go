@@ -521,7 +521,7 @@ func (m *tuiModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return m.quitOrConfirm()
 	case "?":
-		m.dialog = &tuiHelp{}
+		m.dialog = &tuiHelp{tracked: m.ctx.root != ""}
 		return m, nil
 	case "1", "2", "3", "4":
 		m.setFocus(tuiPanelID(int(msg.String()[0] - '1')))
@@ -864,9 +864,6 @@ func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "y":
 		return m, m.ctx.copyRefCmd(*res)
 	case "s":
-		if res.Kind == api.KindFolder {
-			return m, m.toast("folders cannot be shared publicly yet")
-		}
 		m.dialog = m.shareDialog(*res)
 		return m, nil
 	case "p":
@@ -887,9 +884,9 @@ func (m *tuiModel) resourcesActions() []tuiMenuOption {
 	if res == nil {
 		return nil
 	}
-	opts := []tuiMenuOption{{key: "y", label: "copy ref / share link", cmd: m.ctx.copyRefCmd(*res)}}
-	if res.Kind != api.KindFolder {
-		opts = append(opts, tuiMenuOption{key: "s", label: "share…", cmd: tuiOpenDialog(m.shareDialog(*res))})
+	opts := []tuiMenuOption{
+		{key: "y", label: "copy ref / share link", cmd: m.ctx.copyRefCmd(*res)},
+		{key: "s", label: "share…", cmd: tuiOpenDialog(m.shareDialog(*res))},
 	}
 	if res.Visibility == string(api.Public) {
 		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", cmd: tuiOpenDialog(m.makePrivateDialog(*res))})

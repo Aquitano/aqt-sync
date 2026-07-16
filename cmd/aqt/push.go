@@ -80,7 +80,9 @@ func pushCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.BoolVar(&opts.public, "public", false, "mint a shareable public link instead of a private ref")
 	pw.bind(cmd, "password-gate a public link (implies --public)")
-	f.StringVarP(&opts.name, "name", "n", "", "label shown in `aqt ls` (encrypted)")
+	// No backticks in the usage string: cobra renders backticked text as the flag's
+	// value type, which turned this into `-n, --name aqt ls`.
+	f.StringVarP(&opts.name, "name", "n", "", "label shown in aqt ls listings (encrypted)")
 	f.BoolVar(&opts.noClip, "no-clip", false, "do not copy the result to the clipboard")
 	f.StringVar(&expire, "expire", "", "expire the public link after a duration (e.g. 30m, 24h, 7d)")
 	f.Int64Var(&maxReads, "max-reads", 0, "expire the public link after this many downloads")
@@ -89,6 +91,14 @@ func pushCmd() *cobra.Command {
 }
 
 func runPush(path string, opts pushOptions) error {
+	// A directory would only die later with a raw `read ...: is a directory`;
+	// point at the folder workflow instead.
+	if path != "-" {
+		if info, err := os.Stat(path); err == nil && info.IsDir() {
+			return fmt.Errorf("%s is a directory: push uploads single files. Track and sync a folder with "+
+				"`aqt init %s` + `aqt sync %s`, or materialize it elsewhere with `aqt clone`", path, path, path)
+		}
+	}
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err

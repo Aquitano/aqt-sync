@@ -164,15 +164,13 @@ func TestTUIResourceActionsOpenDialogs(t *testing.T) {
 		t.Fatal("n must cancel the confirm")
 	}
 
-	// r3 (folder): share is refused before any dialog.
+	// r3 (folder): chunked folder links shipped, so share opens the same menu.
 	m.panels[tuiPanelResources].list.move(1)
 	m.handleKey(key("s"))
-	if m.dialog != nil {
-		t.Fatal("folders cannot be shared; no dialog expected")
+	if _, ok := m.dialog.(*tuiMenu); !ok {
+		t.Fatalf("s on a folder should open the share menu, got %T", m.dialog)
 	}
-	if !strings.Contains(m.statusLine, "folder") {
-		t.Fatalf("statusLine = %q, want a folder note", m.statusLine)
-	}
+	m.handleKey(key("esc"))
 }
 
 func TestTUISnapshotAnchorArgs(t *testing.T) {

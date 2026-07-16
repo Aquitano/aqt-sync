@@ -8,13 +8,20 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
-// passwordFlags binds the link-password flags. -P/--password takes the secret on the
-// command line, where it lands in the process's argv: /proc/<pid>/cmdline is
-// world-readable, so any local user can read it for as long as the command runs.
-// --password-stdin keeps it out of the process table entirely, and is what the TUI
-// uses. -P stays for scripts and backwards compatibility.
+// passwordPromptSentinel marks `-P`/`--password` given without a value, so resolve
+// can prompt for it. It contains a NUL byte, which no shell can pass as a flag value.
+const passwordPromptSentinel = "\x00prompt"
+
+// passwordFlags binds the link-password flags. -P/--password with an inline value
+// takes the secret on the command line, where it lands in the process's argv:
+// /proc/<pid>/cmdline is world-readable, so any local user can read it for as long
+// as the command runs. Bare -P prompts for it instead (hidden, on a terminal), and
+// --password-stdin keeps it out of the process table for pipes and parent processes
+// like the TUI. Because the flag takes an optional value, an inline secret must be
+// attached (-Psecret or --password=secret), not passed as a separate argument.
 type passwordFlags struct {
 	value     string
 	fromStdin bool
@@ -22,28 +29,55 @@ type passwordFlags struct {
 
 func (p *passwordFlags) bind(cmd *cobra.Command, usage string) {
 	f := cmd.Flags()
-	f.StringVarP(&p.value, "password", "P", "", usage+" (appears in ps; prefer --password-stdin)")
+	f.StringVarP(&p.value, "password", "P", "", usage+" (bare -P prompts; -P<value> appears in ps, prefer --password-stdin)")
+	f.Lookup("password").NoOptDefVal = passwordPromptSentinel
 	f.BoolVar(&p.fromStdin, "password-stdin", false, "read the password from stdin instead of the command line")
 }
 
-// resolve returns the password, reading stdin when --password-stdin is set. A single
-// trailing newline is stripped so `echo hunter2 | aqt share x --password-stdin` works;
-// anything else is taken literally, since a password may legitimately contain spaces.
+// resolve returns the password, reading stdin when --password-stdin is set and
+// prompting when the flag was given without a value. A single trailing newline is
+// stripped so `echo hunter2 | aqt share x --password-stdin` works; anything else is
+// taken literally, since a password may legitimately contain spaces.
 func (p *passwordFlags) resolve() (string, error) {
-	if !p.fromStdin {
-		return p.value, nil
+	if p.fromStdin {
+		if p.value != "" {
+			return "", errors.New("--password and --password-stdin are mutually exclusive")
+		}
+		// Reading a terminal here would block forever with no indication why; the flag is
+		// for a pipe (`... | aqt share x --password-stdin`) or a parent process like the TUI.
+		if interactiveStdin() {
+			return "", errors.New("--password-stdin expects the password on stdin, but stdin is a terminal")
+		}
+		b, err := io.ReadAll(os.Stdin)
+		if err != nil {
+			return "", fmt.Errorf("read password from stdin: %w", err)
+		}
+		return strings.TrimRight(string(b), "\r\n"), nil
 	}
-	if p.value != "" {
-		return "", errors.New("--password and --password-stdin are mutually exclusive")
+	if p.value == passwordPromptSentinel {
+		return promptPassword()
 	}
-	// Reading a terminal here would block forever with no indication why; the flag is
-	// for a pipe (`... | aqt share x --password-stdin`) or a parent process like the TUI.
-	if interactiveStdin() {
-		return "", errors.New("--password-stdin expects the password on stdin, but stdin is a terminal")
+	return p.value, nil
+}
+
+// promptPassword reads the link password without echo. It insists on a terminal:
+// unlike promptPassphrase there is no piped fallback, because a pipe should use
+// --password-stdin explicitly rather than have a bare -P silently consume input
+// meant for something else.
+func promptPassword() (string, error) {
+	fd := int(os.Stdin.Fd())
+	if !term.IsTerminal(fd) {
+		return "", errors.New("--password given without a value, but stdin is not a terminal to prompt on; use --password-stdin (or --password=<value>)")
 	}
-	b, err := io.ReadAll(os.Stdin)
+	fmt.Fprint(os.Stderr, "Link password: ")
+	b, err := term.ReadPassword(fd)
+	fmt.Fprintln(os.Stderr)
 	if err != nil {
-		return "", fmt.Errorf("read password from stdin: %w", err)
+		return "", err
 	}
-	return strings.TrimRight(string(b), "\r\n"), nil
+	pw := strings.TrimRight(string(b), "\r\n")
+	if pw == "" {
+		return "", errors.New("empty password")
+	}
+	return pw, nil
 }

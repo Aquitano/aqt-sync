@@ -141,7 +141,10 @@ func (d *tuiMenu) View(width int) string {
 
 // --- help overlay ---
 
-type tuiHelp struct{}
+// tuiHelp lists the keybindings. tracked gates the keys that only work inside a
+// tracked folder (sync, checkpoint, new snapshot, restore in place), so the overlay
+// never advertises an action the panel would refuse.
+type tuiHelp struct{ tracked bool }
 
 func (d *tuiHelp) Update(msg tea.KeyMsg) (tea.Cmd, bool) {
 	switch msg.String() {
@@ -152,10 +155,20 @@ func (d *tuiHelp) Update(msg tea.KeyMsg) (tea.Cmd, bool) {
 }
 
 func (d *tuiHelp) View(width int) string {
-	sections := []struct {
+	type helpSection struct {
 		title string
 		keys  [][2]string
-	}{
+	}
+	snapshotKeys := [][2]string{
+		{"d", "diff against live tree"}, {"a", "anchor / unanchor"}, {"x", "delete"},
+	}
+	if d.tracked {
+		snapshotKeys = [][2]string{
+			{"d", "diff against live tree"}, {"n", "new snapshot (optional label)"},
+			{"a", "anchor / unanchor"}, {"R", "restore in place"}, {"x", "delete"},
+		}
+	}
+	sections := []helpSection{
 		{"Navigate", [][2]string{
 			{"1-4", "jump to panel"}, {"tab / shift+tab", "next / previous panel"},
 			{"j/k, ↓/↑", "move selection"}, {"g / G", "top / bottom"},
@@ -164,19 +177,20 @@ func (d *tuiHelp) View(width int) string {
 			{"space", "actions menu for the panel"},
 			{"r", "refresh"}, {"q", "quit"},
 		}},
-		{"Files", [][2]string{
+	}
+	if d.tracked {
+		sections = append(sections, helpSection{"Files", [][2]string{
 			{"s", "sync now"}, {"S", "sync options (dry-run, push/pull-only, …)"},
 			{"c", "checkpoint (named, never pruned)"},
-		}},
-		{"Snapshots", [][2]string{
-			{"d", "diff against live tree"}, {"n", "new snapshot (optional label)"},
-			{"a", "anchor / unanchor"}, {"R", "restore in place"}, {"x", "delete"},
-		}},
-		{"Resources", [][2]string{
+		}})
+	}
+	sections = append(sections,
+		helpSection{"Snapshots", snapshotKeys},
+		helpSection{"Resources", [][2]string{
 			{"y", "copy ref / share link"}, {"s", "share (public link, lifecycle options)"},
 			{"p", "make private (rotates key, old links die)"}, {"x", "delete"},
 		}},
-	}
+	)
 	var b strings.Builder
 	for i, s := range sections {
 		if i > 0 {
