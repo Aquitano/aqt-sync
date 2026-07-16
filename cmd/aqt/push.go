@@ -87,6 +87,7 @@ func pushCmd() *cobra.Command {
 	f.StringVar(&expire, "expire", "", "expire the public link after a duration (e.g. 30m, 24h, 7d)")
 	f.Int64Var(&maxReads, "max-reads", 0, "expire the public link after this many downloads")
 	f.BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
+	markJSONSupported(cmd)
 	return cmd
 }
 

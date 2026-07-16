@@ -1521,7 +1521,9 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 
 func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 	rows, err := s.rdb.Query(
-		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
+		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot,
+		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0)
+		 FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
 	)
 	if err != nil {
 		return nil, err
@@ -1536,7 +1538,8 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 			metaJSON    string
 			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot); err != nil {
+		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot,
+			&item.ExpiresAt, &item.MaxReads, &item.Reads); err != nil {
 			return nil, err
 		}
 		item.Visibility = api.Visibility(vis)

@@ -185,6 +185,9 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	}); err != nil {
 		return err
 	}
+	if flagJSON {
+		return printJSON(map[string]any{"path": dest, "bytes": e.Size})
+	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, e.Size)
 	return nil
 }
@@ -227,6 +230,9 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 	}
 	if err := materializeDirs(abs, m.Dirs); err != nil {
 		return err
+	}
+	if flagJSON {
+		return printJSON(map[string]any{"path": abs, "files": len(m.Entries)})
 	}
 	fmt.Fprintf(os.Stderr, "pulled %d files into %s\n", len(m.Entries), abs)
 	return nil

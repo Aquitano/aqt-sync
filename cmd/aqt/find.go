@@ -56,6 +56,7 @@ func findCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&noFzf, "no-fzf", false, "print the index as a table instead of opening fzf")
+	markJSONSupported(cmd)
 	return cmd
 }
 

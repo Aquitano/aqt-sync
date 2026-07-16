@@ -770,7 +770,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.anchorCmd(*snap)
 	case "R":
 		if m.ctx.root == "" {
-			return m, m.toast("in-place restore needs a tracked folder — use `aqt snapshot restore --into` instead")
+			return m, m.toast("in-place restore needs a tracked folder — use `aqt restore <id> --into` instead")
 		}
 		m.dialog = m.restoreDialog(*snap)
 		return m, nil
@@ -843,7 +843,7 @@ func (m *tuiModel) restoreDialog(snap snapshotRow) tuiDialog {
 		title: "Restore in place",
 		body: fmt.Sprintf("Roll %s back to %q (version %d)?\nThe rollback syncs to every device.",
 			tuiAbbrevHome(m.ctx.root), snap.displayName(), snap.Version),
-		confirm: tuiRequestExec("snapshot", "restore", snap.ID, "--in-place", "--dir", m.ctx.root, "-y"),
+		confirm: tuiRequestExec("restore", snap.ID, m.ctx.root, "--in-place", "-y"),
 	}
 }
 
@@ -930,7 +930,7 @@ func (m *tuiModel) makePrivateDialog(res lsRow) tuiDialog {
 	return &tuiConfirm{
 		title:   "Make private",
 		body:    fmt.Sprintf("Rotate %q's content key? Existing share links stop working.", res.Name),
-		confirm: tuiRequestExec("private", res.ID),
+		confirm: tuiRequestExec("unshare", res.ID, "-y"),
 	}
 }
 
@@ -938,7 +938,7 @@ func (m *tuiModel) deleteResourceDialog(res lsRow) tuiDialog {
 	return &tuiConfirm{
 		title:   "Delete resource",
 		body:    fmt.Sprintf("Delete %q from the server? Ciphertext and metadata are removed.", res.Name),
-		confirm: tuiRequestExec("rm", res.ID),
+		confirm: tuiRequestExec("rm", res.ID, "-y"),
 	}
 }
 

@@ -98,15 +98,32 @@ func contactsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if len(pins) == 0 {
-				fmt.Println("no pinned contacts; `aqt share <id> --with <email>` pins on first use")
-				return nil
-			}
 			emails := make([]string, 0, len(pins))
 			for e := range pins {
 				emails = append(emails, e)
 			}
 			sort.Strings(emails)
+			if flagJSON {
+				type contactRow struct {
+					Email       string `json:"email"`
+					Fingerprint string `json:"fingerprint"`
+					PinnedAt    string `json:"pinnedAt"`
+				}
+				rows := make([]contactRow, 0, len(emails))
+				for _, e := range emails {
+					p := pins[e]
+					rows = append(rows, contactRow{
+						Email:       e,
+						Fingerprint: crypto.KeyFingerprint(p.PublicKey),
+						PinnedAt:    time.Unix(p.PinnedAt, 0).Format("2006-01-02"),
+					})
+				}
+				return printJSON(rows)
+			}
+			if len(pins) == 0 {
+				fmt.Println("no pinned contacts; `aqt share <id> --with <email>` pins on first use")
+				return nil
+			}
 			for _, e := range emails {
 				p := pins[e]
 				fmt.Printf("%s  %s  pinned %s\n", e, crypto.KeyFingerprint(p.PublicKey),
@@ -115,6 +132,7 @@ func contactsCmd() *cobra.Command {
 			return nil
 		},
 	}
+	markJSONSupported(cmd)
 	cmd.AddCommand(&cobra.Command{
 		Use:   "remove <email>",
 		Short: "Drop an account's pinned keys, so the next share re-pins whatever the server serves",

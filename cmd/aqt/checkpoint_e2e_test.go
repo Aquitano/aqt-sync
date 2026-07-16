@@ -86,8 +86,9 @@ func TestCheckpointRestoreByName(t *testing.T) {
 	}
 	assertAbsent(t, dest, "c.txt")
 
-	// Restore by name in place over the modified tree: the live folder rolls back.
-	runCmd(t, restoreCmd(), "release-1", src, "-y")
+	// Restore by name in place over the modified tree: the live folder rolls back
+	// only with the explicit --in-place (side-by-side is the default).
+	runCmd(t, restoreCmd(), "release-1", src, "--in-place", "-y")
 	if c := readTree(t, src, "a.txt"); c != "original A" {
 		t.Fatalf("in-place a.txt = %q", c)
 	}

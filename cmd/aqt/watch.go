@@ -510,6 +510,23 @@ func agentCmd() *cobra.Command {
 		Use:   "agent",
 		Short: "Manage background watch agents",
 	}
+	var (
+		startOpts  watchOptions
+		foreground bool
+	)
+	start := &cobra.Command{
+		Use:   "start [dir]",
+		Short: "Start the watch agent for a tracked folder (detached; alias for `aqt watch -d`)",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			startOpts.daemon = !foreground
+			startOpts.intervalSet = cmd.Flags().Changed("interval")
+			return runWatch(dirArg(args), startOpts)
+		},
+	}
+	start.Flags().DurationVar(&startOpts.interval, "interval", defaultInterval, "debounce floor between syncs")
+	start.Flags().BoolVar(&foreground, "foreground", false, "stay attached to this terminal instead of detaching")
+	cmd.AddCommand(start)
 	cmd.AddCommand(
 		&cobra.Command{
 			Use:   "status [dir]",

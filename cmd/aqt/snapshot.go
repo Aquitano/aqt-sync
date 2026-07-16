@@ -35,7 +35,7 @@ func snapshotCmd() *cobra.Command {
 			"pinned server-side so a later sync (or a mistaken delete) cannot reclaim them. " +
 			"They are account-global: any of your devices can browse and restore them.",
 	}
-	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotRestoreCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAnchorCmd(), snapshotAutoCmd())
+	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAnchorCmd(), snapshotAutoCmd())
 	return cmd
 }
 
@@ -60,6 +60,7 @@ func snapshotAnchorCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&remove, "remove", false, "remove the anchor, making the snapshot prunable again")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -133,6 +134,7 @@ func snapshotCreateCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&id, "id", "", "snapshot this resource id directly (e.g. a pushed file) instead of a tracked dir")
 	cmd.Flags().StringVarP(&label, "label", "l", "", "attach a label, encrypted on this machine before upload")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -223,6 +225,7 @@ func snapshotListCmd() *cobra.Command {
 	cmd.Flags().IntVar(&limit, "limit", 0, "show at most N snapshots (0 = all)")
 	cmd.Flags().DurationVar(&since, "since", 0, "only snapshots created within this window (e.g. 168h)")
 	cmd.Flags().DurationVar(&before, "before", 0, "only snapshots older than this (e.g. 720h)")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -341,7 +344,7 @@ func snapshotFindCmd() *cobra.Command {
 		Use:   "find [query]",
 		Short: "Fuzzy-search your snapshots (via fzf) and print the selected id",
 		Long: "Open your snapshots in fzf and print the selected snapshot id, so it composes:\n" +
-			"`aqt snapshot restore \"$(aqt snapshot find)\"`.\n\n" +
+			"`aqt restore \"$(aqt snapshot find)\"`.\n\n" +
 			"Without a terminal or fzf, the index is printed as a table instead.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -350,6 +353,7 @@ func snapshotFindCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope to this resource id instead of all snapshots")
 	cmd.Flags().BoolVar(&noFzf, "no-fzf", false, "print the index as a table instead of opening fzf")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -437,59 +441,7 @@ func snapshotFzfSelect(fzfPath, query string, rows []snapshotRow) error {
 	return nil
 }
 
-// --- restore ---
-
-func snapshotRestoreCmd() *cobra.Command {
-	var (
-		into    string
-		inPlace bool
-		dir     string
-		yes     bool
-	)
-	cmd := &cobra.Command{
-		Use:   "restore <snapshot-id>",
-		Short: "Restore a snapshot side-by-side (default) or in place",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if inPlace && into != "" {
-				return errors.New("--in-place and --into are mutually exclusive")
-			}
-			cl, prof, err := authedClient()
-			if err != nil {
-				return err
-			}
-			snap, err := cl.GetSnapshot(args[0])
-			if errors.Is(err, client.ErrNotFound) {
-				return fmt.Errorf("snapshot %s not found (or not yours)", args[0])
-			}
-			if err != nil {
-				return err
-			}
-			if inPlace {
-				return restoreInPlace(cl, prof, snap, dir, yes)
-			}
-			dest := into
-			if dest == "" {
-				dest = fmt.Sprintf("aqt-restore-%s", snap.Snapshot.ID)
-			}
-			abs, err := filepath.Abs(dest)
-			if err != nil {
-				return err
-			}
-			meta, err := reconstructSnapshot(cl, prof, snap, abs)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("restored %q (version %d) into %s\n", meta.Name, snap.Snapshot.Version, abs)
-			return nil
-		},
-	}
-	cmd.Flags().StringVar(&into, "into", "", "restore side-by-side into this (new) directory")
-	cmd.Flags().BoolVar(&inPlace, "in-place", false, "overwrite the live tracked folder and re-sync to every device")
-	cmd.Flags().StringVar(&dir, "dir", ".", "the tracked folder to roll back (with --in-place)")
-	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the in-place confirmation prompt")
-	return cmd
-}
+// --- restore (in place; the `restore` command owns the surface) ---
 
 // restoreInPlace rolls a tracked folder back to a snapshot and pushes the result to
 // every device. It reconstructs the snapshot into a staging dir first, so a failed
@@ -508,15 +460,9 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 		return fmt.Errorf("snapshot belongs to resource %s, but %s tracks %s; "+
 			"restore it side-by-side with --into instead", snap.Snapshot.ResourceID, root, st.ID)
 	}
-	if !assumeYes {
-		ok, err := promptYesNo(fmt.Sprintf("Roll %s back to snapshot %s and push to every device? "+
-			"Current contents are replaced. [y/N] ", root, snap.Snapshot.ID), false)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errors.New("aborted")
-		}
+	if err := confirmDestructive(fmt.Sprintf("Roll %s back to snapshot %s and push to every device? "+
+		"Current contents are replaced. [y/N] ", root, snap.Snapshot.ID), assumeYes); err != nil {
+		return err
 	}
 
 	staging, err := os.MkdirTemp(filepath.Dir(root), ".aqt-restore-*")
@@ -534,7 +480,9 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
 	}
-	fmt.Fprintln(os.Stderr, "rolled back; syncing to propagate...")
+	if !flagJSON {
+		fmt.Fprintln(os.Stderr, "rolled back; syncing to propagate...")
+	}
 	return runSync(root, syncOptions{force: true})
 }
 
@@ -636,11 +584,18 @@ func snapshotExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if flagJSON {
+				return printJSON(map[string]any{
+					"snapshotId": snap.Snapshot.ID, "name": meta.Name,
+					"version": snap.Snapshot.Version, "to": abs,
+				})
+			}
 			fmt.Printf("exported %q (version %d) to %s\n", meta.Name, snap.Snapshot.Version, abs)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&to, "to", "", "write the decrypted plaintext tree here (required)")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -667,6 +622,7 @@ func snapshotDiffCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&against, "against", "", "compare against this second snapshot instead of the live resource")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -1019,14 +975,8 @@ func snapshotPruneCmd() *cobra.Command {
 				targets = args
 			}
 
-			if !yes {
-				ok, err := promptYesNo(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(targets)), false)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					return errors.New("aborted")
-				}
+			if err := confirmDestructive(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(targets)), yes); err != nil {
+				return err
 			}
 			for _, t := range targets {
 				if err := cl.DeleteSnapshot(t); errors.Is(err, client.ErrNotFound) {
@@ -1034,7 +984,14 @@ func snapshotPruneCmd() *cobra.Command {
 				} else if err != nil {
 					return err
 				}
-				fmt.Printf("pruned %s\n", t)
+				if !flagJSON {
+					fmt.Printf("pruned %s\n", t)
+				}
+			}
+			// Only the explicit-id path reaches here with --json (a retention run with
+			// --json reported its selection above without deleting).
+			if flagJSON {
+				return printJSON(map[string]any{"pruned": targets})
 			}
 			return nil
 		},
@@ -1045,6 +1002,7 @@ func snapshotPruneCmd() *cobra.Command {
 	cmd.Flags().StringVar(&olderThan, "older-than", "", "prune snapshots older than this duration (e.g. 720h)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be pruned without deleting")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -1171,6 +1129,7 @@ func snapshotAutoCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "target this resource id instead of a tracked dir")
 	cmd.Flags().BoolVar(&on, "on", false, "include this root in the scheduled job (the default)")
 	cmd.Flags().BoolVar(&off, "off", false, "exclude this root from the scheduled job")
+	markJSONSupported(cmd)
 	return cmd
 }
 

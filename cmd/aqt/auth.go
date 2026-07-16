@@ -110,7 +110,10 @@ func runLogin(email, invite string, ttl time.Duration, kc kdfChoice) error {
 }
 
 func logoutCmd() *cobra.Command {
-	var allDevices bool
+	var (
+		allDevices bool
+		yes        bool
+	)
 	cmd := &cobra.Command{
 		Use:   "logout",
 		Short: "Clear the cached session key (the passphrase is needed again next time)",
@@ -118,6 +121,9 @@ func logoutCmd() *cobra.Command {
 			// --all-devices revokes every *other* device first; this device stays
 			// attached but locked (its local key material is dropped below).
 			if allDevices {
+				if err := confirmDestructive("Revoke every other device on the account? Each must re-login. [y/N] ", yes); err != nil {
+					return err
+				}
 				if err := revokeOtherDevices(); err != nil {
 					return err
 				}
@@ -131,6 +137,7 @@ func logoutCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVar(&allDevices, "all-devices", false, "also revoke every other device on the account")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the --all-devices confirmation prompt")
 	return cmd
 }
 
@@ -294,13 +301,19 @@ func saveProfile(server, email, fingerprint string, kdf crypto.KdfParams, wrappe
 }
 
 func whoamiCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "whoami",
 		Short: "Show the current account and device",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			p, err := loadProfile()
 			if err != nil {
 				return err
+			}
+			if flagJSON {
+				return printJSON(map[string]string{
+					"email": p.Email, "deviceId": p.DeviceID,
+					"fingerprint": p.Fingerprint, "server": p.Server,
+				})
 			}
 			fingerprint := p.Fingerprint
 			if fingerprint == "" {
@@ -310,6 +323,8 @@ func whoamiCmd() *cobra.Command {
 			return nil
 		},
 	}
+	markJSONSupported(cmd)
+	return cmd
 }
 
 func passphraseCmd() *cobra.Command {

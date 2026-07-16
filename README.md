@@ -50,7 +50,7 @@ aqt clone --adopt <folder-id> ~/vault
 ```
 
 `aqt <path>` with no subcommand is shorthand for `aqt push <path>`. Run `aqt --help`
-for the full command set (`ls`, `find`, `cat`, `share`, `private`, `snapshot`,
+for the full command set (`ls`, `find`, `cat`, `share`, `unshare`, `snapshot`,
 `checkpoint`, `restore`, `watch`, `devices`, `passphrase`, …).
 
 ## TUI
@@ -65,8 +65,8 @@ the TUI does is reproducible at the shell. Outside a tracked folder the
 resources and snapshots panels still work account-wide.
 
 `aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes,
-and `aqt restore <name>` rolls the tracked folder back to it (in place by default,
-`--into <dir>` for side-by-side). The name is sealed on this machine like any snapshot
+and `aqt restore <name>` brings it back (side-by-side by default; `--in-place` rolls
+the live tracked folder back). The name is sealed on this machine like any snapshot
 label. Anchor or unanchor an existing snapshot with `aqt snapshot anchor <id> [--remove]`.
 
 The client refuses to send its bearer token over plain HTTP to any non-loopback

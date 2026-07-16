@@ -43,7 +43,7 @@ All notable changes to this project are documented in this file.
   resource's content key HPKE-wrapped (RFC 9180) to the grantee, bound to
   (resource, owner, grantee) so the server cannot replay it elsewhere. The
   grantee sees the share under `aqt shares` and pulls or clones it read-only;
-  all mutations stay owner-scoped server-side. `--revoke <email>` deletes the
+  all mutations stay owner-scoped server-side. `aqt unshare <id> --with <email>` deletes the
   grant and rotates the content key (re-wrapping remaining grantees), so
   revocation is forward-secure immediately. Grant-target lookups answer unknown
   emails with a deterministic decoy (no account-existence oracle), and

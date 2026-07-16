@@ -80,7 +80,7 @@ old clients and old servers keep their existing behavior.
 
 Retiring does not rotate the content key — the server holds none — so an expired link's
 fragment is dormant, not dead: it opens the resource again if the resource is ever made
-public again. `aqt private <id>` rotates the key, which is what kills every link ever
+public again. `aqt unshare <id>` rotates the key, which is what kills every link ever
 issued for a resource.
 
 Upgrade the **client** too, not just the server. A client that predates `onExpiry` cannot

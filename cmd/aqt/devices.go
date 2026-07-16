@@ -21,25 +21,37 @@ func devicesCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error { return runDevicesList(flagJSON) },
 	}
 	cmd.AddCommand(devicesLsCmd(), devicesRmCmd())
+	markJSONSupported(cmd)
 	return cmd
 }
 
 func devicesLsCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List attached devices",
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, args []string) error { return runDevicesList(flagJSON) },
 	}
+	markJSONSupported(cmd)
+	return cmd
 }
 
 func devicesRmCmd() *cobra.Command {
-	return &cobra.Command{
+	var yes bool
+	cmd := &cobra.Command{
 		Use:   "rm <device-id>...",
 		Short: "Revoke one or more devices",
 		Args:  cobra.MinimumNArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return runDevicesRemove(args) },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := confirmDestructive(fmt.Sprintf("Revoke %d device(s)? A revoked device must re-login. [y/N] ", len(args)), yes); err != nil {
+				return err
+			}
+			return runDevicesRemove(args)
+		},
 	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	markJSONSupported(cmd)
+	return cmd
 }
 
 func runDevicesList(asJSON bool) error {
@@ -89,7 +101,9 @@ func runDevicesRemove(ids []string) error {
 			}
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "revoked %s\n", id)
+		if !flagJSON {
+			fmt.Fprintf(os.Stderr, "revoked %s\n", id)
+		}
 	}
 	// Revoking this device invalidated its own token, so drop the now-useless
 	// cached key to match (the profile stays, so `aqt login` can re-attach).
@@ -97,7 +111,12 @@ func runDevicesRemove(ids []string) error {
 		if err := identity.ClearSession(firstNonEmpty(flagProfile, identity.DefaultProfile)); err != nil {
 			return err
 		}
-		fmt.Fprintln(os.Stderr, "revoked the current device; run `aqt login` to re-attach this machine")
+		if !flagJSON {
+			fmt.Fprintln(os.Stderr, "revoked the current device; run `aqt login` to re-attach this machine")
+		}
+	}
+	if flagJSON {
+		return printJSON(map[string]any{"revoked": ids, "revokedSelf": revokedSelf})
 	}
 	return nil
 }

@@ -30,6 +30,9 @@ func pullCmd() *cobra.Command {
 		Short: "Fetch and decrypt a resource, or a single entry inside a folder",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if flagJSON && toStdout {
+				return errors.New("--json and --stdout are mutually exclusive (stdout carries the content)")
+			}
 			password, err := pw.resolve()
 			if err != nil {
 				return err
@@ -41,6 +44,7 @@ func pullCmd() *cobra.Command {
 	pw.bind(cmd, "password for a gated link")
 	cmd.Flags().BoolVar(&toStdout, "stdout", false, "write decrypted content to stdout")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the destination if it exists")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -178,6 +182,9 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	}); err != nil {
 		return err
 	}
+	if flagJSON {
+		return printJSON(map[string]any{"path": dest, "bytes": root.Size})
+	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, root.Size)
 	return nil
 }
@@ -249,6 +256,9 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 	}
 	if err := writeFileAtomic(out, plaintext, 0o600); err != nil {
 		return err
+	}
+	if flagJSON {
+		return printJSON(map[string]any{"path": out, "bytes": len(plaintext)})
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", out, len(plaintext))
 	return nil

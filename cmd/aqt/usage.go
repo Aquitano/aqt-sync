@@ -9,12 +9,14 @@ import (
 )
 
 func usageCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show your account's storage usage on the server",
 		Args:  cobra.NoArgs,
 		RunE:  func(cmd *cobra.Command, args []string) error { return runUsage(flagJSON) },
 	}
+	markJSONSupported(cmd)
+	return cmd
 }
 
 func runUsage(asJSON bool) error {
