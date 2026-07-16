@@ -25,7 +25,7 @@ type lsRow struct {
 }
 
 func lsCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "ls [folder-ref [path]]",
 		Short: "List your resources, or the entries at a path inside a folder",
 		Long: "Without arguments, lists every resource with its decrypted name and size.\n" +
@@ -54,6 +54,8 @@ func lsCmd() *cobra.Command {
 			return listResources(cl, mk)
 		},
 	}
+	markJSONSupported(cmd)
+	return cmd
 }
 
 func listResources(cl *client.Client, mk crypto.MasterKey) error {

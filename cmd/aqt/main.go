@@ -108,11 +108,22 @@ func rootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
+		// --json is a global flag, so a command that does not implement it must say
+		// so rather than silently print prose a script would try to parse.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if flagJSON && cmd.Annotations[jsonAnnotation] == "" {
+				return fmt.Errorf("%s does not support --json", cmd.CommandPath())
+			}
+			return nil
+		},
 		// Bare `aqt <path>` is sugar for `aqt push <path>` (private default), but only
 		// when the argument unambiguously looks like a path: a typo'd subcommand
 		// (`aqt statsu`) must never silently upload a file that happens to match it.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
+				if flagJSON {
+					return errors.New("aqt does not support --json without a command or path")
+				}
 				return cmd.Help()
 			}
 			return runPushSugar(args[0])
@@ -126,11 +137,13 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "verbose output")
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
-	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), privateCmd(), rmCmd())
+	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
 	root.AddCommand(tuiCmd())
+
+	markJSONSupported(root) // the bare-path push sugar prints the push JSON
 
 	// root.Version makes cobra print the version when the flag is set; we register
 	// the flag ourselves so it carries the documented -V shorthand (cobra's own
@@ -138,6 +151,41 @@ func rootCmd() *cobra.Command {
 	root.Version = version
 	root.Flags().BoolP("version", "V", false, "version for aqt")
 	return root
+}
+
+// jsonAnnotation marks a command as implementing the global --json flag; the root
+// PersistentPreRunE refuses --json on any command without it.
+const jsonAnnotation = "supports-json"
+
+// markJSONSupported annotates commands (and `aqt help <cmd>`-visible subcommands
+// passed explicitly) as honoring --json.
+func markJSONSupported(cmds ...*cobra.Command) {
+	for _, c := range cmds {
+		if c.Annotations == nil {
+			c.Annotations = map[string]string{}
+		}
+		c.Annotations[jsonAnnotation] = "true"
+	}
+}
+
+// confirmDestructive gates a destructive action: --yes skips the prompt, a terminal
+// asks (defaulting to abort), and a non-interactive run without --yes aborts so a
+// piped invocation can never destroy anything by accident.
+func confirmDestructive(prompt string, assumeYes bool) error {
+	if assumeYes {
+		return nil
+	}
+	if !interactiveStdin() {
+		return errors.New("confirmation required: pass -y/--yes to proceed non-interactively")
+	}
+	ok, err := promptYesNo(prompt, false)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("aborted")
+	}
+	return nil
 }
 
 // runPushSugar handles a bare `aqt <arg>`. An argument with a path separator is

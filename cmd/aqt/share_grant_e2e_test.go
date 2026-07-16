@@ -388,8 +388,8 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 	}
 	// The message must not falsely assert an outcome (the atomic PUT's fate is unknown
 	// under a lost response) and must point at a recovery that reconciles survivors.
-	if !strings.Contains(err.Error(), "may not have taken effect") || !strings.Contains(err.Error(), "aqt private") {
-		t.Fatalf("revoke error = %v, want it to admit the uncertain outcome and point at `aqt private`", err)
+	if !strings.Contains(err.Error(), "may not have taken effect") || !strings.Contains(err.Error(), "aqt unshare") {
+		t.Fatalf("revoke error = %v, want it to admit the uncertain outcome and point at `aqt unshare`", err)
 	}
 	// The grant is still there: the retry has something left to find, and the revoked
 	// account's access is unchanged rather than half-removed.

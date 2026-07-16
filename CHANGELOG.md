@@ -25,6 +25,30 @@ All notable changes to this project are documented in this file.
   shared publicly yet" guard was stale since chunked-folder links shipped), and
   the help overlay no longer lists tracked-folder-only keys outside one.
 
+### Changed
+
+- Restore is one command: `aqt restore <name-or-id>` accepts checkpoint names and
+  snapshot ids and defaults **side-by-side** (into `aqt-restore-<id>`, or
+  `--into <dir>`); `--in-place` opts into the destructive rollback.
+  `aqt snapshot restore` is removed — it defaulted the opposite way for the
+  same action.
+- Sharing is one family: `aqt share ls [<id>]` lists outgoing access (public
+  links with their server-reported lifecycle policy, and account grants), and
+  `aqt unshare <id> [--with <email>]` replaces both `aqt private` (bare: rotate
+  the key, kill every link) and `aqt share --revoke` (`--with`: revoke one
+  grant). `aqt shares` (incoming) and `aqt contacts` are unchanged.
+- `--json` now works on `share`, `unshare`, `sync` (summary, dry-run plan, and
+  conflict lists), `status` (local + incoming), `whoami`, `shares`, `contacts`,
+  `rm`, `clone`, `restore`, `pull`, `devices rm`, `snapshot export`, and the
+  explicit-id half of `snapshot prune`. A command that does not implement
+  `--json` now errors instead of silently printing prose.
+- Destructive commands confirm uniformly: `rm` (including `--with-snapshots`),
+  `devices rm`, `logout --all-devices`, `unshare`, `snapshot prune`, and
+  in-place restore all prompt, accept `-y`, and abort on a non-terminal stdin
+  without it.
+- `aqt agent start [dir] [--foreground]` starts the watch daemon (alias for
+  `aqt watch -d`), completing the `agent start|stop|status|logs` lifecycle tree.
+
 ### Added
 
 - Browser decryption for public links is limited to single inline files. Streamed
@@ -43,7 +67,7 @@ All notable changes to this project are documented in this file.
   resource's content key HPKE-wrapped (RFC 9180) to the grantee, bound to
   (resource, owner, grantee) so the server cannot replay it elsewhere. The
   grantee sees the share under `aqt shares` and pulls or clones it read-only;
-  all mutations stay owner-scoped server-side. `--revoke <email>` deletes the
+  all mutations stay owner-scoped server-side. `aqt unshare <id> --with <email>` deletes the
   grant and rotates the content key (re-wrapping remaining grantees), so
   revocation is forward-secure immediately. Grant-target lookups answer unknown
   emails with a deterministic decoy (no account-existence oracle), and
@@ -57,7 +81,7 @@ All notable changes to this project are documented in this file.
   `aqt pull <link>/<subpath>` to fetch a single entry or subtree; all reads go
   through the existing membership-checked public object endpoint, and there is
   no unauthenticated write path, so links are strictly pull-only.
-  `aqt private <folder-id>` rotates the folder key root-only (nodes and chunks
+  `aqt unshare <folder-id>` rotates the folder key root-only (nodes and chunks
   stay deduplicated) so old links die. Pack-and-seal folders remain unshareable.
 
 - Prometheus metrics for the server, exposed on a separate operator-only listener
@@ -78,8 +102,8 @@ All notable changes to this project are documented in this file.
   reproducible at the shell. Requires an unlocked session or prompts for the
   passphrase in-app; reads happen in-process against the existing client layer.
 - `aqt checkpoint <name>` saves a named, anchored snapshot that retention never
-  prunes, and `aqt restore <name>` rolls the tracked folder back to it — in place
-  by default, or side-by-side with `--into <dir>`. `aqt snapshot anchor <id>
+  prunes, and `aqt restore <name>` brings it back — side-by-side by default, or
+  in place with `--in-place`. `aqt snapshot anchor <id>
   [--remove]` anchors or unanchors an existing snapshot. Anchoring fails closed
   against an older server that would silently ignore it.
 - `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
@@ -105,7 +129,7 @@ All notable changes to this project are documented in this file.
   a password, and pulled by anyone holding the link — no account required.
 - `aqt push --public` (and `-P`) now streams a large file through the chunk
   pipeline instead of sealing it whole in memory.
-- `aqt private` rotates a streamed file's key by re-wrapping its root and making
+- `aqt unshare` rotates a streamed file's key by re-wrapping its root and making
   it private again, so a previously shared link no longer decrypts or fetches it.
 - `--password-stdin` on `push`, `share`, `pull`, `cat`, and `info` reads a link
   password from stdin instead of the command line. `-P/--password` still works,

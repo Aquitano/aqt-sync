@@ -25,6 +25,7 @@ func infoCmd() *cobra.Command {
 		},
 	}
 	pw.bind(cmd, "password for a gated link")
+	markJSONSupported(cmd)
 	return cmd
 }
 

@@ -141,6 +141,9 @@ func reconcilePack(c packCtx) error {
 		return errConflictsRemain
 	default:
 		recordRemoteVersion(c.root, res.Version)
+		if flagJSON {
+			return printJSON(map[string]any{"uploaded": 0, "downloaded": 0})
+		}
 		fmt.Println("already in sync")
 		return nil
 	}
@@ -201,6 +204,19 @@ func decidePack(localChanged, remoteChanged bool, opts syncOptions) packDecision
 }
 
 func printPackAction(a packDecision) {
+	if flagJSON {
+		action := "none"
+		switch a {
+		case packPush:
+			action = "push"
+		case packPull:
+			action = "pull"
+		case packConflict:
+			action = "conflict"
+		}
+		_ = printJSON([]planLine{{Action: action, Path: ".", Dir: true}})
+		return
+	}
 	switch a {
 	case packPush:
 		fmt.Println("push     (whole folder, pack-and-seal)")
@@ -299,6 +315,9 @@ func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 		return err
 	}
 	recordRemoteVersion(c.root, resp.Version)
+	if flagJSON {
+		return printJSON(map[string]any{"uploaded": len(c.push.shipped.Entries), "downloaded": 0})
+	}
 	fmt.Printf("synced: pushed %d files (pack-and-seal)\n", len(c.push.shipped.Entries))
 	return nil
 }
@@ -392,10 +411,18 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 		return err
 	}
 	recordRemoteVersion(c.root, res.Version)
-	fmt.Printf("synced: pulled %d files (pack-and-seal)\n", len(remote.Entries))
+	sort.Strings(conflicts)
+	if flagJSON {
+		if err := printJSON(map[string]any{"uploaded": 0, "downloaded": len(remote.Entries), "conflicts": nonNil(conflicts)}); err != nil {
+			return err
+		}
+	} else {
+		fmt.Printf("synced: pulled %d files (pack-and-seal)\n", len(remote.Entries))
+	}
 	if len(conflicts) > 0 {
-		sort.Strings(conflicts)
-		printPaths("conflict", conflicts)
+		if !flagJSON {
+			printPaths("conflict", conflicts)
+		}
 		return errConflictsRemain
 	}
 	return nil

@@ -411,6 +411,13 @@ type ResourceListItem struct {
 	// AutoSnapshot reports whether the server's scheduled snapshot job covers this
 	// resource, so `snapshot auto` can show coverage without a per-resource fetch.
 	AutoSnapshot bool `json:"autoSnapshot"`
+	// Link lifecycle policy, echoed so `aqt share ls` can answer "who has access,
+	// for how long?" without a per-resource fetch. Owner-only endpoint, so this
+	// reveals nothing beyond what the owner set. All zero when the link has no
+	// policy (or the server predates these fields).
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
+	MaxReads  int64 `json:"maxReads,omitempty"`
+	Reads     int64 `json:"reads,omitempty"`
 }
 
 type ListResourcesResponse struct {

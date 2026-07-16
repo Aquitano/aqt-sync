@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -23,7 +25,6 @@ func shareCmd() *cobra.Command {
 		maxReads int64
 		burn     bool
 		with     string
-		revoke   string
 	)
 	cmd := &cobra.Command{
 		Use:   "share <id>",
@@ -41,15 +42,9 @@ func shareCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if with != "" || revoke != "" {
-				if with != "" && revoke != "" {
-					return errors.New("--with and --revoke are mutually exclusive")
-				}
+			if with != "" {
 				if policy.requested() || password != "" {
 					return errors.New("link flags (--password/--expire/--max-reads/--burn) do not apply to account grants")
-				}
-				if revoke != "" {
-					return runShareRevoke(args[0], revoke)
 				}
 				return runShareWith(args[0], with)
 			}
@@ -62,7 +57,174 @@ func shareCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&maxReads, "max-reads", 0, "expire the link after this many downloads")
 	cmd.Flags().BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
 	cmd.Flags().StringVar(&with, "with", "", "grant read-only access to a specific account by email (no public link)")
-	cmd.Flags().StringVar(&revoke, "revoke", "", "revoke an account's grant by email and rotate the content key")
+	cmd.AddCommand(shareLsCmd())
+	markJSONSupported(cmd)
+	return cmd
+}
+
+// shareLsCmd answers "who has access?": every public link and outgoing grant, per
+// resource, with the lifecycle policy the server reports for the link.
+func shareLsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ls [<id>]",
+		Short: "List outgoing access: public links and account grants, per resource",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ref := ""
+			if len(args) == 1 {
+				ref = args[0]
+			}
+			return runShareList(ref)
+		},
+	}
+	markJSONSupported(cmd)
+	return cmd
+}
+
+// shareListRow is one resource with outgoing access, as shown by `aqt share ls`.
+type shareListRow struct {
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Kind     string   `json:"kind,omitempty"`
+	Public   bool     `json:"public"`
+	Policy   string   `json:"policy,omitempty"` // human summary of the link lifecycle
+	Grantees []string `json:"grantees,omitempty"`
+}
+
+func runShareList(ref string) error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	items, err := cl.ListResources()
+	if err != nil {
+		return err
+	}
+	if ref != "" {
+		id, _, _ := parseRef(ref)
+		filtered := items[:0]
+		for _, it := range items {
+			if it.ID == id {
+				filtered = append(filtered, it)
+			}
+		}
+		if len(filtered) == 0 {
+			return fmt.Errorf("resource %s not found (or not yours)", id)
+		}
+		items = filtered
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	// Grantee handles are opaque; the contact pins map them back to emails where
+	// this device knows them.
+	emailByHandle := map[string]string{}
+	if pins, err := identity.LoadContacts(prof.Name); err == nil {
+		for _, c := range pins {
+			emailByHandle[c.Handle] = c.Email
+		}
+	}
+
+	var rows []shareListRow
+	for _, it := range items {
+		grants, err := cl.ListGrants(it.ID)
+		if err != nil {
+			return fmt.Errorf("list grants of %s: %w", it.ID, err)
+		}
+		if it.Visibility != api.Public && len(grants) == 0 {
+			continue
+		}
+		name := "(unreadable)"
+		kind := ""
+		if m, ok := openMetadata(it, mk); ok {
+			name, kind = m.Name, string(m.Kind)
+		}
+		row := shareListRow{ID: it.ID, Name: name, Kind: kind, Public: it.Visibility == api.Public}
+		if row.Public {
+			row.Policy = linkPolicySummary(it)
+		}
+		for _, g := range grants {
+			label := g.GranteeHandle
+			if email, ok := emailByHandle[g.GranteeHandle]; ok {
+				label = email
+			}
+			row.Grantees = append(row.Grantees, label)
+		}
+		rows = append(rows, row)
+	}
+	if flagJSON {
+		if rows == nil {
+			rows = []shareListRow{}
+		}
+		return printJSON(rows)
+	}
+	if len(rows) == 0 {
+		fmt.Println("nothing shared; `aqt share <id>` mints a link, `aqt share <id> --with <email>` grants an account")
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tACCESS\tGRANTED-TO\tID")
+	for _, r := range rows {
+		access := "grant-only"
+		if r.Public {
+			access = "public link"
+			if r.Policy != "" {
+				access += " (" + r.Policy + ")"
+			}
+		}
+		grantees := "-"
+		if len(r.Grantees) > 0 {
+			grantees = strings.Join(r.Grantees, ", ")
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Name, access, grantees, r.ID)
+	}
+	return w.Flush()
+}
+
+// linkPolicySummary renders the server-reported link lifecycle for one listed
+// resource ("expires 2026-07-20 14:00, 3/10 reads"), or "" when the link has none.
+func linkPolicySummary(it api.ResourceListItem) string {
+	var parts []string
+	if it.ExpiresAt > 0 {
+		parts = append(parts, "expires "+formatTime(it.ExpiresAt))
+	}
+	if it.MaxReads > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d reads", it.Reads, it.MaxReads))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func unshareCmd() *cobra.Command {
+	var (
+		with string
+		yes  bool
+	)
+	cmd := &cobra.Command{
+		Use:   "unshare <id>",
+		Short: "Take back access: kill the public link (rotates the key), or revoke one grant (--with)",
+		Long: "Bare `aqt unshare <id>` makes the resource private again and ROTATES its content\n" +
+			"key, so every link ever issued for it stops decrypting. With --with <email> it\n" +
+			"revokes that account's grant instead (also rotating the key on a private resource,\n" +
+			"so the revoked wrap opens nothing that changes from here on).",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if with != "" {
+				if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to %s? [y/N] ", with, args[0]), yes); err != nil {
+					return err
+				}
+				return runShareRevoke(args[0], with)
+			}
+			if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", args[0]), yes); err != nil {
+				return err
+			}
+			return runPrivate(args[0])
+		},
+	}
+	cmd.Flags().StringVar(&with, "with", "", "revoke this account's grant (by email) instead of the public link")
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -138,6 +300,9 @@ func runShareWith(idArg, email string) error {
 	if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: contact.Handle, WrappedKey: wrap}); err != nil {
 		return err
 	}
+	if flagJSON {
+		return printJSON(map[string]any{"id": id, "granted": email})
+	}
 	fmt.Printf("granted %s read-only access to aqt://%s\n", email, id)
 	fmt.Fprintln(os.Stderr, "they will see it under `aqt shares` and can pull or clone it; they cannot modify it")
 	return nil
@@ -201,13 +366,19 @@ func runShareRevoke(idArg, email string) error {
 		if err := revoke(); err != nil {
 			return err
 		}
+		if flagJSON {
+			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false})
+		}
 		fmt.Printf("revoked %s from aqt://%s\n", email, id)
-		fmt.Fprintln(os.Stderr, "the resource is public, so its content key was not rotated; `aqt private` rotates it")
+		fmt.Fprintln(os.Stderr, "the resource is public, so its content key was not rotated; `aqt unshare` rotates it")
 		return nil
 	}
 	if res.WrappedKey == nil {
 		if err := revoke(); err != nil {
 			return err
+		}
+		if flagJSON {
+			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false})
 		}
 		fmt.Printf("revoked %s from aqt://%s (no owner key; content key not rotated)\n", email, id)
 		return nil
@@ -232,9 +403,9 @@ func runShareRevoke(idArg, email string) error {
 		// it may have committed. Do not claim it did not. Forward secrecy is safe either
 		// way — a committed write cut the grantee off, a failed one never rotated — but a
 		// committed-then-lost write can leave the surviving grantees split across two
-		// keys. `aqt private` re-rotates and re-wraps every remaining grant, so it
+		// keys. `aqt unshare` re-rotates and re-wraps every remaining grant, so it
 		// reconciles them whatever happened here.
-		return fmt.Errorf("revoking %s failed (%w); the revoke may not have taken effect — run `aqt private %s` to rotate the key and bring the remaining shares onto it", email, err, id)
+		return fmt.Errorf("revoking %s failed (%w); the revoke may not have taken effect — run `aqt unshare %s` to rotate the key and bring the remaining shares onto it", email, err, id)
 	}
 	defer newCK.Wipe()
 	// The same write that rotated the key dropped the grant, but re-wrap from a fresh
@@ -242,6 +413,9 @@ func runShareRevoke(idArg, email string) error {
 	// and keeps listing it would otherwise get us to hand it a wrap of the NEW key,
 	// undoing the revocation the rotation just enforced.
 	rewrapGrants(cl, prof, id, newCK, handle)
+	if flagJSON {
+		return printJSON(map[string]any{"id": id, "revoked": email, "rotated": true})
+	}
 	fmt.Printf("revoked %s from aqt://%s and rotated the content key\n", email, id)
 	return nil
 }
@@ -316,7 +490,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 				_, undo = cl.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Private})
 			}
 			if undo != nil {
-				return fmt.Errorf("%w; additionally, clearing the policy this attempt stored failed (%v) — the link may still expire destructively, so run `aqt private %s` to rotate the key and drop the policy", err, undo, id)
+				return fmt.Errorf("%w; additionally, clearing the policy this attempt stored failed (%v) — the link may still expire destructively, so run `aqt unshare %s` to rotate the key and drop the policy", err, undo, id)
 			}
 			return err
 		}
@@ -326,6 +500,16 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		return err
 	}
 
+	if flagJSON {
+		out := map[string]any{"id": id, "url": ref, "visibility": string(api.Public)}
+		if policy.expireSeconds > 0 {
+			out["expireSeconds"] = policy.expireSeconds
+		}
+		if policy.maxReads > 0 {
+			out["maxReads"] = policy.maxReads
+		}
+		return printJSON(out)
+	}
 	fmt.Println(ref)
 	if !noClip && copyToClipboard(ref) {
 		fmt.Fprintln(os.Stderr, "(copied to clipboard)")
@@ -334,20 +518,9 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		// Expiry takes the link down without rotating the content key (the server has no
 		// key to rotate with), so the fragment above still opens the resource if it is
 		// ever made public again. Only a rotation kills a link for good.
-		fmt.Fprintln(os.Stderr, "when this link expires the resource stays and only the link goes down; `aqt private "+id+"` rotates the key, which kills every link ever issued for it")
+		fmt.Fprintln(os.Stderr, "when this link expires the resource stays and only the link goes down; `aqt unshare "+id+"` rotates the key, which kills every link ever issued for it")
 	}
 	return nil
-}
-
-func privateCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "private <id>",
-		Short: "Make a resource private again, rotating its key so old links die",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPrivate(args[0])
-		},
-	}
 }
 
 func runPrivate(idArg string) error {
@@ -392,6 +565,9 @@ func runPrivate(idArg string) error {
 	defer newCK.Wipe()
 	rewrapGrants(cl, prof, id, newCK, "")
 
+	if flagJSON {
+		return printJSON(map[string]any{"id": id, "ref": "aqt://" + id, "rotated": true})
+	}
 	fmt.Println("aqt://" + id)
 	fmt.Fprintln(os.Stderr, "rotated content key — any previous public link no longer decrypts")
 	return nil
@@ -511,7 +687,7 @@ func rotateInline(cl *client.Client, id string, res api.GetResourceResponse, old
 	}); err != nil {
 		newCK.Wipe()
 		if errors.Is(err, client.ErrConflict) {
-			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt private`")
+			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt unshare`")
 		}
 		return crypto.ContentKey{}, err
 	}
@@ -589,7 +765,7 @@ func rotateTree(cl *client.Client, id string, res api.GetResourceResponse, oldCK
 	}); err != nil {
 		newCK.Wipe()
 		if errors.Is(err, client.ErrConflict) {
-			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt private`")
+			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt unshare`")
 		}
 		return crypto.ContentKey{}, err
 	}
@@ -655,7 +831,7 @@ func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, o
 	}); err != nil {
 		newCK.Wipe()
 		if errors.Is(err, client.ErrConflict) {
-			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt private`")
+			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt unshare`")
 		}
 		return crypto.ContentKey{}, err
 	}

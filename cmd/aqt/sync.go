@@ -77,6 +77,7 @@ func statusCmd() *cobra.Command {
 		RunE:  func(cmd *cobra.Command, args []string) error { return runStatus(dirArg(args), opts) },
 	}
 	cmd.Flags().BoolVar(&opts.offline, "offline", false, "report only local changes; skip the server check for incoming changes")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -97,6 +98,7 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.rehash, "rehash", false, "re-hash every file instead of trusting size+mtime (catches edits that preserve them)")
 	f.BoolVar(&opts.acceptRollback, "accept-rollback", false, "proceed although the server reports an older version than previously seen (restored from backup): reconcile from scratch, one-sided differences become conflicts to review")
 	f.StringVar(&opts.conflicts, "conflicts", "", "conflict handling: block (default) or copy (keep local, write remote to <name>.conflict-<suffix>)")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -124,6 +126,7 @@ func cloneCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&adopt, "adopt", false,
 		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
 	pw.bind(cmd, "password for a gated link")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -223,6 +226,27 @@ func runStatus(dir string, opts statusOptions) error {
 	// The local half is offline: it compares the working tree to the last synced
 	// manifest. Conflicts (both sides changed) still surface only during `sync`.
 	ch := computeLocalChanges(local, base)
+
+	if flagJSON {
+		renamed := ch.renamed
+		if renamed == nil {
+			renamed = []syncengine.Rename{}
+		}
+		out := map[string]any{
+			"clean":    ch.total() == 0,
+			"added":    nonNil(ch.added),
+			"modified": nonNil(ch.modified),
+			"deleted":  nonNil(ch.deleted),
+			"renamed":  renamed,
+		}
+		if !opts.offline {
+			if rep := collectIncoming(root, base); rep != nil {
+				out["incoming"] = rep
+			}
+		}
+		return printJSON(out)
+	}
+
 	if ch.total() == 0 {
 		fmt.Println("clean (no local changes since last sync)")
 	} else {
@@ -237,7 +261,7 @@ func runStatus(dir string, opts statusOptions) error {
 	if opts.offline {
 		return nil
 	}
-	reportIncoming(root, base)
+	printIncomingReport(collectIncoming(root, base))
 	return nil
 }
 
@@ -287,29 +311,44 @@ func (s incomingSummary) total() int {
 	return len(s.added) + len(s.modified) + len(s.deleted) + len(s.renamed)
 }
 
-// reportIncoming prints whether the server holds changes this machine has not pulled.
-// It is best-effort and never fails `status`: the command is primarily an offline,
-// local-changes view, so a missing profile or an unreachable server downgrades to a
-// short note on stderr rather than an error. A precise file count needs the folder
-// key, so it is shown only when an unlocked session is already cached — status never
-// prompts for a passphrase; otherwise the coarser version delta is reported.
-func reportIncoming(root string, base syncengine.Manifest) {
+// incomingReport is the server-side half of `status`: whether the server holds
+// changes this machine has not pulled, at file level when the folder key is at hand.
+type incomingReport struct {
+	State         string              `json:"state"` // "up-to-date" | "ahead" | "rollback"
+	AheadBy       int                 `json:"aheadBy,omitempty"`
+	ServerVersion int                 `json:"serverVersion,omitempty"` // set on rollback
+	SeenVersion   int                 `json:"seenVersion,omitempty"`   // set on rollback
+	Files         bool                `json:"-"`                       // the file-level lists below are populated
+	Added         []string            `json:"added,omitempty"`
+	Modified      []string            `json:"modified,omitempty"`
+	Deleted       []string            `json:"deleted,omitempty"`
+	Renamed       []syncengine.Rename `json:"renamed,omitempty"`
+}
+
+// collectIncoming reports whether the server holds changes this machine has not
+// pulled, or nil when that cannot be determined. It is best-effort and never fails
+// `status`: the command is primarily an offline, local-changes view, so a missing
+// profile or an unreachable server downgrades to a short note on stderr. A precise
+// file count needs the folder key, so it is computed only when an unlocked session
+// is already cached — status never prompts for a passphrase; otherwise the coarser
+// version delta is reported.
+func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	prof := loadProfileOptional()
 	if prof == nil {
-		return // never logged in: no server to compare against
+		return nil // never logged in: no server to compare against
 	}
 	st, err := loadState(root)
 	if err != nil {
-		return
+		return nil
 	}
 	cl, err := client.New(prof.Server, prof.Token)
 	if err != nil {
-		return
+		return nil
 	}
 	res, err := cl.GetResource(st.ID)
 	if err != nil {
 		noteIncomingUnavailable(err)
-		return
+		return nil
 	}
 
 	// Cheap freshness compare first: RemoteVersion is the server version this machine
@@ -317,12 +356,9 @@ func reportIncoming(root string, base syncengine.Manifest) {
 	// answers "is the server ahead?" — no folder key, no tree walk.
 	switch {
 	case st.RemoteVersion > 0 && res.Version < st.RemoteVersion:
-		fmt.Printf("server reports an older version (%d < %d): it may have been restored from a backup; run `aqt sync`\n",
-			res.Version, st.RemoteVersion)
-		return
+		return &incomingReport{State: "rollback", ServerVersion: res.Version, SeenVersion: st.RemoteVersion}
 	case st.RemoteVersion > 0 && res.Version == st.RemoteVersion:
-		fmt.Println("up to date with the server")
-		return
+		return &incomingReport{State: "up-to-date"}
 	}
 
 	// The server is ahead (or RemoteVersion predates version tracking). Try for a
@@ -333,18 +369,43 @@ func reportIncoming(root string, base syncengine.Manifest) {
 		if mk, ok := identity.LoadSession(prof.Name); ok {
 			defer mk.Wipe()
 			if inc, ierr := incomingFiles(cl, res, base, mk); ierr == nil {
-				printIncoming(inc)
-				return
+				state := "ahead"
+				if inc.total() == 0 {
+					state = "up-to-date"
+				}
+				return &incomingReport{
+					State: state, Files: true,
+					Added: inc.added, Modified: inc.modified, Deleted: inc.deleted, Renamed: inc.renamed,
+				}
 			}
 		}
 	}
 
 	// Fallback: the server advanced but we cannot (or need not) enumerate the files.
 	if st.RemoteVersion == 0 {
-		fmt.Println("the server may hold changes to pull; run `aqt sync`")
+		return &incomingReport{State: "ahead"}
+	}
+	return &incomingReport{State: "ahead", AheadBy: res.Version - st.RemoteVersion}
+}
+
+// printIncomingReport renders collectIncoming's result for the human status view.
+func printIncomingReport(rep *incomingReport) {
+	if rep == nil {
 		return
 	}
-	fmt.Printf("incoming: the server is ahead by %d version(s); run `aqt sync` to pull\n", res.Version-st.RemoteVersion)
+	switch {
+	case rep.State == "rollback":
+		fmt.Printf("server reports an older version (%d < %d): it may have been restored from a backup; run `aqt sync`\n",
+			rep.ServerVersion, rep.SeenVersion)
+	case rep.State == "up-to-date":
+		fmt.Println("up to date with the server")
+	case rep.Files:
+		printIncoming(incomingSummary{added: rep.Added, modified: rep.Modified, deleted: rep.Deleted, renamed: rep.Renamed})
+	case rep.AheadBy > 0:
+		fmt.Printf("incoming: the server is ahead by %d version(s); run `aqt sync` to pull\n", rep.AheadBy)
+	default:
+		fmt.Println("the server may hold changes to pull; run `aqt sync`")
+	}
 }
 
 // incomingFiles decrypts the remote manifest and diffs it against the last-synced
@@ -992,7 +1053,12 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 			// re-planned rather than memoized as done; a retry rewrites the same path.
 			for _, cp := range copies {
 				c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
-				fmt.Printf("conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
+				// stderr under --json so the summary object stays the only stdout output.
+				out := os.Stdout
+				if flagJSON {
+					out = os.Stderr
+				}
+				fmt.Fprintf(out, "conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
 			}
 		}
 	}
@@ -1220,6 +1286,9 @@ func runClone(ref, dir string, adopt bool, password string) error {
 	if err := saveBase(abs, base); err != nil {
 		return err
 	}
+	if flagJSON {
+		return printJSON(map[string]any{"id": id, "dir": abs, "files": len(base.Entries), "tracked": true})
+	}
 	fmt.Printf("cloned %d files into %s\n", len(base.Entries), abs)
 	return nil
 }
@@ -1297,6 +1366,9 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	if err := materializeDirs(abs, manifest.Dirs); err != nil {
 		return err
 	}
+	if flagJSON {
+		return printJSON(map[string]any{"id": id, "dir": abs, "files": len(manifest.Entries), "tracked": false})
+	}
 	fmt.Printf("cloned %d files into %s (read-only share; not a tracked folder)\n", len(manifest.Entries), abs)
 	return nil
 }
@@ -1337,7 +1409,12 @@ func adoptClone(id, abs, server string, version int, meta api.Metadata) error {
 	if err := saveState(abs, folderState{ID: id, Server: server, RemoteVersion: version}); err != nil {
 		return err
 	}
-	fmt.Printf("adopted %s; reconciling with the remote\n", abs)
+	// stderr under --json: the reconcile below emits the JSON summary on stdout.
+	out := os.Stdout
+	if flagJSON {
+		out = os.Stderr
+	}
+	fmt.Fprintf(out, "adopted %s; reconciling with the remote\n", abs)
 	if err := guardTrackedGit(abs, syncOptions{reconcile: true}); err != nil {
 		return err
 	}
@@ -2394,11 +2471,46 @@ func abortOnConflicts(actions []syncengine.Action, dirActions []syncengine.DirAc
 		return nil
 	}
 	sort.Strings(conflicts)
-	printPaths("conflict", conflicts)
+	if flagJSON {
+		_ = printJSON(map[string]any{"conflicts": conflicts})
+	} else {
+		printPaths("conflict", conflicts)
+	}
 	return errConflictsRemain
 }
 
+// planLine is one dry-run plan entry as emitted by `sync --dry-run --json`. Renames
+// use action "rename" with from/to; a copy-mode conflict carries the copy path.
+type planLine struct {
+	Action string `json:"action"`
+	Path   string `json:"path,omitempty"`
+	From   string `json:"from,omitempty"`
+	To     string `json:"to,omitempty"`
+	Dir    bool   `json:"dir,omitempty"`
+	Copy   string `json:"copy,omitempty"`
+}
+
+func printPlanJSON(lines []planLine) error {
+	if lines == nil {
+		lines = []planLine{}
+	}
+	return printJSON(lines)
+}
+
 func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction, renames []syncengine.Rename) error {
+	if flagJSON {
+		var lines []planLine
+		for _, r := range renames {
+			lines = append(lines, planLine{Action: "rename", From: r.From, To: r.To, Dir: r.Dir})
+		}
+		for _, a := range actions {
+			lines = append(lines, planLine{Action: string(a.Kind), Path: a.Path})
+		}
+		for _, a := range dirActions {
+			lines = append(lines, planLine{Action: string(a.Kind), Path: a.Path, Dir: true})
+		}
+		return printPlanJSON(lines)
+	}
 	if len(actions) == 0 && len(dirActions) == 0 && len(renames) == 0 {
 		fmt.Println("already in sync")
 		return nil
@@ -2422,12 +2534,13 @@ func printPlan(actions []syncengine.Action, dirActions []syncengine.DirAction, r
 // shown as a plain conflict. Directory conflicts carry no copy (they resolve
 // local-wins) and pass through unchanged.
 func printCopyPlan(root string, actions []syncengine.Action, dirActions []syncengine.DirAction, renames []syncengine.Rename, remote syncengine.Manifest, host string, now time.Time) error {
-	if len(actions) == 0 && len(dirActions) == 0 && len(renames) == 0 {
+	if !flagJSON && len(actions) == 0 && len(dirActions) == 0 && len(renames) == 0 {
 		fmt.Println("already in sync")
 		return nil
 	}
+	var lines []planLine
 	for _, r := range renames {
-		fmt.Printf("%-13s %s\n", "renamed", renameArrow(r))
+		lines = append(lines, planLine{Action: "rename", From: r.From, To: r.To, Dir: r.Dir})
 	}
 	remoteByPath := remote.ByPath()
 	taken := takenPaths(remoteByPath) // same collision set the real apply uses
@@ -2436,14 +2549,29 @@ func printCopyPlan(root string, actions []syncengine.Action, dirActions []syncen
 			if _, ok := remoteByPath[a.Path]; ok {
 				cp := conflictCopyPath(root, a.Path, host, now, taken)
 				taken[cp] = true
-				fmt.Printf("%-13s %s -> %s\n", "conflict-copy", a.Path, cp)
+				lines = append(lines, planLine{Action: "conflict-copy", Path: a.Path, Copy: cp})
 				continue
 			}
 		}
-		fmt.Printf("%-13s %s\n", a.Kind, a.Path)
+		lines = append(lines, planLine{Action: string(a.Kind), Path: a.Path})
 	}
 	for _, a := range dirActions {
-		fmt.Printf("%-13s %s/\n", a.Kind, a.Path) // trailing slash marks a directory
+		lines = append(lines, planLine{Action: string(a.Kind), Path: a.Path, Dir: true})
+	}
+	if flagJSON {
+		return printPlanJSON(lines)
+	}
+	for _, l := range lines {
+		switch {
+		case l.Action == "rename":
+			fmt.Printf("%-13s %s\n", "renamed", renameArrow(syncengine.Rename{From: l.From, To: l.To, Dir: l.Dir}))
+		case l.Copy != "":
+			fmt.Printf("%-13s %s -> %s\n", l.Action, l.Path, l.Copy)
+		case l.Dir:
+			fmt.Printf("%-13s %s/\n", l.Action, l.Path) // trailing slash marks a directory
+		default:
+			fmt.Printf("%-13s %s\n", l.Action, l.Path)
+		}
 	}
 	return nil
 }
@@ -2555,6 +2683,14 @@ func printPaths(label string, paths []string) {
 }
 
 func summarize(uploads, downloads []syncengine.Entry, localDeletes []string) {
+	if flagJSON {
+		_ = printJSON(map[string]any{
+			"uploaded": len(uploads), "uploadedBytes": entriesBytes(uploads),
+			"downloaded": len(downloads), "downloadedBytes": entriesBytes(downloads),
+			"removedLocally": len(localDeletes),
+		})
+		return
+	}
 	fmt.Printf("synced: %d up (%s), %d down (%s), %d removed locally\n",
 		len(uploads), humanBytes(entriesBytes(uploads)),
 		len(downloads), humanBytes(entriesBytes(downloads)), len(localDeletes))
