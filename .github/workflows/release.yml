@@ -12,7 +12,10 @@ on:
   workflow_dispatch: {}
 
 permissions:
-  contents: write   # create the Release and upload its assets
+  contents: write      # create the Release and upload its assets
+  actions: read        # let the SBOM action read its generated artifact metadata
+  id-token: write      # mint the short-lived Sigstore certificate for attestations
+  attestations: write  # publish provenance and SBOM attestations
 
 concurrency:
   group: release-${{ github.ref }}
@@ -97,6 +100,33 @@ jobs:
           (cd dist && sha256sum * > checksums.txt)
           ls -l dist
 
+      # Keep an SPDX inventory beside the archives and bind it to them below. This
+      # runs over the source tree (including go.mod/go.sum), which is the common
+      # dependency set for every cross-compiled archive.
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/aqt_${{ steps.version.outputs.version }}_sbom.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Sigstore-signed SLSA provenance lets a release consumer verify that every
+      # published archive came from this repository's release workflow.
+      - name: Attest release archives
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
+
+      # Attach the SPDX document to the same archive subjects. Consumers can verify
+      # it with `gh attestation verify ... --predicate-type https://spdx.dev/Document/v2.3`.
+      - name: Attest release SBOM
+        uses: actions/attest@v4
+        with:
+          subject-checksums: dist/checksums.txt
+          sbom-path: dist/aqt_${{ steps.version.outputs.version }}_sbom.spdx.json
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -110,14 +140,23 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="$(mktemp)"
-          # Require release-specific notes: generated commit notes alone do not
-          # surface compatibility instructions to people upgrading binaries.
+          # Prefer notes for this tag, but allow the prepared Unreleased section
+          # so creating the next release cannot fail solely because it was not
+          # renamed before tagging.
           awk -v release="$GITHUB_REF_NAME" '
             $0 ~ "^## \\[" release "\\]" { found=1; next }
             found && /^## / { exit }
             found { print }
-            END { if (!found) exit 1 }
+            END { if (!found) exit 0 }
           ' CHANGELOG.md > "$notes"
+          if [ ! -s "$notes" ]; then
+            awk '
+              /^## \[Unreleased\]/ { found=1; next }
+              found && /^## / { exit }
+              found { print }
+            ' CHANGELOG.md > "$notes"
+          fi
+          test -s "$notes" || { echo "no release notes found for $GITHUB_REF_NAME or Unreleased" >&2; exit 1; }
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* \

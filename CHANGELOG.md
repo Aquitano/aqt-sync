@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Browser decryption for public links is limited to single inline files. Streamed
+  files and folders remain CLI-only (`aqt pull` or `aqt clone`); the share page
+  states this before a recipient consumes a limited-use link.
+
 - `aqt passphrase rotate-root` performs account-compromise recovery: it creates a new root key, atomically rewraps all recoverable resource and snapshot keys plus incoming grants, migrates the account signing/encryption identities, and revokes every device except the initiating one (which receives a fresh token). Future convergent writes use the new root-derived identity.
 
 - Capability negotiation now fails closed for missing or malformed headers. Header-less legacy clients are baseline-only and receive `426 Upgrade Required` before an id-bound or newer resource is served.
