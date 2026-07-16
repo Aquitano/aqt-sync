@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/url"
 	"os"
@@ -85,6 +86,13 @@ func exitCode(err error) int {
 }
 
 func isNetworkError(err error) bool {
+	// *fs.PathError has a Timeout method, so it satisfies net.Error; a local file
+	// error (`aqt push missing-file`) must not map to the retryable network exit
+	// code, or cron treats a permanent failure as a blip worth retrying.
+	var pathErr *fs.PathError
+	if errors.As(err, &pathErr) {
+		return false
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return true
@@ -100,12 +108,14 @@ func rootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
-		// Bare `aqt <path>` is sugar for `aqt push <path>` (private default).
+		// Bare `aqt <path>` is sugar for `aqt push <path>` (private default), but only
+		// when the argument unambiguously looks like a path: a typo'd subcommand
+		// (`aqt statsu`) must never silently upload a file that happens to match it.
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 0 {
 				return cmd.Help()
 			}
-			return runPush(args[0], pushOptions{})
+			return runPushSugar(args[0])
 		},
 	}
 	root.PersistentFlags().StringVar(&flagServer, "server", "", "server URL override")
@@ -128,6 +138,30 @@ func rootCmd() *cobra.Command {
 	root.Version = version
 	root.Flags().BoolP("version", "V", false, "version for aqt")
 	return root
+}
+
+// runPushSugar handles a bare `aqt <arg>`. An argument with a path separator is
+// clearly a file and pushes directly; a bare word that exists as a regular file
+// pushes only after an interactive confirmation; anything else is an unknown
+// command. This keeps the sugar while closing the typo'd-command upload hole.
+func runPushSugar(arg string) error {
+	if strings.ContainsRune(arg, os.PathSeparator) || strings.ContainsRune(arg, '/') {
+		return runPush(arg, pushOptions{})
+	}
+	if info, err := os.Stat(arg); err == nil && info.Mode().IsRegular() {
+		if !interactiveStdin() {
+			return fmt.Errorf("unknown command %q for \"aqt\"; to upload the file %q, run `aqt push %s`", arg, arg, arg)
+		}
+		ok, err := promptYesNo(fmt.Sprintf("Upload the file %q? [y/N] ", arg), false)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return errors.New("aborted")
+		}
+		return runPush(arg, pushOptions{})
+	}
+	return fmt.Errorf("unknown command %q for \"aqt\"; run `aqt --help` for the command list", arg)
 }
 
 // loadProfile loads the active profile and applies a --server override.

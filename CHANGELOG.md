@@ -4,6 +4,27 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- Local file errors (`aqt push missing-file`) no longer exit with code 5
+  ("network, retry later"): `*fs.PathError` satisfies the `net.Error` interface
+  and was misclassified. They now exit 1.
+- Bare `aqt <word>` no longer uploads a file that happens to match a typo'd
+  subcommand: the push sugar requires a path separator, or an interactive
+  confirmation when the bare word names an existing file.
+- `-P`/`--password` without a value now prompts for the password (hidden, on a
+  terminal), as DESIGN.md promised; an inline value must be attached
+  (`-P<pw>`/`--password=<pw>`), and `--password-stdin` remains for pipes.
+- `aqt push --help` renders `--name` as a plain string flag (backticks in the
+  usage string were parsed by cobra as a flag type).
+- `aqt push <dir>` explains the `init`/`sync`/`clone` folder workflow instead of
+  failing with a raw `read ...: is a directory`.
+- `aqt passphrase rotate-root` without a terminal requires `-y` instead of
+  silently proceeding to revoke every other device.
+- TUI: folders can be shared from the resources panel (the "folders cannot be
+  shared publicly yet" guard was stale since chunked-folder links shipped), and
+  the help overlay no longer lists tracked-folder-only keys outside one.
+
 ### Added
 
 - Browser decryption for public links is limited to single inline files. Streamed

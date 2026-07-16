@@ -70,7 +70,10 @@ key directly or prompt for a password to unwrap it. The server sees only `<id>`.
 
 ## 3. CLI surface
 
-`aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>`.
+`aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>`
+when the argument contains a path separator; a bare word that names an existing file
+asks for confirmation first (and errors as an unknown command without a terminal),
+so a typo'd subcommand never uploads a file.
 
 Global flags (all commands): `--server <url>` (default `http://localhost:8080`; the
 `aqt.sh` URLs below stand in for wherever you host it),
@@ -89,7 +92,8 @@ aqt <path>                Sugar for `aqt push <path>`.
 aqt push -                Read plaintext from stdin.
 
   --public            Mint a shareable fragment link instead of a private ref.
-  -P, --password      Password-gate a public link (prompts unless value given).
+  -P, --password      Password-gate a public link (prompts unless value given;
+                      an inline value must be attached: -P<pw> or --password=<pw>).
                       Implies --public. Recipient needs link AND password.
   -n, --name <label>  Human label shown in `aqt ls` (encrypted; not in the URL).
       --no-clip       Do not copy the resulting ref/URL to the clipboard.

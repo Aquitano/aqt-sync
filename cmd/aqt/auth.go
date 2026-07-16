@@ -338,12 +338,14 @@ func passphraseCmd() *cobra.Command {
 	addKdfFlags(calibrate, &calibrateKc)
 	cmd.AddCommand(calibrate)
 
+	var rotateYes bool
 	rotateRoot := &cobra.Command{
 		Use:   "rotate-root",
 		Short: "Replace the account root key after compromise (revokes every other device)",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return runRootKeyRotation() },
+		RunE:  func(cmd *cobra.Command, args []string) error { return runRootKeyRotation(rotateYes) },
 	}
+	rotateRoot.Flags().BoolVarP(&rotateYes, "yes", "y", false, "skip the confirmation prompt")
 	cmd.AddCommand(rotateRoot)
 
 	return cmd
@@ -476,7 +478,7 @@ func runPassphraseCalibrate(kc kdfChoice) error {
 // identity in one transaction. Existing convergent objects remain readable because
 // their per-object keys live in the sealed roots; future writes derive convergence
 // from the new root.
-func runRootKeyRotation() error {
+func runRootKeyRotation(assumeYes bool) error {
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
@@ -495,7 +497,12 @@ func runRootKeyRotation() error {
 		return errors.New("current passphrase is incorrect")
 	}
 	defer oldRoot.Wipe()
-	if interactiveStdin() {
+	// A piped invocation must not silently revoke every other device: without a
+	// terminal to confirm on, the rotation requires an explicit -y.
+	if !assumeYes {
+		if !interactiveStdin() {
+			return errors.New("root-key rotation revokes every other device; confirmation required (pass -y to proceed non-interactively)")
+		}
 		ok, err := promptYesNo("Rotate the account root key and revoke every other device? [y/N] ", false)
 		if err != nil {
 			return err
