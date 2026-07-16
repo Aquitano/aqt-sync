@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -85,6 +86,25 @@ func TestPasswordFlagPromptsWithoutValue(t *testing.T) {
 	withStdin(t, "") // a pipe, not a terminal
 	if _, err := pw.resolve(); err == nil || !strings.Contains(err.Error(), "terminal") {
 		t.Errorf("resolve() with sentinel and no tty = %v, want a terminal error", err)
+	}
+}
+
+func TestPasswordFlagHelpIsPrintable(t *testing.T) {
+	cmd := pushCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Help(); err != nil {
+		t.Fatal(err)
+	}
+	help := out.String()
+	if strings.ContainsRune(help, '\x00') {
+		t.Fatalf("push help contains a NUL byte:\n%q", help)
+	}
+	if strings.Contains(help, passwordPromptSentinel) {
+		t.Fatalf("push help exposes the internal password sentinel:\n%s", help)
+	}
+	if !strings.Contains(help, `--password string[="prompt"]`) {
+		t.Fatalf("push help does not describe the optional prompt value:\n%s", help)
 	}
 }
 

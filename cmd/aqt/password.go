@@ -12,8 +12,9 @@ import (
 )
 
 // passwordPromptSentinel marks `-P`/`--password` given without a value, so resolve
-// can prompt for it. It contains a NUL byte, which no shell can pass as a flag value.
-const passwordPromptSentinel = "\x00prompt"
+// can prompt for it. Keep it printable: pflag includes NoOptDefVal in some generated
+// output, and a control byte there corrupts its internal help-column separator.
+const passwordPromptSentinel = "__aqt_internal_password_prompt__"
 
 // passwordFlags binds the link-password flags. -P/--password with an inline value
 // takes the secret on the command line, where it lands in the process's argv:
@@ -32,6 +33,32 @@ func (p *passwordFlags) bind(cmd *cobra.Command, usage string) {
 	f.StringVarP(&p.value, "password", "P", "", usage+" (bare -P prompts; -P<value> appears in ps, prefer --password-stdin)")
 	f.Lookup("password").NoOptDefVal = passwordPromptSentinel
 	f.BoolVar(&p.fromStdin, "password-stdin", false, "read the password from stdin instead of the command line")
+
+	// pflag prints a string flag's NoOptDefVal in help. The parser needs the unique
+	// sentinel above, but users should see the behavior it represents, not an
+	// implementation token. Swap only while Cobra renders help or usage.
+	help := cmd.HelpFunc()
+	cmd.SetHelpFunc(func(c *cobra.Command, args []string) {
+		withPasswordPromptHelpValue(c, func() { help(c, args) })
+	})
+	usageFunc := cmd.UsageFunc()
+	cmd.SetUsageFunc(func(c *cobra.Command) error {
+		var err error
+		withPasswordPromptHelpValue(c, func() { err = usageFunc(c) })
+		return err
+	})
+}
+
+func withPasswordPromptHelpValue(cmd *cobra.Command, render func()) {
+	f := cmd.Flags().Lookup("password")
+	if f == nil {
+		render()
+		return
+	}
+	noOpt := f.NoOptDefVal
+	f.NoOptDefVal = "prompt"
+	defer func() { f.NoOptDefVal = noOpt }()
+	render()
 }
 
 // resolve returns the password, reading stdin when --password-stdin is set and
