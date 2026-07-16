@@ -26,13 +26,13 @@ type lsRow struct {
 
 func lsCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "ls [folder-ref [path]]",
+		Use:   "ls [folder-ref[/path]]",
 		Short: "List your resources, or the entries at a path inside a folder",
 		Long: "Without arguments, lists every resource with its decrypted name and size.\n" +
-			"With a folder ref (aqt://<id>, optionally aqt://<id>/<path> or a second path\n" +
-			"argument), lists the entries at that path by fetching only the directory\n" +
+			"With a folder ref (aqt://<id>, optionally aqt://<id>/<path>), lists the\n" +
+			"entries at that path by fetching only the directory\n" +
 			"nodes on its spine — the rest of the tree is never downloaded.",
-		Args: cobra.MaximumNArgs(2),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cl, prof, err := authedClient()
 			if err != nil {
@@ -45,11 +45,7 @@ func lsCmd() *cobra.Command {
 			defer mk.Wipe()
 
 			if len(args) > 0 {
-				extra := ""
-				if len(args) == 2 {
-					extra = args[1]
-				}
-				return runLsFolder(cl, mk, args[0], extra)
+				return runLsFolder(cl, mk, args[0])
 			}
 			return listResources(cl, mk)
 		},

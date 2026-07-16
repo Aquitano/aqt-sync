@@ -113,12 +113,12 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	switch child.Type {
 	case syncengine.ChildDir:
 		if toStdout {
-			return fmt.Errorf("%s is a directory: `aqt ls aqt://%s/%s` lists it, `aqt pull` (without --stdout) materializes it", subpath, id, subpath)
+			return fmt.Errorf("%s is a directory: `aqt ls aqt://%s/%s` lists it, `aqt pull` materializes it", subpath, id, subpath)
 		}
 		return pullSubtree(cl, id, root.Version, child, fetch, subpath, out, slices)
 	case syncengine.ChildSymlink:
 		if toStdout {
-			return fmt.Errorf("%s is a symlink to %s; pull it without --stdout to recreate the link", subpath, child.Link)
+			return fmt.Errorf("%s is a symlink to %s; use `aqt pull` to recreate the link", subpath, child.Link)
 		}
 		dest := out
 		if dest == "" {
@@ -248,11 +248,8 @@ type folderLsRow struct {
 // collectFolderRows lists the entries at a path inside a folder by walking only
 // that path's spine plus the one listed node — never the whole tree. A path that
 // names a file or symlink yields that single entry.
-func collectFolderRows(cl *client.Client, mk crypto.MasterKey, ref, extra string) ([]folderLsRow, error) {
+func collectFolderRows(cl *client.Client, mk crypto.MasterKey, ref string) ([]folderLsRow, error) {
 	baseRef, sub := splitRefPath(ref)
-	if extra != "" {
-		sub = strings.Trim(sub+"/"+strings.Trim(extra, "/"), "/")
-	}
 	id, _, _ := parseRef(baseRef)
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
@@ -298,8 +295,8 @@ func collectFolderRows(cl *client.Client, mk crypto.MasterKey, ref, extra string
 	return rows, nil
 }
 
-func runLsFolder(cl *client.Client, mk crypto.MasterKey, ref, extra string) error {
-	rows, err := collectFolderRows(cl, mk, ref, extra)
+func runLsFolder(cl *client.Client, mk crypto.MasterKey, ref string) error {
+	rows, err := collectFolderRows(cl, mk, ref)
 	if err != nil {
 		return err
 	}

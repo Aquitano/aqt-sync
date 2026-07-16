@@ -77,7 +77,7 @@ func TestCheckpointRestoreByName(t *testing.T) {
 
 	// Restore by name, side-by-side into a fresh dir: must match the pre-mutation tree.
 	dest := filepath.Join(t.TempDir(), "restored")
-	runCmd(t, restoreCmd(), "release-1", src, "--into", dest)
+	runCmd(t, restoreCmd(), "release-1", src, "--out", dest)
 	if c := readTree(t, dest, "a.txt"); c != "original A" {
 		t.Fatalf("side-by-side a.txt = %q", c)
 	}
@@ -184,7 +184,7 @@ func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 	if !errors.Is(err, client.ErrSnapshotAnchored) {
 		t.Fatalf("delete anchored = %v, want ErrSnapshotAnchored", err)
 	}
-	if !strings.Contains(err.Error(), "anchor") || !strings.Contains(err.Error(), "--remove") {
+	if !strings.Contains(err.Error(), "snapshot unanchor") {
 		t.Fatalf("refusal message %q does not name the escape hatch", err)
 	}
 

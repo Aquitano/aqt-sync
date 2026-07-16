@@ -27,9 +27,15 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Standardized the CLI surface: `contacts rm` is canonical (`remove` remains an
+  alias); pull, restore, and snapshot export use `-o/--out`; snapshot retention
+  uses `--since/--before`; `snapshot create` accepts a positional label;
+  `snapshot unanchor` replaces `anchor --remove`; the no-op verbose flag is gone
+  and `-v` prints the version; `ls` accepts subpaths only in refs; and `cat` is
+  the sole stdout-fetch command.
 - Restore is one command: `aqt restore <name-or-id>` accepts checkpoint names and
   snapshot ids and defaults **side-by-side** (into `aqt-restore-<id>`, or
-  `--into <dir>`); `--in-place` opts into the destructive rollback.
+  `--out <dir>`); `--in-place` opts into the destructive rollback.
   `aqt snapshot restore` is removed — it defaulted the opposite way for the
   same action.
 - Sharing is one family: `aqt share ls [<id>]` lists outgoing access (public
@@ -103,8 +109,8 @@ All notable changes to this project are documented in this file.
   passphrase in-app; reads happen in-process against the existing client layer.
 - `aqt checkpoint <name>` saves a named, anchored snapshot that retention never
   prunes, and `aqt restore <name>` brings it back — side-by-side by default, or
-  in place with `--in-place`. `aqt snapshot anchor <id>
-  [--remove]` anchors or unanchors an existing snapshot. Anchoring fails closed
+  in place with `--in-place`. `aqt snapshot anchor <id>` anchors and
+  `aqt snapshot unanchor <id>` unanchors an existing snapshot. Anchoring fails closed
   against an older server that would silently ignore it.
 - `aqt sync --conflicts=copy` (also `conflicts: "copy"` in `.aqtconfig`) resolves a
   two-sided change Dropbox-style: the local version stays at its path and the remote

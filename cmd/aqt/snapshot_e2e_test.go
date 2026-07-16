@@ -77,13 +77,7 @@ func TestSnapshotLabelEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	rid := h.folderID(src)
-	sealed, err := sealSnapshotLabel(cl, prof, rid, "milestone-1")
-	if err != nil {
-		t.Fatalf("seal label: %v", err)
-	}
-	if _, err := cl.CreateSnapshot(rid, sealed, false); err != nil {
-		t.Fatalf("create: %v", err)
-	}
+	runCmd(t, snapshotCreateCmd(), src, "milestone-1")
 
 	snaps, err := cl.ListSnapshots(rid)
 	if err != nil || len(snaps) != 1 {

@@ -88,7 +88,7 @@ func checkpointDir(args []string) string {
 func restoreCmd() *cobra.Command {
 	var (
 		id      string
-		into    string
+		out     string
 		inPlace bool
 		yes     bool
 	)
@@ -97,13 +97,13 @@ func restoreCmd() *cobra.Command {
 		Short: "Restore a checkpoint by name or a snapshot by id (side-by-side by default)",
 		Long: "Look up <name-or-id> against the tracked folder's checkpoint names first, then as\n" +
 			"a snapshot id, and restore it. By default the snapshot is materialized side-by-side\n" +
-			"into a new directory (aqt-restore-<snapshot-id>, or --into). --in-place instead\n" +
+			"into a new directory (aqt-restore-<snapshot-id>, or --out). --in-place instead\n" +
 			"rolls the live tracked folder back (with a confirmation prompt) and re-syncs the\n" +
 			"rollback to every device.",
 		Args: cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if inPlace && into != "" {
-				return errors.New("--in-place and --into are mutually exclusive")
+			if inPlace && out != "" {
+				return errors.New("--in-place and --out are mutually exclusive")
 			}
 			dir := "."
 			if len(args) == 2 {
@@ -120,7 +120,7 @@ func restoreCmd() *cobra.Command {
 			if inPlace {
 				return restoreInPlace(cl, prof, snap, dir, yes)
 			}
-			dest := into
+			dest := out
 			if dest == "" {
 				dest = "aqt-restore-" + snap.Snapshot.ID
 			}
@@ -135,7 +135,7 @@ func restoreCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(map[string]any{
 					"snapshotId": snap.Snapshot.ID, "name": meta.Name,
-					"version": snap.Snapshot.Version, "into": abs,
+					"version": snap.Snapshot.Version, "out": abs,
 				})
 			}
 			fmt.Printf("restored %q (version %d) into %s\n", meta.Name, snap.Snapshot.Version, abs)
@@ -143,7 +143,7 @@ func restoreCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope the name lookup to this resource id instead of a tracked dir")
-	cmd.Flags().StringVar(&into, "into", "", "restore side-by-side into this (new) directory (default aqt-restore-<snapshot-id>)")
+	cmd.Flags().StringVarP(&out, "out", "o", "", "restore side-by-side into this (new) directory (default aqt-restore-<snapshot-id>)")
 	cmd.Flags().BoolVar(&inPlace, "in-place", false, "roll the live tracked folder back and re-sync it to every device")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the in-place confirmation prompt")
 	markJSONSupported(cmd)

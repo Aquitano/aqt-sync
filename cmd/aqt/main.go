@@ -24,7 +24,7 @@ import (
 
 const defaultServer = "http://localhost:8080"
 
-// version is reported by `aqt --version` / `-V`, overridable at build time via
+// version is reported by `aqt --version` / `-v`, overridable at build time via
 // -ldflags "-X main.version=...".
 var version = "0.2.0-dev"
 
@@ -47,7 +47,6 @@ var (
 	flagProfile  string
 	flagJSON     bool
 	flagQuiet    bool
-	flagVerbose  bool
 	flagProgress bool
 )
 
@@ -133,8 +132,6 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
 	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "output as JSON")
 	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
-	// Accepted on every command; verbose diagnostics are currently minimal.
-	root.PersistentFlags().BoolVarP(&flagVerbose, "verbose", "v", false, "verbose output")
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
 	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd())
@@ -145,11 +142,10 @@ func rootCmd() *cobra.Command {
 
 	markJSONSupported(root) // the bare-path push sugar prints the push JSON
 
-	// root.Version makes cobra print the version when the flag is set; we register
-	// the flag ourselves so it carries the documented -V shorthand (cobra's own
-	// default has no shorthand once --verbose has claimed -v).
+	// root.Version makes cobra print the version when the flag is set; register the
+	// flag explicitly so it carries the conventional -v shorthand.
 	root.Version = version
-	root.Flags().BoolP("version", "V", false, "version for aqt")
+	root.Flags().BoolP("version", "v", false, "version for aqt")
 	return root
 }
 

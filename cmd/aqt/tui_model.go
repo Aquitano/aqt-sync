@@ -770,7 +770,7 @@ func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, m.anchorCmd(*snap)
 	case "R":
 		if m.ctx.root == "" {
-			return m, m.toast("in-place restore needs a tracked folder — use `aqt restore <id> --into` instead")
+			return m, m.toast("in-place restore needs a tracked folder — use `aqt restore <id> --out` instead")
 		}
 		m.dialog = m.restoreDialog(*snap)
 		return m, nil
@@ -822,7 +822,7 @@ func (m *tuiModel) newSnapshotDialog() tuiDialog {
 	in := tuiNewInput("New snapshot", "label (optional)", func(label string) tea.Cmd {
 		args := []string{"snapshot", "create", root}
 		if label != "" {
-			args = append(args, "-l", label)
+			args = append(args, label)
 		}
 		return tuiRequestExec(args...)
 	})
@@ -831,11 +831,10 @@ func (m *tuiModel) newSnapshotDialog() tuiDialog {
 }
 
 func (m *tuiModel) anchorCmd(snap snapshotRow) tea.Cmd {
-	args := []string{"snapshot", "anchor", snap.ID}
 	if snap.Anchored {
-		args = append(args, "--remove")
+		return tuiRequestExec("snapshot", "unanchor", snap.ID)
 	}
-	return tuiRequestExec(args...)
+	return tuiRequestExec("snapshot", "anchor", snap.ID)
 }
 
 func (m *tuiModel) restoreDialog(snap snapshotRow) tuiDialog {

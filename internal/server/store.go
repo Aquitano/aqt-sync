@@ -372,7 +372,7 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	 ALTER TABLE resources ADD COLUMN exhausted_at INTEGER;
 	 ALTER TABLE resources ADD COLUMN reclaimed INTEGER NOT NULL DEFAULT 0;`,
 	// 11: an anchor pins a snapshot against every retention path (the scheduled job's
-	// prune, the client's --keep-last/--older-than selection, and an explicit prune,
+	// prune, the client's --keep-last/--before selection, and an explicit prune,
 	// which the store refuses). Like `scheduled`, it is a plaintext server-side boolean
 	// so retention can act on it without a key; it leaks only "this snapshot is
 	// protected", the same shape of leak as scheduled, while the name stays sealed.

@@ -124,7 +124,7 @@ func TestLsFolderSubpath(t *testing.T) {
 	}
 	defer mk.Wipe()
 
-	rows, err := collectFolderRows(cl, mk, "aqt://"+id, "")
+	rows, err := collectFolderRows(cl, mk, "aqt://"+id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,26 +138,22 @@ func TestLsFolderSubpath(t *testing.T) {
 		}
 	}
 
-	// The same path can ride in the ref or the extra arg.
-	sub, err := collectFolderRows(cl, mk, "aqt://"+id+"/docs", "")
+	// Subpaths ride in the ref, so there is one unambiguous form.
+	sub, err := collectFolderRows(cl, mk, "aqt://"+id+"/docs")
 	if err != nil {
 		t.Fatal(err)
 	}
-	viaArg, err := collectFolderRows(cl, mk, "aqt://"+id, "docs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(sub) != 2 || len(viaArg) != 2 {
-		t.Fatalf("docs rows = %+v / %+v, want 2 entries each", sub, viaArg)
+	if len(sub) != 2 {
+		t.Fatalf("docs rows = %+v, want 2 entries", sub)
 	}
 
 	// A file path lists the single entry.
-	one, err := collectFolderRows(cl, mk, "aqt://"+id+"/docs/notes.txt", "")
+	one, err := collectFolderRows(cl, mk, "aqt://"+id+"/docs/notes.txt")
 	if err != nil || len(one) != 1 || one[0].Type != string(syncengine.ChildFile) {
 		t.Fatalf("file row = %+v, %v; want one file entry", one, err)
 	}
 
-	if _, err := collectFolderRows(cl, mk, "aqt://"+id+"/nope", ""); err == nil ||
+	if _, err := collectFolderRows(cl, mk, "aqt://"+id+"/nope"); err == nil ||
 		!strings.Contains(err.Error(), "not found") {
 		t.Fatalf("ls of missing path err = %v, want path-not-found", err)
 	}

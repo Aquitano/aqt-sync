@@ -35,31 +35,45 @@ func snapshotCmd() *cobra.Command {
 			"pinned server-side so a later sync (or a mistaken delete) cannot reclaim them. " +
 			"They are account-global: any of your devices can browse and restore them.",
 	}
-	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAnchorCmd(), snapshotAutoCmd())
+	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAnchorCmd(), snapshotUnanchorCmd(), snapshotAutoCmd())
 	return cmd
 }
 
 // --- anchor ---
 
 func snapshotAnchorCmd() *cobra.Command {
-	var remove bool
 	cmd := &cobra.Command{
 		Use:   "anchor <snapshot-id>",
-		Short: "Protect a snapshot from retention (or --remove to make it prunable)",
+		Short: "Protect a snapshot from retention",
 		Long: "An anchored snapshot is exempt from every retention path — the scheduled job's\n" +
-			"prune, `snapshot prune --keep-last/--older-than`, and an explicit prune, which is\n" +
-			"refused until the anchor is removed. `aqt checkpoint` anchors as it creates; this\n" +
-			"toggles the anchor on an existing snapshot.",
+			"prune, `snapshot prune --keep-last/--before`, and an explicit prune, which is\n" +
+			"refused until the snapshot is unanchored. `aqt checkpoint` anchors as it creates.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cl, _, err := authedClient()
 			if err != nil {
 				return err
 			}
-			return setSnapshotAnchor(cl, args[0], !remove)
+			return setSnapshotAnchor(cl, args[0], true)
 		},
 	}
-	cmd.Flags().BoolVar(&remove, "remove", false, "remove the anchor, making the snapshot prunable again")
+	markJSONSupported(cmd)
+	return cmd
+}
+
+func snapshotUnanchorCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "unanchor <snapshot-id>",
+		Short: "Make an anchored snapshot eligible for retention again",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cl, _, err := authedClient()
+			if err != nil {
+				return err
+			}
+			return setSnapshotAnchor(cl, args[0], false)
+		},
+	}
 	markJSONSupported(cmd)
 	return cmd
 }
@@ -98,15 +112,25 @@ func snapshotCreateCmd() *cobra.Command {
 		label string
 	)
 	cmd := &cobra.Command{
-		Use:   "create [dir]",
+		Use:   "create [dir] [label]",
 		Short: "Snapshot a tracked folder's (or a resource's) current state",
-		Args:  cobra.MaximumNArgs(1),
+		Args:  cobra.MaximumNArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) == 2 {
+				if cmd.Flags().Changed("label") {
+					return errors.New("specify the snapshot label either positionally or with --label, not both")
+				}
+				label = args[1]
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
 			}
-			resourceID, err := resolveResourceID(dirArg(args), id)
+			dir := "."
+			if len(args) > 0 {
+				dir = args[0]
+			}
+			resourceID, err := resolveResourceID(dir, id)
 			if err != nil {
 				return err
 			}
@@ -458,7 +482,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	}
 	if st.ID != snap.Snapshot.ResourceID {
 		return fmt.Errorf("snapshot belongs to resource %s, but %s tracks %s; "+
-			"restore it side-by-side with --into instead", snap.Snapshot.ResourceID, root, st.ID)
+			"restore it side-by-side with --out instead", snap.Snapshot.ResourceID, root, st.ID)
 	}
 	if err := confirmDestructive(fmt.Sprintf("Roll %s back to snapshot %s and push to every device? "+
 		"Current contents are replaced. [y/N] ", root, snap.Snapshot.ID), assumeYes); err != nil {
@@ -475,7 +499,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 		return err
 	}
 	if meta.Kind != api.KindFolder {
-		return errors.New("in-place restore is only for tracked folders; use --into for a single file")
+		return errors.New("in-place restore is only for tracked folders; use --out for a single file")
 	}
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
@@ -552,17 +576,17 @@ func swapTree(root, staging string) error {
 // --- export ---
 
 func snapshotExportCmd() *cobra.Command {
-	var to string
+	var out string
 	cmd := &cobra.Command{
 		Use:   "export <snapshot-id>",
 		Short: "Decrypt a snapshot to a plaintext tree for offsite backup",
-		Long: "Reconstructs a snapshot and writes it as plaintext to --to. Decryption happens " +
+		Long: "Reconstructs a snapshot and writes it as plaintext to --out. Decryption happens " +
 			"entirely on this machine; the server never sees a key. The output is NOT encrypted, " +
 			"so it leaves aqt's zero-knowledge boundary: store it somewhere you trust.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if to == "" {
-				return errors.New("--to <dir> is required")
+			if out == "" {
+				return errors.New("--out <dir> is required")
 			}
 			cl, prof, err := authedClient()
 			if err != nil {
@@ -575,7 +599,7 @@ func snapshotExportCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			abs, err := filepath.Abs(to)
+			abs, err := filepath.Abs(out)
 			if err != nil {
 				return err
 			}
@@ -594,7 +618,7 @@ func snapshotExportCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&to, "to", "", "write the decrypted plaintext tree here (required)")
+	cmd.Flags().StringVarP(&out, "out", "o", "", "write the decrypted plaintext tree here (required)")
 	markJSONSupported(cmd)
 	return cmd
 }
@@ -917,23 +941,23 @@ func nonNil(s []string) []string {
 
 func snapshotPruneCmd() *cobra.Command {
 	var (
-		id        string
-		dir       string
-		keepLast  int
-		olderThan string
-		dryRun    bool
-		yes       bool
+		id       string
+		dir      string
+		keepLast int
+		before   string
+		dryRun   bool
+		yes      bool
 	)
 	cmd := &cobra.Command{
 		Use:   "prune [snapshot-id...]",
-		Short: "Delete snapshots by id, or by retention (--keep-last/--older-than)",
+		Short: "Delete snapshots by id, or by retention (--keep-last/--before)",
 		Long: "Delete snapshots and let GC reclaim any objects no other snapshot or resource\n" +
-			"needs. Pass explicit ids, or select by retention with --keep-last / --older-than.\n" +
+			"needs. Pass explicit ids, or select by retention with --keep-last / --before.\n" +
 			"A retention run spans every snapshot unless scoped to one resource with --dir or\n" +
 			"--id; --keep-last is applied per resource. Use --dry-run to preview.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			byRetention := keepLast > 0 || olderThan != ""
+			byRetention := keepLast > 0 || before != ""
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
@@ -942,9 +966,9 @@ func snapshotPruneCmd() *cobra.Command {
 			var targets []string
 			if byRetention {
 				if len(args) > 0 {
-					return errors.New("with --keep-last/--older-than, scope with --dir/--id; positional ids are not allowed")
+					return errors.New("with --keep-last/--before, scope with --dir/--id; positional ids are not allowed")
 				}
-				cutoff, err := parseOlderThan(olderThan)
+				cutoff, err := parseSnapshotBefore(before)
 				if err != nil {
 					return err
 				}
@@ -970,7 +994,7 @@ func snapshotPruneCmd() *cobra.Command {
 				}
 			} else {
 				if len(args) == 0 {
-					return errors.New("specify snapshot ids, or use --keep-last/--older-than")
+					return errors.New("specify snapshot ids, or use --keep-last/--before")
 				}
 				targets = args
 			}
@@ -999,37 +1023,37 @@ func snapshotPruneCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "scope a retention prune to this resource id")
 	cmd.Flags().StringVar(&dir, "dir", "", "scope a retention prune to this tracked dir")
 	cmd.Flags().IntVar(&keepLast, "keep-last", 0, "keep the N newest snapshots per resource, prune the rest (anchored snapshots are excluded from the count and never pruned)")
-	cmd.Flags().StringVar(&olderThan, "older-than", "", "prune snapshots older than this duration (e.g. 720h)")
+	cmd.Flags().StringVar(&before, "before", "", "prune snapshots older than this duration (e.g. 720h)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what would be pruned without deleting")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func parseOlderThan(s string) (time.Duration, error) {
+func parseSnapshotBefore(s string) (time.Duration, error) {
 	if s == "" {
 		return 0, nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return 0, fmt.Errorf("invalid --older-than: %w", err)
+		return 0, fmt.Errorf("invalid --before: %w", err)
 	}
 	return d, nil
 }
 
 // selectSnapshotsToPrune chooses which snapshots a retention policy deletes. snaps
 // must be newest-first (as ListSnapshots returns). keepLast > 0 keeps that many newest
-// per resource; olderThan > 0 selects snapshots created before now-olderThan. When
+// per resource; before > 0 selects snapshots created before now-before. When
 // both are set, only snapshots beyond the keep-last window AND older than the cutoff
 // are selected (the conservative intersection). It returns the ids to prune.
 //
 // Anchored snapshots are outside the retention universe entirely: they are never
 // selected, and they do not count toward the --keep-last quota, so anchoring a
 // snapshot never pushes an unanchored one out of the keep window.
-func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, olderThan time.Duration, now time.Time) []string {
+func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, before time.Duration, now time.Time) []string {
 	var cutoff int64
-	if olderThan > 0 {
-		cutoff = now.Add(-olderThan).Unix()
+	if before > 0 {
+		cutoff = now.Add(-before).Unix()
 	}
 	perResource := map[string]int{}
 	var prune []string
@@ -1039,16 +1063,16 @@ func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, olderThan ti
 		}
 		perResource[s.ResourceID]++ // newest-first, so this rank rises going back in time
 		beyondKeep := keepLast > 0 && perResource[s.ResourceID] > keepLast
-		olderThanCutoff := olderThan > 0 && s.CreatedAt < cutoff
+		beforeCutoff := before > 0 && s.CreatedAt < cutoff
 
 		var selected bool
 		switch {
-		case keepLast > 0 && olderThan > 0:
-			selected = beyondKeep && olderThanCutoff
+		case keepLast > 0 && before > 0:
+			selected = beyondKeep && beforeCutoff
 		case keepLast > 0:
 			selected = beyondKeep
-		case olderThan > 0:
-			selected = olderThanCutoff
+		case before > 0:
+			selected = beforeCutoff
 		}
 		if selected {
 			prune = append(prune, s.ID)
