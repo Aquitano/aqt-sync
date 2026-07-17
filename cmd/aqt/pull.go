@@ -187,6 +187,14 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 // contentKey recovers the content key either from the share fragment (public/
 // gated) or by unwrapping with the master key (private).
 func contentKey(res api.GetResourceResponse, fragment, password string, prof *identity.Profile) (crypto.ContentKey, error) {
+	return contentKeyWithMaster(res, fragment, password, prof, nil)
+}
+
+// contentKeyWithMaster is contentKey given an already-unlocked master key to reuse.
+// A caller that has unlocked once (e.g. info resolving an owned ref by name) passes it
+// so unwrapping the owner or grant key does not prompt for the passphrase a second time
+// when session caching is unavailable. A nil master is unlocked on demand.
+func contentKeyWithMaster(res api.GetResourceResponse, fragment, password string, prof *identity.Profile, master *crypto.MasterKey) (crypto.ContentKey, error) {
 	if fragment != "" {
 		if strings.HasPrefix(fragment, "p.") && password == "" {
 			p, err := promptPassphrase("Share password: ")
@@ -204,11 +212,13 @@ func contentKey(res api.GetResourceResponse, fragment, password string, prof *id
 		if prof == nil {
 			return crypto.ContentKey{}, errors.New("granted resource: run `aqt login` to decrypt it")
 		}
-		mk, err := unlockMaster(prof)
+		mk, owned, err := borrowMaster(prof, master)
 		if err != nil {
 			return crypto.ContentKey{}, err
 		}
-		defer mk.Wipe()
+		if owned {
+			defer mk.Wipe()
+		}
 		return crypto.UnwrapGrant(res.GrantKey, mk, res.ID, res.Owner, prof.OwnerHandle)
 	}
 	if res.WrappedKey == nil {
@@ -217,12 +227,27 @@ func contentKey(res api.GetResourceResponse, fragment, password string, prof *id
 	if prof == nil {
 		return crypto.ContentKey{}, errors.New("private resource: run `aqt login` to decrypt it")
 	}
-	mk, err := unlockMaster(prof)
+	mk, owned, err := borrowMaster(prof, master)
 	if err != nil {
 		return crypto.ContentKey{}, err
 	}
-	defer mk.Wipe()
+	if owned {
+		defer mk.Wipe()
+	}
 	return crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+}
+
+// borrowMaster returns the caller's already-unlocked master key when non-nil (owned is
+// false; the caller wipes it), otherwise unlocks a fresh key the caller must wipe.
+func borrowMaster(prof *identity.Profile, shared *crypto.MasterKey) (mk crypto.MasterKey, owned bool, err error) {
+	if shared != nil {
+		return *shared, false, nil
+	}
+	mk, err = unlockMaster(prof)
+	if err != nil {
+		return crypto.MasterKey{}, false, err
+	}
+	return mk, true, nil
 }
 
 // safeOutputName reduces an attacker-controlled metadata name to a bare basename

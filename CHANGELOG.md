@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- A download response no longer exposes a link's lifecycle fields (expiry, read
+  counts, create/update timestamps) to public-link recipients or grantees; they
+  are returned to the owner only. Enforcement is unchanged.
+- `aqt mv` against a server too old for the resource-metadata endpoint now
+  reports that the server lacks rename support (upgrade it) instead of a bare
+  "not found".
+- `aqt mv` warns when the new name already belongs to another resource, so a
+  later name-based ref does not silently become ambiguous.
+- `aqt info` no longer prompts for the passphrase twice when session caching is
+  unavailable: the master key is unlocked once per invocation.
 - Local file errors (`aqt push missing-file`) no longer exit with code 5
   ("network, retry later"): `*fs.PathError` satisfies the `net.Error` interface
   and was misclassified. They now exit 1.
