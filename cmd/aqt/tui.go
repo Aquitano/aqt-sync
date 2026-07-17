@@ -20,8 +20,9 @@ func tuiCmd() *cobra.Command {
 		Short: "Interactive terminal UI for sync, snapshots, and shares",
 		Long: "A lazygit-style dashboard over the tracked folder at [dir] (default: the\n" +
 			"folder the current directory is inside, if any): local and incoming changes,\n" +
-			"snapshots and checkpoints, and every pushed resource, with single-key actions\n" +
-			"for sync, share, checkpoint, and restore. Actions run the corresponding aqt\n" +
+			"snapshots and checkpoints, account/device status, and every pushed resource.\n" +
+			"Single-key actions cover sync, push/pull, sharing, agents, devices, snapshots,\n" +
+			"and restore; space opens the full contextual menu. Actions run the corresponding aqt\n" +
 			"command and stream its output into a log pane. Outside a tracked folder the\n" +
 			"resources and snapshots panels still work account-wide.",
 		Args: cobra.MaximumNArgs(1),

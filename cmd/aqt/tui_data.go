@@ -223,9 +223,12 @@ func (c *tuiCtx) snapshotsCmd() tea.Cmd {
 }
 
 func (c *tuiCtx) devicesCmd() tea.Cmd {
-	cl := c.cl
+	cl, currentID := c.cl, c.prof.DeviceID
 	return func() tea.Msg {
 		devs, err := cl.ListDevices()
+		for i := range devs {
+			devs[i].Current = devs[i].ID == currentID
+		}
 		return tuiDevicesMsg{devices: devs, err: err}
 	}
 }

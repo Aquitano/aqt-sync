@@ -18,14 +18,15 @@ import (
 
 // lsRow is one resource as shown by `aqt ls`, with metadata decrypted locally.
 type lsRow struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	Kind       string `json:"kind"`
-	Size       int64  `json:"size"`
-	Visibility string `json:"visibility"`
-	Version    int    `json:"version"`
-	CreatedAt  int64  `json:"createdAt,omitempty"`
-	UpdatedAt  int64  `json:"updatedAt,omitempty"`
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Kind         string `json:"kind"`
+	Size         int64  `json:"size"`
+	Visibility   string `json:"visibility"`
+	AutoSnapshot bool   `json:"-"`
+	Version      int    `json:"version"`
+	CreatedAt    int64  `json:"createdAt,omitempty"`
+	UpdatedAt    int64  `json:"updatedAt,omitempty"`
 }
 
 type lsOptions struct {
@@ -136,7 +137,7 @@ func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 		}
 		rows = append(rows, lsRow{
 			ID: it.ID, Name: name, Kind: kind, Size: meta.Size,
-			Visibility: string(it.Visibility), Version: it.Version,
+			Visibility: string(it.Visibility), AutoSnapshot: it.AutoSnapshot, Version: it.Version,
 			CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
 		})
 	}

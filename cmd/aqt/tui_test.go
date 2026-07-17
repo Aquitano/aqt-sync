@@ -795,16 +795,16 @@ func TestTUISpaceMenuActions(t *testing.T) {
 	if !strings.Contains(menu.title, "Resources") {
 		t.Fatalf("menu title = %q, want a Resources heading", menu.title)
 	}
-	if ks := menuKeys(menu); ks != "y,s,x" {
-		t.Fatalf("private resource menu keys = %q, want y,s,x", ks)
+	if ks := menuKeys(menu); ks != "y,o,v,s,g,r,A,x,X" {
+		t.Fatalf("private resource menu keys = %q, want expanded resource actions", ks)
 	}
 	m.handleKey(key("esc"))
 
 	// A public resource adds the make-private entry.
 	m.panels[tuiPanelResources].list.move(1)
 	m.handleKey(key(" "))
-	if ks := menuKeys(m.dialog.(*tuiMenu)); ks != "y,s,p,x" {
-		t.Fatalf("public resource menu keys = %q, want y,s,p,x", ks)
+	if ks := menuKeys(m.dialog.(*tuiMenu)); ks != "y,o,v,s,g,r,A,p,x,X" {
+		t.Fatalf("public resource menu keys = %q, want expanded public resource actions", ks)
 	}
 	m.handleKey(key("esc"))
 
@@ -813,8 +813,8 @@ func TestTUISpaceMenuActions(t *testing.T) {
 	m.setFocus(tuiPanelFiles)
 	m.handleKey(key(" "))
 	filesMenu := m.dialog.(*tuiMenu)
-	if ks := menuKeys(filesMenu); ks != "s,S,c" {
-		t.Fatalf("files menu keys = %q, want s,S,c", ks)
+	if ks := menuKeys(filesMenu); ks != "s,u,d,S,c,w" {
+		t.Fatalf("files menu keys = %q, want expanded folder actions", ks)
 	}
 	cmd, done := filesMenu.Update(key("s"))
 	if !done || cmd == nil {
