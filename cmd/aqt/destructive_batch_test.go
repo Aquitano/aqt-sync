@@ -56,6 +56,20 @@ func TestSnapshotPrunePreflightsLateBlocker(t *testing.T) {
 	}
 }
 
+func TestSnapshotPruneDeduplicatesExplicitIDs(t *testing.T) {
+	previous := flagJSON
+	flagJSON = true
+	defer func() { flagJSON = previous }()
+
+	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{{ID: "one"}}}
+	if err := runSnapshotPrune(cl, nil, []string{"one", "one"}, "", "", 0, "", false, true); err != nil {
+		t.Fatalf("prune duplicate ids: %v", err)
+	}
+	if want := []string{"one"}; !reflect.DeepEqual(cl.deleted, want) {
+		t.Fatalf("deleted = %v, want %v", cl.deleted, want)
+	}
+}
+
 type fakeDeviceRemover struct {
 	devices []api.Device
 	deleted []string
@@ -125,5 +139,19 @@ func TestDeviceBatchStopsAfterMidBatchFailure(t *testing.T) {
 	}
 	if want := []string{batchSucceeded, batchFailed, batchNotAttempted}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("statuses = %v, want %v", got, want)
+	}
+}
+
+func TestDeviceBatchDeduplicatesIDs(t *testing.T) {
+	previous := flagJSON
+	flagJSON = true
+	defer func() { flagJSON = previous }()
+
+	cl := &fakeDeviceRemover{devices: []api.Device{{ID: "one"}}}
+	if err := runDevicesRemoveWithClient(cl, "", []string{"one", "one"}, func() error { return nil }); err != nil {
+		t.Fatalf("remove duplicate ids: %v", err)
+	}
+	if want := []string{"one"}; !reflect.DeepEqual(cl.deleted, want) {
+		t.Fatalf("deleted = %v, want %v", cl.deleted, want)
 	}
 }

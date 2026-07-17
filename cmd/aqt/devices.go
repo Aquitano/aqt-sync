@@ -111,7 +111,7 @@ func runDevicesRemoveWithClient(cl deviceRemoveClient, currentID string, request
 		known[device.ID] = true
 	}
 
-	ids := append([]string(nil), requested...)
+	ids := uniqueBatchIDs(requested)
 	for i, id := range ids {
 		if id == currentID && i != len(ids)-1 {
 			copy(ids[i:], ids[i+1:])

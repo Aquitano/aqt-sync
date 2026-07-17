@@ -50,6 +50,19 @@ func newBatchResults(ids []string) []destructiveBatchResult {
 	return results
 }
 
+func uniqueBatchIDs(ids []string) []string {
+	seen := make(map[string]bool, len(ids))
+	unique := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		unique = append(unique, id)
+	}
+	return unique
+}
+
 func failBatchPreflight(results []destructiveBatchResult, failures map[int]error) error {
 	var first error
 	for i := range results {

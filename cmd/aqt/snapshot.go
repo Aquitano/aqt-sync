@@ -1002,7 +1002,7 @@ func runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit [
 		return err
 	}
 
-	targets := append([]string(nil), explicit...)
+	targets := uniqueBatchIDs(explicit)
 	if keepLast > 0 || before != "" {
 		targets = selectSnapshotsToPrune(snaps, keepLast, cutoff, time.Now())
 	}
