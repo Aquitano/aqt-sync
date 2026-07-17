@@ -67,7 +67,8 @@ resources and snapshots panels still work account-wide.
 `aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes,
 and `aqt restore <name>` brings it back (side-by-side by default; `--in-place` rolls
 the live tracked folder back). The name is sealed on this machine like any snapshot
-label. Anchor or unanchor an existing snapshot with `aqt snapshot anchor <id> [--remove]`.
+label. Anchor or unanchor an existing snapshot with `aqt snapshot anchor <id>` and
+`aqt snapshot unanchor <id>`.
 
 The client refuses to send its bearer token over plain HTTP to any non-loopback
 host, so an offsite server must serve HTTPS. `http://localhost:8080` is exempted for

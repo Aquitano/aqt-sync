@@ -174,8 +174,8 @@ func TestTUIResourceActionsOpenDialogs(t *testing.T) {
 }
 
 func TestTUISnapshotAnchorArgs(t *testing.T) {
-	// The anchored snapshot toggles off with --remove; the plain one without.
-	if got := tuiExecArgs([]string{"snapshot", "anchor", "s1", "--remove"}); strings.Join(got, " ") != "snapshot anchor s1 --remove" {
+	// Anchoring and unanchoring are separate verbs.
+	if got := tuiExecArgs([]string{"snapshot", "unanchor", "s1"}); strings.Join(got, " ") != "snapshot unanchor s1" {
 		t.Fatalf("unexpected args %v", got)
 	}
 }

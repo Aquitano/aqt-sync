@@ -943,8 +943,8 @@ func (s *Server) deleteSnapshot(c *gin.Context) {
 		return
 	} else if errors.Is(err, ErrSnapshotAnchored) {
 		c.AbortWithStatusJSON(http.StatusConflict, api.ErrorResponse{
-			Error: "snapshot is anchored and protected from pruning; run `aqt snapshot anchor " +
-				c.Param("id") + " --remove` first",
+			Error: "snapshot is anchored and protected from pruning; run `aqt snapshot unanchor " +
+				c.Param("id") + "` first",
 			Code: api.ErrCodeSnapshotAnchored,
 		})
 		return

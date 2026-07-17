@@ -419,7 +419,7 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 // an unknown email — it is self-signed and indistinguishable from a real key on purpose,
 // or the lookup would become an account-existence oracle. The grant is accepted and opens
 // for nobody, and once they do register their honest key mismatches the pin, so every
-// later share fails as if the server were substituting keys. `aqt contacts remove` is the
+// later share fails as if the server were substituting keys. `aqt contacts rm` is the
 // way out, and the mismatch error has to say so.
 func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 	h := newE2E(t)
@@ -439,21 +439,21 @@ func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 	if err == nil {
 		t.Fatal("re-share after registration should refuse: the real key cannot match the pinned decoy")
 	}
-	if !strings.Contains(err.Error(), "contacts remove") {
-		t.Fatalf("mismatch error = %v, want it to point at `aqt contacts remove`", err)
+	if !strings.Contains(err.Error(), "contacts rm") {
+		t.Fatalf("mismatch error = %v, want it to point at `aqt contacts rm`", err)
 	}
 
 	cmd := contactsCmd()
-	cmd.SetArgs([]string{"remove", email})
+	cmd.SetArgs([]string{"rm", email})
 	captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
-			t.Fatalf("contacts remove: %v", err)
+			t.Fatalf("contacts rm: %v", err)
 		}
 	})
 
 	// With the placeholder dropped, the share re-pins Dave's real key and reaches him.
 	if err := runShareWith(id, email); err != nil {
-		t.Fatalf("re-share after `aqt contacts remove`: %v", err)
+		t.Fatalf("re-share after `aqt contacts rm`: %v", err)
 	}
 	asProfile("dave", func() {
 		dest := filepath.Join(t.TempDir(), "out.txt")
