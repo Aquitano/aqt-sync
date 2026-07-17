@@ -134,7 +134,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
-	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd())
+	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
@@ -171,8 +171,8 @@ func confirmDestructive(prompt string, assumeYes bool) error {
 	if assumeYes {
 		return nil
 	}
-	if !interactiveStdin() {
-		return errors.New("confirmation required: pass -y/--yes to proceed non-interactively")
+	if err := requireConfirmable(assumeYes); err != nil {
+		return err
 	}
 	ok, err := promptYesNo(prompt, false)
 	if err != nil {
@@ -180,6 +180,16 @@ func confirmDestructive(prompt string, assumeYes bool) error {
 	}
 	if !ok {
 		return errors.New("aborted")
+	}
+	return nil
+}
+
+// requireConfirmable fails fast when a later destructive confirmation could never
+// be answered, so commands that resolve refs before prompting abort before doing
+// any auth or network work.
+func requireConfirmable(assumeYes bool) error {
+	if !assumeYes && !interactiveStdin() {
+		return errors.New("confirmation required: pass -y/--yes to proceed non-interactively")
 	}
 	return nil
 }

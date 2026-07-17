@@ -259,6 +259,13 @@ func (c *Client) SetVisibility(id string, req api.SetVisibilityRequest) (api.Put
 	return r, err
 }
 
+// UpdateResourceMetadata replaces only the opaque sealed metadata blob.
+func (c *Client) UpdateResourceMetadata(id string, req api.UpdateResourceMetadataRequest) (api.PutResourceResponse, error) {
+	var r api.PutResourceResponse
+	err := c.do(http.MethodPut, "/v1/resources/"+url.PathEscape(id)+"/metadata", req, &r)
+	return r, err
+}
+
 func (c *Client) ListResources() ([]api.ResourceListItem, error) {
 	var r api.ListResourcesResponse
 	err := c.do(http.MethodGet, "/v1/resources", nil, &r)

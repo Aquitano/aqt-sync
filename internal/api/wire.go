@@ -50,6 +50,11 @@ type resourceDownloadHeader struct {
 	Owner         string             `json:"owner,omitempty"`
 	Version       int                `json:"version"`
 	MinClient     int                `json:"minClient,omitempty"`
+	ExpiresAt     int64              `json:"expiresAt,omitempty"`
+	MaxReads      int64              `json:"maxReads,omitempty"`
+	Reads         int64              `json:"reads,omitempty"`
+	CreatedAt     int64              `json:"createdAt,omitempty"`
+	UpdatedAt     int64              `json:"updatedAt,omitempty"`
 }
 
 // EncodeResourceUpload encodes req as a raw upload body: length-prefixed JSON
@@ -108,6 +113,11 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		Owner:         res.Owner,
 		Version:       res.Version,
 		MinClient:     res.MinClient,
+		ExpiresAt:     res.ExpiresAt,
+		MaxReads:      res.MaxReads,
+		Reads:         res.Reads,
+		CreatedAt:     res.CreatedAt,
+		UpdatedAt:     res.UpdatedAt,
 	}, res.Blob.Ciphertext)
 }
 
@@ -128,6 +138,11 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		Owner:         h.Owner,
 		Version:       h.Version,
 		MinClient:     h.MinClient,
+		ExpiresAt:     h.ExpiresAt,
+		MaxReads:      h.MaxReads,
+		Reads:         h.Reads,
+		CreatedAt:     h.CreatedAt,
+		UpdatedAt:     h.UpdatedAt,
 	}, nil
 }
 

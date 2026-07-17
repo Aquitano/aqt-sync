@@ -1226,3 +1226,66 @@ func TestStartGCSweepsAgedPacksOnTimer(t *testing.T) {
 	}
 	t.Fatal("scheduled gc never swept the aged dead pack")
 }
+
+// TestUpdateResourceMetadataOnly verifies rename's store primitive cannot alter
+// content, chunk roots, visibility, or link lifecycle and rejects stale writers.
+func TestUpdateResourceMetadataOnly(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "metadata-owner@example.com")
+	other := s.mustAccount(t, "metadata-other@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("content stays"), ck, crypto.AADBlob)
+	oldMeta, _ := crypto.Seal([]byte(`{"name":"old"}`), ck, crypto.AADMeta)
+	newMeta, _ := crypto.Seal([]byte(`{"name":"new"}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+
+	id, version, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+		Visibility: api.Public, Blob: blob, EncryptedMeta: oldMeta, WrappedKey: &wrapped,
+		ExpireSeconds: 3600, MaxReads: 5, OnExpiry: api.ExpiryRetire, MinClient: api.CapabilityIDBinding,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upgrade *UpgradeRequiredError
+	if _, err := s.UpdateResourceMetadata(owner, id, api.CapabilityBaseline, api.UpdateResourceMetadataRequest{
+		EncryptedMeta: newMeta, ExpectedVersion: version,
+	}); !errors.As(err, &upgrade) || upgrade.MinClient != api.CapabilityIDBinding {
+		t.Fatalf("under-capable metadata update err = %v, want UpgradeRequiredError{%d}", err, api.CapabilityIDBinding)
+	}
+	gotVersion, err := s.UpdateResourceMetadata(owner, id, api.CapabilityIDBinding, api.UpdateResourceMetadataRequest{
+		EncryptedMeta: newMeta, ExpectedVersion: version,
+	})
+	if err != nil || gotVersion != version+1 {
+		t.Fatalf("metadata update: version=%d err=%v", gotVersion, err)
+	}
+	after, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after.Blob.Nonce, before.Blob.Nonce) || !bytes.Equal(after.Blob.Ciphertext, before.Blob.Ciphertext) {
+		t.Fatal("metadata update changed content blob")
+	}
+	if !bytes.Equal(after.EncryptedMeta.Ciphertext, newMeta.Ciphertext) || after.Visibility != api.Public {
+		t.Fatalf("metadata/visibility after update = %+v", after)
+	}
+	if after.ExpiresAt != before.ExpiresAt || after.MaxReads != 5 || after.Reads != 0 {
+		t.Fatalf("metadata update changed lifecycle: before=%+v after=%+v", before, after)
+	}
+	if after.CreatedAt == 0 || after.UpdatedAt < after.CreatedAt {
+		t.Fatalf("invalid timestamps: created=%d updated=%d", after.CreatedAt, after.UpdatedAt)
+	}
+	if _, err := s.UpdateResourceMetadata(owner, id, api.CapabilityIDBinding, api.UpdateResourceMetadataRequest{
+		EncryptedMeta: oldMeta, ExpectedVersion: version,
+	}); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale metadata update err = %v, want ErrVersionConflict", err)
+	}
+	if _, err := s.UpdateResourceMetadata(other, id, api.CapabilityIDBinding, api.UpdateResourceMetadataRequest{
+		EncryptedMeta: oldMeta, ExpectedVersion: version + 1,
+	}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("foreign metadata update err = %v, want ErrNotFound", err)
+	}
+}

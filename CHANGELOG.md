@@ -57,6 +57,11 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Everyday resource management no longer requires copying opaque ids: `share`,
+  `unshare`, `rm`, and `info` accept a unique decrypted name or a local tracked
+  path. `aqt mv` (`rename`) re-seals only client-encrypted metadata, `info` shows
+  link expiry/read limits, and `ls` adds `-l`, filtering, and name/size/date sorts.
+
 - Browser decryption for public links is limited to single inline files. Streamed
   files and folders remain CLI-only (`aqt pull` or `aqt clone`); the share page
   states this before a recipient consumes a limited-use link.

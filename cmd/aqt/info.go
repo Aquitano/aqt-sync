@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -13,8 +14,8 @@ import (
 func infoCmd() *cobra.Command {
 	var pw passwordFlags
 	cmd := &cobra.Command{
-		Use:   "info <id|url>",
-		Short: "Show one resource's metadata (name, kind, size, visibility)",
+		Use:   "info <name-or-id|tracked-path|url>",
+		Short: "Show one resource's metadata and link lifecycle",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			password, err := pw.resolve()
@@ -29,17 +30,39 @@ func infoCmd() *cobra.Command {
 	return cmd
 }
 
+type infoRow struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Kind           string `json:"kind"`
+	Size           int64  `json:"size"`
+	Visibility     string `json:"visibility"`
+	Version        int    `json:"version"`
+	CreatedAt      int64  `json:"createdAt,omitempty"`
+	UpdatedAt      int64  `json:"updatedAt,omitempty"`
+	ExpiresAt      int64  `json:"expiresAt,omitempty"`
+	Reads          int64  `json:"reads,omitempty"`
+	MaxReads       int64  `json:"maxReads,omitempty"`
+	ReadsRemaining *int64 `json:"readsRemaining,omitempty"`
+}
+
 func runInfo(ref, password string, asJSON bool) error {
 	id, fragment, origin := parseRef(ref)
 
-	// Metadata for your own resource needs the account token (to fetch) and the
-	// master key (to unwrap); a public link instead decrypts from its fragment and
-	// needs no profile — the same key recovery as pull. Honor a host embedded in
-	// the ref, without attaching the token to a foreign host (see newLinkClient).
 	prof := loadProfileOptional()
 	cl, err := newLinkClient(origin, prof)
 	if err != nil {
 		return err
+	}
+	if origin == "" && fragment == "" && prof != nil {
+		mk, err := unlockMaster(prof)
+		if err != nil {
+			return err
+		}
+		id, err = resolveOwnedResourceID(cl, mk, ref)
+		mk.Wipe()
+		if err != nil {
+			return err
+		}
 	}
 
 	res, err := cl.GetResource(id)
@@ -64,11 +87,18 @@ func runInfo(ref, password string, asJSON bool) error {
 	if kind == "" {
 		kind = api.KindFile
 	}
+	row := infoRow{
+		ID: res.ID, Name: meta.Name, Kind: kind, Size: meta.Size,
+		Visibility: string(res.Visibility), Version: res.Version,
+		CreatedAt: res.CreatedAt, UpdatedAt: res.UpdatedAt,
+		ExpiresAt: res.ExpiresAt, Reads: res.Reads, MaxReads: res.MaxReads,
+	}
+	if res.MaxReads > 0 {
+		remaining := max(res.MaxReads-res.Reads, 0)
+		row.ReadsRemaining = &remaining
+	}
 	if asJSON {
-		return printJSON(lsRow{
-			ID: res.ID, Name: meta.Name, Kind: kind, Size: meta.Size,
-			Visibility: string(res.Visibility), Version: res.Version,
-		})
+		return printJSON(row)
 	}
 	name := meta.Name
 	if name == "" {
@@ -76,5 +106,12 @@ func runInfo(ref, password string, asJSON bool) error {
 	}
 	fmt.Println(name)
 	fmt.Printf("%s · %s · %s · v%d · %s\n", kind, sizeCell(kind, meta.Size), res.Visibility, res.Version, res.ID)
+	if res.ExpiresAt > 0 {
+		until := time.Until(time.Unix(res.ExpiresAt, 0)).Round(time.Second)
+		fmt.Printf("link expires %s (%s remaining)\n", formatTime(res.ExpiresAt), until)
+	}
+	if row.ReadsRemaining != nil {
+		fmt.Printf("link reads %d/%d (%d remaining)\n", res.Reads, res.MaxReads, *row.ReadsRemaining)
+	}
 	return nil
 }

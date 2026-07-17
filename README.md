@@ -33,6 +33,12 @@ aqt --server https://aqt.example.com login --email you@example.com
 aqt push secret.env
 aqt push notes.md --public
 
+# Everyday resource management accepts a unique name, id, or tracked path.
+aqt info secret.env
+aqt mv secret.env production.env
+aqt share production.env --expire 24h
+aqt ls -l --filter env --sort date
+
 # Track a folder and sync it two-way, like git.
 aqt init ~/vault
 aqt sync ~/vault
