@@ -210,16 +210,44 @@ func unshareCmd() *cobra.Command {
 			"so the revoked wrap opens nothing that changes from here on).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if with != "" {
-				if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to %s? [y/N] ", with, args[0]), yes); err != nil {
-					return err
-				}
-				return runShareRevoke(args[0], with)
-			}
-			if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", args[0]), yes); err != nil {
+			if err := requireConfirmable(yes); err != nil {
 				return err
 			}
-			return runPrivate(args[0])
+			// Resolve before confirming, so the prompt names the resource the key
+			// rotation will actually hit rather than echoing the raw argument.
+			cl, prof, err := authedClient()
+			if err != nil {
+				return err
+			}
+			mk, err := unlockMaster(prof)
+			if err != nil {
+				return err
+			}
+			items, err := cl.ListResources()
+			if err != nil {
+				mk.Wipe()
+				return err
+			}
+			id, ok, err := trackedResourceID(args[0])
+			if !ok {
+				id, err = resolveOwnedResourceIDFromItems(items, mk, args[0])
+			}
+			if err != nil {
+				mk.Wipe()
+				return err
+			}
+			label := resourceLabel(items, mk, id)
+			mk.Wipe()
+			if with != "" {
+				if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to %s? [y/N] ", with, label), yes); err != nil {
+					return err
+				}
+				return runShareRevoke(id, with)
+			}
+			if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", label), yes); err != nil {
+				return err
+			}
+			return runPrivate(id)
 		},
 	}
 	cmd.Flags().StringVar(&with, "with", "", "revoke this account's grant (by email) instead of the public link")

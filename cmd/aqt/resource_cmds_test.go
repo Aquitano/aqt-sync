@@ -69,14 +69,14 @@ func TestInfoCatRm(t *testing.T) {
 		t.Errorf("cat output = %q, want %q", out, content)
 	}
 
-	if err := runRemove([]string{id}, false); err != nil {
+	if err := runRemove([]string{id}, false, true); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	if _, err := cl.GetResource(id); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("after rm, GetResource err = %v, want ErrNotFound", err)
 	}
 	// A second rm of the same id reports it gone rather than succeeding silently.
-	if err := runRemove([]string{id}, false); err == nil || !strings.Contains(err.Error(), "not found") {
+	if err := runRemove([]string{id}, false, true); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("rm of deleted id err = %v, want a not-found error", err)
 	}
 }
@@ -122,7 +122,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 	if _, err := cl.CreateSnapshot(kept, nil, false); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if err := runRemove([]string{kept}, false); err != nil {
+	if err := runRemove([]string{kept}, false, true); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	if snaps, err := cl.ListSnapshots(kept); err != nil || len(snaps) != 1 {
@@ -134,7 +134,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 	if _, err := cl.CreateSnapshot(cascade, nil, false); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if err := runRemove([]string{cascade}, true); err != nil {
+	if err := runRemove([]string{cascade}, true, true); err != nil {
 		t.Fatalf("rm --with-snapshots: %v", err)
 	}
 	if snaps, err := cl.ListSnapshots(cascade); err != nil || len(snaps) != 0 {
@@ -214,13 +214,14 @@ func TestEverydayResourceRefsAndRename(t *testing.T) {
 	if !strings.Contains(out, "0/3") || !strings.Contains(out, "3 remaining") {
 		t.Fatalf("info omitted read lifecycle: %q", out)
 	}
-	if err := runRemove([]string{"renamed.txt"}, false); err != nil {
+	if err := runRemove([]string{"renamed.txt"}, false, true); err != nil {
 		t.Fatalf("rm by name: %v", err)
 	}
 }
 
-// TestResolveTrackedResourcePath confirms a path anywhere under a tracked root
-// resolves directly to that root's resource id.
+// TestResolveTrackedResourcePath confirms the tracked root itself resolves to
+// its resource id, while a path inside it is refused instead of silently
+// widening to the whole folder resource.
 func TestResolveTrackedResourcePath(t *testing.T) {
 	h := newE2E(t)
 	root := t.TempDir()
@@ -239,12 +240,15 @@ func TestResolveTrackedResourcePath(t *testing.T) {
 	if _, ok, err := trackedResourceID("remote-name"); ok || err != nil {
 		t.Fatalf("bare name treated as tracked path: ok=%v err=%v", ok, err)
 	}
-	got, err := resolveOwnedResourceID(cl, mk, nested)
+	got, err := resolveOwnedResourceID(cl, mk, root)
 	if err != nil {
-		t.Fatalf("resolve tracked path: %v", err)
+		t.Fatalf("resolve tracked root: %v", err)
 	}
 	if want := h.folderID(root); got != want {
 		t.Fatalf("resolved id = %q, want %q", got, want)
+	}
+	if _, err := resolveOwnedResourceID(cl, mk, nested); err == nil || !strings.Contains(err.Error(), "inside the tracked folder") {
+		t.Fatalf("nested path err = %v, want inside-tracked-folder refusal", err)
 	}
 }
 

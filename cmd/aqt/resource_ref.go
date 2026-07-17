@@ -85,6 +85,16 @@ func trackedResourceID(ref string) (id string, ok bool, err error) {
 	if rootErr != nil {
 		return "", false, nil
 	}
+	abs, absErr := filepath.Abs(ref)
+	if absErr != nil {
+		return "", false, nil
+	}
+	// Only the tracked root itself names the folder resource. A file or subdirectory
+	// inside it is not a resource of its own, and silently widening it to the whole
+	// folder would let `aqt rm notes.txt` delete the entire folder resource.
+	if abs != root {
+		return "", true, fmt.Errorf("%s is inside the tracked folder %s but is not a resource itself; pass %s to act on the whole folder, or use a resource id", ref, root, root)
+	}
 	st, err := loadState(root)
 	if err != nil {
 		return "", true, fmt.Errorf("read folder state: %w", err)
@@ -93,4 +103,20 @@ func trackedResourceID(ref string) (id string, ok bool, err error) {
 		return "", true, fmt.Errorf("%s has no synced resource yet; run `aqt sync` first", root)
 	}
 	return st.ID, true, nil
+}
+
+// resourceLabel is the human-readable form used by destructive confirmation
+// prompts: the decrypted name with the id, or just the id when the resource is
+// unknown or its metadata cannot be opened.
+func resourceLabel(items []api.ResourceListItem, mk crypto.MasterKey, id string) string {
+	for _, it := range items {
+		if it.ID != id {
+			continue
+		}
+		if meta, ok := openMetadata(it, mk); ok && meta.Name != "" {
+			return fmt.Sprintf("%s (%s)", meta.Name, id)
+		}
+		break
+	}
+	return id
 }

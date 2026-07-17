@@ -1241,7 +1241,7 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 
 	id, version, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
 		Visibility: api.Public, Blob: blob, EncryptedMeta: oldMeta, WrappedKey: &wrapped,
-		ExpireSeconds: 3600, MaxReads: 5, OnExpiry: api.ExpiryRetire,
+		ExpireSeconds: 3600, MaxReads: 5, OnExpiry: api.ExpiryRetire, MinClient: api.CapabilityIDBinding,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1250,7 +1250,13 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotVersion, err := s.UpdateResourceMetadata(owner, id, api.UpdateResourceMetadataRequest{
+	var upgrade *UpgradeRequiredError
+	if _, err := s.UpdateResourceMetadata(owner, id, api.CapabilityBaseline, api.UpdateResourceMetadataRequest{
+		EncryptedMeta: newMeta, ExpectedVersion: version,
+	}); !errors.As(err, &upgrade) || upgrade.MinClient != api.CapabilityIDBinding {
+		t.Fatalf("under-capable metadata update err = %v, want UpgradeRequiredError{%d}", err, api.CapabilityIDBinding)
+	}
+	gotVersion, err := s.UpdateResourceMetadata(owner, id, api.CapabilityIDBinding, api.UpdateResourceMetadataRequest{
 		EncryptedMeta: newMeta, ExpectedVersion: version,
 	})
 	if err != nil || gotVersion != version+1 {
@@ -1272,12 +1278,12 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 	if after.CreatedAt == 0 || after.UpdatedAt < after.CreatedAt {
 		t.Fatalf("invalid timestamps: created=%d updated=%d", after.CreatedAt, after.UpdatedAt)
 	}
-	if _, err := s.UpdateResourceMetadata(owner, id, api.UpdateResourceMetadataRequest{
+	if _, err := s.UpdateResourceMetadata(owner, id, api.CapabilityIDBinding, api.UpdateResourceMetadataRequest{
 		EncryptedMeta: oldMeta, ExpectedVersion: version,
 	}); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("stale metadata update err = %v, want ErrVersionConflict", err)
 	}
-	if _, err := s.UpdateResourceMetadata(other, id, api.UpdateResourceMetadataRequest{
+	if _, err := s.UpdateResourceMetadata(other, id, api.CapabilityIDBinding, api.UpdateResourceMetadataRequest{
 		EncryptedMeta: oldMeta, ExpectedVersion: version + 1,
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("foreign metadata update err = %v, want ErrNotFound", err)

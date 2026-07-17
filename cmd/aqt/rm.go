@@ -20,14 +20,7 @@ func rmCmd() *cobra.Command {
 		Short: "Delete the server-side ciphertext and metadata for one or more resources",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prompt := fmt.Sprintf("Permanently delete %d resource(s) from the server? [y/N] ", len(args))
-			if withSnapshots {
-				prompt = fmt.Sprintf("Permanently delete %d resource(s) AND every snapshot of them? [y/N] ", len(args))
-			}
-			if err := confirmDestructive(prompt, yes); err != nil {
-				return err
-			}
-			return runRemove(args, withSnapshots)
+			return runRemove(args, withSnapshots, yes)
 		},
 	}
 	cmd.Flags().BoolVar(&withSnapshots, "with-snapshots", false, "also delete every snapshot of each resource")
@@ -43,18 +36,54 @@ type rmResult struct {
 	SnapshotsRemaining int    `json:"snapshotsRemaining,omitempty"`
 }
 
-func runRemove(refs []string, withSnapshots bool) error {
+func runRemove(refs []string, withSnapshots, assumeYes bool) error {
+	if err := requireConfirmable(assumeYes); err != nil {
+		return err
+	}
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err
 	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	items, err := cl.ListResources()
+	if err != nil {
+		return err
+	}
+	// Resolve every ref before asking for confirmation, so the prompt names what
+	// will actually be deleted rather than echoing unresolved arguments.
+	seen := make(map[string]bool, len(refs))
 	ids := make([]string, 0, len(refs))
+	labels := make([]string, 0, len(refs))
 	for _, ref := range refs {
-		id, err := resolveOwnedResourceIDWithProfile(cl, prof, ref)
+		id, ok, err := trackedResourceID(ref)
+		if !ok {
+			id, err = resolveOwnedResourceIDFromItems(items, mk, ref)
+		}
 		if err != nil {
 			return err
 		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
 		ids = append(ids, id)
+		labels = append(labels, resourceLabel(items, mk, id))
+	}
+	if !flagJSON {
+		for _, label := range labels {
+			fmt.Fprintf(os.Stderr, "will delete %s\n", label)
+		}
+	}
+	prompt := fmt.Sprintf("Permanently delete %d resource(s) from the server? [y/N] ", len(ids))
+	if withSnapshots {
+		prompt = fmt.Sprintf("Permanently delete %d resource(s) AND every snapshot of them? [y/N] ", len(ids))
+	}
+	if err := confirmDestructive(prompt, assumeYes); err != nil {
+		return err
 	}
 	results := make([]rmResult, 0, len(ids))
 	for _, id := range ids {

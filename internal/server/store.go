@@ -1540,12 +1540,29 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 
 // UpdateResourceMetadata atomically replaces the opaque metadata blob without
 // touching content, chunk roots, visibility, grants, or lifecycle policy.
-func (s *Store) UpdateResourceMetadata(owner, id string, req api.UpdateResourceMetadataRequest) (int, error) {
+// capability is gated against the stored min_client the same way updateResource
+// gates content writes: a client that cannot read the current sealed format must
+// not overwrite it. min_client itself is left unchanged — this write carries no
+// format bump.
+func (s *Store) UpdateResourceMetadata(owner, id string, capability int, req api.UpdateResourceMetadataRequest) (int, error) {
 	metaJSON, err := json.Marshal(req.EncryptedMeta)
 	if err != nil {
 		return 0, err
 	}
 	defer s.resLocks.lock(id)()
+	var storedMin int
+	err = s.rdb.QueryRow(
+		`SELECT min_client FROM resources WHERE id = ? AND owner_handle = ? AND reclaimed = 0`, id, owner,
+	).Scan(&storedMin)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if capability < storedMin {
+		return 0, &UpgradeRequiredError{MinClient: storedMin}
+	}
 	res, err := s.db.Exec(
 		`UPDATE resources SET encrypted_meta = ?, version = version + 1, updated_at = unixepoch()
 		 WHERE id = ? AND owner_handle = ? AND version = ? AND reclaimed = 0`,

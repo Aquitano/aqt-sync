@@ -827,7 +827,13 @@ func (s *Server) updateResourceMetadata(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "encrypted metadata and expectedVersion are required")
 		return
 	}
-	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), req)
+	capability := requestCapability(c)
+	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), capability, req)
+	var upgrade *UpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		abortUpgradeRequired(c, upgrade.MinClient, capability)
+		return
+	}
 	if errors.Is(err, ErrVersionConflict) {
 		abort(c, http.StatusConflict, "resource changed since you last fetched it; retry the rename")
 		return
