@@ -550,7 +550,7 @@ capability that can read the formats it seals — which the server stores per re
 (and copies onto snapshots taken from it). On a read (`GET /v1/resources/:id`, snapshot
 fetch) or an overwriting write, a requester whose capability is below the resource's
 stored `min_client` gets `426 Upgrade Required` with a structured body
-(`{ error, code: "upgrade_required", min_client }`) *before* any payload — an
+(`{ error, code: "upgrade_required", minClient }`) *before* any payload — an
 actionable "upgrade aqt" instead of a downstream decryption failure. A request with
 no (or an unparseable) capability header is assumed to be `2`: the header ships only
 after v0.2.0, so any header-less client is no newer than v0.2.x, whose newest release
@@ -570,7 +570,9 @@ POST   /v1/devices                   Attach device. Body: { email, challengeId, 
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
 DELETE /v1/devices/:id               Revoke a device.
 
-PUT    /v1/resources                 Create (id omitted) or replace in place (id set, owner-checked, version++).
+POST   /v1/resources                 Create (server-assigned id). Same body/echo as PUT below.
+PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). Also still
+                                     accepts a create (id omitted) so an older client keeps working.
                                      Body: { ciphertext, encryptedMeta, visibility,
                                              wrappedKey?, expireSeconds?, maxReads? }  // wrappedKey only for private;
                                                                                        // policy only for public
@@ -584,7 +586,8 @@ POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxRead
                                      Used by `share`/`private`; rotation just replaces the blob. Echoes the
                                      accepted policy; a private flip clears it.
 DELETE /v1/resources/:id
-GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility).
+GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility). Paginated
+                                     (?limit=, ?cursor=) → { resources, nextCursor? }; see pagination note below.
 POST   /v1/public/resources/:id/objects  Unauthenticated. Body: { ids } → positional length-prefixed
                                      object slices. Serves exact objects of a PUBLIC resource, each id
                                      of which must be referenced by that resource (the share-link read
@@ -604,10 +607,10 @@ PUT    /v1/account/enc-key           Backfill the caller's X25519 enc key; the E
 POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey }. Upsert (rotation
                                      re-wraps by re-posting). No grantee-existence check (decoy handles
                                      must be accepted indistinguishably).
-GET    /v1/resources/:id/grants      Owner only: [{ granteeHandle, createdAt }].
+GET    /v1/resources/:id/grants      Owner only: [{ granteeHandle, createdAt }]. Paginated (see below).
 DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
                                      (private resources) and re-wraps surviving grantees.
-GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHandle, wrap, sealed meta).
+GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHandle, wrap, sealed meta). Paginated.
 POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the public variant, gated on
                                      ownership OR a grant instead of visibility — a grantee reads exact
                                      membership-checked slices, never raw pack ranges (packs interleave
@@ -617,14 +620,33 @@ POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the publi
 # manifest objects, so it uses the resource routes above; PUT additionally carries
 # chunkRefs (file-object ids ∪ manifest-object ids the new root references) so the
 # server can root GC. Objects ship inside raw packs; all routes require the owner token:
-POST   /v1/chunks/check              Body: { ids } → { missing }   (have/want before packing)
-POST   /v1/chunks/locate             Body: { ids } → { locations: [{ id, packId, off, len }] }
+POST   /v1/chunks/check              Body: { ids } → { missing }   (have/want before packing). ≤10,000 ids/call.
+POST   /v1/chunks/locate             Body: { ids } → { locations: [{ id, packId, off, len }] }. ≤10,000 ids/call.
 PUT    /v1/packs/:id                  Body: raw pack bytes (octet-stream). id = sha256(pack);
                                      server verifies the address and every object slice. Range-able GET.
                                      → { storedObjects }
 GET    /v1/packs/:id                  → raw pack bytes; supports Range (pull fetches only the needed span)
 POST   /v1/gc                        Pack-level mark-and-sweep → { deletedPacks, freedBytes }
 ```
+
+**Pagination.** Every list endpoint (`/v1/resources`, `/v1/shares`, `/v1/snapshots`,
+`/v1/devices`, `/v1/resources/:id/grants`) pages rather than buffering the whole set:
+`?limit=` (default 100, clamped to 1000) and an opaque `?cursor=`; the response keeps
+its items array and adds `nextCursor` (empty on the last page). Cursors are keyset
+seeks over each list's ordering key, so paging is stable under concurrent inserts. A
+non-positive `limit` is `400 invalid_limit`; a corrupt `cursor` is `400 invalid_cursor`.
+The Go client follows `nextCursor` transparently, so its list methods still return the
+whole slice to CLI callers.
+
+**Error codes.** Every distinct error condition carries a stable snake_case `code` in
+the `{ error, code }` body — `upgrade_required`, `version_conflict`, `quota_exceeded`,
+`device_limit`, `bad_pack`, `gone`, `snapshot_anchored`, `not_found`, `too_many_ids`,
+`grant_limit`, `invalid_policy`, `invalid_cursor`, `invalid_limit`, `drops_roots` — so
+a client branches on the code instead of matching prose, and the server never echoes a
+raw Go error whose text might carry internal detail. `426` additionally carries `minClient`.
+
+**Rate limiting.** A `429` carries a `Retry-After` header (whole seconds), computed
+from the tripped limiter's own refill rate, so a client backs off exactly long enough.
 
 **Public-link lifecycle.** `PUT /v1/resources` and the visibility endpoint accept an
 optional `expireSeconds` (a TTL — the server stores `expires_at = now + expireSeconds`,

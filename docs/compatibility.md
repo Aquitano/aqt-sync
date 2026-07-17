@@ -33,7 +33,7 @@ API layer, *before* any payload is served.
   **overwriting write** of an existing resource, the server compares the requester's
   capability to the resource's stored `min_client`. If the requester is below it, the
   server answers `426 Upgrade Required` with
-  `{ "error": "...", "code": "upgrade_required", "min_client": <n> }` and no payload.
+  `{ "error": "...", "code": "upgrade_required", "minClient": <n> }` and no payload.
   The client maps this to `client.ErrUpgradeRequired` (exit code `6`) and prints the
   server's message verbatim.
 - Write-side validation: a declared `minClient` above the writer's own capability is

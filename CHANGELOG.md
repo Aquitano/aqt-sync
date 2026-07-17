@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Every list endpoint (`/v1/resources`, `/v1/shares`, `/v1/snapshots`,
+  `/v1/devices`, `/v1/resources/:id/grants`) is now paginated with `?limit=`
+  (default 100, max 1000) and an opaque `?cursor=`, returning `nextCursor`
+  alongside the existing items array. The Go client follows the cursor
+  transparently, so CLI callers still get the whole slice in one call.
+- `POST /v1/resources` creates a resource (server-assigned id); `PUT
+  /v1/resources` is now the in-place update. The client uses `POST` for creates.
+  The legacy `PUT`-create path still works for older clients.
+- `429` responses carry a `Retry-After` header (whole seconds) computed from the
+  tripped limiter's refill rate.
+
+### Changed
+
+- Every distinct API error condition now carries a stable snake_case `code` in
+  the error body (quota, version conflict, device limit, bad pack, too-many-ids,
+  grant limit, invalid policy/cursor/limit, drops-roots, not-found — alongside
+  the existing upgrade-required/gone/snapshot-anchored). The client maps by code,
+  and the server no longer echoes raw Go error text that could leak internal
+  detail. **Breaking:** the `426` error body's `min_client` field is renamed to
+  `minClient`, matching every other field's camelCase.
+- `POST /v1/chunks/check` and `/v1/chunks/locate` now cap a request at 10,000
+  ids (`400 too_many_ids`), matching the object endpoints; the client batches
+  `check` like it already batched `locate`.
+- The share page's `500` now renders the same styled page as its `404`/`410`.
+
 ### Fixed
 
 - Local file errors (`aqt push missing-file`) no longer exit with code 5

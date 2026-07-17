@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -143,33 +144,59 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte) erro
 	return tx.Commit()
 }
 
-// ListResourceGrants lists a resource's grants for its owner.
-func (s *Store) ListResourceGrants(owner, resourceID string) ([]api.GrantEntry, error) {
+// ListResourceGrants returns one page of a resource's grants for its owner, ordered
+// by (created_at, grantee_handle), plus the cursor for the next page.
+func (s *Store) ListResourceGrants(owner, resourceID string, page pageParams) ([]api.GrantEntry, string, error) {
 	var resOwner string
 	err := s.rdb.QueryRow(`SELECT owner_handle FROM resources WHERE id = ?`, resourceID).Scan(&resOwner)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && resOwner != owner) {
-		return nil, ErrNotFound
+		return nil, "", ErrNotFound
 	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	limit := page.effectiveLimit()
+	where := "resource_id = ?"
+	args := []any{resourceID}
+	if page.cursor != "" {
+		parts, err := decodeCursor(page.cursor, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		createdAt, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, "", errBadCursor
+		}
+		where += " AND (created_at > ? OR (created_at = ? AND grantee_handle > ?))"
+		args = append(args, createdAt, createdAt, parts[1])
+	}
+	args = append(args, limit+1)
 	rows, err := s.rdb.Query(
-		`SELECT grantee_handle, created_at FROM grants WHERE resource_id = ? ORDER BY created_at, grantee_handle`,
-		resourceID,
+		`SELECT grantee_handle, created_at FROM grants WHERE `+where+` ORDER BY created_at, grantee_handle LIMIT ?`,
+		args...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []api.GrantEntry
 	for rows.Next() {
 		var g api.GrantEntry
 		if err := rows.Scan(&g.GranteeHandle, &g.CreatedAt); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, g)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = encodeCursor(strconv.FormatInt(last.CreatedAt, 10), last.GranteeHandle)
+	}
+	return out, next, nil
 }
 
 // DeleteGrant removes one grant from a resource the caller owns. ErrNotFound
@@ -191,16 +218,32 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string) error {
 // ListShares lists the caller's incoming grants: one row per live resource
 // granted to them, with the sealed metadata so the client can show names after
 // unwrapping. Reclaimed tombstones are skipped (their ciphertext is gone).
-func (s *Store) ListShares(grantee string) ([]api.ShareItem, error) {
+func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, string, error) {
+	limit := page.effectiveLimit()
+	where := "g.grantee_handle = ? AND r.reclaimed = 0"
+	args := []any{grantee}
+	if page.cursor != "" {
+		parts, err := decodeCursor(page.cursor, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		createdAt, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, "", errBadCursor
+		}
+		where += " AND (g.created_at > ? OR (g.created_at = ? AND g.resource_id > ?))"
+		args = append(args, createdAt, createdAt, parts[1])
+	}
+	args = append(args, limit+1)
 	rows, err := s.rdb.Query(
 		`SELECT g.resource_id, g.owner_handle, g.wrapped_key, g.created_at, r.encrypted_meta
 		 FROM grants g JOIN resources r ON r.id = g.resource_id
-		 WHERE g.grantee_handle = ? AND r.reclaimed = 0
-		 ORDER BY g.created_at, g.resource_id`,
-		grantee,
+		 WHERE `+where+`
+		 ORDER BY g.created_at, g.resource_id LIMIT ?`,
+		args...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 	var out []api.ShareItem
@@ -210,14 +253,23 @@ func (s *Store) ListShares(grantee string) ([]api.ShareItem, error) {
 			metaJSON string
 		)
 		if err := rows.Scan(&item.ResourceID, &item.OwnerHandle, &item.WrappedKey, &item.CreatedAt, &metaJSON); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if err := json.Unmarshal([]byte(metaJSON), &item.EncryptedMeta); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, item)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = encodeCursor(strconv.FormatInt(last.CreatedAt, 10), last.ResourceID)
+	}
+	return out, next, nil
 }
 
 // grantWrappedKey returns the wrap for (resource, grantee), if one exists.
@@ -380,11 +432,11 @@ func (s *Server) createGrant(c *gin.Context) {
 	}
 	err := s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if errors.Is(err, ErrGrantLimit) {
-		abort(c, http.StatusBadRequest, err.Error())
+		abortCode(c, http.StatusBadRequest, "grant limit reached for this resource", api.ErrCodeGrantLimit)
 		return
 	}
 	if err != nil {
@@ -398,16 +450,24 @@ func (s *Server) createGrant(c *gin.Context) {
 // listResourceGrants lists a resource's grants for its owner.
 func (s *Server) listResourceGrants(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	grants, err := s.store.ListResourceGrants(owner, c.Param("id"))
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	grants, next, err := s.store.ListResourceGrants(owner, c.Param("id"), page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "list failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.ListGrantsResponse{Grants: grants})
+	c.JSON(http.StatusOK, api.ListGrantsResponse{Grants: grants, NextCursor: next})
 }
 
 // deleteGrant revokes one grant (DELETE /v1/resources/:id/grants/:grantee).
@@ -415,7 +475,7 @@ func (s *Server) deleteGrant(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	err := s.store.DeleteGrant(owner, c.Param("id"), c.Param("grantee"))
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -428,12 +488,20 @@ func (s *Server) deleteGrant(c *gin.Context) {
 // listShares lists the caller's incoming grants (GET /v1/shares).
 func (s *Server) listShares(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	shares, err := s.store.ListShares(owner)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	shares, next, err := s.store.ListShares(owner, page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "list failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.ListSharesResponse{Shares: shares})
+	c.JSON(http.StatusOK, api.ListSharesResponse{Shares: shares, NextCursor: next})
 }
 
 // grantObjects serves exact object slices of a granted (or owned) resource to an
@@ -447,12 +515,12 @@ func (s *Server) grantObjects(c *gin.Context) {
 		return
 	}
 	if len(req.IDs) > maxPublicObjectIDs {
-		abort(c, http.StatusBadRequest, "too many object ids in one request")
+		abortCode(c, http.StatusBadRequest, "too many object ids in one request", api.ErrCodeTooManyIDs)
 		return
 	}
 	owner, locs, err := s.store.ResourceObjectSlices(c.Param("id"), caller, req.IDs)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if errors.Is(err, ErrGone) {

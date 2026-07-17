@@ -14,9 +14,10 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 )
 
-// maxPublicObjectIDs caps one public-read request. It mirrors the client-side
-// locate batch cap (locateBatchSize), keeping a single response's pack-read set
-// bounded no matter how the caller frames its batches.
+// maxPublicObjectIDs caps how many ids one request may carry across the object and
+// chunk endpoints (public/grant object reads, chunks/check, chunks/locate). It
+// mirrors the client-side batch caps (locateBatchSize/checkBatchSize), keeping a
+// single response's pack-read set bounded no matter how the caller frames its batches.
 const maxPublicObjectIDs = 10_000
 
 // gcMinAge is the age guard for garbage collection: a pack younger than this is
@@ -28,6 +29,10 @@ func (s *Server) checkChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.ChunkCheckRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.IDs) > maxPublicObjectIDs {
+		abortCode(c, http.StatusBadRequest, "too many object ids in one request", api.ErrCodeTooManyIDs)
 		return
 	}
 	missing, err := s.store.MissingChunks(owner, req.IDs)
@@ -52,11 +57,11 @@ func (s *Server) putPack(c *gin.Context) {
 	}
 	stored, err := s.store.PutPack(owner, packID, data, s.cfg.QuotaBytes)
 	if errors.Is(err, ErrBadPack) {
-		abort(c, http.StatusBadRequest, err.Error())
+		abortCode(c, http.StatusBadRequest, "uploaded pack is malformed or fails verification", api.ErrCodeBadPack)
 		return
 	}
 	if errors.Is(err, ErrQuotaExceeded) {
-		abort(c, http.StatusInsufficientStorage, "storage quota exceeded; free space or raise the quota")
+		abortCode(c, http.StatusInsufficientStorage, "storage quota exceeded; free space or raise the quota", api.ErrCodeQuotaExceeded)
 		return
 	}
 	if err != nil {
@@ -74,7 +79,7 @@ func (s *Server) getPack(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	path, err := s.store.PackFileForOwner(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -105,6 +110,10 @@ func (s *Server) locateChunks(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
+	if len(req.IDs) > maxPublicObjectIDs {
+		abortCode(c, http.StatusBadRequest, "too many object ids in one request", api.ErrCodeTooManyIDs)
+		return
+	}
 	locations, err := s.store.LocateObjects(owner, req.IDs)
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "locate failed")
@@ -128,12 +137,12 @@ func (s *Server) publicObjects(c *gin.Context) {
 		return
 	}
 	if len(req.IDs) > maxPublicObjectIDs {
-		abort(c, http.StatusBadRequest, "too many object ids in one request")
+		abortCode(c, http.StatusBadRequest, "too many object ids in one request", api.ErrCodeTooManyIDs)
 		return
 	}
 	owner, locs, err := s.store.PublicObjectSlices(c.Param("id"), req.IDs)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if errors.Is(err, ErrGone) {

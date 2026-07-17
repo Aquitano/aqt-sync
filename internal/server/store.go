@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1034,12 +1035,24 @@ func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 
 // ListDevices returns the owner's attached devices (id + name). Token hashes never
 // leave the store.
-func (s *Store) ListDevices(owner string) ([]api.Device, error) {
+func (s *Store) ListDevices(owner string, page pageParams) ([]api.Device, string, error) {
+	limit := page.effectiveLimit()
+	where := "owner_handle = ?"
+	args := []any{owner}
+	if page.cursor != "" {
+		parts, err := decodeCursor(page.cursor, 1)
+		if err != nil {
+			return nil, "", err
+		}
+		where += " AND device_id > ?"
+		args = append(args, parts[0])
+	}
+	args = append(args, limit+1)
 	rows, err := s.rdb.Query(
-		`SELECT device_id, name FROM devices WHERE owner_handle = ? ORDER BY device_id`, owner,
+		`SELECT device_id, name FROM devices WHERE `+where+` ORDER BY device_id LIMIT ?`, args...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 
@@ -1047,11 +1060,19 @@ func (s *Store) ListDevices(owner string) ([]api.Device, error) {
 	for rows.Next() {
 		var d api.Device
 		if err := rows.Scan(&d.ID, &d.Name); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		devices = append(devices, d)
 	}
-	return devices, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(devices) > limit {
+		devices = devices[:limit]
+		next = encodeCursor(devices[len(devices)-1].ID)
+	}
+	return devices, next, nil
 }
 
 // DeleteDevice revokes a device, scoped to its owner so one account cannot revoke
@@ -1585,14 +1606,29 @@ func (s *Store) UpdateResourceMetadata(owner, id string, capability int, req api
 	return req.ExpectedVersion + 1, nil
 }
 
-func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
+// ListResources returns one page of the owner's resources ordered by id, plus the
+// cursor for the next page (empty when the page is the last). The cursor is the last
+// row's id; the query keyset-seeks past it, so paging never buffers the whole set.
+func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceListItem, string, error) {
+	limit := page.effectiveLimit()
+	where := "owner_handle = ?"
+	args := []any{owner}
+	if page.cursor != "" {
+		parts, err := decodeCursor(page.cursor, 1)
+		if err != nil {
+			return nil, "", err
+		}
+		where += " AND id > ?"
+		args = append(args, parts[0])
+	}
+	args = append(args, limit+1) // one extra row tells us whether a next page exists
 	rows, err := s.rdb.Query(
 		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot,
 		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at
-		 FROM resources WHERE owner_handle = ? ORDER BY id`, owner,
+		 FROM resources WHERE `+where+` ORDER BY id LIMIT ?`, args...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 
@@ -1606,11 +1642,11 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 		)
 		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot,
 			&item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		item.Visibility = api.Visibility(vis)
 		if err := json.Unmarshal([]byte(metaJSON), &item.EncryptedMeta); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		// The owner's recovery key, so they can decrypt their own resource names in
 		// `ls`/`find`. This endpoint is owner-only (authed), so returning it leaks
@@ -1618,13 +1654,21 @@ func (s *Store) ListResources(owner string) ([]api.ResourceListItem, error) {
 		if wrappedJSON.Valid {
 			var wk crypto.WrappedKey
 			if err := json.Unmarshal([]byte(wrappedJSON.String), &wk); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 			item.WrappedKey = &wk
 		}
 		items = append(items, item)
 	}
-	return items, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(items) > limit {
+		items = items[:limit]
+		next = encodeCursor(items[len(items)-1].ID)
+	}
+	return items, next, nil
 }
 
 func (s *Store) DeleteResource(owner, id string) error {
@@ -1845,9 +1889,12 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	return info, nil
 }
 
-// ListSnapshots returns the owner's snapshots, newest first. A non-empty
-// resourceID restricts the list to one resource's history.
-func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, error) {
+// ListSnapshots returns one page of the owner's snapshots, newest first, plus the
+// cursor for the next page. A non-empty resourceID restricts the list to one
+// resource's history. The ordering is (created_at DESC, snapshot_id ASC), so the
+// keyset seek uses that mixed-direction predicate.
+func (s *Store) ListSnapshots(owner, resourceID string, page pageParams) ([]api.SnapshotInfo, string, error) {
+	limit := page.effectiveLimit()
 	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored
 	          FROM snapshots WHERE owner_handle = ?`
 	args := []any{owner}
@@ -1855,10 +1902,23 @@ func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, err
 		query += ` AND resource_id = ?`
 		args = append(args, resourceID)
 	}
-	query += ` ORDER BY created_at DESC, snapshot_id`
+	if page.cursor != "" {
+		parts, err := decodeCursor(page.cursor, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		createdAt, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, "", errBadCursor
+		}
+		query += ` AND (created_at < ? OR (created_at = ? AND snapshot_id > ?))`
+		args = append(args, createdAt, createdAt, parts[1])
+	}
+	query += ` ORDER BY created_at DESC, snapshot_id LIMIT ?`
+	args = append(args, limit+1)
 	rows, err := s.rdb.Query(query, args...)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer rows.Close()
 
@@ -1871,17 +1931,26 @@ func (s *Store) ListSnapshots(owner, resourceID string) ([]api.SnapshotInfo, err
 			wrappedJSON sql.NullString
 		)
 		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		if info.EncryptedLabel, err = decodeLabel(labelJSON); err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		out = append(out, info)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = encodeCursor(strconv.FormatInt(last.CreatedAt, 10), last.ID)
+	}
+	return out, next, nil
 }
 
 // GetSnapshot returns one snapshot's sealed root blob plus the copied meta and

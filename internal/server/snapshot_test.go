@@ -168,7 +168,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 		t.Fatalf("opted-out run: n=%d err=%v, want 0", n, err)
 	}
 
-	snaps, err := s.ListSnapshots(owner, rid)
+	snaps, _, err := s.ListSnapshots(owner, rid, pageParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 			t.Fatalf("scheduled snapshot v%d: n=%d err=%v, want 1", i, n, err)
 		}
 	}
-	if all, _ := s.ListSnapshots(owner, rid); len(all) != 5 {
+	if all, _, _ := s.ListSnapshots(owner, rid, pageParams{}); len(all) != 5 {
 		t.Fatalf("setup: %d snapshots, want 5 (1 manual + 4 scheduled)", len(all))
 	}
 
@@ -224,7 +224,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("pruned %d, want 2 (4 scheduled minus keep-2)", n)
 	}
-	all, err := s.ListSnapshots(owner, rid)
+	all, _, err := s.ListSnapshots(owner, rid, pageParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestSnapshotAnchorRefusesDelete(t *testing.T) {
 	if got, _ := s.GetSnapshot(owner, snap.ID); !got.Snapshot.Anchored {
 		t.Fatal("GetSnapshot lost the anchor")
 	}
-	if list, _ := s.ListSnapshots(owner, rid); len(list) != 1 || !list[0].Anchored {
+	if list, _, _ := s.ListSnapshots(owner, rid, pageParams{}); len(list) != 1 || !list[0].Anchored {
 		t.Fatalf("ListSnapshots anchor = %v, want one anchored", list)
 	}
 
@@ -311,7 +311,7 @@ func TestPruneAutoSnapshotsSkipsAnchored(t *testing.T) {
 			t.Fatalf("scheduled v%d: n=%d err=%v", i, n, err)
 		}
 	}
-	all, _ := s.ListSnapshots(owner, rid)
+	all, _, _ := s.ListSnapshots(owner, rid, pageParams{})
 	if len(all) != 3 {
 		t.Fatalf("setup: %d snapshots, want 3", len(all))
 	}
@@ -331,7 +331,7 @@ func TestPruneAutoSnapshotsSkipsAnchored(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("pruned %d, want 1 (anchored + newest survive)", n)
 	}
-	remaining, _ := s.ListSnapshots(owner, rid)
+	remaining, _, _ := s.ListSnapshots(owner, rid, pageParams{})
 	if len(remaining) != 2 {
 		t.Fatalf("remaining %d, want 2 (1 anchored + 1 newest)", len(remaining))
 	}
@@ -363,7 +363,7 @@ func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 	}
 
 	// A different owner can neither list, fetch, nor delete it.
-	if got, _ := s.ListSnapshots(other, ""); len(got) != 0 {
+	if got, _, _ := s.ListSnapshots(other, "", pageParams{}); len(got) != 0 {
 		t.Fatal("snapshot leaked to another owner")
 	}
 	if _, err := s.GetSnapshot(other, snap.ID); !errors.Is(err, ErrNotFound) {
@@ -429,7 +429,7 @@ func TestSnapshotLabelRoundTrip(t *testing.T) {
 	if _, err := s.RunAutoSnapshots(); err != nil {
 		t.Fatal(err)
 	}
-	all, err := s.ListSnapshots(owner, rid)
+	all, _, err := s.ListSnapshots(owner, rid, pageParams{})
 	if err != nil || len(all) != 2 {
 		t.Fatalf("list = %d err=%v, want 2", len(all), err)
 	}
@@ -455,7 +455,7 @@ func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
 	}
 	rid := s.rootResource(t, owner, []string{idsA[0]})
 
-	items, err := s.ListResources(owner)
+	items, _, err := s.ListResources(owner, pageParams{})
 	if err != nil || len(items) != 1 {
 		t.Fatalf("list = %d err=%v, want 1", len(items), err)
 	}
@@ -466,7 +466,7 @@ func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
 	if err := s.SetAutoSnapshot(owner, rid, false); err != nil {
 		t.Fatal(err)
 	}
-	items, err = s.ListResources(owner)
+	items, _, err = s.ListResources(owner, pageParams{})
 	if err != nil {
 		t.Fatal(err)
 	}
