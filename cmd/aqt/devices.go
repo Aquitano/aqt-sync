@@ -8,6 +8,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
@@ -90,33 +91,61 @@ func runDevicesRemove(ids []string) error {
 	if err != nil {
 		return err
 	}
-	revokedSelf := false
-	for _, id := range ids {
-		if id == prof.DeviceID {
-			revokedSelf = true
+	return runDevicesRemoveWithClient(cl, prof.DeviceID, ids, func() error {
+		return identity.ClearSession(firstNonEmpty(flagProfile, identity.DefaultProfile))
+	})
+}
+
+type deviceRemoveClient interface {
+	ListDevices() ([]api.Device, error)
+	DeleteDevice(string) error
+}
+
+func runDevicesRemoveWithClient(cl deviceRemoveClient, currentID string, requested []string, clearSession func() error) error {
+	devices, err := cl.ListDevices()
+	if err != nil {
+		return err
+	}
+	known := make(map[string]bool, len(devices))
+	for _, device := range devices {
+		known[device.ID] = true
+	}
+
+	ids := uniqueBatchIDs(requested)
+	for i, id := range ids {
+		if id == currentID && i != len(ids)-1 {
+			copy(ids[i:], ids[i+1:])
+			ids[len(ids)-1] = id
+			break
 		}
-		if err := cl.DeleteDevice(id); err != nil {
-			if errors.Is(err, client.ErrNotFound) {
-				return fmt.Errorf("device %s not found (or not yours); run `aqt devices` to list yours", id)
+	}
+	results := newBatchResults(ids)
+	failures := map[int]error{}
+	for i, id := range ids {
+		if !known[id] {
+			failures[i] = fmt.Errorf("device %s not found (or not yours); run `aqt devices` to list yours", id)
+		}
+	}
+	if len(failures) > 0 {
+		err = failBatchPreflight(results, failures)
+		return finishDestructiveBatch(destructiveBatchReport{Results: results}, "revoke", err)
+	}
+
+	for i, id := range ids {
+		deleteErr := cl.DeleteDevice(id)
+		if id == currentID {
+			// Once the self-revoke request is sent its outcome is uncertain on any
+			// transport error. Discard the local session even if the response is lost.
+			deleteErr = errors.Join(deleteErr, clearSession())
+		}
+		if deleteErr != nil {
+			if errors.Is(deleteErr, client.ErrNotFound) {
+				deleteErr = fmt.Errorf("device %s not found (or not yours); run `aqt devices` to list yours", id)
 			}
-			return err
+			err = markBatchFailure(results, i, deleteErr)
+			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "revoke", err)
 		}
-		if !flagJSON {
-			fmt.Fprintf(os.Stderr, "revoked %s\n", id)
-		}
+		results[i].Status = batchSucceeded
 	}
-	// Revoking this device invalidated its own token, so drop the now-useless
-	// cached key to match (the profile stays, so `aqt login` can re-attach).
-	if revokedSelf {
-		if err := identity.ClearSession(firstNonEmpty(flagProfile, identity.DefaultProfile)); err != nil {
-			return err
-		}
-		if !flagJSON {
-			fmt.Fprintln(os.Stderr, "revoked the current device; run `aqt login` to re-attach this machine")
-		}
-	}
-	if flagJSON {
-		return printJSON(map[string]any{"revoked": ids, "revokedSelf": revokedSelf})
-	}
-	return nil
+	return finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "revoked", nil)
 }

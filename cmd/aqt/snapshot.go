@@ -958,66 +958,17 @@ func snapshotPruneCmd() *cobra.Command {
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			byRetention := keepLast > 0 || before != ""
+			if byRetention && len(args) > 0 {
+				return errors.New("with --keep-last/--before, scope with --dir/--id; positional ids are not allowed")
+			}
+			if !byRetention && len(args) == 0 {
+				return errors.New("specify snapshot ids, or use --keep-last/--before")
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
 			}
-
-			var targets []string
-			if byRetention {
-				if len(args) > 0 {
-					return errors.New("with --keep-last/--before, scope with --dir/--id; positional ids are not allowed")
-				}
-				cutoff, err := parseSnapshotBefore(before)
-				if err != nil {
-					return err
-				}
-				resourceID := id
-				if resourceID == "" && dir != "" {
-					if resourceID, err = resolveResourceID(dir, ""); err != nil {
-						return err
-					}
-				}
-				snaps, err := cl.ListSnapshots(resourceID)
-				if err != nil {
-					return err
-				}
-				targets = selectSnapshotsToPrune(snaps, keepLast, cutoff, time.Now())
-				if len(targets) == 0 {
-					fmt.Fprintln(os.Stderr, "nothing to prune")
-					return nil
-				}
-				// --dry-run/--json inspect the selection without deleting, so a scripted
-				// retention sweep can be reviewed before it runs for real.
-				if dryRun || flagJSON {
-					return reportPruneTargets(snaps, targets, prof)
-				}
-			} else {
-				if len(args) == 0 {
-					return errors.New("specify snapshot ids, or use --keep-last/--before")
-				}
-				targets = args
-			}
-
-			if err := confirmDestructive(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(targets)), yes); err != nil {
-				return err
-			}
-			for _, t := range targets {
-				if err := cl.DeleteSnapshot(t); errors.Is(err, client.ErrNotFound) {
-					return fmt.Errorf("snapshot %s not found (or not yours)", t)
-				} else if err != nil {
-					return err
-				}
-				if !flagJSON {
-					fmt.Printf("pruned %s\n", t)
-				}
-			}
-			// Only the explicit-id path reaches here with --json (a retention run with
-			// --json reported its selection above without deleting).
-			if flagJSON {
-				return printJSON(map[string]any{"pruned": targets})
-			}
-			return nil
+			return runSnapshotPrune(cl, prof, args, id, dir, keepLast, before, dryRun, yes)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope a retention prune to this resource id")
@@ -1028,6 +979,81 @@ func snapshotPruneCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	markJSONSupported(cmd)
 	return cmd
+}
+
+type snapshotPruneClient interface {
+	ListSnapshots(string) ([]api.SnapshotInfo, error)
+	DeleteSnapshot(string) error
+}
+
+func runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit []string, id, dir string, keepLast int, before string, dryRun, yes bool) error {
+	cutoff, err := parseSnapshotBefore(before)
+	if err != nil {
+		return err
+	}
+	resourceID := id
+	if resourceID == "" && dir != "" {
+		if resourceID, err = resolveResourceID(dir, ""); err != nil {
+			return err
+		}
+	}
+	snaps, err := cl.ListSnapshots(resourceID)
+	if err != nil {
+		return err
+	}
+
+	targets := uniqueBatchIDs(explicit)
+	if keepLast > 0 || before != "" {
+		targets = selectSnapshotsToPrune(snaps, keepLast, cutoff, time.Now())
+	}
+	if len(targets) == 0 {
+		if !flagJSON {
+			fmt.Fprintln(os.Stderr, "nothing to prune")
+		}
+		return finishDestructiveBatch(destructiveBatchReport{Complete: true, DryRun: dryRun, Results: []destructiveBatchResult{}}, "pruned", nil)
+	}
+
+	results := newBatchResults(targets)
+	known := make(map[string]api.SnapshotInfo, len(snaps))
+	for _, snapshot := range snaps {
+		known[snapshot.ID] = snapshot
+	}
+	failures := map[int]error{}
+	for i, target := range targets {
+		snapshot, ok := known[target]
+		switch {
+		case !ok:
+			failures[i] = fmt.Errorf("snapshot %s not found (or not yours)", target)
+		case snapshot.Anchored:
+			failures[i] = fmt.Errorf("snapshot %s is anchored; unanchor it before pruning", target)
+		}
+	}
+	if len(failures) > 0 {
+		err = failBatchPreflight(results, failures)
+		return finishDestructiveBatch(destructiveBatchReport{Results: results}, "prune", err)
+	}
+
+	if dryRun {
+		if flagJSON {
+			return finishDestructiveBatch(destructiveBatchReport{Complete: true, DryRun: true, Results: results}, "prune", nil)
+		}
+		return reportPruneTargets(snaps, targets, prof)
+	}
+	if err := confirmDestructive(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(targets)), yes); err != nil {
+		return err
+	}
+	for i, target := range targets {
+		deleteErr := cl.DeleteSnapshot(target)
+		if deleteErr != nil {
+			if errors.Is(deleteErr, client.ErrNotFound) {
+				deleteErr = fmt.Errorf("snapshot %s not found (or not yours)", target)
+			}
+			err = markBatchFailure(results, i, deleteErr)
+			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "prune", err)
+		}
+		results[i].Status = batchSucceeded
+	}
+	return finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "pruned", nil)
 }
 
 func parseSnapshotBefore(s string) (time.Duration, error) {
