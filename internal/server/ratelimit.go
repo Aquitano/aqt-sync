@@ -1,8 +1,10 @@
 package server
 
 import (
+	"math"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"time"
 
@@ -73,6 +75,14 @@ func newIPRateLimiter(rps, burst float64) *ipRateLimiter {
 
 // allow reports whether a request from key may proceed, consuming one token.
 func (l *ipRateLimiter) allow(key string) bool {
+	ok, _ := l.reserve(key)
+	return ok
+}
+
+// reserve is allow with the caller's Retry-After hint: on a denial it returns how
+// long until the bucket has refilled one token, so the middleware can advertise it.
+// The duration is zero when the request is allowed.
+func (l *ipRateLimiter) reserve(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -84,7 +94,7 @@ func (l *ipRateLimiter) allow(key string) bool {
 	b, ok := l.buckets[key]
 	if !ok {
 		l.buckets[key] = &tokenBucket{tokens: l.burst - 1, last: now}
-		return true
+		return true, 0
 	}
 	b.tokens += now.Sub(b.last).Seconds() * l.rps
 	if b.tokens > l.burst {
@@ -92,10 +102,25 @@ func (l *ipRateLimiter) allow(key string) bool {
 	}
 	b.last = now
 	if b.tokens < 1 {
-		return false
+		return false, retryAfter(1-b.tokens, l.rps)
 	}
 	b.tokens--
-	return true
+	return true, 0
+}
+
+// retryAfter is the wait until deficit tokens have refilled at rps tokens/sec,
+// rounded up to whole seconds (the Retry-After delay-seconds form), and never below
+// one second so a client always backs off measurably. A non-positive rps has no
+// refill schedule, so it falls back to one second.
+func retryAfter(deficit, rps float64) time.Duration {
+	if rps <= 0 {
+		return time.Second
+	}
+	secs := math.Ceil(deficit / rps)
+	if secs < 1 {
+		secs = 1
+	}
+	return time.Duration(secs) * time.Second
 }
 
 // prune drops buckets that have fully refilled: such a bucket is
@@ -118,7 +143,10 @@ func (l *ipRateLimiter) middleware(c *gin.Context) {
 // (set on the context by authMiddleware) instead of the peer address.
 func (l *ipRateLimiter) middlewareKeyed(key func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !l.allow(key(c)) {
+		if ok, wait := l.reserve(key(c)); !ok {
+			// Retry-After in whole seconds, computed from the bucket's own refill rate,
+			// so a client backs off exactly long enough rather than guessing.
+			c.Header("Retry-After", strconv.Itoa(int(wait.Seconds())))
 			abort(c, http.StatusTooManyRequests, "rate limit exceeded; slow down")
 			return
 		}

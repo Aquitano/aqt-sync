@@ -159,5 +159,6 @@ var (
 		"No public resource lives at this link. It may be private, deleted, or the link may be incomplete.")
 	gonePage = staticPage("link expired", "This link has expired.",
 		"It ran out of time or reached its read limit. The encrypted content is no longer available.")
-	internalErrorPage = []byte("internal error")
+	internalErrorPage = staticPage("server error", "Something went wrong.",
+		"The server could not load this link. Try again in a moment.")
 )

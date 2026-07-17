@@ -105,6 +105,9 @@ type GrantEntry struct {
 
 type ListGrantsResponse struct {
 	Grants []GrantEntry `json:"grants"`
+	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
+	// empty on the last page. See ListResourcesResponse for the paging contract.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 // ShareItem is one incoming grant, as listed for its grantee: enough to show
@@ -119,6 +122,9 @@ type ShareItem struct {
 
 type ListSharesResponse struct {
 	Shares []ShareItem `json:"shares"`
+	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
+	// empty on the last page. See ListResourcesResponse for the paging contract.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 // ChallengeRequest asks the server for a fresh nonce to sign when attaching a
@@ -437,6 +443,11 @@ type ResourceListItem struct {
 
 type ListResourcesResponse struct {
 	Resources []ResourceListItem `json:"resources"`
+	// NextCursor is the opaque cursor to fetch the following page: pass it as
+	// ?cursor= on the next request. Empty when this is the last page. A caller that
+	// wants the whole set follows it until empty; the Go client does this
+	// transparently so its list methods still return the full slice.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 // Device is one attached device on an account. The server never returns the token
@@ -449,6 +460,9 @@ type Device struct {
 
 type ListDevicesResponse struct {
 	Devices []Device `json:"devices"`
+	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
+	// empty on the last page. See ListResourcesResponse for the paging contract.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 // UsageResponse summarizes the calling account's storage: pack bytes stored
@@ -510,6 +524,9 @@ type SetSnapshotAnchorRequest struct {
 
 type ListSnapshotsResponse struct {
 	Snapshots []SnapshotInfo `json:"snapshots"`
+	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
+	// empty on the last page. See ListResourcesResponse for the paging contract.
+	NextCursor string `json:"nextCursor,omitempty"`
 }
 
 // GetSnapshotResponse carries everything the client needs to reconstruct a
@@ -539,5 +556,5 @@ type ErrorResponse struct {
 	Code string `json:"code,omitempty"`
 	// MinClient accompanies an upgrade-required (426) error: the capability the
 	// resource needs, so the client can report exactly how far it is behind.
-	MinClient int `json:"min_client,omitempty"`
+	MinClient int `json:"minClient,omitempty"`
 }

@@ -33,9 +33,17 @@ var ErrConflict = errors.New("conflict")
 // reclaimed. Callers surface it distinctly (exit code 7) from a plain not-found.
 var ErrGone = errors.New("link expired or read limit reached")
 
-// ErrQuotaExceeded maps a 507 so callers can surface "storage quota exceeded"
-// distinctly from a generic server error.
+// ErrQuotaExceeded maps a 507 (or the quota_exceeded code) so callers can surface
+// "storage quota exceeded" distinctly from a generic server error.
 var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the server operator to raise the quota")
+
+// ErrDeviceLimit maps the device_limit code (a 403 on attach) so a caller can tell
+// "revoke a device first" apart from a generic authorization failure.
+var ErrDeviceLimit = errors.New("device limit reached; revoke a device before attaching another")
+
+// ErrBadPack maps the bad_pack code (a 400 on pack upload): the pack was malformed or
+// failed the server's verification, distinct from a generic bad request.
+var ErrBadPack = errors.New("uploaded pack is malformed or fails verification")
 
 // ErrUpgradeRequired maps a 426: the resource is sealed in a format newer than this
 // build reads. Callers test errors.Is(err, ErrUpgradeRequired); the concrete
@@ -162,11 +170,22 @@ func (c *Client) AttachDevice(req api.AttachDeviceRequest) (api.AuthResponse, er
 	return r, err
 }
 
-// ListDevices returns the devices attached to the authenticated account.
+// ListDevices returns the devices attached to the authenticated account, following
+// pagination transparently.
 func (c *Client) ListDevices() ([]api.Device, error) {
-	var r api.ListDevicesResponse
-	err := c.do(http.MethodGet, "/v1/devices", nil, &r)
-	return r.Devices, err
+	var all []api.Device
+	cursor := ""
+	for {
+		var r api.ListDevicesResponse
+		if err := c.do(http.MethodGet, withCursor("/v1/devices", cursor), nil, &r); err != nil {
+			return nil, err
+		}
+		all = append(all, r.Devices...)
+		if r.NextCursor == "" {
+			return all, nil
+		}
+		cursor = r.NextCursor
+	}
 }
 
 // DeleteDevice revokes a device by id. Revoking the current device invalidates
@@ -209,15 +228,21 @@ func (c *Client) RotateRootKey(req api.RootKeyRotationRequest) (api.AuthResponse
 	return r, err
 }
 
-// PutResource uploads a resource as a raw envelope (JSON header + ciphertext),
-// so the blob never pays the base64-in-JSON tax.
+// PutResource uploads a resource as a raw envelope (JSON header + ciphertext), so the
+// blob never pays the base64-in-JSON tax. A create (empty id) goes to POST
+// /v1/resources so the server assigns the id; an in-place update (id set) goes to PUT.
+// Both land on the same server handler, which dispatches on the id.
 func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceResponse, error) {
 	var r api.PutResourceResponse
 	body, err := api.EncodeResourceUpload(req)
 	if err != nil {
 		return r, err
 	}
-	err = c.doRaw(http.MethodPut, "/v1/resources", body, &r)
+	method := http.MethodPost
+	if req.ID != "" {
+		method = http.MethodPut
+	}
+	err = c.doRaw(method, "/v1/resources", body, &r)
 	return r, err
 }
 
@@ -266,22 +291,64 @@ func (c *Client) UpdateResourceMetadata(id string, req api.UpdateResourceMetadat
 	return r, err
 }
 
+// ListResources returns all of the owner's resources, following the endpoint's
+// pagination transparently so a CLI caller still gets the whole slice in one call.
 func (c *Client) ListResources() ([]api.ResourceListItem, error) {
-	var r api.ListResourcesResponse
-	err := c.do(http.MethodGet, "/v1/resources", nil, &r)
-	return r.Resources, err
+	var all []api.ResourceListItem
+	cursor := ""
+	for {
+		var r api.ListResourcesResponse
+		if err := c.do(http.MethodGet, withCursor("/v1/resources", cursor), nil, &r); err != nil {
+			return nil, err
+		}
+		all = append(all, r.Resources...)
+		if r.NextCursor == "" {
+			return all, nil
+		}
+		cursor = r.NextCursor
+	}
+}
+
+// withCursor appends an opaque pagination cursor to a path, respecting any query
+// string already present.
+func withCursor(path, cursor string) string {
+	if cursor == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "cursor=" + url.QueryEscape(cursor)
 }
 
 func (c *Client) DeleteResource(id string) error {
 	return c.do(http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil, nil)
 }
 
+// checkBatchSize bounds how many object ids ride in one /v1/chunks/check request. It
+// matches the locate batch cap and stays at or under the server's per-request id cap,
+// so a large sync's have/want gate splits into several requests instead of one that
+// the server rejects with a 400.
+const checkBatchSize = 10_000
+
 // CheckChunks returns which of the given object ids the server is missing — the
-// have/want gate before packing and uploading.
+// have/want gate before packing and uploading. The id set is sent in bounded batches
+// and the missing sets merged, so a large sync never exceeds the server's id cap.
 func (c *Client) CheckChunks(ids []string) ([]string, error) {
-	var r api.ChunkCheckResponse
-	err := c.do(http.MethodPost, "/v1/chunks/check", api.ChunkCheckRequest{IDs: ids}, &r)
-	return r.Missing, err
+	var missing []string
+	for start := 0; start < len(ids); start += checkBatchSize {
+		end := start + checkBatchSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		var r api.ChunkCheckResponse
+		if err := c.do(http.MethodPost, "/v1/chunks/check", api.ChunkCheckRequest{IDs: ids[start:end]}, &r); err != nil {
+			return nil, err
+		}
+		missing = append(missing, r.Missing...)
+	}
+	return missing, nil
 }
 
 // locateBatchSize bounds how many object ids ride in one /v1/chunks/locate request.
@@ -410,24 +477,32 @@ func (c *Client) SetSnapshotAnchor(id string, anchored bool) (api.SnapshotInfo, 
 // ListSnapshots returns the caller's snapshots, newest first. A non-empty
 // resourceID restricts the list to that resource's history.
 func (c *Client) ListSnapshots(resourceID string) ([]api.SnapshotInfo, error) {
-	path := "/v1/snapshots"
+	base := "/v1/snapshots"
 	if resourceID != "" {
-		path += "?resource=" + url.QueryEscape(resourceID)
+		base += "?resource=" + url.QueryEscape(resourceID)
 	}
-	var r api.ListSnapshotsResponse
-	if err := c.do(http.MethodGet, path, nil, &r); err != nil {
-		return nil, err
-	}
-	// Pin a filtered listing to the requested resource: the ResourceID field is
-	// server-supplied, and downstream id-bound AAD checks verify against it.
-	if resourceID != "" {
-		for _, s := range r.Snapshots {
-			if s.ResourceID != resourceID {
-				return nil, fmt.Errorf("server returned a snapshot of resource %q in a listing for %q", s.ResourceID, resourceID)
+	var all []api.SnapshotInfo
+	cursor := ""
+	for {
+		var r api.ListSnapshotsResponse
+		if err := c.do(http.MethodGet, withCursor(base, cursor), nil, &r); err != nil {
+			return nil, err
+		}
+		// Pin a filtered listing to the requested resource: the ResourceID field is
+		// server-supplied, and downstream id-bound AAD checks verify against it.
+		if resourceID != "" {
+			for _, s := range r.Snapshots {
+				if s.ResourceID != resourceID {
+					return nil, fmt.Errorf("server returned a snapshot of resource %q in a listing for %q", s.ResourceID, resourceID)
+				}
 			}
 		}
+		all = append(all, r.Snapshots...)
+		if r.NextCursor == "" {
+			return all, nil
+		}
+		cursor = r.NextCursor
 	}
-	return r.Snapshots, nil
 }
 
 // GetSnapshot fetches a snapshot's sealed root blob plus the copied meta and
@@ -630,39 +705,62 @@ func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
 	return data, nil
 }
 
-// statusError maps an HTTP status to the package's sentinel errors, mirroring the
-// tail of do() so the raw transport reports failures the same way.
+// statusError maps an HTTP response to the package's sentinel errors, mirroring the
+// tail of do() so the raw transport reports failures the same way. It prefers the
+// machine-readable ErrorResponse.Code and falls back to the HTTP status, so a
+// condition the status alone cannot express (device_limit vs a plain 403, bad_pack
+// vs a plain 400) is still surfaced distinctly.
 func statusError(status int, path string, body []byte) error {
-	switch {
-	case status == http.StatusNotFound:
-		return ErrNotFound
-	case status == http.StatusConflict:
-		// An anchored-prune 409 carries a distinct code and an actionable message; a
-		// plain 409 is a version conflict.
-		var e api.ErrorResponse
-		if json.Unmarshal(body, &e) == nil && e.Code == api.ErrCodeSnapshotAnchored {
-			return &SnapshotAnchoredError{Message: e.Error}
-		}
-		return ErrConflict
-	case status == http.StatusGone:
-		return ErrGone
-	case status == http.StatusInsufficientStorage:
-		return ErrQuotaExceeded
-	case status == http.StatusUpgradeRequired:
-		var e api.ErrorResponse
-		msg := fmt.Sprintf("server returned %d for %s", status, path)
-		if json.Unmarshal(body, &e) == nil && e.Error != "" {
-			msg = e.Error
-		}
-		return &UpgradeRequiredError{MinClient: e.MinClient, Message: msg}
-	case status < 200 || status >= 300:
-		var e api.ErrorResponse
-		if json.Unmarshal(body, &e) == nil && e.Error != "" {
-			return fmt.Errorf("server: %s (%d)", e.Error, status)
-		}
-		return fmt.Errorf("server returned %d for %s", status, path)
+	if status >= 200 && status < 300 {
+		return nil
 	}
-	return nil
+	var e api.ErrorResponse
+	json.Unmarshal(body, &e) // best effort; a bodyless or non-JSON error falls through to status
+
+	switch e.Code {
+	case api.ErrCodeSnapshotAnchored:
+		return &SnapshotAnchoredError{Message: e.Error}
+	case api.ErrCodeUpgradeRequired:
+		return &UpgradeRequiredError{MinClient: e.MinClient, Message: upgradeMessage(e, status, path)}
+	case api.ErrCodeGone:
+		return ErrGone
+	case api.ErrCodeQuotaExceeded:
+		return ErrQuotaExceeded
+	case api.ErrCodeVersionConflict:
+		return ErrConflict
+	case api.ErrCodeDeviceLimit:
+		return ErrDeviceLimit
+	case api.ErrCodeBadPack:
+		return ErrBadPack
+	case api.ErrCodeNotFound:
+		return ErrNotFound
+	}
+
+	switch status {
+	case http.StatusNotFound:
+		return ErrNotFound
+	case http.StatusConflict:
+		return ErrConflict
+	case http.StatusGone:
+		return ErrGone
+	case http.StatusInsufficientStorage:
+		return ErrQuotaExceeded
+	case http.StatusUpgradeRequired:
+		return &UpgradeRequiredError{MinClient: e.MinClient, Message: upgradeMessage(e, status, path)}
+	}
+	if e.Error != "" {
+		return fmt.Errorf("server: %s (%d)", e.Error, status)
+	}
+	return fmt.Errorf("server returned %d for %s", status, path)
+}
+
+// upgradeMessage prefers the server's actionable 426 text, falling back to a generic
+// status line when the body carried none.
+func upgradeMessage(e api.ErrorResponse, status int, path string) string {
+	if e.Error != "" {
+		return e.Error
+	}
+	return fmt.Sprintf("server returned %d for %s", status, path)
 }
 
 func (c *Client) do(method, path string, body, out any) error {

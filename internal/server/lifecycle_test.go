@@ -586,7 +586,7 @@ func TestPutResourceRevokesGranteeAtomically(t *testing.T) {
 	}
 	grantCount := func() int {
 		t.Helper()
-		grants, err := s.ListResourceGrants(owner, id)
+		grants, _, err := s.ListResourceGrants(owner, id, pageParams{})
 		if err != nil {
 			t.Fatal(err)
 		}

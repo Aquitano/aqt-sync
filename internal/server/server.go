@@ -205,6 +205,10 @@ func (s *Server) Router() *gin.Engine {
 		{
 			// The blob (a file's ciphertext or a folder's sealed manifest) is the one
 			// large payload; it keeps the engine-wide maxResourceBody.
+			// POST creates a resource (server-assigned id); PUT replaces one in place.
+			// The single handler dispatches on whether the request carries an id, and the
+			// legacy PUT-create path stays wired so an older client keeps working.
+			authed.POST("/resources", s.putResource)
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
 			authed.PUT("/resources/:id/metadata", limitBody(maxControlBody), s.updateResourceMetadata)
@@ -489,7 +493,7 @@ func (s *Server) attachDevice(c *gin.Context) {
 	if sigOK && verifierOK {
 		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch, s.cfg.MaxDevices)
 		if errors.Is(err, ErrDeviceLimit) {
-			abort(c, http.StatusForbidden, "device limit reached; revoke a device before attaching another")
+			abortCode(c, http.StatusForbidden, "device limit reached; revoke a device before attaching another", api.ErrCodeDeviceLimit)
 			return
 		}
 		if err != nil {
@@ -537,7 +541,7 @@ func (s *Server) changePassphrase(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrVersionConflict) {
-		abort(c, http.StatusConflict, "the passphrase changed on another device; re-run with the current one")
+		abortCode(c, http.StatusConflict, "the passphrase changed on another device; re-run with the current one", api.ErrCodeVersionConflict)
 		return
 	}
 	if err != nil {
@@ -573,7 +577,7 @@ func (s *Server) rotateRootKey(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrVersionConflict) {
-		abort(c, http.StatusConflict, "account or a protected key changed while rotating; re-run root-key rotation")
+		abortCode(c, http.StatusConflict, "account or a protected key changed while rotating; re-run root-key rotation", api.ErrCodeVersionConflict)
 		return
 	}
 	if err != nil {
@@ -603,19 +607,27 @@ func (s *Server) accountUsage(c *gin.Context) {
 
 func (s *Server) listDevices(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	devices, err := s.store.ListDevices(owner)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	devices, next, err := s.store.ListDevices(owner, page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "list devices failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.ListDevicesResponse{Devices: devices})
+	c.JSON(http.StatusOK, api.ListDevicesResponse{Devices: devices, NextCursor: next})
 }
 
 func (s *Server) deleteDevice(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	err := s.store.DeleteDevice(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -661,20 +673,20 @@ func (s *Server) putResource(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrVersionConflict) {
-		abort(c, http.StatusConflict, "resource changed since you last fetched it; re-sync")
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; re-sync", api.ErrCodeVersionConflict)
 		return
 	}
 	if errors.Is(err, ErrDropsRoots) {
-		abort(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss")
+		abortCode(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss", api.ErrCodeDropsRoots)
 		return
 	}
 	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
-		abort(c, http.StatusBadRequest, err.Error())
+		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
 		return
 	}
 	if errors.Is(err, ErrNotFound) {
 		// Update targeting an id the caller doesn't own (or that doesn't exist).
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -738,7 +750,7 @@ func (s *Server) getResource(c *gin.Context) {
 	}
 	res, err := s.store.GetResource(c.Param("id"), owner)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if errors.Is(err, ErrGone) {
@@ -809,12 +821,20 @@ func acceptsOctetStream(c *gin.Context) bool {
 
 func (s *Server) listResources(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	items, err := s.store.ListResources(owner)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	items, next, err := s.store.ListResources(owner, page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "list failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.ListResourcesResponse{Resources: items})
+	c.JSON(http.StatusOK, api.ListResourcesResponse{Resources: items, NextCursor: next})
 }
 
 func (s *Server) updateResourceMetadata(c *gin.Context) {
@@ -835,11 +855,11 @@ func (s *Server) updateResourceMetadata(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrVersionConflict) {
-		abort(c, http.StatusConflict, "resource changed since you last fetched it; retry the rename")
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the rename", api.ErrCodeVersionConflict)
 		return
 	}
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -861,11 +881,11 @@ func (s *Server) setVisibility(c *gin.Context) {
 	}
 	version, err := s.store.SetVisibility(owner, c.Param("id"), req)
 	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
-		abort(c, http.StatusBadRequest, err.Error())
+		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
 		return
 	}
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -887,7 +907,7 @@ func (s *Server) deleteResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	err := s.store.DeleteResource(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -911,7 +931,7 @@ func (s *Server) createSnapshot(c *gin.Context) {
 	}
 	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel, req.Anchor)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -929,7 +949,7 @@ func (s *Server) setSnapshotAnchor(c *gin.Context) {
 	}
 	info, err := s.store.SetSnapshotAnchor(owner, c.Param("id"), req.Anchored)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -941,19 +961,27 @@ func (s *Server) setSnapshotAnchor(c *gin.Context) {
 
 func (s *Server) listSnapshots(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	snaps, err := s.store.ListSnapshots(owner, c.Query("resource"))
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	snaps, next, err := s.store.ListSnapshots(owner, c.Query("resource"), page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "list snapshots failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.ListSnapshotsResponse{Snapshots: snaps})
+	c.JSON(http.StatusOK, api.ListSnapshotsResponse{Snapshots: snaps, NextCursor: next})
 }
 
 func (s *Server) getSnapshot(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	resp, err := s.store.GetSnapshot(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	}
 	if err != nil {
@@ -972,7 +1000,7 @@ func (s *Server) getSnapshot(c *gin.Context) {
 func (s *Server) deleteSnapshot(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	if err := s.store.DeleteSnapshot(owner, c.Param("id")); errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	} else if errors.Is(err, ErrSnapshotAnchored) {
 		c.AbortWithStatusJSON(http.StatusConflict, api.ErrorResponse{
@@ -995,7 +1023,7 @@ func (s *Server) setAutoSnapshot(c *gin.Context) {
 		return
 	}
 	if err := s.store.SetAutoSnapshot(owner, c.Param("id"), req.Enabled); errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusNotFound, "not found")
+		abortNotFound(c)
 		return
 	} else if err != nil {
 		abort(c, http.StatusInternalServerError, "update failed")
@@ -1082,6 +1110,31 @@ func bindJSON(c *gin.Context, v any) bool {
 
 func abort(c *gin.Context, code int, msg string) {
 	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg})
+}
+
+// abortCode is abort with a stable machine-readable Code, so a client can branch on
+// the condition without string-matching the message. The message stays a fixed,
+// user-facing string — never a raw Go error, which may carry internal detail.
+func abortCode(c *gin.Context, code int, msg, errCode string) {
+	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg, Code: errCode})
+}
+
+// abortNotFound answers the canonical 404 with the not_found code. A missing or
+// foreign-owned resource, device, snapshot, or grant all reduce to this: the store
+// returns ErrNotFound for a foreign owner too, so the code reveals nothing an
+// unauthorized caller could not already infer from the status.
+func abortNotFound(c *gin.Context) {
+	abortCode(c, http.StatusNotFound, "not found", api.ErrCodeNotFound)
+}
+
+// policyErrorMessage maps the two lifecycle-policy validation errors to fixed,
+// user-facing messages, so the handler answers a stable string (and a stable Code)
+// rather than echoing the raw error value.
+func policyErrorMessage(err error) string {
+	if errors.Is(err, ErrPolicyOnPrivate) {
+		return "a link lifecycle policy can only be set on a public resource"
+	}
+	return "link lifecycle policy values must be non-negative"
 }
 
 // requestCapability fails closed for clients that predate capability headers.

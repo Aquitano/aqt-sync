@@ -35,3 +35,41 @@ const ErrCodeSnapshotAnchored = "snapshot_anchored"
 // ErrCodeGone is the stable ErrorResponse.Code the server returns with an HTTP 410
 // when a public link has expired, reached its read limit, or been reclaimed.
 const ErrCodeGone = "gone"
+
+// Stable ErrorResponse.Code tags for the remaining distinct error conditions, so a
+// client branches on a machine-readable code instead of string-matching prose (and
+// so the server need not echo a raw Go error whose text may carry internal detail).
+const (
+	// ErrCodeVersionConflict accompanies a 409 when an update's ExpectedVersion no
+	// longer matches the stored version (a concurrent write moved it).
+	ErrCodeVersionConflict = "version_conflict"
+	// ErrCodeQuotaExceeded accompanies a 507 when storing a pack would push the owner
+	// past their configured storage quota.
+	ErrCodeQuotaExceeded = "quota_exceeded"
+	// ErrCodeDeviceLimit accompanies a 403 when attaching a device would exceed the
+	// account's device cap.
+	ErrCodeDeviceLimit = "device_limit"
+	// ErrCodeBadPack accompanies a 400 when an uploaded pack is malformed or fails the
+	// server's content-address / slice verification.
+	ErrCodeBadPack = "bad_pack"
+	// ErrCodeNotFound accompanies a 404 for a missing (or foreign-owned) resource,
+	// device, snapshot, or grant.
+	ErrCodeNotFound = "not_found"
+	// ErrCodeInvalidCursor accompanies a 400 when a pagination cursor does not decode.
+	ErrCodeInvalidCursor = "invalid_cursor"
+	// ErrCodeInvalidLimit accompanies a 400 when a pagination limit is not a positive
+	// integer.
+	ErrCodeInvalidLimit = "invalid_limit"
+	// ErrCodeTooManyIDs accompanies a 400 when a check/locate/object request carries
+	// more ids than the per-request cap allows.
+	ErrCodeTooManyIDs = "too_many_ids"
+	// ErrCodeGrantLimit accompanies a 400 when a resource already carries the maximum
+	// number of grants.
+	ErrCodeGrantLimit = "grant_limit"
+	// ErrCodeInvalidPolicy accompanies a 400 when a link lifecycle policy is invalid
+	// (attached to a private resource, or carrying a negative value).
+	ErrCodeInvalidPolicy = "invalid_policy"
+	// ErrCodeDropsRoots accompanies a 400 when a replace would clear every chunk root
+	// of an object-backed resource.
+	ErrCodeDropsRoots = "drops_roots"
+)
