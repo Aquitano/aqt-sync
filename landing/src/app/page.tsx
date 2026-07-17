@@ -226,7 +226,7 @@ export default function Home() {
               <div className="feature-visual" aria-hidden="true">
                 <div className="snap-rows">
                   <code><span>$</span> aqt checkpoint pre-release</code>
-                  <code><span>$</span> aqt diff pre-release</code>
+                  <code><span>$</span> aqt snapshot diff &lt;id&gt;</code>
                   <code><span>$</span> aqt restore pre-release</code>
                 </div>
               </div>
