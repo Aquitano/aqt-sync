@@ -209,9 +209,6 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 	if err != nil {
 		return err
 	}
-	if err := ensureEmptyDir(abs); err != nil {
-		return err
-	}
 	var get func(string) ([]byte, error)
 	if slices != nil {
 		get = newPublicEntrySource(slices, m.Entries)
@@ -222,13 +219,15 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		}
 		get = src.get
 	}
-	prog := newProgressBar("downloading", entriesBytes(m.Entries))
-	dlErr := runDownloadsFrom(get, abs, m.Entries, prog)
-	prog.finish(dlErr == nil)
-	if dlErr != nil {
-		return dlErr
-	}
-	if err := materializeDirs(abs, m.Dirs); err != nil {
+	if err := materializeStaged(abs, func(staging string) error {
+		prog := newProgressBar("downloading", entriesBytes(m.Entries))
+		dlErr := runDownloadsFrom(get, staging, m.Entries, prog)
+		prog.finish(dlErr == nil)
+		if dlErr != nil {
+			return dlErr
+		}
+		return materializeDirs(staging, m.Dirs)
+	}); err != nil {
 		return err
 	}
 	if flagJSON {

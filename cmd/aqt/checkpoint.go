@@ -30,6 +30,11 @@ func checkpointCmd() *cobra.Command {
 			if name == "" {
 				return errors.New("checkpoint name must not be empty")
 			}
+			if id == "" {
+				if err := bindTrackedDir(checkpointDir(args)); err != nil {
+					return err
+				}
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
@@ -108,6 +113,11 @@ func restoreCmd() *cobra.Command {
 			dir := "."
 			if len(args) == 2 {
 				dir = args[1]
+			}
+			if id == "" {
+				if err := bindTrackedDir(dir); err != nil {
+					return err
+				}
 			}
 			cl, prof, err := authedClient()
 			if err != nil {

@@ -1,15 +1,25 @@
 package syncengine
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"time"
 )
 
 // Config holds per-folder sync options read from .aqtconfig (JSON). The zero
 // value — no file present — is the default: chunked sync with per-account dedup.
 type Config struct {
+	// Version is the config schema version. 0 (absent) and 1 are the current
+	// schema; a higher value means the file was written for a newer aqt and is
+	// refused rather than half-understood. Bump it only when a field's meaning
+	// changes incompatibly — adding fields does not need a bump, since an older
+	// aqt already rejects fields it does not know.
+	Version int `json:"version,omitempty"`
+
 	// Pack selects pack-and-seal: the whole tree is tarred into one sealed blob
 	// rather than chunked. Simpler and leaks no structure, but loses chunk-level
 	// dedup, so any change re-ships the entire folder. Default false.
@@ -133,15 +143,8 @@ func (c Config) Chunker() (*Chunker, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !(0 < sizes.Min && sizes.Min <= sizes.Normal && sizes.Normal <= sizes.Max) {
-		return nil, fmt.Errorf("invalid chunk sizes in %s: need 0 < min (%d) <= normal (%d) <= max (%d)",
-			configFile, sizes.Min, sizes.Normal, sizes.Max)
-	}
-	// Cap max so a mistyped size is a returned error, not an OOM: the chunker reserves
-	// a ~2*max window, and a chunk larger than one pack's target is meaningless anyway.
-	if sizes.Max > DefaultPackTarget {
-		return nil, fmt.Errorf("invalid chunk sizes in %s: max (%d) exceeds the pack target %d; a chunk must fit in one pack",
-			configFile, sizes.Max, DefaultPackTarget)
+	if err := sizes.validate(); err != nil {
+		return nil, fmt.Errorf("%s in %s", err, configFile)
 	}
 	return NewChunker(sizes.Min, sizes.Normal, sizes.Max), nil
 }
@@ -191,23 +194,82 @@ func (w WatchConfig) GitGuardEnabled() bool {
 	return w.GitGuard == nil || *w.GitGuard
 }
 
-// LoadConfig reads dir/.aqtconfig; a missing file yields the default Config.
+// LoadConfig reads dir/.aqtconfig; a missing file yields the default Config. A
+// present file is parsed strictly (see ParseConfig) and every error names the
+// file's path, so a typo'd key or value fails the command up front instead of
+// being silently ignored until sync behavior surprises.
 func LoadConfig(dir string) (Config, error) {
-	var c Config
-	b, err := os.ReadFile(filepath.Join(dir, configFile))
+	path := filepath.Join(dir, configFile)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return c, nil
+			return Config{}, nil
 		}
-		return c, err
+		return Config{}, err
 	}
-	if err := json.Unmarshal(b, &c); err != nil {
-		return c, err
+	c, err := ParseConfig(b)
+	if err != nil {
+		return c, fmt.Errorf("%s: %w", path, err)
+	}
+	return c, nil
+}
+
+// ParseConfig parses .aqtconfig bytes, rejecting unknown fields and invalid
+// values. Unknown fields are refused rather than ignored: a misspelled key
+// ("chunkprofile") silently reverting the folder to defaults is worse than an
+// error at load time.
+func ParseConfig(b []byte) (Config, error) {
+	var c Config
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&c); err != nil {
+		return c, fmt.Errorf("invalid config: %s", strings.TrimPrefix(err.Error(), "json: "))
+	}
+	if dec.More() {
+		return c, fmt.Errorf("invalid config: trailing data after the JSON object")
+	}
+	return c, c.Validate()
+}
+
+// Validate checks every field's value, so a config mistake fails when the file is
+// loaded rather than deep inside the first sync that happens to consult the field.
+func (c Config) Validate() error {
+	if c.Version != 0 && c.Version != 1 {
+		return fmt.Errorf("unsupported config version %d (this aqt understands version 1; upgrade aqt to use this folder's config)", c.Version)
 	}
 	switch c.Conflicts {
 	case "", "block", "copy":
 	default:
-		return c, fmt.Errorf("invalid conflicts %q in %s (want \"block\" or \"copy\")", c.Conflicts, configFile)
+		return fmt.Errorf("invalid conflicts %q (want \"block\" or \"copy\")", c.Conflicts)
 	}
-	return c, nil
+	if _, ok := namedChunkProfiles[c.ChunkProfile]; !ok {
+		return fmt.Errorf("unknown chunkProfile %q (want \"default\", \"large\", or \"huge\")", c.ChunkProfile)
+	}
+	if c.Chunk != nil {
+		if err := c.Chunk.validate(); err != nil {
+			return err
+		}
+	}
+	if c.Watch.Interval != "" {
+		d, err := time.ParseDuration(c.Watch.Interval)
+		if err != nil {
+			return fmt.Errorf("invalid watch.interval %q (want a Go duration like \"2s\" or \"1m30s\")", c.Watch.Interval)
+		}
+		if d <= 0 {
+			return fmt.Errorf("invalid watch.interval %q (must be positive)", c.Watch.Interval)
+		}
+	}
+	return nil
+}
+
+func (s ChunkSizes) validate() error {
+	if !(0 < s.Min && s.Min <= s.Normal && s.Normal <= s.Max) {
+		return fmt.Errorf("invalid chunk sizes: need 0 < min (%d) <= normal (%d) <= max (%d)", s.Min, s.Normal, s.Max)
+	}
+	// Cap max so a mistyped size is a returned error, not an OOM: the chunker reserves
+	// a ~2*max window, and a chunk larger than one pack's target is meaningless anyway.
+	if s.Max > DefaultPackTarget {
+		return fmt.Errorf("invalid chunk sizes: max (%d) exceeds the pack target %d; a chunk must fit in one pack", s.Max, DefaultPackTarget)
+	}
+	return nil
 }

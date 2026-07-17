@@ -3,6 +3,7 @@ package syncengine
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -155,6 +156,87 @@ func TestConfigChunkSelectorPinnedVsScaled(t *testing.T) {
 
 	if _, err := (Config{ChunkProfile: "gigantic"}).ChunkSelector(); err == nil {
 		t.Fatal("an unknown profile must error")
+	}
+}
+
+// A misspelled or unknown key must fail the load with the file path and the
+// field name, not silently fall back to defaults.
+func TestLoadConfigRejectsUnknownFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, configFile)
+	if err := os.WriteFile(path, []byte(`{"chunkProfiles": "large"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := LoadConfig(dir)
+	if err == nil {
+		t.Fatal("expected an error for an unknown field")
+	}
+	if !strings.Contains(err.Error(), path) {
+		t.Fatalf("error %q does not name the config path %s", err, path)
+	}
+	if !strings.Contains(err.Error(), "chunkProfiles") {
+		t.Fatalf("error %q does not name the offending field", err)
+	}
+}
+
+func TestParseConfigRejectsInvalidValues(t *testing.T) {
+	bad := []struct {
+		name string
+		body string
+	}{
+		{"future version", `{"version": 2}`},
+		{"bad conflicts", `{"conflicts": "merge"}`},
+		{"bad chunk profile", `{"chunkProfile": "gigantic"}`},
+		{"bad chunk ordering", `{"chunk": {"min": 10, "normal": 5, "max": 20}}`},
+		{"bad watch interval", `{"watch": {"interval": "fast"}}`},
+		{"negative watch interval", `{"watch": {"interval": "-2s"}}`},
+		{"wrong value type", `{"pack": "yes"}`},
+		{"trailing data", `{"pack": true} {"pack": false}`},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := ParseConfig([]byte(tc.body)); err == nil {
+				t.Fatalf("ParseConfig(%s): expected an error", tc.body)
+			}
+		})
+	}
+
+	good := []string{
+		`{}`,
+		`{"version": 1, "pack": true}`,
+		`{"chunkProfile": "large", "watch": {"interval": "2s", "gitGuard": false}, "conflicts": "copy"}`,
+	}
+	for _, body := range good {
+		if _, err := ParseConfig([]byte(body)); err != nil {
+			t.Fatalf("ParseConfig(%s): %v", body, err)
+		}
+	}
+}
+
+// The .aqtconfig example documented in DESIGN.md must be accepted by the real
+// parser, so the docs cannot drift into showing a config the CLI rejects.
+func TestDesignConfigExampleParses(t *testing.T) {
+	b, err := os.ReadFile(filepath.Join("..", "..", "DESIGN.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := "**`.aqtconfig`** (JSON)"
+	i := strings.Index(string(b), marker)
+	if i < 0 {
+		t.Fatalf("DESIGN.md no longer contains the marker %q", marker)
+	}
+	rest := string(b)[i:]
+	start := strings.Index(rest, "```json\n")
+	if start < 0 {
+		t.Fatal("no ```json fence after the .aqtconfig marker in DESIGN.md")
+	}
+	rest = rest[start+len("```json\n"):]
+	end := strings.Index(rest, "```")
+	if end < 0 {
+		t.Fatal("unterminated .aqtconfig example fence in DESIGN.md")
+	}
+	if _, err := ParseConfig([]byte(rest[:end])); err != nil {
+		t.Fatalf("the documented .aqtconfig example is rejected by the parser: %v", err)
 	}
 }
 

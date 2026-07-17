@@ -10,7 +10,7 @@ import (
 func TestWriteStarterIgnore(t *testing.T) {
 	t.Run("default ignores git", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := writeStarterIgnore(dir, false); err != nil {
+		if _, err := writeStarterIgnore(dir, false); err != nil {
 			t.Fatal(err)
 		}
 		body := readIgnore(t, dir)
@@ -29,7 +29,7 @@ func TestWriteStarterIgnore(t *testing.T) {
 
 	t.Run("syncGit re-includes git", func(t *testing.T) {
 		dir := t.TempDir()
-		if err := writeStarterIgnore(dir, true); err != nil {
+		if _, err := writeStarterIgnore(dir, true); err != nil {
 			t.Fatal(err)
 		}
 		body := readIgnore(t, dir)
@@ -44,7 +44,7 @@ func TestWriteStarterIgnore(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(dir, ".aqtignore"), []byte(existing), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := writeStarterIgnore(dir, true); err != nil {
+		if _, err := writeStarterIgnore(dir, true); err != nil {
 			t.Fatal(err)
 		}
 		if got := readIgnore(t, dir); got != existing {

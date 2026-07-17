@@ -420,6 +420,34 @@ function plan(local: Manifest, base: Manifest, remote: Manifest): SyncPlan;  // 
 `base` is the last-synced manifest cached in `.aqt/`. A `conflict` action is never
 auto-resolved unless `--force` is passed.
 
+**Tracked-state identity binding.** `.aqt/state.json` records, next to the
+resource id and server URL, the owning profile name and the account's signing-key
+fingerprint. Tracked commands default to that recorded identity (no `--profile`
+needed even from a shell whose default profile differs), and an explicit
+`--profile` or `--server` that contradicts it is rejected with guidance rather
+than talking to the wrong account or server. A profile that was re-logged into a
+different account (fingerprint change) is likewise refused. If the recorded
+profile itself starts talking to a different server (a migration or a restore
+under a new URL), the folder follows the profile — the account key, not the URL,
+is the identity — and records the move.
+
+**Atomic materialization.** Operations that create trees commit all-or-nothing:
+`clone`, directory pulls, snapshot export and side-by-side restore download into
+a staging directory beside the destination and rename it into place only on
+success (an in-place restore stages and swaps with rollback), so an interrupted
+transfer, a permission failure, or a destination collision leaves the
+destination exactly as it was. `init` stages the local `.aqt` control state
+before registering the remote resource and deletes the just-created resource if
+the local commit fails, so a failed init is side-effect-free on both ends.
+
+*Binding migration:* state written by an older
+build carries no binding fields; the first tracked command adopts the active
+profile only when that profile's server matches the folder's recorded server, and
+writes the binding back. A legacy folder whose recorded server matches no
+configured profile fails with instructions to pass the owning `--profile` (or
+re-clone) — it is never silently rebound to whatever account happens to be
+active.
+
 ### 4.2a Folder sync — implemented design
 
 The TS sketch above predates the build; the authoritative interfaces are the Go
@@ -495,17 +523,30 @@ referencing an object the owner no longer stores.
 ignored (a tracked tree syncs working files, never a live git directory), though
 a later `!`-rule can re-include. **`.aqtconfig`** (JSON) sets per-folder options:
 
-```jsonc
+```json
 {
-  "pack": false,                 // pack-and-seal instead of chunked sync (see below)
-  "chunkProfile": "default",     // "default" scales with file size; "large"/"huge" pin one granularity
-  "chunk": { "min": 65536, "normal": 262144, "max": 1048576 }, // explicit sizes; overrides chunkProfile
+  "version": 1,
+  "pack": false,
+  "chunkProfile": "default",
   "watch": {
-    "interval": "5s",            // watch debounce floor; --interval overrides it
-    "gitGuard": true             // hold pushes while a sub-repo is mid-operation (default true)
+    "interval": "5s",
+    "gitGuard": true
   }
 }
 ```
+
+The file is plain JSON (no comments) and is parsed strictly: an unknown key or an
+invalid value fails the command with the file path and field, rather than being
+silently ignored. `version` is the schema version (optional; 0/absent and 1 mean
+the current schema — a higher value is refused so a file written for a newer aqt
+is never half-understood). `chunkProfile` is `"default"` (scales granularity with
+file size) or `"large"`/`"huge"` (pin one coarse granularity); the rare tree a
+named profile does not fit can pin explicit byte sizes instead with
+`"chunk": { "min": ..., "normal": ..., "max": ... }`, which overrides
+`chunkProfile`. `watch.interval` is the daemon's debounce floor (a Go duration;
+`--interval` overrides it) and `watch.gitGuard` the git-lock guard (default true).
+`conflicts` (`"block"`, the default, or `"copy"`) sets the folder's conflict
+handling; `--conflicts` overrides it per run.
 
 `pack` selects pack-and-seal instead of the chunked default: the whole tree is
 tarred and sealed under the folder content key into fixed-size segments (a fresh

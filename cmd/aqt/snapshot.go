@@ -122,13 +122,18 @@ func snapshotCreateCmd() *cobra.Command {
 				}
 				label = args[1]
 			}
-			cl, prof, err := authedClient()
-			if err != nil {
-				return err
-			}
 			dir := "."
 			if len(args) > 0 {
 				dir = args[0]
+			}
+			if id == "" {
+				if err := bindTrackedDir(dir); err != nil {
+					return err
+				}
+			}
+			cl, prof, err := authedClient()
+			if err != nil {
+				return err
 			}
 			resourceID, err := resolveResourceID(dir, id)
 			if err != nil {
@@ -209,6 +214,11 @@ func snapshotListCmd() *cobra.Command {
 		Short:   "List snapshots, newest first, with decrypted names",
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if id == "" && len(args) > 0 {
+				if err := bindTrackedDir(args[0]); err != nil {
+					return err
+				}
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
@@ -964,6 +974,11 @@ func snapshotPruneCmd() *cobra.Command {
 			if !byRetention && len(args) == 0 {
 				return errors.New("specify snapshot ids, or use --keep-last/--before")
 			}
+			if id == "" && dir != "" {
+				if err := bindTrackedDir(dir); err != nil {
+					return err
+				}
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
@@ -1150,6 +1165,11 @@ func snapshotAutoCmd() *cobra.Command {
 			if on && off {
 				return errors.New("--on and --off are mutually exclusive")
 			}
+			if id == "" && len(args) > 0 {
+				if err := bindTrackedDir(args[0]); err != nil {
+					return err
+				}
+			}
 			cl, prof, err := authedClient()
 			if err != nil {
 				return err
@@ -1278,13 +1298,10 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		return api.Metadata{}, err
 	}
 	if meta.Kind == api.KindFolder {
-		if err := ensureEmptyDir(destDir); err != nil {
-			return meta, err
-		}
-		if _, err := materializeClone(cl, destDir, res, ck, meta); err != nil {
-			return meta, err
-		}
-		return meta, nil
+		return meta, materializeStaged(destDir, func(staging string) error {
+			_, err := materializeClone(cl, staging, res, ck, meta)
+			return err
+		})
 	}
 	// A single file (inline or streamed): write it under destDir by its name.
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
@@ -1311,22 +1328,15 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		if err != nil {
 			return meta, err
 		}
-		f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-		if err != nil {
-			return meta, err
-		}
-		if err := syncengine.WriteFileRoot(f, chunks, src.get); err != nil {
-			f.Close()
-			_ = os.Remove(dest)
-			return meta, err
-		}
-		return meta, f.Close()
+		return meta, writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+			return syncengine.WriteFileRoot(f, chunks, src.get)
+		})
 	}
 	plain, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, res.ID)
 	if err != nil {
 		return meta, fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
-	return meta, os.WriteFile(dest, plain, 0o600)
+	return meta, writeFileAtomic(dest, plain, 0o600)
 }
 
 // materializeWithMaster unwraps res's content key under the master key, then writes

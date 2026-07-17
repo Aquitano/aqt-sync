@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
 // runCmd executes a freshly-built command with the given args, failing the test on
@@ -269,10 +270,18 @@ func TestCheckpointFailsClosedOnOldServer(t *testing.T) {
 	}
 	rid := h.folderID(src)
 
-	// Point the command at the anchor-stripping proxy.
+	// Point the profile at the anchor-stripping proxy (an explicit --server that
+	// contradicts the folder's recorded server is rejected by the identity binding,
+	// so the proxy has to look like the profile's own server moving).
 	proxy := oldServerProxy(t, h.url)
-	flagServer = proxy.URL
-	t.Cleanup(func() { flagServer = "" })
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prof.Server = proxy.URL
+	if err := identity.Save(prof); err != nil {
+		t.Fatal(err)
+	}
 
 	cmd := checkpointCmd()
 	cmd.SetArgs([]string{"release-1", src})
