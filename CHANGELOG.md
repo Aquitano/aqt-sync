@@ -62,9 +62,15 @@ All notable changes to this project are documented in this file.
   path. `aqt mv` (`rename`) re-seals only client-encrypted metadata, `info` shows
   link expiry/read limits, and `ls` adds `-l`, filtering, and name/size/date sorts.
 
-- Browser decryption for public links is limited to single inline files. Streamed
-  files and folders remain CLI-only (`aqt pull` or `aqt clone`); the share page
-  states this before a recipient consumes a limited-use link.
+- Browser recipients of a share link can now open folders and streamed files, not
+  just single inline files. A folder link renders a navigable listing with
+  decrypted names and sizes, fetching only the directory nodes a path needs (spine
+  reads) and decrypting per-file on click with a download progress indicator;
+  streamed files decrypt and save the same way. Everything stays client-side: the
+  key never leaves the URL fragment, and browsing a folder still counts as one read
+  against a `--max-reads` link (object fetches are uncounted). Very large files
+  (over 512 MiB) and packed folders remain CLI-only, and the page says so. The
+  page vendors a pinned pure-JS zstd decoder (`fzstd`) for aqt's chunk/node codec.
 
 - `aqt passphrase rotate-root` performs account-compromise recovery: it creates a new root key, atomically rewraps all recoverable resource and snapshot keys plus incoming grants, migrates the account signing/encryption identities, and revokes every device except the initiating one (which receives a fresh token). Future convergent writes use the new root-derived identity.
 

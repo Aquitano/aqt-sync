@@ -41,6 +41,7 @@ var shareScriptAssets = map[string]struct {
 	"libsodium-0.7.10.js":          {"webassets/libsodium-0.7.10.js", true},
 	"libsodium-wrappers-0.7.10.js": {"webassets/libsodium-wrappers-0.7.10.js", true},
 	"hash-wasm-argon2-4.9.0.js":    {"webassets/hash-wasm-argon2-4.9.0.js", true},
+	"fzstd-0.1.1.js":               {"webassets/fzstd-0.1.1.js", true},
 	"share.js":                     {"webassets/share.js", false},
 }
 

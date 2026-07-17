@@ -56,8 +56,11 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		`name="robots" content="noindex`, // share pages stay out of indexes
 		`src="/x-assets/libsodium-0.7.10.js"`,
 		`src="/x-assets/hash-wasm-argon2-4.9.0.js"`,
+		`src="/x-assets/fzstd-0.1.1.js"`, // zstd decoder for folder/streamed downloads
 		`src="/x-assets/share.js"`,
-		"Browser decryption supports single inline files only.",
+		`id="state-folder"`,            // the in-browser folder browser state
+		`id="folder-list"`,             // its listing container
+		"Files, folders, and streamed", // copy now advertises folder/streamed support
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page missing %q", want)
@@ -66,13 +69,23 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	if strings.Contains(body, "AqtCrypto") {
 		t.Error("page script must be served as an asset, not inlined (CSP has no script-src 'unsafe-inline')")
 	}
+	if strings.Contains(body, "single inline files only") {
+		t.Error("share page still claims browser decryption is inline-only after folder support landed")
+	}
 
-	// The decryptor logic ships in the external page script.
+	// The decryptor logic ships in the external page script, including the folder
+	// walk over content-addressed objects.
 	script := h.get("/x-assets/share.js")
 	if script.Code != http.StatusOK {
 		t.Fatalf("share.js: got %d, want 200", script.Code)
 	}
-	for _, want := range []string{"crypto_aead_xchacha20poly1305_ietf_decrypt", "hashwasm.argon2id"} {
+	for _, want := range []string{
+		"crypto_aead_xchacha20poly1305_ietf_decrypt",
+		"hashwasm.argon2id",
+		"aqt-treenode-v1",       // directory-node AAD, mirrors crypto.aadTreeNode
+		"/v1/public/resources/", // the exact-slice objects endpoint
+		"fzstd.decompress",      // zstd path for compressed objects/nodes
+	} {
 		if !strings.Contains(script.Body.String(), want) {
 			t.Errorf("share.js missing %q", want)
 		}
@@ -93,6 +106,7 @@ func TestShareCryptoAssetsAreSelfHostedAndAllowlisted(t *testing.T) {
 		"libsodium-0.7.10.js",
 		"libsodium-wrappers-0.7.10.js",
 		"hash-wasm-argon2-4.9.0.js",
+		"fzstd-0.1.1.js",
 		"share.js",
 	} {
 		rec := h.get("/x-assets/" + name)
