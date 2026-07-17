@@ -1119,9 +1119,6 @@ func abortCode(c *gin.Context, code int, msg, errCode string) {
 	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg, Code: errCode})
 }
 
-// policyErrorMessage maps the two lifecycle-policy validation errors to fixed,
-// user-facing messages, so the handler answers a stable string (and a stable Code)
-// rather than echoing the raw error value.
 // abortNotFound answers the canonical 404 with the not_found code. A missing or
 // foreign-owned resource, device, snapshot, or grant all reduce to this: the store
 // returns ErrNotFound for a foreign owner too, so the code reveals nothing an
@@ -1130,6 +1127,9 @@ func abortNotFound(c *gin.Context) {
 	abortCode(c, http.StatusNotFound, "not found", api.ErrCodeNotFound)
 }
 
+// policyErrorMessage maps the two lifecycle-policy validation errors to fixed,
+// user-facing messages, so the handler answers a stable string (and a stable Code)
+// rather than echoing the raw error value.
 func policyErrorMessage(err error) string {
 	if errors.Is(err, ErrPolicyOnPrivate) {
 		return "a link lifecycle policy can only be set on a public resource"
