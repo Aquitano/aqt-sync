@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -64,6 +65,7 @@ func runRename(ref, newName string) error {
 		return err
 	}
 	oldName := meta.Name
+	warnOnNameCollision(cl, mk, id, newName)
 	meta.Name = newName
 	plain, err := json.Marshal(meta)
 	if err != nil {
@@ -79,6 +81,12 @@ func runRename(ref, newName string) error {
 	if errors.Is(err, client.ErrConflict) {
 		return errors.New("resource changed while renaming it; retry the command")
 	}
+	if errors.Is(err, client.ErrNotFound) {
+		// GetResource for this id succeeded moments ago, so the resource exists; a 404 on
+		// the metadata endpoint means the server predates it. (A server that has the route
+		// but lost the resource in between would also land here, hence the combined note.)
+		return errors.New("this server does not support rename: it has no resource-metadata endpoint (upgrade the server), or the resource was just deleted")
+	}
 	if err != nil {
 		return err
 	}
@@ -87,4 +95,24 @@ func runRename(ref, newName string) error {
 	}
 	fmt.Printf("renamed %s to %q\n", id, newName)
 	return nil
+}
+
+// warnOnNameCollision alerts (to stderr) when newName already decrypts to another
+// resource's name. The rename still proceeds — names are not unique keys — but later
+// name-based refs to newName would resolve as "ambiguous", so the user is told why.
+// A listing failure is non-fatal here: it must never block the rename itself.
+func warnOnNameCollision(cl *client.Client, mk crypto.MasterKey, id, newName string) {
+	items, err := cl.ListResources()
+	if err != nil {
+		return
+	}
+	for _, it := range items {
+		if it.ID == id {
+			continue
+		}
+		if meta, ok := openMetadata(it, mk); ok && meta.Name == newName {
+			fmt.Fprintf(os.Stderr, "warning: %q already names resource %s; refer to either by id, not name\n", newName, it.ID)
+			return
+		}
+	}
 }

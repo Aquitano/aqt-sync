@@ -1398,11 +1398,18 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext},
 		Version:    version,
 		MinClient:  minClient,
-		ExpiresAt:  expiresAt.Int64,
-		MaxReads:   maxReads.Int64,
-		Reads:      reads,
-		CreatedAt:  createdAt,
-		UpdatedAt:  updatedAt,
+	}
+	// Lifecycle fields (expiry, read counts, create/update timestamps) are the owner's
+	// operational view of the link. A public-link recipient or grantee has no business
+	// learning when the link dies, how many reads remain, or when it was last touched,
+	// so they are withheld from every non-owner read. Enforcement (expiry, max-reads)
+	// stays server-side and is unaffected.
+	if isOwner {
+		out.ExpiresAt = expiresAt.Int64
+		out.MaxReads = maxReads.Int64
+		out.Reads = reads
+		out.CreatedAt = createdAt
+		out.UpdatedAt = updatedAt
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &out.EncryptedMeta); err != nil {
 		return out, err

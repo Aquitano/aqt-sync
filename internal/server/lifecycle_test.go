@@ -610,3 +610,30 @@ func TestPutResourceRevokesGranteeAtomically(t *testing.T) {
 		t.Fatalf("grants after the rotation = %d, want 0", n)
 	}
 }
+
+// TestGetResourceLifecycleFieldsOwnerOnly verifies the download response exposes the
+// link's lifecycle (expiry, read counts, timestamps) only to the owner. A public-link
+// recipient must not learn when the link dies or how many reads remain; enforcement is
+// server-side and unchanged, so the fields carry no information the reader needs.
+func TestGetResourceLifecycleFieldsOwnerOnly(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "lifecycle-fields@example.com")
+	id := s.putPublic(t, owner, "body", 3600, 5)
+
+	ownerRes, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatalf("owner read: %v", err)
+	}
+	if ownerRes.ExpiresAt == 0 || ownerRes.MaxReads != 5 || ownerRes.CreatedAt == 0 || ownerRes.UpdatedAt == 0 {
+		t.Fatalf("owner read missing lifecycle: %+v", ownerRes)
+	}
+
+	pub, err := s.GetResource(id, "")
+	if err != nil {
+		t.Fatalf("public read: %v", err)
+	}
+	if pub.ExpiresAt != 0 || pub.MaxReads != 0 || pub.Reads != 0 || pub.CreatedAt != 0 || pub.UpdatedAt != 0 {
+		t.Fatalf("public read leaked lifecycle fields: expires=%d maxReads=%d reads=%d created=%d updated=%d",
+			pub.ExpiresAt, pub.MaxReads, pub.Reads, pub.CreatedAt, pub.UpdatedAt)
+	}
+}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 func infoCmd() *cobra.Command {
@@ -16,7 +17,11 @@ func infoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info <name-or-id|tracked-path|url>",
 		Short: "Show one resource's metadata and link lifecycle",
-		Args:  cobra.ExactArgs(1),
+		Long: "Show one resource's metadata. For a link you own it also prints the link's\n" +
+			"lifecycle (expiry and read counts); those fields are withheld from public links.\n\n" +
+			"Inspecting someone else's public link fetches the resource, which counts as one\n" +
+			"of the link's reads. Reads of your own resources are never counted.",
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			password, err := pw.resolve()
 			if err != nil {
@@ -53,13 +58,18 @@ func runInfo(ref, password string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
+	// Unlock the master key at most once per invocation: resolving an owned ref by name
+	// and unwrapping the owner key below both need it, and a second unlockMaster would
+	// prompt for the passphrase again whenever session caching is unavailable.
+	var master *crypto.MasterKey
 	if origin == "" && fragment == "" && prof != nil {
 		mk, err := unlockMaster(prof)
 		if err != nil {
 			return err
 		}
+		defer mk.Wipe()
+		master = &mk
 		id, err = resolveOwnedResourceID(cl, mk, ref)
-		mk.Wipe()
 		if err != nil {
 			return err
 		}
@@ -73,7 +83,7 @@ func runInfo(ref, password string, asJSON bool) error {
 		return err
 	}
 
-	ck, err := contentKey(res, fragment, password, prof)
+	ck, err := contentKeyWithMaster(res, fragment, password, prof, master)
 	if err != nil {
 		return err
 	}
