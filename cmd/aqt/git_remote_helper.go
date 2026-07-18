@@ -317,6 +317,11 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 			remote.close()
 			return err
 		}
+		if bundle != nil && os.Getenv("AQT_TEST_GITREMOTE_EXIT_AFTER_UPLOAD") == "1" {
+			// Test-only crash boundary: the segments are durable but the root still
+			// points at the prior version. A real SIGKILL here has the same storage shape.
+			os.Exit(99)
+		}
 		next := applyPushes(remote.root, pushes, objectFormat)
 		if bundle != nil {
 			next.Bundles = append(next.Bundles, *bundle)

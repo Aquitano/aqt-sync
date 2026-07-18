@@ -9,8 +9,10 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
 func TestGitRemotePushAndClone(t *testing.T) {
@@ -207,6 +209,9 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 		t.Fatalf("pre-compaction snapshots = %+v", snapshots)
 	}
 
+	if err := os.RemoveAll(filepath.Join(preexisting, ".git", "aqt")); err != nil {
+		t.Fatal(err)
+	}
 	gitRun(t, preexisting, "fetch", "origin")
 	want := gitOutput(t, source, "rev-parse", "refs/heads/main")
 	if got := gitOutput(t, preexisting, "rev-parse", "refs/remotes/origin/main"); got != want {
@@ -235,6 +240,157 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 		remote.close()
 		t.Fatal("deleted git remote is still resolvable")
 	}
+}
+
+func TestGitRemoteConcurrentPushRace(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
+	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := runRepoCreate("race", 64); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+
+	first := t.TempDir()
+	gitRun(t, first, "init", "-b", "main")
+	gitRun(t, first, "config", "user.email", "first@example.com")
+	gitRun(t, first, "config", "user.name", "First Writer")
+	if err := os.WriteFile(filepath.Join(first, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, first, "add", "base.txt")
+	gitRun(t, first, "commit", "-m", "base")
+	gitRun(t, first, "remote", "add", "origin", "aqt::race")
+	gitRun(t, first, "push", "-u", "origin", "main")
+
+	secondParent := t.TempDir()
+	gitRun(t, secondParent, "clone", "aqt::race", "second")
+	second := filepath.Join(secondParent, "second")
+	gitRun(t, second, "config", "user.email", "second@example.com")
+	gitRun(t, second, "config", "user.name", "Second Writer")
+	if err := os.WriteFile(filepath.Join(first, "first.txt"), []byte("first\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, first, "add", "first.txt")
+	gitRun(t, first, "commit", "-m", "first writer")
+	if err := os.WriteFile(filepath.Join(second, "second.txt"), []byte("second\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, second, "add", "second.txt")
+	gitRun(t, second, "commit", "-m", "second writer")
+
+	start := make(chan struct{})
+	results := make(chan gitCommandResult, 2)
+	for _, dir := range []string{first, second} {
+		dir := dir
+		go func() {
+			<-start
+			results <- runGitCommand(dir, "push", "origin", "main")
+		}()
+	}
+	close(start)
+	a, b := <-results, <-results
+	successes := 0
+	if a.err == nil {
+		successes++
+	}
+	if b.err == nil {
+		successes++
+	}
+	if successes != 1 {
+		t.Fatalf("concurrent pushes: successes=%d\nfirst: %v\n%s\nsecond: %v\n%s", successes, a.err, a.output, b.err, b.output)
+	}
+	loserResult := a
+	if a.err == nil {
+		loserResult = b
+	}
+	if !strings.Contains(loserResult.output, "non-fast-forward") {
+		t.Fatalf("losing push did not report non-fast-forward:\n%s", loserResult.output)
+	}
+	gitRun(t, loserResult.dir, "pull", "--rebase", "origin", "main")
+	gitRun(t, loserResult.dir, "push", "origin", "main")
+	gitRun(t, first, "fetch", "origin")
+	if got := gitOutput(t, first, "show", "refs/remotes/origin/main:first.txt"); got != "first" {
+		t.Fatalf("first writer commit was lost: %q", got)
+	}
+	if got := gitOutput(t, first, "show", "refs/remotes/origin/main:second.txt"); got != "second" {
+		t.Fatalf("second writer commit was lost: %q", got)
+	}
+}
+
+func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
+	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	harness := newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := runRepoCreate("crash", 64); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+	source := t.TempDir()
+	gitRun(t, source, "init", "-b", "main")
+	gitRun(t, source, "config", "user.email", "crash@example.com")
+	gitRun(t, source, "config", "user.name", "Crash Writer")
+	if err := os.WriteFile(filepath.Join(source, "crash.txt"), []byte("survives\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, source, "add", "crash.txt")
+	gitRun(t, source, "commit", "-m", "crash boundary")
+	gitRun(t, source, "remote", "add", "origin", "aqt::crash")
+
+	t.Setenv("AQT_TEST_GITREMOTE_EXIT_AFTER_UPLOAD", "1")
+	gitMustFail(t, source, "push", "origin", "main")
+	remote := openRemoteForTest(t, "crash")
+	if remote.res.Version != 1 || len(remote.root.Refs) != 0 || len(remote.root.Bundles) != 0 {
+		remote.close()
+		t.Fatalf("root changed after helper crash: version=%d refs=%v bundles=%d", remote.res.Version, remote.root.Refs, len(remote.root.Bundles))
+	}
+	remote.close()
+	profile, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, removedBytes, err := harness.store.GCPacks(profile.OwnerHandle, -time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed == 0 || removedBytes == 0 {
+		t.Fatalf("orphan upload was not GC-eligible: packs=%d bytes=%d", removed, removedBytes)
+	}
+
+	t.Setenv("AQT_TEST_GITREMOTE_EXIT_AFTER_UPLOAD", "")
+	gitRun(t, source, "push", "origin", "main")
+	cloneParent := t.TempDir()
+	gitRun(t, cloneParent, "clone", "aqt::crash", "clone")
+	gitRun(t, filepath.Join(cloneParent, "clone"), "fsck", "--full")
+}
+
+type gitCommandResult struct {
+	dir    string
+	output string
+	err    error
+}
+
+func runGitCommand(dir string, args ...string) gitCommandResult {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	data, err := cmd.CombinedOutput()
+	return gitCommandResult{dir: dir, output: strings.TrimSpace(string(data)), err: err}
 }
 
 func openRemoteForTest(t *testing.T, ref string) *openedGitRemote {
