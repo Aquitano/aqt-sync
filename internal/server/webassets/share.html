@@ -223,6 +223,8 @@
   }
   .cmd > button:hover { background: rgb(243 222 163 / 12%); }
 
+  .field-label { display: block; margin-top: 1.2rem; font-family: var(--mono); font-size: 0.75rem; font-weight: 700; }
+
   .password-row {
     display: flex;
     flex-wrap: wrap;
@@ -608,7 +610,7 @@
         <p>This page needs the part after <code>#</code> to decrypt anything. Open the full link you
         were given, or pull it with the CLI:</p>
         <div class="cmd">
-          <code id="cli-cmd">aqt pull '{{.PullURL}}#…'</code>
+          <code id="cli-cmd">aqt pull requires the original full URL, including its # fragment</code>
           <button type="button" id="cli-copy" hidden>Copy</button>
         </div>
         <p class="hint" id="nojs-hint">The part after <code>#</code> is the decryption key. It stays in
@@ -622,6 +624,7 @@
         opening it counts as one read; browsing a shared folder still counts as just one.</p>
         <p class="hint">Files, folders, and streamed files all open here. Very large files may
         need the CLI.</p>
+        <p class="hint" id="policy-note"></p>
         <div class="actions">
           <button type="button" id="decrypt-btn">Decrypt in browser</button>
           <button type="button" class="ghost" id="show-cli-btn">Use the CLI instead</button>
@@ -631,19 +634,20 @@
       <!-- State: password-protected link -->
       <div id="state-password" hidden>
         <h2>This link is password-protected.</h2>
-        <p>The password unwraps the file key locally. Deriving it is deliberately slow.</p>
+        <p id="password-help">The password unwraps the file key locally. Deriving it is deliberately slow.</p>
         <p class="hint">Files, folders, and streamed files all open here. Very large files may
         need the CLI.</p>
+        <label class="field-label" for="password-input">Share password</label>
         <form class="password-row" id="password-form">
-          <input type="password" id="password-input" placeholder="share password"
-                 autocomplete="off" spellcheck="false" aria-label="Share password">
+          <input type="password" id="password-input" required aria-describedby="password-help password-error"
+                 autocomplete="off" spellcheck="false">
           <button type="submit">Unlock</button>
         </form>
         <p class="field-error" id="password-error" hidden></p>
       </div>
 
       <!-- State: working -->
-      <div id="state-busy" hidden>
+      <div id="state-busy" role="status" aria-live="polite" aria-busy="true" hidden>
         <h2 id="busy-title">Decrypting.</h2>
         <div class="progress">
           <span id="busy-step">FETCHING CIPHERTEXT</span>
@@ -675,21 +679,21 @@
         <div class="file-panel">
           <div class="folder-list" id="folder-list"></div>
         </div>
-        <p class="folder-status" id="folder-status" hidden></p>
+        <p class="folder-status" id="folder-status" role="status" aria-live="polite" hidden></p>
         <p class="hint folder-hint">Names and sizes are decrypted in your browser. Pull the whole
         tree with the CLI:</p>
         <div class="cmd">
-          <code id="folder-cmd-code">aqt pull '{{.PullURL}}#…'</code>
+          <code id="folder-cmd-code">aqt pull requires the original full URL, including its # fragment</code>
           <button type="button" id="folder-copy">Copy</button>
         </div>
       </div>
 
       <!-- State: error / unsupported -->
-      <div id="state-error" hidden>
+      <div id="state-error" role="alert" hidden>
         <h2 id="error-title">Could not decrypt.</h2>
         <p id="error-body"></p>
         <div class="cmd">
-          <code id="error-cmd">aqt pull '{{.PullURL}}#…'</code>
+          <code id="error-cmd">aqt pull requires the original full URL, including its # fragment</code>
           <button type="button" id="error-copy">Copy</button>
         </div>
       </div>

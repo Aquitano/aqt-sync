@@ -269,3 +269,30 @@ func TestSessionCacheRejectsMalformed(t *testing.T) {
 		t.Fatal("malformed session should be removed")
 	}
 }
+
+func TestDeleteRemovesProfileTokenAndSession(t *testing.T) {
+	isolateConfigDir(t)
+	p := &Profile{Name: "default", Server: "https://x.example", Email: "u.com", Token: "tok-secret"}
+	if err := Save(p); err != nil {
+		t.Fatal(err)
+	}
+	var mk crypto.MasterKey
+	if err := SaveSession("default", mk, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveSession("default", mk, -time.Second); err == nil {
+		t.Fatal("negative TTL was accepted")
+	}
+	if err := Delete("default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load("default"); !errors.Is(err, ErrNoProfile) {
+		t.Fatalf("profile still loads: %v", err)
+	}
+	if _, ok := LoadSession("default"); ok {
+		t.Fatal("session survived delete")
+	}
+	if token, ok := keychainLoadToken("default"); ok || token != "" {
+		t.Fatal("keychain token survived delete")
+	}
+}

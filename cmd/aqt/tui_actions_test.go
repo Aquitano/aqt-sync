@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -172,5 +173,37 @@ func TestTUIIssue92AccountMenu(t *testing.T) {
 	cmd, _ = adopt.Update(key("enter"))
 	if got := strings.Join(tuiRequestArgs(t, cmd), " "); got != "clone aqt://folder /tmp/existing --adopt" {
 		t.Fatalf("adopt args = %q", got)
+	}
+}
+
+func TestTUISharePasswordPreservesWhitespaceAndResultPersists(t *testing.T) {
+	m := testModel(t)
+	res := *m.selectedResource()
+	opened := menuCommand(t, m.shareDialog(res).(*tuiMenu), "p")().(tuiOpenDialogMsg)
+	secret := opened.dialog.(*tuiInput)
+	if secret.trimSpace || secret.input.EchoMode != textinput.EchoPassword {
+		t.Fatal("share password input is not exact masked input")
+	}
+	secret.input.SetValue("  exact password  ")
+	cmd, done := secret.Update(key("enter"))
+	if !done {
+		t.Fatal("password dialog did not close")
+	}
+	req := cmd().(tuiExecRequestMsg)
+	if req.stdin != "  exact password  \n" {
+		t.Fatalf("password stdin = %q", req.stdin)
+	}
+	if got := strings.Join(req.sub, " "); got != "share r1 --password-stdin" {
+		t.Fatalf("share args = %q", got)
+	}
+
+	retry := func() tea.Msg { return "retried" }
+	dialog := &tuiResultDialog{title: "Clipboard unavailable", body: "https://example.test/x/id#key", retry: retry}
+	if !strings.Contains(dialog.View(80), "https://example.test/x/id#key") {
+		t.Fatal("exact link missing from persistent dialog")
+	}
+	got, closed := dialog.Update(key("r"))
+	if closed || got == nil || got().(string) != "retried" {
+		t.Fatal("retry did not keep result dialog open")
 	}
 }

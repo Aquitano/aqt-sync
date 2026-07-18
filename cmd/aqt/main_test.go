@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"testing"
+	"time"
 )
 
 // TestMain forces the keychain off for the e2e suite so it exercises the
@@ -21,4 +22,17 @@ func TestMain(m *testing.M) {
 		os.RemoveAll(cacheDir)
 	}
 	os.Exit(code)
+}
+
+func TestAccountLifecycleCommandsAreExplicit(t *testing.T) {
+	root := rootCmd()
+	for _, name := range []string{"signup", "login", "lock", "logout"} {
+		cmd, _, err := root.Find([]string{name})
+		if err != nil || cmd == root || cmd.Name() != name {
+			t.Fatalf("command %q missing: %v", name, err)
+		}
+	}
+	if err := validateSessionTTL(-time.Second); err == nil {
+		t.Fatal("negative login TTL was accepted")
+	}
 }

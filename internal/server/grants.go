@@ -95,14 +95,15 @@ func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error
 // PutGrant stores (or replaces) a grant on a resource the caller owns. The
 // grantee handle is not validated against accounts: a wrap to a decoy handle
 // (unknown-email lookup) must be accepted indistinguishably from a real one.
-func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte) error {
+func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expectedVersions ...int) error {
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	var resOwner string
-	if err := tx.QueryRow(`SELECT owner_handle FROM resources WHERE id = ?`, resourceID).Scan(&resOwner); err != nil {
+	var version int
+	if err := tx.QueryRow(`SELECT owner_handle, version FROM resources WHERE id = ?`, resourceID).Scan(&resOwner, &version); err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -112,6 +113,10 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte) erro
 	if resOwner != owner {
 		tx.Rollback()
 		return ErrNotFound
+	}
+	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
+		tx.Rollback()
+		return ErrVersionConflict
 	}
 	var count int
 	if err := tx.QueryRow(`SELECT count(*) FROM grants WHERE resource_id = ?`, resourceID).Scan(&count); err != nil {
@@ -138,6 +143,10 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte) erro
 		 ON CONFLICT(resource_id, grantee_handle) DO UPDATE SET wrapped_key = excluded.wrapped_key`,
 		resourceID, owner, grantee, wrapped, time.Now().Unix(),
 	); err != nil {
+		tx.Rollback()
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE resources SET version = version + 1, updated_at = unixepoch() WHERE id = ? AND version = ?`, resourceID, version); err != nil {
 		tx.Rollback()
 		return err
 	}
@@ -201,8 +210,27 @@ func (s *Store) ListResourceGrants(owner, resourceID string, page pageParams) ([
 
 // DeleteGrant removes one grant from a resource the caller owns. ErrNotFound
 // covers a missing resource, foreign ownership, and a missing grant alike.
-func (s *Store) DeleteGrant(owner, resourceID, grantee string) error {
-	res, err := s.db.Exec(
+func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions ...int) error {
+	defer s.resLocks.lock(resourceID)()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	var version int
+	err = tx.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner).Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		tx.Rollback()
+		return ErrNotFound
+	}
+	if err != nil {
+		tx.Rollback()
+		return err
+	}
+	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
+		tx.Rollback()
+		return ErrVersionConflict
+	}
+	res, err := tx.Exec(
 		`DELETE FROM grants WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
 		resourceID, owner, grantee,
 	)
@@ -210,9 +238,14 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string) error {
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
+		tx.Rollback()
 		return ErrNotFound
 	}
-	return nil
+	if _, err := tx.Exec(`UPDATE resources SET version = version + 1, updated_at = unixepoch() WHERE id = ? AND version = ?`, resourceID, version); err != nil {
+		tx.Rollback()
+		return err
+	}
+	return tx.Commit()
 }
 
 // ListShares lists the caller's incoming grants: one row per live resource
@@ -430,7 +463,11 @@ func (s *Server) createGrant(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "cannot grant a resource to its own account")
 		return
 	}
-	err := s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey)
+	err := s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ExpectedVersion)
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource or grants changed since you last fetched it", api.ErrCodeVersionConflict)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -473,7 +510,15 @@ func (s *Server) listResourceGrants(c *gin.Context) {
 // deleteGrant revokes one grant (DELETE /v1/resources/:id/grants/:grantee).
 func (s *Server) deleteGrant(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	err := s.store.DeleteGrant(owner, c.Param("id"), c.Param("grantee"))
+	expected, ok := parseIfMatch(c)
+	if !ok {
+		return
+	}
+	err := s.store.DeleteGrant(owner, c.Param("id"), c.Param("grantee"), expected)
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource or grants changed since you last fetched it", api.ErrCodeVersionConflict)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return

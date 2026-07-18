@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"strconv"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 )
@@ -28,7 +29,14 @@ func (c *Client) PublishEncKey(req api.PublishEncKeyRequest) error {
 // CreateGrant stores a client-sealed grant wrap on a resource the caller owns.
 // Re-granting an existing grantee replaces the wrap.
 func (c *Client) CreateGrant(resourceID string, req api.CreateGrantRequest) error {
-	return c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(resourceID)+"/grants", req, nil)
+	if req.ExpectedVersion <= 0 {
+		current, err := c.GetResource(resourceID)
+		if err != nil {
+			return err
+		}
+		req.ExpectedVersion = current.Version
+	}
+	return mutationOutcome("create grant", c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(resourceID)+"/grants", req, nil))
 }
 
 // ListGrants lists a resource's grants (owner only), following pagination
@@ -52,8 +60,18 @@ func (c *Client) ListGrants(resourceID string) ([]api.GrantEntry, error) {
 
 // RevokeGrant deletes one grant from a resource the caller owns.
 func (c *Client) RevokeGrant(resourceID, granteeHandle string) error {
-	return c.do(http.MethodDelete,
-		"/v1/resources/"+url.PathEscape(resourceID)+"/grants/"+url.PathEscape(granteeHandle), nil, nil)
+	current, err := c.GetResource(resourceID)
+	if err != nil {
+		return err
+	}
+	path := "/v1/resources/" + url.PathEscape(resourceID) + "/grants/" + url.PathEscape(granteeHandle)
+	req, err := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("If-Match", strconv.Itoa(current.Version))
+	_, _, err = c.send(req, path)
+	return mutationOutcome("revoke grant", err)
 }
 
 // ListShares lists the caller's incoming grants, following pagination transparently.
@@ -87,7 +105,7 @@ func (c *Client) ResourceObjects(resourceID string, ids []string) ([][]byte, err
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("Accept", api.ObjectFramesMediaType)
 	_, data, err := c.send(req, path)
 	if err != nil {
 		return nil, err

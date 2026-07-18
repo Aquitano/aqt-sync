@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -24,7 +25,8 @@ func newHarnessCfg(t *testing.T, cfg Config) *harness {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	return &harness{t: t, router: NewWithConfig(store, cfg).Router()}
+	srv := NewWithConfig(store, cfg)
+	return &harness{t: t, router: srv.Router(), store: store, srv: srv}
 }
 
 // createReq builds a self-consistent account-creation request for an email/passphrase
@@ -285,5 +287,75 @@ func TestTrustedProxyConfigAccepted(t *testing.T) {
 		if rec := h.get("/x/does-not-exist"); rec.Code != http.StatusNotFound {
 			t.Fatalf("case %d: share view returned %d, want 404", i, rec.Code)
 		}
+	}
+}
+
+func TestPhysicalQuotaCoversInlineBlobsAndRetainedSnapshots(t *testing.T) {
+	h := newHarnessCfg(t, Config{})
+	token, mk := h.signup("physical-quota.com", "passphrase for quota")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal(bytes.Repeat([]byte("x"), 512), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":512}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	var put api.PutResourceResponse
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped}, &put); code != http.StatusCreated {
+		t.Fatalf("first resource = %d", code)
+	}
+	var snap api.SnapshotInfo
+	if code := h.do(http.MethodPost, "/v1/snapshots", token, api.CreateSnapshotRequest{ResourceID: put.ID}, &snap); code != http.StatusCreated {
+		t.Fatalf("first snapshot = %d", code)
+	}
+	owner, _ := h.store.OwnerByToken(token)
+	usage, err := h.store.AccountUsage(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.srv.cfg.QuotaBytes = usage.StorageBytes
+
+	var quotaErr api.ErrorResponse
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped}, &quotaErr); code != http.StatusInsufficientStorage {
+		t.Fatalf("inline quota = %d", code)
+	}
+	if quotaErr.Code != api.ErrCodeQuotaExceeded || quotaErr.LimitKind != "storageBytes" || quotaErr.Current != usage.StorageBytes || quotaErr.Limit != usage.StorageBytes {
+		t.Fatalf("inline quota error = %+v", quotaErr)
+	}
+	quotaErr = api.ErrorResponse{}
+	if code := h.do(http.MethodPost, "/v1/snapshots", token, api.CreateSnapshotRequest{ResourceID: put.ID}, &quotaErr); code != http.StatusInsufficientStorage {
+		t.Fatalf("retained snapshot quota = %d", code)
+	}
+	if quotaErr.Current != usage.StorageBytes || quotaErr.Limit != usage.StorageBytes {
+		t.Fatalf("snapshot quota error = %+v", quotaErr)
+	}
+}
+
+func TestResourceAndObjectCountCaps(t *testing.T) {
+	h := newHarnessCfg(t, Config{MaxResources: 1, MaxObjects: 1})
+	token, mk := h.signup("count-caps.com", "passphrase for caps")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	req := api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped}
+	if code := h.do(http.MethodPost, "/v1/resources", token, req, nil); code != http.StatusCreated {
+		t.Fatalf("first resource = %d", code)
+	}
+	var limitErr api.ErrorResponse
+	if code := h.do(http.MethodPost, "/v1/resources", token, req, &limitErr); code != http.StatusInsufficientStorage {
+		t.Fatalf("resource cap = %d", code)
+	}
+	if limitErr.LimitKind != "resources" || limitErr.Current != 1 || limitErr.Limit != 1 {
+		t.Fatalf("resource limit = %+v", limitErr)
+	}
+	packID, pack, _ := packOf("object one", "object two")
+	rec := h.raw(http.MethodPut, "/v1/packs/"+packID, token, map[string]string{"Content-Type": "application/octet-stream"}, pack)
+	if rec.Code != http.StatusInsufficientStorage {
+		t.Fatalf("object cap = %d: %s", rec.Code, rec.Body.String())
+	}
+	limitErr = api.ErrorResponse{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &limitErr); err != nil {
+		t.Fatal(err)
+	}
+	if limitErr.LimitKind != "objects" || limitErr.Limit != 1 {
+		t.Fatalf("object limit = %+v", limitErr)
 	}
 }

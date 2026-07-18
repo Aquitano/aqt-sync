@@ -149,6 +149,9 @@
     document.body.classList.toggle("is-decrypted", state === "state-file" || state === "state-folder");
     states.forEach(function (s) { $(s).hidden = s !== state; });
     $("card-state").textContent = stateLabels[state];
+    var panel = $(state);
+    panel.setAttribute("tabindex", "-1");
+    panel.focus();
   }
 
   function setHeadline(text) { $("headline").textContent = text; }
@@ -169,7 +172,11 @@
       navigator.clipboard.writeText(typeof text === "function" ? text() : text).then(function () {
         var old = btn.textContent;
         btn.textContent = "Copied";
-        setTimeout(function () { btn.textContent = old; }, 1400);
+        btn.setAttribute("aria-label", "Copied successfully");
+        setTimeout(function () { btn.textContent = old; btn.removeAttribute("aria-label"); }, 1400);
+      }).catch(function () {
+        btn.textContent = "Copy failed";
+        btn.setAttribute("aria-label", "Copy failed; select the command manually");
       });
     });
   }
@@ -190,9 +197,20 @@
   // large files are sent to the CLI instead of risking a killed tab.
   var maxDownloadBytes = 512 * 1024 * 1024;
 
+  function fetchPreflight() {
+    return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/preflight", {
+      headers: { Accept: "application/json", "X-Aqt-Capability": "3" },
+    }).then(function (res) {
+      if (res.status === 410) throw new Error("gone");
+      if (res.status === 404) throw new Error("not-public");
+      if (!res.ok) throw new Error("The server answered " + res.status + ".");
+      return res.json();
+    });
+  }
+
   function fetchResource() {
     return fetchImpl("/v1/resources/" + encodeURIComponent(RES_ID), {
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", "X-Aqt-Capability": "3" },
     }).then(function (res) {
       if (res.status === 410) throw new Error("gone");
       if (res.status === 404) throw new Error("not-public");
@@ -208,7 +226,7 @@
   function fetchObjects(ids) {
     return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/objects", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/octet-stream" },
+      headers: { "Content-Type": "application/json", Accept: "application/vnd.aqt.object-frames; version=1" },
       body: JSON.stringify({ ids: ids }),
     }).then(function (res) {
       if (res.status === 410) throw new Error("gone");
@@ -544,7 +562,64 @@
 
   /* ---------------- fetch + decrypt flow ----------------------------- */
 
-  function decryptFlow(keyPromise) {
+  function preflightPolicyText(preflight) {
+    var notes = [];
+    if (preflight.expiresAt) {
+      notes.push("expires " + new Date(preflight.expiresAt * 1000).toLocaleString());
+    }
+    if (preflight.maxReads) {
+      notes.push((preflight.maxReads - (preflight.reads || 0)) + " read(s) remain; decrypting consumes one");
+    }
+    return notes.length ? notes.join(" · ") : "This link has no server-enforced expiry or read limit.";
+  }
+
+  function prepareFlow(keyPromise) {
+    if (!AqtCrypto.ready) {
+      fail("Browser decryption is unavailable.", "This browser could not load the local crypto runtime.");
+      return;
+    }
+    show("state-busy");
+    $("busy-step").textContent = "INSPECTING ENCRYPTED METADATA";
+    var key;
+    Promise.resolve(AqtCrypto.ready)
+      .then(function () { return new Promise(function (r) { setTimeout(r, 30); }); })
+      .then(keyPromise)
+      .then(function (derivedKey) { key = derivedKey; return fetchPreflight(); })
+      .then(function (preflight) {
+        var metaPlain = openBound(preflight.encryptedMeta, key, "meta", RES_ID);
+        if (metaPlain === null) throw new Error("wrong-key");
+        var meta = JSON.parse(new TextDecoder().decode(metaPlain));
+        if (meta.kind === "folder" && (meta.packed || !meta.tree)) throw new Error("unsupported:packed");
+        if ((meta.size || 0) > maxDownloadBytes) throw new Error("unsupported:large");
+        $("policy-note").textContent = preflightPolicyText(preflight);
+        $("decrypt-btn").onclick = function () { decryptFlow(function () { return Promise.resolve(key); }, meta); };
+        show("state-locked");
+        $("decrypt-btn").focus();
+      })
+      .catch(function (err) {
+        var msg = String(err && err.message || err);
+        if (msg === "wrong-password") {
+          show("state-password");
+          $("password-error").textContent = "Wrong password: the key failed to unwrap.";
+          $("password-error").hidden = false;
+          $("password-input").focus();
+        } else if (msg === "wrong-key") {
+          fail("The key does not fit.", "The fragment cannot authenticate the encrypted metadata.");
+        } else if (msg === "gone") {
+          fail("This link is closed.", "It has expired or reached its read limit.");
+        } else if (msg === "not-public") {
+          fail("This resource is not public.", "It may be private, deleted, or the link may be incomplete.");
+        } else if (msg === "unsupported:packed") {
+          fail("This folder needs the CLI.", "Packed or legacy folders are inspected without consuming a read.");
+        } else if (msg === "unsupported:large") {
+          fail("This resource needs the CLI.", "It is too large to assemble safely in a browser tab; no read was consumed.");
+        } else {
+          fail("Could not inspect this share.", msg);
+        }
+      });
+  }
+
+  function decryptFlow(keyPromise, knownMeta) {
     if (!AqtCrypto.ready) {
       fail("Browser decryption is unavailable.", "This browser could not load the local crypto runtime.");
       return;
@@ -568,24 +643,27 @@
         return new Promise(function (r) { setTimeout(r, 30); });
       })
       .then(function () {
-        var metaPlain = openBound(resource.EncryptedMeta, key, "meta", RES_ID);
-        if (metaPlain === null) throw new Error("wrong-key");
-        var meta = JSON.parse(new TextDecoder().decode(metaPlain));
+        var meta = knownMeta;
+        if (!meta) {
+          var metaPlain = openBound(resource.encryptedMeta, key, "meta", RES_ID);
+          if (metaPlain === null) throw new Error("wrong-key");
+          meta = JSON.parse(new TextDecoder().decode(metaPlain));
+        }
 
         if (meta.kind === "folder") {
           if (meta.packed || !meta.tree) throw new Error("unsupported:packed");
-          var rootPlain = openBound(resource.Blob, key, "treeroot", RES_ID);
+          var rootPlain = openBound(resource.blob, key, "treeroot", RES_ID);
           if (rootPlain === null) throw new Error("wrong-key");
           startFolder(JSON.parse(new TextDecoder().decode(rootPlain)), meta);
           return;
         }
         if (meta.streamed) {
-          var frPlain = openBound(resource.Blob, key, "blob", RES_ID);
+          var frPlain = openBound(resource.blob, key, "blob", RES_ID);
           if (frPlain === null) throw new Error("wrong-key");
           startStreamedFile(JSON.parse(new TextDecoder().decode(frPlain)), meta);
           return;
         }
-        var plain = openBound(resource.Blob, key, "blob", RES_ID);
+        var plain = openBound(resource.blob, key, "blob", RES_ID);
         if (plain === null) throw new Error("wrong-key");
         renderFile(meta, plain);
       })
@@ -716,6 +794,7 @@
   wireCopy("cli-copy", pullCmd);
   wireCopy("error-copy", pullCmd);
   wireCopy("folder-copy", function () { return pullCmd; });
+  $("show-cli-btn").addEventListener("click", function () { show("state-cli"); });
 
   var frag = parseFragment(window.location.hash);
 
@@ -724,19 +803,21 @@
   } else if (frag === null) {
     fail("The key fragment is malformed.", "The part after # is not a valid aqt key.");
   } else if (frag.kind === "public") {
-    show("state-locked");
-    $("decrypt-btn").addEventListener("click", function () {
-      decryptFlow(function () { return Promise.resolve(frag.key); });
-    });
-    $("show-cli-btn").addEventListener("click", function () { show("state-cli"); });
+    prepareFlow(function () { return Promise.resolve(frag.key); });
   } else {
     show("state-password");
     $("password-form").addEventListener("submit", function (ev) {
       ev.preventDefault();
       var pw = $("password-input").value;
-      if (!pw) return;
+      if (!pw) {
+        $("password-error").textContent = "Enter the share password.";
+        $("password-error").hidden = false;
+        $("password-input").focus();
+        return;
+      }
+      $("password-input").value = "";
       $("password-error").hidden = true;
-      decryptFlow(function () {
+      prepareFlow(function () {
         var kdf = frag.gated.kdf;
         $("busy-step").textContent = "DERIVING PASSWORD KEY";
         return Promise.resolve(AqtCrypto.argon2id(

@@ -294,7 +294,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 // the server will not actually expire. A no-policy push is a no-op.
 func confirmPolicy(cl *client.Client, resp api.PutResourceResponse, policy linkPolicy) error {
 	if err := verifyPolicyEcho(policy, resp); err != nil {
-		_ = cl.DeleteResource(resp.ID)
+		_ = cl.DeleteResourceVersion(resp.ID, resp.Version)
 		return err
 	}
 	return nil

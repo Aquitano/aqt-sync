@@ -21,6 +21,12 @@ import (
 // else in the header is a few hundred bytes.
 const maxWireHeader = 32 << 20
 
+const (
+	ResourceJSONMediaType     = "application/vnd.aqt.resource+json; version=1"
+	ResourceEnvelopeMediaType = "application/vnd.aqt.resource+octet-stream; version=1"
+	ObjectFramesMediaType     = "application/vnd.aqt.object-frames; version=1"
+)
+
 // resourceUploadHeader is the JSON header of PUT /v1/resources. The blob
 // ciphertext follows as the rest of the body, sealed with BlobNonce.
 type resourceUploadHeader struct {

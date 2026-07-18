@@ -1289,3 +1289,76 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 		t.Fatalf("foreign metadata update err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestCreationIdempotencyKeysReplayAndRejectPayloadReuse(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "idem.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	req := api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, IdempotencyKey: "resource-key"}
+	id1, version1, err := s.PutResource(owner, api.ClientCapability, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, version2, err := s.PutResource(owner, api.ClientCapability, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 || version1 != version2 {
+		t.Fatalf("replay = %s/v%d, want %s/v%d", id2, version2, id1, version1)
+	}
+	changed := req
+	changed.Blob.Ciphertext = append([]byte(nil), req.Blob.Ciphertext...)
+	changed.Blob.Ciphertext[0] ^= 1
+	if _, _, err := s.PutResource(owner, api.ClientCapability, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed replay error = %v", err)
+	}
+
+	snapReq := api.CreateSnapshotRequest{ResourceID: id1, IdempotencyKey: "snapshot-key"}
+	snap1, err := s.CreateSnapshotIdempotent(owner, snapReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap2, err := s.CreateSnapshotIdempotent(owner, snapReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap1.ID != snap2.ID {
+		t.Fatalf("snapshot replay ids = %s/%s", snap1.ID, snap2.ID)
+	}
+	snapReq.Anchor = true
+	if _, err := s.CreateSnapshotIdempotent(owner, snapReq); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed snapshot replay error = %v", err)
+	}
+}
+
+func TestMutationsRejectStaleResourceVersions(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "cas.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	id, version, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err = s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, ExpectedVersion: version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Private, ExpectedVersion: version - 1}); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale visibility = %v", err)
+	}
+	if err := s.PutGrant(owner, id, "grantee", []byte("wrapped"), version); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutGrant(owner, id, "other", []byte("wrapped"), version); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale grant = %v", err)
+	}
+	if err := s.DeleteResourceVersion(owner, id, version); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale delete = %v", err)
+	}
+}

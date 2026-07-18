@@ -197,3 +197,61 @@ func selfSignedCert(t *testing.T) (certPEM, keyPEM []byte) {
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 	return certPEM, keyPEM
 }
+
+func TestValidateListenAddressRequiresTLSOrExplicitOverride(t *testing.T) {
+	cases := []struct {
+		addr                string
+		tls, allow, wantErr bool
+	}{
+		{"127.0.0.1:8080", false, false, false},
+		{"0.0.0.0:8080", false, false, true},
+		{":443", false, false, true},
+		{"0.0.0.0:443", true, false, false},
+		{"0.0.0.0:8080", false, true, false},
+		{"not-an-address", true, false, true},
+	}
+	for _, tc := range cases {
+		err := validateListenAddress(tc.addr, tc.tls, tc.allow)
+		if (err != nil) != tc.wantErr {
+			t.Errorf("validateListenAddress(%q, tls=%v, allow=%v) = %v", tc.addr, tc.tls, tc.allow, err)
+		}
+	}
+}
+
+func TestLoadServerConfigRejectsTyposAndNegativeValues(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"AQT_REGISTRATION", "invte"},
+		{"AQT_QUOTA_BYTES", "-1"},
+		{"AQT_MAX_RESOURCES", "-1"},
+		{"AQT_AUTH_RATE", "-0.1"},
+		{"AQT_TRUSTED_PROXIES", "not-a-proxy"},
+		{"AQT_MAX_OBJECTS", "lots"},
+	}
+	keys := []string{"AQT_REGISTRATION", "AQT_INVITE_TOKENS", "AQT_QUOTA_BYTES", "AQT_MAX_DEVICES", "AQT_MAX_RESOURCES", "AQT_MAX_SNAPSHOTS", "AQT_MAX_OBJECTS", "AQT_AUTH_RATE", "AQT_AUTH_BURST", "AQT_TRUSTED_PROXIES"}
+	for _, tc := range cases {
+		t.Run(tc.key+"="+tc.value, func(t *testing.T) {
+			for _, key := range keys {
+				t.Setenv(key, "")
+			}
+			t.Setenv(tc.key, tc.value)
+			if _, err := loadServerConfig(); err == nil {
+				t.Fatal("expected actionable config error")
+			}
+		})
+	}
+}
+
+func TestEnvDurationValueRejectsInvalidAndNegative(t *testing.T) {
+	for _, value := range []string{"tomorrow", "-1s"} {
+		t.Run(value, func(t *testing.T) {
+			t.Setenv("AQT_TEST_DURATION", value)
+			if _, err := envDurationValue("AQT_TEST_DURATION", "1s", true); err == nil {
+				t.Fatal("expected duration error")
+			}
+		})
+	}
+	t.Setenv("AQT_TEST_DURATION", "0")
+	if _, err := envDurationValue("AQT_TEST_DURATION", "1s", false); err == nil {
+		t.Fatal("zero shutdown grace was accepted")
+	}
+}

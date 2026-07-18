@@ -5,7 +5,9 @@ package client
 import (
 	"bytes"
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,9 +27,38 @@ import (
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
 var ErrNotFound = errors.New("not found")
 
+// ErrUnauthorized maps a 401 so login can distinguish a revoked local device
+// from a transient network failure without creating a duplicate attachment.
+var ErrUnauthorized = errors.New("unauthorized")
+
 // ErrConflict maps a 409 so callers can distinguish a version conflict (the
 // resource moved under them) and retry against the new state.
 var ErrConflict = errors.New("conflict")
+
+// UnknownOutcomeError means an unsafe mutation lost a definitive response.
+type UnknownOutcomeError struct {
+	Operation string
+	Err       error
+}
+
+func (e *UnknownOutcomeError) Error() string {
+	return fmt.Sprintf("%s outcome is unknown: %v", e.Operation, e.Err)
+}
+func (e *UnknownOutcomeError) Unwrap() error { return e.Err }
+
+func mutationOutcome(operation string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) {
+		return err
+	}
+	var upgrade *UpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		return err
+	}
+	return &UnknownOutcomeError{Operation: operation, Err: err}
+}
 
 // ErrGone maps a 410: a public link has expired, reached its read limit, or been
 // reclaimed. Callers surface it distinctly (exit code 7) from a plain not-found.
@@ -242,7 +273,11 @@ func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceRespons
 	if req.ID != "" {
 		method = http.MethodPut
 	}
-	err = c.doRaw(method, "/v1/resources", body, &r)
+	if req.ID == "" {
+		err = c.doRawIdempotent(method, "/v1/resources", body, &r)
+	} else {
+		err = c.doRaw(method, "/v1/resources", body, &r)
+	}
 	return r, err
 }
 
@@ -255,7 +290,7 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 		return api.GetResourceResponse{}, err
 	}
 	// Opt into the raw envelope; without this the server answers legacy JSON.
-	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("Accept", api.ResourceEnvelopeMediaType)
 	_, data, err := c.send(req, path)
 	if err != nil {
 		return api.GetResourceResponse{}, err
@@ -280,7 +315,15 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 // server that does not enforce it.
 func (c *Client) SetVisibility(id string, req api.SetVisibilityRequest) (api.PutResourceResponse, error) {
 	var r api.PutResourceResponse
+	if req.ExpectedVersion <= 0 {
+		current, err := c.GetResource(id)
+		if err != nil {
+			return r, err
+		}
+		req.ExpectedVersion = current.Version
+	}
 	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility", req, &r)
+	err = mutationOutcome("set visibility", err)
 	return r, err
 }
 
@@ -323,7 +366,22 @@ func withCursor(path, cursor string) string {
 }
 
 func (c *Client) DeleteResource(id string) error {
-	return c.do(http.MethodDelete, "/v1/resources/"+url.PathEscape(id), nil, nil)
+	current, err := c.GetResource(id)
+	if err != nil {
+		return err
+	}
+	return c.DeleteResourceVersion(id, current.Version)
+}
+
+func (c *Client) DeleteResourceVersion(id string, version int) error {
+	path := "/v1/resources/" + url.PathEscape(id)
+	req, err := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("If-Match", strconv.Itoa(version))
+	_, _, err = c.send(req, path)
+	return mutationOutcome("delete resource", err)
 }
 
 // checkBatchSize bounds how many object ids ride in one /v1/chunks/check request. It
@@ -399,7 +457,7 @@ func (c *Client) PublicObjects(resourceID string, ids []string) ([][]byte, error
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/octet-stream")
+	req.Header.Set("Accept", api.ObjectFramesMediaType)
 	// Same stall-guarded transport as the pack download path; the CLI-side batching
 	// keeps one response small enough to buffer.
 	_, data, err := c.send(req, path)
@@ -460,7 +518,7 @@ func (c *Client) GC() (api.GCResponse, error) {
 // keys). anchor pins the snapshot against retention.
 func (c *Client) CreateSnapshot(resourceID string, label *crypto.SealedBlob, anchor bool) (api.SnapshotInfo, error) {
 	var r api.SnapshotInfo
-	err := c.do(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, EncryptedLabel: label, Anchor: anchor}, &r)
+	err := c.doIdempotent(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, EncryptedLabel: label, Anchor: anchor}, &r)
 	return r, err
 }
 
@@ -471,6 +529,7 @@ func (c *Client) SetSnapshotAnchor(id string, anchored bool) (api.SnapshotInfo, 
 	var r api.SnapshotInfo
 	err := c.do(http.MethodPost, "/v1/snapshots/"+url.PathEscape(id)+"/anchor",
 		api.SetSnapshotAnchorRequest{Anchored: anchored}, &r)
+	err = mutationOutcome("set snapshot anchor", err)
 	return r, err
 }
 
@@ -665,7 +724,7 @@ func (c *Client) doRaw(method, path string, body []byte, out any) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	req.Header.Set("Content-Type", api.ResourceEnvelopeMediaType)
 	_, data, err := c.send(req, path)
 	if err != nil {
 		return err
@@ -674,6 +733,70 @@ func (c *Client) doRaw(method, path string, body []byte, out any) error {
 		return json.Unmarshal(data, out)
 	}
 	return nil
+}
+
+func newIdempotencyKey() (string, error) {
+	var raw [16]byte
+	if _, err := cryptorand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate idempotency key: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
+}
+
+func (c *Client) doRawIdempotent(method, path string, body []byte, out any) error {
+	key, err := newIdempotencyKey()
+	if err != nil {
+		return err
+	}
+	var last error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", api.ResourceEnvelopeMediaType)
+		req.Header.Set("Idempotency-Key", key)
+		_, data, err := c.send(req, path)
+		if err != nil {
+			last = err
+			continue
+		}
+		if out != nil && len(data) > 0 {
+			return json.Unmarshal(data, out)
+		}
+		return nil
+	}
+	return last
+}
+
+func (c *Client) doIdempotent(method, path string, body, out any) error {
+	key, err := newIdempotencyKey()
+	if err != nil {
+		return err
+	}
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+	var last error
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(payload))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Idempotency-Key", key)
+		_, data, err := c.send(req, path)
+		if err != nil {
+			last = err
+			continue
+		}
+		if out != nil && len(data) > 0 {
+			return json.Unmarshal(data, out)
+		}
+		return nil
+	}
+	return last
 }
 
 // getRange downloads [off, off+length) of an opaque body via a Range request and
@@ -737,6 +860,8 @@ func statusError(status int, path string, body []byte) error {
 	}
 
 	switch status {
+	case http.StatusUnauthorized:
+		return ErrUnauthorized
 	case http.StatusNotFound:
 		return ErrNotFound
 	case http.StatusConflict:

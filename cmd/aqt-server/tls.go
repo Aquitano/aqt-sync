@@ -93,6 +93,20 @@ func (s tlsSettings) tlsConfig(dataDir string) (*tls.Config, error) {
 	}
 }
 
+func validateListenAddress(addr string, tlsEnabled, allowInsecure bool) error {
+	tcpAddr, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("invalid AQT_ADDR %q: %w", addr, err)
+	}
+	if tlsEnabled || allowInsecure {
+		return nil
+	}
+	if tcpAddr.IP == nil || !tcpAddr.IP.IsLoopback() {
+		return fmt.Errorf("plain HTTP on non-loopback %q requires AQT_ALLOW_INSECURE_HTTP=1", addr)
+	}
+	return nil
+}
+
 // shutdownGrace bounds how long a SIGINT/SIGTERM lets in-flight requests drain
 // before the process exits, so a deploy restart neither hangs nor severs an upload
 // mid-write.
@@ -112,6 +126,16 @@ func serve(srv *http.Server, tlsCfg *tls.Config) error {
 	return serveListener(ctx, srv, ln, tlsCfg)
 }
 
+func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration, before func(context.Context) error) error {
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, grace, before)
+}
+
 // serveListener serves ln until it errors or ctx is cancelled, then drains
 // in-flight requests within shutdownGrace. Splitting the listener and cancellation
 // out of serve lets a test drive shutdown without an OS signal, and exercise the
@@ -123,6 +147,10 @@ func serve(srv *http.Server, tlsCfg *tls.Config) error {
 // a server that only speaks HTTP/1.1 would break. ServeTLS also preserves the
 // acme-tls/1 challenge protocol needed for autocert issuance.
 func serveListener(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config) error {
+	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, shutdownGrace, nil)
+}
+
+func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config, grace time.Duration, before func(context.Context) error) error {
 	serve := srv.Serve
 	scheme := "http"
 	if tlsCfg != nil {
@@ -140,8 +168,26 @@ func serveListener(ctx context.Context, srv *http.Server, ln net.Listener, tlsCf
 		return err
 	case <-ctx.Done():
 		log.Print("shutting down; draining in-flight requests")
-		shutCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
-		return srv.Shutdown(shutCtx)
+		errCh := make(chan error, 2)
+		n := 1
+		go func() { errCh <- srv.Shutdown(shutCtx) }()
+		if before != nil {
+			n++
+			go func() { errCh <- before(shutCtx) }()
+		}
+		var first error
+		for i := 0; i < n; i++ {
+			select {
+			case err := <-errCh:
+				if first == nil && err != nil {
+					first = err
+				}
+			case <-shutCtx.Done():
+				return shutCtx.Err()
+			}
+		}
+		return first
 	}
 }

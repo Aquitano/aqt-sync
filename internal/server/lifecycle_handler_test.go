@@ -155,3 +155,31 @@ func TestShareViewGonePage(t *testing.T) {
 		t.Fatalf("gone page missing expiry copy: %s", body)
 	}
 }
+
+func TestPublicPreflightDoesNotConsumeBurnRead(t *testing.T) {
+	h := newHarness(t)
+	token, mk := h.signup("preflight.com", "a passphrase here")
+	put := h.putPublicViaAPI(token, mk, 0, 1)
+	for i := 0; i < 2; i++ {
+		rec := h.get("/v1/public/resources/" + put.ID + "/preflight")
+		if rec.Code != http.StatusOK {
+			t.Fatalf("preflight %d = %d: %s", i, rec.Code, rec.Body.String())
+		}
+		var got api.PublicResourcePreflight
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.ID != put.ID || got.Reads != 0 || got.MaxReads != 1 || len(got.EncryptedMeta.Ciphertext) == 0 {
+			t.Fatalf("preflight = %+v", got)
+		}
+		if strings.Contains(rec.Body.String(), "ciphertextBlob") || strings.Contains(rec.Body.String(), "wrappedKey") {
+			t.Fatalf("preflight leaked content fields: %s", rec.Body.String())
+		}
+	}
+	if rec := h.get("/v1/resources/" + put.ID); rec.Code != http.StatusOK {
+		t.Fatalf("counted read = %d", rec.Code)
+	}
+	if rec := h.get("/v1/public/resources/" + put.ID + "/preflight"); rec.Code != http.StatusGone {
+		t.Fatalf("preflight after burn = %d", rec.Code)
+	}
+}

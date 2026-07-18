@@ -114,3 +114,18 @@ When a new write format lands that older releases cannot read:
 
 No server change is needed to gate the new boundary — the `min_client` mechanism is
 format-agnostic; it only compares integers.
+
+
+## Resource wire protocol v1
+
+Resource representations are explicit, versioned contracts:
+
+- JSON: `application/vnd.aqt.resource+json; version=1`
+- Binary resource envelope: `application/vnd.aqt.resource+octet-stream; version=1`
+- Object frames: `application/vnd.aqt.object-frames; version=1`
+
+`Accept` selection honors media parameters and quality values. If none of the offered representations is supported, the server returns `406`. Resource writes accept the versioned JSON or envelope media type and return `415` for unsupported or malformed `Content-Type` values. The unversioned `application/json` and `application/octet-stream` forms remain compatibility aliases for pre-v1 clients. Public DTO fields are lower camel case and do not depend on Go field names.
+
+The resource envelope is a four-byte unsigned big-endian JSON-header length, a lower-camel JSON header of at most 32 MiB, then the sealed blob ciphertext as the remainder. The request header carries visibility, sealed metadata, wrapped key, blob nonce, chunk roots, expected version, minimum client capability, and lifecycle policy. The response header also carries the resource id and accepted version. Object-frame responses repeat a four-byte unsigned big-endian length followed by exactly that object ciphertext, in request order. Object requests are capped at 10,000 ids and every decoded length is bounds-checked before allocation or slicing.
+
+Clients send `X-Aqt-Capability`; the server returns `426` before serving or overwriting a resource whose sealed format the client cannot read. Resource and snapshot creates may send an `Idempotency-Key` of at most 128 bytes. Keys are scoped to the account and operation, recorded atomically with the create, and replay the original stable response. Reusing a key for another payload returns `409 idempotency_conflict`. The official client retries only these key-backed creates. Replacements use `expectedVersion`; visibility changes include the same field, and deletes use an `If-Match` resource version. Stale mutations return `409 version_conflict`. Creates return `201`; replacements and in-place mutations return `200` (or `204` when no response body is defined).

@@ -220,7 +220,7 @@ func runInit(dir string) error {
 		// keeps a failed init side-effect-free instead of leaving an orphan the
 		// user cannot see locally.
 		cleanupLocal()
-		if delErr := cl.DeleteResource(resp.ID); delErr != nil {
+		if delErr := cl.DeleteResourceVersion(resp.ID, resp.Version); delErr != nil {
 			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %v; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
 		}
 		return err

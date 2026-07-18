@@ -9,7 +9,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/aqt-server ./cmd/a
 
 FROM gcr.io/distroless/static-debian12:nonroot
 COPY --from=build /out/aqt-server /usr/local/bin/aqt-server
-ENV AQT_DATA_DIR=/data
+ENV AQT_DATA_DIR=/data AQT_ADDR=0.0.0.0:8080 AQT_ALLOW_INSECURE_HTTP=1
 VOLUME ["/data"]
 EXPOSE 8080
 USER nonroot:nonroot

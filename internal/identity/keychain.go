@@ -123,3 +123,10 @@ func keychainLoadToken(name string) (string, bool) {
 	}
 	return v, true
 }
+
+func keychainDropToken(name string) {
+	if keychainDisabled() {
+		return
+	}
+	_ = keyringDelete(keychainService, tokenID(name))
+}

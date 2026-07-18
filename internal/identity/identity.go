@@ -40,6 +40,11 @@ type Profile struct {
 	// AuthEpoch is the account auth epoch this device's token was issued under. A
 	// passphrase change bumps it; the server rejects a token whose epoch is behind.
 	AuthEpoch int `json:"authEpoch,omitempty"`
+	// SessionTTLSeconds is the cache lifetime selected at signup/login. The
+	// companion boolean distinguishes an explicit zero (cache until lock/logout)
+	// from an older profile that predates this field and should use the default.
+	SessionTTLSeconds int64 `json:"sessionTtlSeconds,omitempty"`
+	SessionTTLSet     bool  `json:"sessionTtlSet,omitempty"`
 }
 
 // Unlock recovers the account's master (root) key from the passphrase: it derives
@@ -231,9 +236,12 @@ func sessionPath(name string) (string, error) {
 	return filepath.Join(dir, name+".session"), nil
 }
 
-// SaveSession caches the master key for ttl. A non-positive ttl caches it with
-// no expiry (until logout).
+// SaveSession caches the master key for ttl. Zero means no expiry (until lock or
+// logout); negative values are invalid rather than silently becoming unbounded.
 func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
+	if ttl < 0 {
+		return errors.New("session TTL must be zero or positive")
+	}
 	if name == "" {
 		name = DefaultProfile
 	}
@@ -314,6 +322,27 @@ func ClearSession(name string) error {
 		return err
 	}
 	keychainDropSealingKey(name) // best-effort; the sealed file is already gone
+	return nil
+}
+
+// Delete removes a local profile and every credential derived for it. Server-side
+// device revocation is deliberately the caller's responsibility so a network
+// failure cannot be mistaken for a completed logout.
+func Delete(name string) error {
+	if name == "" {
+		name = DefaultProfile
+	}
+	if err := ClearSession(name); err != nil {
+		return err
+	}
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(filepath.Join(dir, name+".json")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	keychainDropToken(name)
 	return nil
 }
 

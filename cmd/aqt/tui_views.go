@@ -136,9 +136,10 @@ func tuiResourceDetail(r lsRow) string {
 	b.WriteString(tuiField("visibility", vis))
 	b.WriteString(tuiField("version", fmt.Sprintf("%d", r.Version)))
 	b.WriteString(tuiField("ref", "aqt://"+r.ID))
-	b.WriteString("\n" + tuiStyleDim.Render("y copies the ref"))
 	if r.Visibility == string(api.Public) {
-		b.WriteString(tuiStyleDim.Render(" (the full share link, fragment key included)"))
+		b.WriteString("\n" + tuiStyleDim.Render("y copies the public share link (fragment key included)"))
+	} else {
+		b.WriteString("\n" + tuiStyleDim.Render("y copies the private aqt:// owner reference"))
 	}
 	return b.String()
 }

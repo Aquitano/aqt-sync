@@ -306,11 +306,15 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tuiCopiedMsg:
-		note := "copied: " + msg.ref
-		if !msg.ok {
-			note = "clipboard unavailable — " + msg.ref
+		if msg.err != nil {
+			m.dialog = &tuiResultDialog{title: "Could not create " + msg.kind, body: msg.err.Error() + "\n\nNo private reference was substituted.", retry: msg.retry}
+			return m, nil
 		}
-		cmd := m.toast(note)
+		if !msg.ok {
+			m.dialog = &tuiResultDialog{title: "Clipboard unavailable", body: "The exact " + msg.kind + " is below. Select and copy it manually:\n\n" + msg.ref, retry: msg.retry}
+			return m, nil
+		}
+		cmd := m.toast("copied " + msg.kind)
 		m.refreshMain()
 		return m, cmd
 
@@ -953,7 +957,12 @@ func (m *tuiModel) resourcesActions() []tuiMenuOption {
 		return nil
 	}
 	opts := []tuiMenuOption{
-		{key: "y", label: "copy ref / share link", cmd: m.ctx.copyRefCmd(*res)},
+		{key: "y", label: func() string {
+			if res.Visibility == string(api.Public) {
+				return "copy public share link"
+			}
+			return "copy private aqt:// ref"
+		}(), cmd: m.ctx.copyRefCmd(*res)},
 	}
 	if res.Kind != string(api.KindFolder) {
 		opts = append(opts,
@@ -1001,12 +1010,11 @@ func (m *tuiModel) shareDialog(res lsRow) tuiDialog {
 		{key: "g", label: "grant to an account…", cmd: tuiOpenDialog(grantDialog(res))},
 		{key: "r", label: "revoke an account grant…", cmd: tuiOpenDialog(revokeGrantDialog(res))},
 		{key: "p", label: "password-gated link…", cmd: func() tea.Msg {
-			in := tuiNewInput("Share password", "recipients need link and password", func(pw string) tea.Cmd {
+			in := tuiNewSecretInput("Share password", "recipients need link and password", func(pw string) tea.Cmd {
 				// Over stdin, not -P: argv is world-readable in ps, and a masked
 				// prompt promising secrecy has to actually deliver it.
 				return tuiRequestExecStdin(pw+"\n", "share", id, "--password-stdin")
 			})
-			in.input.EchoMode = textinput.EchoPassword
 			return tuiOpenDialogMsg{dialog: in}
 		}},
 	}}

@@ -3,16 +3,22 @@
 package server
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -47,12 +53,14 @@ type Config struct {
 	Registration RegistrationMode
 	// InviteTokens are the accepted invite secrets in RegistrationInvite mode.
 	InviteTokens []string
-	// QuotaBytes caps an owner's stored pack bytes — the chunked-sync object store,
-	// where bulk data lives. 0 means unlimited. (A streamed file's resource blob is
-	// bounded separately by the per-route body cap.)
+	// QuotaBytes caps physical storage attributable to an account: packs, resource and
+	// snapshot blobs, and modeled database-row growth. Zero means unlimited.
 	QuotaBytes int64
 	// MaxDevices caps devices per account. 0 means unlimited.
-	MaxDevices int
+	MaxDevices   int
+	MaxResources int
+	MaxSnapshots int
+	MaxObjects   int
 	// TrustedProxies is passed to gin.SetTrustedProxies, but only when set through
 	// WithTrustedProxies: the CIDRs/hosts whose X-Forwarded-* headers are believed.
 	// Left unset (the zero value), gin's own default — which trusts every proxy —
@@ -64,6 +72,34 @@ type Config struct {
 	// authenticated routes. Zero values pick the package defaults.
 	AuthedRatePerSec float64
 	AuthedBurst      float64
+}
+
+func (c Config) Validate() error {
+	registration := c.Registration
+	if registration == "" {
+		registration = RegistrationOpen
+	}
+	if registration != RegistrationOpen && registration != RegistrationInvite {
+		return fmt.Errorf("registration mode %q must be open or invite", c.Registration)
+	}
+	if registration == RegistrationInvite && len(c.InviteTokens) == 0 {
+		return errors.New("invite registration requires at least one invite token")
+	}
+	if c.QuotaBytes < 0 || c.MaxDevices < 0 || c.MaxResources < 0 || c.MaxSnapshots < 0 || c.MaxObjects < 0 {
+		return errors.New("quotas and count limits must be non-negative")
+	}
+	if c.AuthedRatePerSec < 0 || c.AuthedBurst < 0 {
+		return errors.New("authentication rate and burst must be non-negative")
+	}
+	for _, proxy := range c.TrustedProxies {
+		if net.ParseIP(proxy) != nil {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(proxy); err != nil {
+			return fmt.Errorf("trusted proxy %q is not an IP address or CIDR", proxy)
+		}
+	}
+	return nil
 }
 
 // WithTrustedProxies records an explicit trusted-proxy list (including an empty one,
@@ -101,6 +137,9 @@ type Server struct {
 	gcLimiter     *ipRateLimiter
 	publicLimiter *ipRateLimiter
 	metrics       *Metrics
+	ready         atomic.Bool
+	workers       sync.WaitGroup
+	accountLimits *keyedMutex
 }
 
 func New(store *Store) *Server { return NewWithConfig(store, Config{}) }
@@ -113,7 +152,7 @@ func NewWithConfig(store *Store, cfg Config) *Server {
 	if burst <= 0 {
 		burst = authedBurst
 	}
-	return &Server{
+	s := &Server{
 		store:         store,
 		cfg:           cfg,
 		limiter:       newIPRateLimiter(unauthRatePerSec, unauthBurst),
@@ -121,6 +160,23 @@ func NewWithConfig(store *Store, cfg Config) *Server {
 		gcLimiter:     newIPRateLimiter(gcRatePerSec, gcBurst),
 		publicLimiter: newIPRateLimiter(publicObjectsRatePerSec, publicObjectsBurst),
 		metrics:       newMetrics(store),
+		accountLimits: newKeyedMutex(),
+	}
+	s.ready.Store(true)
+	return s
+}
+
+// BeginShutdown makes readiness fail before listeners begin draining.
+func (s *Server) BeginShutdown() { s.ready.Store(false) }
+
+func (s *Server) WaitWorkers(ctx context.Context) error {
+	done := make(chan struct{})
+	go func() { s.workers.Wait(); close(done) }()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -160,7 +216,15 @@ func (s *Server) Router() *gin.Engine {
 	// Liveness probe for load balancers, container HEALTHCHECKs, and systemd. It
 	// reads no state and needs no auth, so it stays cheap and can be hit before a
 	// device token exists (e.g. a deploy readiness check).
+	r.GET("/livez", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	r.GET("/readyz", func(c *gin.Context) {
+		if !s.ready.Load() || s.store.Ping() != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready"})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"status": "ready"})
+	})
 
 	// Human-facing landing page for a public share link. Its pinned crypto assets
 	// decrypt inline files in the browser; the content key remains in the URL
@@ -184,6 +248,7 @@ func (s *Server) Router() *gin.Engine {
 		// Public resource reads need no auth; the id is unguessable and the
 		// decrypt key lives only in the caller's URL fragment.
 		v1.GET("/resources/:id", s.getResource)
+		v1.GET("/public/resources/:id/preflight", s.publicResourcePreflight)
 
 		// Public object read for a streamed (large) share: a link holder has the
 		// content key (URL fragment) but object fetch is otherwise owner-scoped. Gated
@@ -493,7 +558,8 @@ func (s *Server) attachDevice(c *gin.Context) {
 	if sigOK && verifierOK {
 		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch, s.cfg.MaxDevices)
 		if errors.Is(err, ErrDeviceLimit) {
-			abortCode(c, http.StatusForbidden, "device limit reached; revoke a device before attaching another", api.ErrCodeDeviceLimit)
+			u, _ := s.store.AccountUsage(owner)
+			c.AbortWithStatusJSON(http.StatusForbidden, api.ErrorResponse{Error: "device limit reached; revoke a device before attaching another", Code: api.ErrCodeDeviceLimit, LimitKind: "devices", Current: u.Devices, Limit: int64(s.cfg.MaxDevices)})
 			return
 		}
 		if err != nil {
@@ -602,7 +668,47 @@ func (s *Server) accountUsage(c *gin.Context) {
 		Resources:    u.Resources,
 		Snapshots:    u.Snapshots,
 		Devices:      u.Devices,
+		MaxResources: int64(s.cfg.MaxResources), MaxSnapshots: int64(s.cfg.MaxSnapshots),
+		MaxObjects: int64(s.cfg.MaxObjects), MaxDevices: int64(s.cfg.MaxDevices),
 	})
+}
+
+func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
+	u, err := s.store.AccountUsage(owner)
+	if err != nil {
+		return err
+	}
+	if s.cfg.QuotaBytes > 0 && u.StorageBytes+addedBytes > s.cfg.QuotaBytes {
+		return &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: s.cfg.QuotaBytes}
+	}
+	var current, limit int64
+	switch kind {
+	case "resources":
+		current, limit = u.Resources, int64(s.cfg.MaxResources)
+	case "snapshots":
+		current, limit = u.Snapshots, int64(s.cfg.MaxSnapshots)
+	case "objects":
+		current, limit = u.Objects, int64(s.cfg.MaxObjects)
+	}
+	if limit > 0 && current >= limit {
+		return &LimitExceededError{Kind: kind, Current: current, Limit: limit}
+	}
+	return nil
+}
+
+func abortLimit(c *gin.Context, err error) bool {
+	var limit *LimitExceededError
+	if !errors.As(err, &limit) {
+		return false
+	}
+	c.AbortWithStatusJSON(http.StatusInsufficientStorage, api.ErrorResponse{Error: "account limit exceeded; free space or raise the configured limit", Code: api.ErrCodeQuotaExceeded, LimitKind: limit.Kind, Current: limit.Current, Limit: limit.Limit})
+	return true
+}
+
+func estimatedResourceBytes(req api.PutResourceRequest) int64 {
+	b, _ := json.Marshal(req.EncryptedMeta)
+	w, _ := json.Marshal(req.WrappedKey)
+	return int64(len(req.Blob.Ciphertext) + len(req.Blob.Nonce) + len(b) + len(w) + 256)
 }
 
 func (s *Server) listDevices(c *gin.Context) {
@@ -646,6 +752,12 @@ func (s *Server) putResource(c *gin.Context) {
 	if !ok {
 		return
 	}
+	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
+		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
+		return
+	} else {
+		req.IdempotencyKey = key
+	}
 	// A client cannot declare content unreadable by itself: that would be a resource
 	// it just wrote but could never read back. Reject it as a client bug.
 	if req.MinClient > capability {
@@ -666,6 +778,15 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
+	if req.ID == "" {
+		defer s.accountLimits.lock(owner)()
+		if err := s.checkAccountLimit(owner, "resources", estimatedResourceBytes(req)); err != nil {
+			if !abortLimit(c, err) {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+			}
+			return
+		}
+	}
 	id, version, err := s.store.PutResource(owner, capability, req)
 	var upgrade *UpgradeRequiredError
 	if errors.As(err, &upgrade) {
@@ -674,6 +795,10 @@ func (s *Server) putResource(c *gin.Context) {
 	}
 	if errors.Is(err, ErrVersionConflict) {
 		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; re-sync", api.ErrCodeVersionConflict)
+		return
+	}
+	if errors.Is(err, ErrIdempotencyConflict) {
+		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
 		return
 	}
 	if errors.Is(err, ErrDropsRoots) {
@@ -738,6 +863,24 @@ func echoedOnExpiry(requested api.OnExpiry, expiresAt, maxReads int64) api.OnExp
 	return api.ExpiryReclaim
 }
 
+func (s *Server) publicResourcePreflight(c *gin.Context) {
+	preflight, err := s.store.PublicResourcePreflight(c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if errors.Is(err, ErrGone) {
+		abortGone(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "preflight failed")
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, preflight)
+}
+
 func (s *Server) getResource(c *gin.Context) {
 	// An authenticated owner can read their private resources; anyone can read a
 	// public one. We pass the owner (empty if unauthenticated) to the store so a
@@ -769,17 +912,21 @@ func (s *Server) getResource(c *gin.Context) {
 		abortUpgradeRequired(c, res.MinClient, capability)
 		return
 	}
-	// A raw-envelope client (Accept: octet-stream) gets the blob verbatim, no
-	// base64 tax; anything else keeps the legacy JSON shape.
-	if acceptsOctetStream(c) {
+	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
+	if !ok {
+		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
+		return
+	}
+	if format == resourceEnvelope {
 		body, err := api.EncodeResourceDownload(res)
 		if err != nil {
 			abort(c, http.StatusInternalServerError, "encode failed")
 			return
 		}
-		c.Data(http.StatusOK, "application/octet-stream", body)
+		c.Data(http.StatusOK, api.ResourceEnvelopeMediaType, body)
 		return
 	}
+	c.Header("Content-Type", api.ResourceJSONMediaType)
 	c.JSON(http.StatusOK, res)
 }
 
@@ -788,7 +935,12 @@ func (s *Server) getResource(c *gin.Context) {
 // JSON-decoded); anything else is the legacy JSON body, so old clients keep
 // working. Both paths sit behind the same maxResourceBody cap.
 func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
-	if !isOctetStream(c.ContentType()) {
+	format, ok := resourceRequestFormat(c.GetHeader("Content-Type"))
+	if !ok {
+		abort(c, http.StatusUnsupportedMediaType, "unsupported resource Content-Type; send version=1 JSON or envelope media type")
+		return api.PutResourceRequest{}, false
+	}
+	if format == resourceJSON {
 		var req api.PutResourceRequest
 		if !bindJSON(c, &req) {
 			return api.PutResourceRequest{}, false
@@ -808,15 +960,84 @@ func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
 	return req, true
 }
 
-// isOctetStream reports whether a Content-Type selects the raw envelope path.
-func isOctetStream(contentType string) bool {
-	return contentType == "application/octet-stream"
+type resourceFormat int
+
+const (
+	resourceJSON resourceFormat = iota
+	resourceEnvelope
+)
+
+func resourceRequestFormat(header string) (resourceFormat, bool) {
+	if strings.TrimSpace(header) == "" {
+		return resourceJSON, true
+	}
+	mediaType, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return 0, false
+	}
+	switch mediaType {
+	case "application/json":
+		return resourceJSON, true
+	case "application/octet-stream":
+		return resourceEnvelope, true
+	case "application/vnd.aqt.resource+json":
+		return resourceJSON, params["version"] == "1"
+	case "application/vnd.aqt.resource+octet-stream":
+		return resourceEnvelope, params["version"] == "1"
+	default:
+		return 0, false
+	}
 }
 
-// acceptsOctetStream reports whether the caller asked for the raw envelope
-// response rather than legacy JSON.
-func acceptsOctetStream(c *gin.Context) bool {
-	return strings.Contains(c.GetHeader("Accept"), "application/octet-stream")
+func negotiateResourceResponse(header string) (resourceFormat, bool) {
+	if strings.TrimSpace(header) == "" {
+		return resourceJSON, true
+	}
+	bestQ, bestSpecificity, best := -1.0, -1, resourceJSON
+	for _, item := range strings.Split(header, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(item))
+		if err != nil {
+			continue
+		}
+		q := 1.0
+		if raw := params["q"]; raw != "" {
+			q, err = strconv.ParseFloat(raw, 64)
+			if err != nil || q < 0 || q > 1 {
+				continue
+			}
+		}
+		if q == 0 {
+			continue
+		}
+		var format resourceFormat
+		specificity := 2
+		switch mediaType {
+		case "application/vnd.aqt.resource+octet-stream":
+			if params["version"] != "1" {
+				continue
+			}
+			format = resourceEnvelope
+		case "application/vnd.aqt.resource+json":
+			if params["version"] != "1" {
+				continue
+			}
+			format = resourceJSON
+		case "application/octet-stream":
+			format = resourceEnvelope
+		case "application/json":
+			format = resourceJSON
+		case "application/*":
+			format, specificity = resourceJSON, 1
+		case "*/*":
+			format, specificity = resourceJSON, 0
+		default:
+			continue
+		}
+		if q > bestQ || q == bestQ && specificity > bestSpecificity {
+			bestQ, bestSpecificity, best = q, specificity, format
+		}
+	}
+	return best, bestQ >= 0
 }
 
 func (s *Server) listResources(c *gin.Context) {
@@ -880,6 +1101,10 @@ func (s *Server) setVisibility(c *gin.Context) {
 		return
 	}
 	version, err := s.store.SetVisibility(owner, c.Param("id"), req)
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the visibility change", api.ErrCodeVersionConflict)
+		return
+	}
 	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
 		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
 		return
@@ -905,7 +1130,15 @@ func (s *Server) setVisibility(c *gin.Context) {
 
 func (s *Server) deleteResource(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	err := s.store.DeleteResource(owner, c.Param("id"))
+	expected, ok := parseIfMatch(c)
+	if !ok {
+		return
+	}
+	err := s.store.DeleteResourceVersion(owner, c.Param("id"), expected)
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the delete", api.ErrCodeVersionConflict)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -915,6 +1148,22 @@ func (s *Server) deleteResource(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func parseIfMatch(c *gin.Context) (int, bool) {
+	raw := strings.TrimSpace(c.GetHeader("If-Match"))
+	if raw == "" {
+		return 0, true
+	}
+	if len(raw) >= 2 && strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"") {
+		raw = raw[1 : len(raw)-1]
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		abort(c, http.StatusBadRequest, "If-Match must contain a positive resource version")
+		return 0, false
+	}
+	return n, true
 }
 
 // --- snapshot handlers ---
@@ -929,7 +1178,33 @@ func (s *Server) createSnapshot(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "resourceId is required")
 		return
 	}
-	info, err := s.store.CreateSnapshot(owner, req.ResourceID, req.EncryptedLabel, req.Anchor)
+	defer s.accountLimits.lock(owner)()
+	resource, err := s.store.GetResource(req.ResourceID, owner)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			abortNotFound(c)
+		} else {
+			abort(c, http.StatusInternalServerError, "resource lookup failed")
+		}
+		return
+	}
+	if err := s.checkAccountLimit(owner, "snapshots", estimatedResourceBytes(api.PutResourceRequest{Blob: resource.Blob, EncryptedMeta: resource.EncryptedMeta, WrappedKey: resource.WrappedKey})); err != nil {
+		if !abortLimit(c, err) {
+			abort(c, http.StatusInternalServerError, "usage lookup failed")
+		}
+		return
+	}
+	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
+		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
+		return
+	} else {
+		req.IdempotencyKey = key
+	}
+	info, err := s.store.CreateSnapshotIdempotent(owner, req)
+	if errors.Is(err, ErrIdempotencyConflict) {
+		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -1043,14 +1318,16 @@ func (s *Server) StartAutoSnapshot(interval time.Duration, keepLast int, stop <-
 		return
 	}
 	t := time.NewTicker(interval)
+	s.workers.Add(1)
 	go func() {
 		defer t.Stop()
+		defer s.workers.Done()
 		for {
 			select {
 			case <-stop:
 				return
 			case <-t.C:
-				if n, err := s.store.RunAutoSnapshots(); err != nil {
+				if n, err := s.store.RunAutoSnapshotsWithLimits(s.cfg.MaxSnapshots, s.cfg.QuotaBytes); err != nil {
 					log.Printf("auto-snapshot: %v", err)
 				} else if n > 0 {
 					log.Printf("auto-snapshot: created %d snapshot(s)", n)
@@ -1076,8 +1353,10 @@ func (s *Server) StartGC(interval time.Duration, stop <-chan struct{}) {
 		return
 	}
 	t := time.NewTicker(interval)
+	s.workers.Add(1)
 	go func() {
 		defer t.Stop()
+		defer s.workers.Done()
 		for {
 			select {
 			case <-stop:

@@ -88,8 +88,8 @@ func TestPublicObjectsServesExactSlicesInOrder(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
-		t.Fatalf("content-type = %q, want application/octet-stream", ct)
+	if ct := rec.Header().Get("Content-Type"); ct != api.ObjectFramesMediaType {
+		t.Fatalf("content-type = %q, want versioned object frames", ct)
 	}
 	frames := decodeFrames(t, rec.Body.Bytes(), len(req))
 	want := []string{"first object bytes", "second object bytes longer", "first object bytes"}

@@ -47,6 +47,7 @@ type tuiInput struct {
 	// allowEmpty lets a prompt treat an empty submit as valid (e.g. an optional
 	// snapshot label); otherwise enter on an empty field does nothing.
 	allowEmpty bool
+	trimSpace  bool
 }
 
 func tuiNewInput(title, placeholder string, submit func(string) tea.Cmd) *tuiInput {
@@ -54,13 +55,16 @@ func tuiNewInput(title, placeholder string, submit func(string) tea.Cmd) *tuiInp
 	in.Placeholder = placeholder
 	in.Focus()
 	in.CharLimit = 256
-	return &tuiInput{title: title, input: in, submit: submit}
+	return &tuiInput{title: title, input: in, submit: submit, trimSpace: true}
 }
 
 func (d *tuiInput) Update(msg tea.KeyMsg) (tea.Cmd, bool) {
 	switch msg.String() {
 	case "enter":
-		v := strings.TrimSpace(d.input.Value())
+		v := d.input.Value()
+		if d.trimSpace {
+			v = strings.TrimSpace(v)
+		}
 		if v == "" && !d.allowEmpty {
 			return nil, false
 		}
@@ -75,6 +79,40 @@ func (d *tuiInput) Update(msg tea.KeyMsg) (tea.Cmd, bool) {
 
 func (d *tuiInput) View(width int) string {
 	body := d.input.View() + "\n\n" + tuiKeyHint("enter", "submit") + "  " + tuiKeyHint("esc", "cancel")
+	return tuiDialogBox(d.title, body, width)
+}
+
+func tuiNewSecretInput(title, placeholder string, submit func(string) tea.Cmd) *tuiInput {
+	in := tuiNewInput(title, placeholder, submit)
+	in.trimSpace = false
+	in.input.EchoMode = textinput.EchoPassword
+	return in
+}
+
+// --- persistent result ---
+
+type tuiResultDialog struct {
+	title string
+	body  string
+	retry tea.Cmd
+}
+
+func (d *tuiResultDialog) Update(msg tea.KeyMsg) (tea.Cmd, bool) {
+	switch msg.String() {
+	case "r":
+		return d.retry, false
+	case "esc", "q", "enter":
+		return nil, true
+	}
+	return nil, false
+}
+
+func (d *tuiResultDialog) View(width int) string {
+	body := d.body
+	if d.retry != nil {
+		body += "\n\n" + tuiKeyHint("r", "retry copy")
+	}
+	body += "  " + tuiKeyHint("esc", "close")
 	return tuiDialogBox(d.title, body, width)
 }
 

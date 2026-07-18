@@ -55,8 +55,8 @@ func TestRawResourceRoundTrip(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("raw get: %d", rec.Code)
 	}
-	if ct := rec.Header().Get("Content-Type"); ct != "application/octet-stream" {
-		t.Fatalf("raw get content-type = %q, want octet-stream", ct)
+	if ct := rec.Header().Get("Content-Type"); ct != api.ResourceEnvelopeMediaType {
+		t.Fatalf("raw get content-type = %q, want versioned resource envelope", ct)
 	}
 	got, err := api.DecodeResourceDownload(bytes.NewReader(rec.Body.Bytes()))
 	if err != nil {
@@ -239,5 +239,38 @@ func TestGzipSkipsOctetStream(t *testing.T) {
 	}
 	if !bytes.Equal(rec.Body.Bytes(), pack) {
 		t.Fatal("pack GET under Accept-Encoding: gzip did not round-trip the bytes")
+	}
+}
+
+func TestVersionedMediaNegotiationConformance(t *testing.T) {
+	if got, ok := negotiateResourceResponse("application/vnd.aqt.resource+json; version=1; q=0.2, application/vnd.aqt.resource+octet-stream; version=1; q=0.9"); !ok || got != resourceEnvelope {
+		t.Fatalf("quality negotiation = %v/%v", got, ok)
+	}
+	if _, ok := negotiateResourceResponse("application/vnd.aqt.resource+json; version=2"); ok {
+		t.Fatal("unsupported response version was accepted")
+	}
+	if _, ok := resourceRequestFormat("application/vnd.aqt.resource+json; version=2"); ok {
+		t.Fatal("unsupported request version was accepted")
+	}
+	if acceptsObjectFrames("application/vnd.aqt.object-frames; version=1; q=0") {
+		t.Fatal("q=0 object frames were accepted")
+	}
+
+	h := newHarness(t)
+	token, _ := h.signup("media.com", "passphrase for media tests")
+	rec := h.raw(http.MethodPost, "/v1/resources", token, map[string]string{"Content-Type": "text/plain"}, []byte("nope"))
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("unsupported content type = %d", rec.Code)
+	}
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	var put api.PutResourceResponse
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{Visibility: api.Public, Blob: blob, EncryptedMeta: meta}, &put); code != http.StatusCreated {
+		t.Fatalf("create = %d", code)
+	}
+	rec = h.raw(http.MethodGet, "/v1/resources/"+put.ID, token, map[string]string{"Accept": "image/png"}, nil)
+	if rec.Code != http.StatusNotAcceptable {
+		t.Fatalf("unacceptable response = %d", rec.Code)
 	}
 }

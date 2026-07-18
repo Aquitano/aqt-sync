@@ -272,3 +272,36 @@ func TestUpgradeRequiredMaps426(t *testing.T) {
 		t.Fatalf("error text = %q, want the server's message", err.Error())
 	}
 }
+
+func TestCreateRetriesOnceWithSameIdempotencyKey(t *testing.T) {
+	var keys []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		keys = append(keys, r.Header.Get("Idempotency-Key"))
+		if len(keys) == 1 {
+			http.Error(w, "transient", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(api.PutResourceResponse{ID: "stable", Version: 1})
+	}))
+	defer srv.Close()
+	cl, _ := New(srv.URL, "tok")
+	got, err := cl.PutResource(api.PutResourceRequest{Visibility: api.Public})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ID != "stable" || len(keys) != 2 || keys[0] == "" || keys[0] != keys[1] {
+		t.Fatalf("response=%+v keys=%v", got, keys)
+	}
+}
+
+func TestUnsafeMutationSurfacesUnknownOutcome(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "lost", http.StatusInternalServerError) }))
+	defer srv.Close()
+	cl, _ := New(srv.URL, "tok")
+	_, err := cl.SetVisibility("id", api.SetVisibilityRequest{Visibility: api.Public, ExpectedVersion: 1})
+	var unknown *UnknownOutcomeError
+	if !errors.As(err, &unknown) {
+		t.Fatalf("error = %v, want UnknownOutcomeError", err)
+	}
+}
