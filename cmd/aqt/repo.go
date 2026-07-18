@@ -19,7 +19,36 @@ import (
 
 func repoCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "repo", Short: "Manage encrypted Git remotes", Args: cobra.NoArgs}
-	cmd.AddCommand(repoCreateCmd(), repoListCmd(), repoInfoCmd())
+	cmd.AddCommand(repoCreateCmd(), repoListCmd(), repoInfoCmd(), repoGCCmd(), repoRemoveCmd())
+	return cmd
+}
+
+func repoGCCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "gc <name-or-id>",
+		Short: "Compact an encrypted Git remote into one full bundle",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRepoGC(args[0], flagJSON)
+		},
+	}
+	markJSONSupported(cmd)
+	return cmd
+}
+
+func repoRemoveCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:     "rm <name-or-id>",
+		Aliases: []string{"remove"},
+		Short:   "Delete an encrypted Git remote",
+		Args:    cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRepoRemove(args[0], yes)
+		},
+	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -240,19 +269,10 @@ func runRepoInfo(ref string, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	var matches []repoRow
-	for _, row := range rows {
-		if row.ID == ref || row.Name == ref {
-			matches = append(matches, row)
-		}
+	row, err := selectRepoRow(rows, ref)
+	if err != nil {
+		return err
 	}
-	if len(matches) == 0 {
-		return fmt.Errorf("git remote %q not found", ref)
-	}
-	if len(matches) > 1 {
-		return fmt.Errorf("git remote name %q is ambiguous; use an id", ref)
-	}
-	row := matches[0]
 	item := items[row.ID]
 	res, err := cl.GetResource(row.ID)
 	if err != nil {
@@ -293,5 +313,80 @@ func runRepoInfo(ref string, asJSON bool) error {
 		fmt.Printf("%s %s\n", root.Refs[name], name)
 	}
 	fmt.Printf("snapshots %d · automatic %t\n", len(snapshots), item.AutoSnapshot)
+	return nil
+}
+
+func selectRepoRow(rows []repoRow, ref string) (repoRow, error) {
+	var matches []repoRow
+	for _, row := range rows {
+		if row.ID == ref || row.Name == ref {
+			matches = append(matches, row)
+		}
+	}
+	if len(matches) == 0 {
+		return repoRow{}, fmt.Errorf("git remote %q not found", ref)
+	}
+	if len(matches) > 1 {
+		return repoRow{}, fmt.Errorf("git remote name %q is ambiguous; use an id", ref)
+	}
+	return matches[0], nil
+}
+
+func runRepoGC(ref string, asJSON bool) error {
+	// Unlike the helper protocol, this is an interactive CLI command: unlock once
+	// here if needed, which also populates the cache h.openRemote requires.
+	_, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	h := &remoteHelper{
+		remoteName: "repo-gc", rawURL: ref,
+		errOut: os.Stderr,
+	}
+	compacted, before, generation, err := h.compact(true)
+	if err != nil {
+		return err
+	}
+	if !compacted {
+		return nil
+	}
+	if asJSON {
+		return printJSON(map[string]any{"compacted": true, "bundlesBefore": before, "bundlesAfter": 1, "generation": generation})
+	}
+	fmt.Printf("compacted %d bundle(s) to 1 · generation %d\n", before, generation)
+	return nil
+}
+
+func runRepoRemove(ref string, assumeYes bool) error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	rows, _, err := loadRepoRows(cl, mk)
+	mk.Wipe()
+	if err != nil {
+		return err
+	}
+	row, err := selectRepoRow(rows, ref)
+	if err != nil {
+		return err
+	}
+	if err := runRemove([]string{row.ID}, false, assumeYes); err != nil {
+		return err
+	}
+	if _, err = cl.GC(); err != nil {
+		// The remote is already deleted. Report cleanup as a warning so a caller
+		// never retries a destructive operation that actually succeeded.
+		fmt.Fprintln(os.Stderr, "warning: post-delete pack GC failed:", err)
+	}
 	return nil
 }

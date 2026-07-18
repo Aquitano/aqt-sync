@@ -530,6 +530,10 @@ type SnapshotInfo struct {
 	// key, and it leaks only "this snapshot is protected" — the same shape of leak as
 	// scheduled — while the name stays sealed in EncryptedLabel.
 	Anchored bool `json:"anchored,omitempty"`
+	// Automatic marks snapshots created by scheduled retention or a client-side
+	// maintenance operation such as git-remote compaction. Auto-retention may prune
+	// these; manual and anchored snapshots remain untouched.
+	Automatic bool `json:"automatic,omitempty"`
 }
 
 // CreateSnapshotRequest pins the current version of a resource the caller owns.
@@ -543,6 +547,7 @@ type CreateSnapshotRequest struct {
 	// Anchor pins the new snapshot against retention (see SnapshotInfo.Anchored). Set
 	// by `aqt checkpoint`; a plain `snapshot create` leaves it false.
 	Anchor         bool   `json:"anchor,omitempty"`
+	Automatic      bool   `json:"automatic,omitempty"`
 	IdempotencyKey string `json:"-"`
 }
 

@@ -2155,7 +2155,7 @@ func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlo
 // snapshots are tagged so retention can prune them without touching manual ones.
 // anchored pins the snapshot against every retention path.
 func (s *Store) CreateSnapshotIdempotent(owner string, req api.CreateSnapshotRequest) (api.SnapshotInfo, error) {
-	return s.createSnapshot(owner, req.ResourceID, req.EncryptedLabel, false, req.Anchor, req.IdempotencyKey)
+	return s.createSnapshot(owner, req.ResourceID, req.EncryptedLabel, req.Automatic, req.Anchor, req.IdempotencyKey)
 }
 
 func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled, anchored bool, idempotencyKey string) (api.SnapshotInfo, error) {
@@ -2163,7 +2163,8 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		ResourceID string
 		Label      *crypto.SealedBlob
 		Anchored   bool
-	}{resourceID, label, anchored})
+		Automatic  bool
+	}{resourceID, label, anchored, scheduled})
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
@@ -2248,7 +2249,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		tx.Rollback()
 		return prior, nil
 	}
-	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored}
+	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored, Automatic: scheduled}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -2292,7 +2293,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 // keyset seek uses that mixed-direction predicate.
 func (s *Store) ListSnapshots(owner, resourceID string, page pageParams) ([]api.SnapshotInfo, string, error) {
 	limit := page.effectiveLimit()
-	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored
+	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored, scheduled
 	          FROM snapshots WHERE owner_handle = ?`
 	args := []any{owner}
 	if resourceID != "" {
@@ -2327,7 +2328,7 @@ func (s *Store) ListSnapshots(owner, resourceID string, page pageParams) ([]api.
 			labelJSON   sql.NullString
 			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored); err != nil {
+		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored, &info.Automatic); err != nil {
 			return nil, "", err
 		}
 		if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {

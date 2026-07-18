@@ -576,6 +576,14 @@ func (c *Client) CreateSnapshot(resourceID string, label *crypto.SealedBlob, anc
 	return r, err
 }
 
+// CreateAutoSnapshot pins a maintenance checkpoint that normal automatic
+// retention may prune. It is used immediately before git-remote compaction swaps.
+func (c *Client) CreateAutoSnapshot(resourceID string) (api.SnapshotInfo, error) {
+	var r api.SnapshotInfo
+	err := c.doIdempotent(http.MethodPost, "/v1/snapshots", api.CreateSnapshotRequest{ResourceID: resourceID, Automatic: true}, &r)
+	return r, err
+}
+
 // SetSnapshotAnchor toggles a snapshot's anchor and returns the updated metadata, so
 // the caller can verify the server honored the change (an older server that ignores
 // the field echoes the old state, which the caller treats as a hard error).

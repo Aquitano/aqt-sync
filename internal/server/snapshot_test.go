@@ -95,6 +95,26 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	}
 }
 
+func TestClientAutomaticSnapshotIsMarkedForRetention(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "automatic@example.com")
+	rid := s.rootResource(t, owner, nil)
+	snap, err := s.CreateSnapshotIdempotent(owner, api.CreateSnapshotRequest{ResourceID: rid, Automatic: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snap.Automatic {
+		t.Fatal("automatic snapshot response is not marked automatic")
+	}
+	listed, _, err := s.ListSnapshots(owner, rid, pageParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || !listed[0].Automatic {
+		t.Fatalf("listed snapshots = %+v", listed)
+	}
+}
+
 // Deleting the source resource entirely must not take its snapshots with it: this is
 // the protection against a sync-propagated delete.
 func TestSnapshotSurvivesResourceDelete(t *testing.T) {

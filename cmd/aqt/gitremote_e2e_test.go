@@ -154,6 +154,99 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	}
 }
 
+func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
+	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := runRepoCreate("compact", 2); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+
+	source := t.TempDir()
+	gitRun(t, source, "init", "-b", "main")
+	gitRun(t, source, "config", "user.email", "e2e@example.com")
+	gitRun(t, source, "config", "user.name", "AQT E2E")
+	if err := os.WriteFile(filepath.Join(source, "history.txt"), []byte("one\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, source, "add", "history.txt")
+	gitRun(t, source, "commit", "-m", "one")
+	gitRun(t, source, "remote", "add", "origin", "aqt::compact")
+	gitRun(t, source, "push", "-u", "origin", "main")
+
+	preexistingParent := t.TempDir()
+	gitRun(t, preexistingParent, "clone", "aqt::compact", "preexisting")
+	preexisting := filepath.Join(preexistingParent, "preexisting")
+	if err := os.WriteFile(filepath.Join(source, "history.txt"), []byte("one\ntwo\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, source, "add", "history.txt")
+	gitRun(t, source, "commit", "-m", "two")
+	gitRun(t, source, "push", "origin", "main") // reaches threshold and compacts
+
+	remote := openRemoteForTest(t, "compact")
+	if len(remote.root.Bundles) != 1 || remote.root.Generation != 1 {
+		remote.close()
+		t.Fatalf("compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
+	}
+	snapshots, err := remote.client.ListSnapshots(remote.res.ID)
+	remote.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || !snapshots[0].Automatic {
+		t.Fatalf("pre-compaction snapshots = %+v", snapshots)
+	}
+
+	gitRun(t, preexisting, "fetch", "origin")
+	want := gitOutput(t, source, "rev-parse", "refs/heads/main")
+	if got := gitOutput(t, preexisting, "rev-parse", "refs/remotes/origin/main"); got != want {
+		t.Fatalf("pre-existing clone fetched %s, want %s", got, want)
+	}
+	freshParent := t.TempDir()
+	gitRun(t, freshParent, "clone", "aqt::compact", "fresh")
+	gitRun(t, filepath.Join(freshParent, "fresh"), "fsck", "--full")
+
+	oldGeneration := 1
+	t.Chdir(source)
+	if err := runRepoGC("compact", false); err != nil {
+		t.Fatalf("explicit repo gc: %v", err)
+	}
+	remote = openRemoteForTest(t, "compact")
+	if len(remote.root.Bundles) != 1 || remote.root.Generation != oldGeneration+1 {
+		remote.close()
+		t.Fatalf("explicitly compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
+	}
+	remote.close()
+	if err := runRepoRemove("compact", true); err != nil {
+		t.Fatalf("repo rm: %v", err)
+	}
+	h := &remoteHelper{remoteName: "origin", rawURL: "compact", errOut: os.Stderr}
+	if remote, err := h.openRemote(); err == nil {
+		remote.close()
+		t.Fatal("deleted git remote is still resolvable")
+	}
+}
+
+func openRemoteForTest(t *testing.T, ref string) *openedGitRemote {
+	t.Helper()
+	h := &remoteHelper{remoteName: "origin", rawURL: ref, errOut: os.Stderr}
+	remote, err := h.openRemote()
+	if err != nil {
+		t.Fatalf("open remote %s: %v", ref, err)
+	}
+	return remote
+}
+
 func configureGitTestEnv(t *testing.T) {
 	t.Helper()
 	// Prevent background auto-maintenance racing an immediate fsck over temporary

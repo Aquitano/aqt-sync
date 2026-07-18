@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -330,6 +331,7 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 			remote.close()
 			return err
 		}
+		compactAt := remote.res.CompactAt
 		_, err = remote.client.PutResource(api.PutResourceRequest{
 			ID: remote.res.ID, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
 			WrappedKey: remote.res.WrappedKey, ChunkRefs: next.SegmentIDs(),
@@ -343,6 +345,13 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 		if err != nil {
 			return err
 		}
+		if compactAt > 0 && len(next.Bundles) >= compactAt {
+			if _, _, _, compactErr := h.compact(false); compactErr != nil {
+				// The push already committed. Never report failure to Git at this point:
+				// a retry would misleadingly look like a failed ref update.
+				fmt.Fprintf(h.errOut, "warning: aqt git remote compaction skipped: %v\n", compactErr)
+			}
+		}
 		lines := make([]string, 0, len(pushes)+1)
 		for _, push := range pushes {
 			lines = append(lines, "ok "+push.dst)
@@ -351,6 +360,144 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 		return h.respond(lines...)
 	}
 	return errors.New("remote busy, pull and retry")
+}
+
+// compact replaces a remote's delta chain with one full bundle. explicit controls
+// whether a not-even local clone is an error (`aqt repo gc`) or a silent auto-skip.
+func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generation int, err error) {
+	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
+		remote, err := h.openRemote()
+		if err != nil {
+			return false, 0, 0, err
+		}
+		local, err := localGitRefs()
+		if err != nil {
+			remote.close()
+			return false, 0, 0, err
+		}
+		if !maps.Equal(local, remote.root.Refs) {
+			remote.close()
+			if explicit {
+				return false, 0, 0, errors.New("local refs are not even with the remote; fetch/reconcile every branch and tag before `aqt repo gc`")
+			}
+			return false, 0, 0, nil
+		}
+		if len(remote.root.Refs) == 0 {
+			remote.close()
+			if explicit {
+				return false, 0, 0, errors.New("empty git remote has nothing to compact")
+			}
+			return false, 0, 0, nil
+		}
+
+		full, err := buildAndUploadFullBundle(remote.client, remote.key, remote.root)
+		if err != nil {
+			remote.close()
+			return false, 0, 0, err
+		}
+		snapshot, err := remote.client.CreateAutoSnapshot(remote.res.ID)
+		if err != nil {
+			remote.close()
+			return false, 0, 0, fmt.Errorf("create pre-compaction snapshot: %w", err)
+		}
+		if !snapshot.Automatic {
+			remote.close()
+			return false, 0, 0, errors.New("server did not mark the pre-compaction snapshot automatic")
+		}
+		next := remote.root
+		next.Bundles = []gitremote.BundleRef{full}
+		next.Generation++
+		blob, err := gitremote.SealRefsRoot(next, remote.key, remote.res.ID)
+		if err != nil {
+			remote.close()
+			return false, 0, 0, err
+		}
+		meta, err := resealMetaBound(remote.res.EncryptedMeta, remote.key, remote.res.ID)
+		if err != nil {
+			remote.close()
+			return false, 0, 0, err
+		}
+		_, err = remote.client.PutResource(api.PutResourceRequest{
+			ID: remote.res.ID, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+			WrappedKey: remote.res.WrappedKey, ChunkRefs: next.SegmentIDs(),
+			ExpectedVersion: remote.res.Version, MinClient: api.CapabilityGitRemote,
+			CompactAt: remote.res.CompactAt,
+		})
+		before = len(remote.root.Bundles)
+		generation = next.Generation
+		remote.close()
+		if errors.Is(err, client.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return false, 0, 0, err
+		}
+		return true, before, generation, nil
+	}
+	return false, 0, 0, errors.New("remote busy, pull and retry")
+}
+
+func localGitRefs() (map[string]string, error) {
+	output, err := commandOutput("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags")
+	if err != nil {
+		return nil, err
+	}
+	refs := make(map[string]string)
+	for _, line := range strings.Split(output, "\n") {
+		if line == "" {
+			continue
+		}
+		name, oid, ok := strings.Cut(line, " ")
+		if !ok || name == "" || oid == "" {
+			return nil, fmt.Errorf("unexpected git ref record %q", line)
+		}
+		refs[name] = oid
+	}
+	return refs, nil
+}
+
+func buildAndUploadFullBundle(cl *client.Client, key crypto.ContentKey, root gitremote.RefsRoot) (gitremote.BundleRef, error) {
+	tmp, err := os.CreateTemp("", "aqt-full-*.bundle")
+	if err != nil {
+		return gitremote.BundleRef{}, err
+	}
+	path := tmp.Name()
+	defer os.Remove(path)
+	if err := tmp.Close(); err != nil {
+		return gitremote.BundleRef{}, err
+	}
+	if err := os.Remove(path); err != nil {
+		return gitremote.BundleRef{}, err
+	}
+	cmd := exec.Command("git", "bundle", "create", "--version=3", path, "--all")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return gitremote.BundleRef{}, fmt.Errorf("create full git bundle: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return gitremote.BundleRef{}, err
+	}
+	uploader := &gitObjectUploader{cl: cl}
+	bundle, sealErr := gitremote.SealBundle(f, key, uploader)
+	closeErr := f.Close()
+	if sealErr != nil {
+		return gitremote.BundleRef{}, sealErr
+	}
+	if closeErr != nil {
+		return gitremote.BundleRef{}, closeErr
+	}
+	if err := uploader.Flush(); err != nil {
+		return gitremote.BundleRef{}, err
+	}
+	seen := make(map[string]bool)
+	for _, oid := range root.Refs {
+		if !seen[oid] {
+			bundle.Tips = append(bundle.Tips, oid)
+			seen[oid] = true
+		}
+	}
+	sort.Strings(bundle.Tips)
+	return bundle, nil
 }
 
 func nonFastForwardPushes(pushes []helperPush, remoteRefs map[string]string) map[string]bool {
