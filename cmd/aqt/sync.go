@@ -28,7 +28,15 @@ import (
 type folderState struct {
 	ID     string `json:"id"`
 	Server string `json:"server"`
-	LastGC int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
+	// Profile and Fingerprint bind the folder to the account that owns its remote
+	// resource: Profile is the local profile name commands default to, and
+	// Fingerprint pins the account's signing-key fingerprint so a profile that was
+	// re-logged into a different account is detected instead of silently syncing
+	// this folder against it. Empty on state written by an older build; backfilled
+	// by bindTrackedRoot once the recorded server identity checks out.
+	Profile     string `json:"profile,omitempty"`
+	Fingerprint string `json:"fingerprint,omitempty"`
+	LastGC      int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
 	// RemoteVersion is the highest resource version this machine has observed —
 	// the freshness pin. A server reporting a lower version has been rolled back
 	// (restored from backup, or replaying an old state); syncing against it would
@@ -164,11 +172,31 @@ func runInit(dir string) error {
 		return err
 	}
 
+	// Stage the local control state before touching the server: creating .aqt and
+	// the starter ignore up front surfaces permission problems while there is still
+	// nothing remote to orphan. Everything staged here is removed again if a later
+	// step fails.
+	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
+		return err
+	}
+	wroteIgnore, err := writeStarterIgnore(abs, syncGit)
+	if err != nil {
+		os.RemoveAll(filepath.Join(abs, syncengine.ControlDir))
+		return err
+	}
+	cleanupLocal := func() {
+		os.RemoveAll(filepath.Join(abs, syncengine.ControlDir))
+		if wroteIgnore {
+			os.Remove(filepath.Join(abs, ".aqtignore"))
+		}
+	}
+
 	// Register an empty private folder resource; the first `sync` fills it. A
 	// pack-and-seal folder (.aqtconfig pack=true) is created with an empty PackRoot;
 	// the chunked default with an empty Merkle-DAG tree root.
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
+		cleanupLocal()
 		return err
 	}
 	defer ck.Wipe()
@@ -183,24 +211,38 @@ func runInit(dir string) error {
 		conv.Wipe()
 	}
 	if err != nil {
+		cleanupLocal()
 		return err
 	}
 
-	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
-		return err
-	}
-	if err := writeStarterIgnore(abs, syncGit); err != nil {
-		return err
-	}
-	if err := saveState(abs, folderState{ID: resp.ID, Server: prof.Server, RemoteVersion: resp.Version}); err != nil {
-		return err
-	}
-	if err := saveBase(abs, manifest); err != nil {
+	if err := commitInitState(abs, prof, resp, manifest); err != nil {
+		// The resource was just created and nothing references it yet; deleting it
+		// keeps a failed init side-effect-free instead of leaving an orphan the
+		// user cannot see locally.
+		cleanupLocal()
+		if delErr := cl.DeleteResource(resp.ID); delErr != nil {
+			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %v; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
+		}
 		return err
 	}
 	fmt.Printf("tracking %s\naqt://%s\n", abs, resp.ID)
 	fmt.Fprintln(os.Stderr, "run `aqt sync` to push the current contents")
 	return nil
+}
+
+// commitInitState writes the tracking pointer and empty base for a fresh init.
+// Split out (as a var) so a test can fail the local commit and assert the remote
+// resource is cleaned up.
+var commitInitState = func(abs string, prof *identity.Profile, resp api.PutResourceResponse, manifest syncengine.Manifest) error {
+	profileName, fingerprint := stateIdentity(prof)
+	if err := saveState(abs, folderState{
+		ID: resp.ID, Server: prof.Server,
+		Profile: profileName, Fingerprint: fingerprint,
+		RemoteVersion: resp.Version,
+	}); err != nil {
+		return err
+	}
+	return saveBase(abs, manifest)
 }
 
 // --- status ---
@@ -212,6 +254,11 @@ type statusOptions struct {
 func runStatus(dir string, opts statusOptions) error {
 	root, err := trackedRoot(dir)
 	if err != nil {
+		return err
+	}
+	// Even the offline half needs the folder's own identity: the base manifest is
+	// sealed under the owning profile's key.
+	if err := bindTrackedRoot(root); err != nil {
 		return err
 	}
 	base, err := loadBase(root)
@@ -651,6 +698,11 @@ func runSync(dir string, opts syncOptions) error {
 		return err
 	}
 	defer release()
+	// Under the lock: binding may back-fill state.json, which must not race a
+	// concurrent sync's own state write.
+	if err := bindTrackedRoot(root); err != nil {
+		return err
+	}
 	cfg, err := syncengine.LoadConfig(root)
 	if err != nil {
 		return err
@@ -1268,22 +1320,31 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		return err
 	}
 	if adopt {
-		return adoptClone(id, abs, prof.Server, res.Version, meta)
+		return adoptClone(id, abs, prof, res.Version, meta)
 	}
-	if err := ensureEmptyDir(abs); err != nil {
-		return err
-	}
-	base, err := materializeClone(cl, abs, res, ck, meta)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
-		return err
-	}
-	if err := saveState(abs, folderState{ID: id, Server: prof.Server, RemoteVersion: res.Version}); err != nil {
-		return err
-	}
-	if err := saveBase(abs, base); err != nil {
+	// Content and control state are staged together and committed with one rename,
+	// so an interrupted clone leaves no destination at all rather than a partial
+	// tree (or a complete tree that is not yet tracked).
+	var base syncengine.Manifest
+	profileName, fingerprint := stateIdentity(prof)
+	if err := materializeStaged(abs, func(staging string) error {
+		var mErr error
+		base, mErr = materializeClone(cl, staging, res, ck, meta)
+		if mErr != nil {
+			return mErr
+		}
+		if err := os.MkdirAll(filepath.Join(staging, syncengine.ControlDir), 0o700); err != nil {
+			return err
+		}
+		if err := saveState(staging, folderState{
+			ID: id, Server: prof.Server,
+			Profile: profileName, Fingerprint: fingerprint,
+			RemoteVersion: res.Version,
+		}); err != nil {
+			return err
+		}
+		return saveBase(staging, base)
+	}); err != nil {
 		return err
 	}
 	if flagJSON {
@@ -1350,20 +1411,19 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	if err != nil {
 		return err
 	}
-	if err := ensureEmptyDir(abs); err != nil {
-		return err
-	}
 	manifest, err := syncengine.OpenTreeBatched(root, newPublicBatchFetcher(fetch))
 	if err != nil {
 		return fmt.Errorf("decrypt manifest: %w", err)
 	}
-	prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
-	dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), abs, manifest.Entries, prog)
-	prog.finish(dlErr == nil)
-	if dlErr != nil {
-		return dlErr
-	}
-	if err := materializeDirs(abs, manifest.Dirs); err != nil {
+	if err := materializeStaged(abs, func(staging string) error {
+		prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
+		dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), staging, manifest.Entries, prog)
+		prog.finish(dlErr == nil)
+		if dlErr != nil {
+			return dlErr
+		}
+		return materializeDirs(staging, manifest.Dirs)
+	}); err != nil {
 		return err
 	}
 	if flagJSON {
@@ -1379,7 +1439,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 // surface as conflicts, exactly like `sync --reconcile`. Tracking is written before
 // the reconcile so it survives a conflict abort: the user can resolve and re-run
 // `aqt sync --reconcile`.
-func adoptClone(id, abs, server string, version int, meta api.Metadata) error {
+func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Metadata) error {
 	// Hash-level reconcile does not apply to a sealed pack (whole-folder last-writer-wins);
 	// adopting one would compare an empty base against opaque segments.
 	if meta.Packed {
@@ -1406,7 +1466,12 @@ func adoptClone(id, abs, server string, version int, meta api.Metadata) error {
 	}
 	// Deliberately no saveBase: an empty base would resurrect deletions; the reconcile
 	// below writes base.json once local and remote agree.
-	if err := saveState(abs, folderState{ID: id, Server: server, RemoteVersion: version}); err != nil {
+	profileName, fingerprint := stateIdentity(prof)
+	if err := saveState(abs, folderState{
+		ID: id, Server: prof.Server,
+		Profile: profileName, Fingerprint: fingerprint,
+		RemoteVersion: version,
+	}); err != nil {
 		return err
 	}
 	// stderr under --json: the reconcile below emits the JSON summary on stdout.
@@ -2401,16 +2466,21 @@ const starterIgnoreWithGit = `# aqt ignore patterns (gitignore syntax)
 !.git/
 ` + defaultIgnoreBody
 
-func writeStarterIgnore(root string, syncGit bool) error {
+// writeStarterIgnore writes the starter .aqtignore, reporting whether it created
+// the file so a failed init can remove exactly what it added.
+func writeStarterIgnore(root string, syncGit bool) (created bool, err error) {
 	path := filepath.Join(root, ".aqtignore")
 	if _, err := os.Stat(path); err == nil {
-		return nil // do not clobber an existing one
+		return false, nil // do not clobber an existing one
 	}
 	body := starterIgnore
 	if syncGit {
 		body = starterIgnoreWithGit
 	}
-	return os.WriteFile(path, []byte(body), 0o644)
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // promptSyncGit asks whether to track the git repository at repo (relative to the
@@ -2444,6 +2514,57 @@ func ensureEmptyDir(path string) error {
 	}
 	if len(entries) != 0 {
 		return fmt.Errorf("%s already exists and is not empty", path)
+	}
+	return nil
+}
+
+// materializeStaged fills dest by letting fn write into a staging directory that
+// is renamed to dest only after fn succeeds, so a failed or interrupted
+// materialization leaves dest exactly as it was (usually: absent) instead of
+// half-populated. dest must not exist, or be an empty directory (the same
+// contract ensureEmptyDir enforced); staging shares dest's parent so the commit
+// rename never crosses filesystems.
+func materializeStaged(dest string, fn func(staging string) error) error {
+	parent := filepath.Dir(dest)
+	if err := os.MkdirAll(parent, 0o755); err != nil {
+		return err
+	}
+	existedEmpty := false
+	if fi, err := os.Stat(dest); err == nil {
+		if !fi.IsDir() {
+			return fmt.Errorf("%s already exists and is not a directory", dest)
+		}
+		entries, err := os.ReadDir(dest)
+		if err != nil {
+			return err
+		}
+		if len(entries) != 0 {
+			return fmt.Errorf("%s already exists and is not empty", dest)
+		}
+		existedEmpty = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	staging, err := os.MkdirTemp(parent, ".aqt-stage-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(staging) // no-op once renamed; cleans up every failure path
+	if err := fn(staging); err != nil {
+		return err
+	}
+	// MkdirTemp creates 0700; the committed directory keeps the mode ensureEmptyDir
+	// used to create.
+	if err := os.Chmod(staging, 0o755); err != nil {
+		return err
+	}
+	if existedEmpty {
+		if err := os.Remove(dest); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if err := os.Rename(staging, dest); err != nil {
+		return fmt.Errorf("commit into %s (did something create it mid-transfer?): %w", dest, err)
 	}
 	return nil
 }
