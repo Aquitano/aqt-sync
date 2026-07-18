@@ -56,6 +56,10 @@ func TestMetricsRequestCountersAndAccountGauges(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve owner: %v", err)
 	}
+	usage, err := h.store.AccountUsage(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
 	body := h.scrape()
 	wantMetric(t, body, `aqt_http_requests_total{method="POST",route="/v1/account",status="201"} 1`)
 	wantMetric(t, body, `aqt_http_requests_total{method="PUT",route="/v1/packs/:id",status="200"} 1`)
@@ -63,7 +67,7 @@ func TestMetricsRequestCountersAndAccountGauges(t *testing.T) {
 	wantMetric(t, body, fmt.Sprintf("aqt_pack_bytes_received_total %d", len(pack)))
 	wantMetric(t, body, `aqt_gc_runs_total{trigger="client"} 1`)
 	wantMetric(t, body, "aqt_accounts 1")
-	wantMetric(t, body, fmt.Sprintf(`aqt_account_storage_bytes{owner="%s"} %d`, owner, len(pack)))
+	wantMetric(t, body, fmt.Sprintf(`aqt_account_storage_bytes{owner="%s"} %d`, owner, usage.StorageBytes))
 	wantMetric(t, body, fmt.Sprintf(`aqt_account_objects{owner="%s"} 2`, owner))
 	wantMetric(t, body, fmt.Sprintf(`aqt_account_devices{owner="%s"} 1`, owner))
 }
@@ -96,8 +100,8 @@ func TestAccountUsageEndpoint(t *testing.T) {
 	if code := h.do(http.MethodGet, "/v1/account/usage", token, nil, &u); code != http.StatusOK {
 		t.Fatalf("usage: %d", code)
 	}
-	if u.StorageBytes != int64(len(pack)) {
-		t.Fatalf("storageBytes = %d, want %d", u.StorageBytes, len(pack))
+	if u.StorageBytes <= int64(len(pack)) {
+		t.Fatalf("storageBytes = %d, want physical usage above pack bytes %d", u.StorageBytes, len(pack))
 	}
 	if u.Packs != 1 || u.Objects != 3 || u.Devices != 1 {
 		t.Fatalf("counts = packs %d objects %d devices %d, want 1/3/1", u.Packs, u.Objects, u.Devices)
@@ -140,10 +144,10 @@ func TestAccountUsageAllPerOwnerIsolation(t *testing.T) {
 	if len(byOwner) != 2 {
 		t.Fatalf("accounts = %d, want 2", len(byOwner))
 	}
-	if got := byOwner[ownerA].StorageBytes; got != int64(len(pack)) {
-		t.Fatalf("owner a storage = %d, want %d", got, len(pack))
+	if got := byOwner[ownerA].StorageBytes; got <= byOwner[ownerB].StorageBytes {
+		t.Fatalf("owner a storage = %d, want above owner b baseline %d", got, byOwner[ownerB].StorageBytes)
 	}
-	if got := byOwner[ownerB]; got.StorageBytes != 0 || got.Objects != 0 {
-		t.Fatalf("owner b usage = %+v, want empty", got)
+	if got := byOwner[ownerB]; got.Objects != 0 || got.Packs != 0 || got.Resources != 0 || got.Snapshots != 0 {
+		t.Fatalf("owner b content usage = %+v, want no content rows", got)
 	}
 }

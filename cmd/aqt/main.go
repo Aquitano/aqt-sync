@@ -29,7 +29,7 @@ const defaultServer = "http://localhost:8080"
 var version = "0.2.0-dev"
 
 // defaultSessionTTL bounds how long the unlocked master key stays cached after a
-// passphrase prompt. `aqt login --ttl` overrides it; `aqt logout` clears it.
+// passphrase prompt. `aqt login --ttl` overrides it; `aqt lock` clears it.
 const defaultSessionTTL = 8 * time.Hour
 
 // exitDeferred (EX_TEMPFAIL) marks a `watch --once` run that declined to sync
@@ -134,7 +134,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
-	root.AddCommand(loginCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
+	root.AddCommand(signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
@@ -400,8 +400,15 @@ func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
 	if err != nil {
 		return crypto.MasterKey{}, err
 	}
-	if err := identity.SaveSession(prof.Name, mk, defaultSessionTTL); err != nil {
+	if err := identity.SaveSession(prof.Name, mk, sessionTTL(prof)); err != nil {
 		fmt.Fprintln(os.Stderr, "warning: could not cache session:", err)
 	}
 	return mk, nil
+}
+
+func sessionTTL(prof *identity.Profile) time.Duration {
+	if prof != nil && prof.SessionTTLSet {
+		return time.Duration(prof.SessionTTLSeconds) * time.Second
+	}
+	return defaultSessionTTL
 }

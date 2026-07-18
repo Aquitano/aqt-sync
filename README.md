@@ -98,7 +98,7 @@ AQT_DATA_DIR=/var/lib/aqt-server AQT_ADDR=:443 \
   ./bin/aqt-server
 ```
 
-`GET /healthz` returns `200 {"status":"ok"}` for load-balancer and container probes.
+`GET /livez` is the liveness probe; `GET /readyz` admits traffic only while storage is available and the server is not shutting down. `/healthz` remains a liveness compatibility alias.
 `AQT_METRICS_ADDR` exposes Prometheus metrics (request rates, GC activity,
 per-account storage) on a private listener, and `aqt usage` shows an account its
 own storage footprint.

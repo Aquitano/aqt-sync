@@ -82,9 +82,22 @@ type tuiDiffMsg struct {
 }
 
 type tuiCopiedMsg struct {
-	ref string
-	ok  bool
+	ref   string
+	kind  string
+	ok    bool
+	err   error
+	retry tea.Cmd
 }
+
+type tuiPublicLinkError struct {
+	Stage string
+	Err   error
+}
+
+func (e *tuiPublicLinkError) Error() string {
+	return "build public link (" + e.Stage + "): " + e.Err.Error()
+}
+func (e *tuiPublicLinkError) Unwrap() error { return e.Err }
 
 type tuiFsEventMsg struct{}
 type tuiFsSettledMsg struct{ seq int }
@@ -100,7 +113,7 @@ func (c *tuiCtx) unlockCmd(passphrase string) tea.Cmd {
 		}
 		// The unlock itself succeeded; a failed cache only means the next action
 		// subprocess would prompt, which it cannot — so it has to be visible.
-		if err := identity.SaveSession(prof.Name, mk, defaultSessionTTL); err != nil {
+		if err := identity.SaveSession(prof.Name, mk, sessionTTL(prof)); err != nil {
 			return tuiUnlockResultMsg{mk: mk, cacheWarn: err}
 		}
 		return tuiUnlockResultMsg{mk: mk}
@@ -258,19 +271,28 @@ func (c *tuiCtx) diffCmd(snapshotID string) tea.Cmd {
 func (c *tuiCtx) copyRefCmd(row lsRow) tea.Cmd {
 	ctx := *c
 	return func() tea.Msg {
-		ref := "aqt://" + row.ID
-		if row.Visibility == string(api.Public) {
-			res, err := ctx.cl.GetResource(row.ID)
-			if err == nil && res.WrappedKey != nil {
-				if ck, kerr := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(ctx.mk)); kerr == nil {
-					if r, rerr := buildRef(ctx.prof.Server, row.ID, api.Public, ck, ""); rerr == nil {
-						ref = r
-					}
-					ck.Wipe()
-				}
-			}
+		retry := ctx.copyRefCmd(row)
+		if row.Visibility != string(api.Public) {
+			ref := "aqt://" + row.ID
+			return tuiCopiedMsg{ref: ref, kind: "private ref", ok: copyToClipboard(ref), retry: retry}
 		}
-		return tuiCopiedMsg{ref: ref, ok: copyToClipboard(ref)}
+		res, err := ctx.cl.GetResource(row.ID)
+		if err != nil {
+			return tuiCopiedMsg{kind: "public link", err: &tuiPublicLinkError{Stage: "fetch resource", Err: err}, retry: retry}
+		}
+		if res.WrappedKey == nil {
+			return tuiCopiedMsg{kind: "public link", err: &tuiPublicLinkError{Stage: "recover key", Err: errors.New("resource has no owner-wrapped key")}, retry: retry}
+		}
+		ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(ctx.mk))
+		if err != nil {
+			return tuiCopiedMsg{kind: "public link", err: &tuiPublicLinkError{Stage: "unwrap key", Err: err}, retry: retry}
+		}
+		defer ck.Wipe()
+		ref, err := buildRef(ctx.prof.Server, row.ID, api.Public, ck, "")
+		if err != nil {
+			return tuiCopiedMsg{kind: "public link", err: &tuiPublicLinkError{Stage: "encode link", Err: err}, retry: retry}
+		}
+		return tuiCopiedMsg{ref: ref, kind: "public link", ok: copyToClipboard(ref), retry: retry}
 	}
 }
 

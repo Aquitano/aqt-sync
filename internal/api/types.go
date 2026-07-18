@@ -93,8 +93,9 @@ type AccountKeysResponse struct {
 // The server stores the wrap opaquely; re-granting an existing grantee
 // replaces the wrap (the rotation path re-wraps for remaining grantees).
 type CreateGrantRequest struct {
-	GranteeHandle string `json:"granteeHandle"`
-	WrappedKey    []byte `json:"wrappedKey"`
+	GranteeHandle   string `json:"granteeHandle"`
+	WrappedKey      []byte `json:"wrappedKey"`
+	ExpectedVersion int    `json:"expectedVersion,omitempty"`
 }
 
 // GrantEntry is one grant on a resource, as listed for its owner.
@@ -249,23 +250,25 @@ type RootKeyRotationRequest struct {
 // resource; a policy on a private put is rejected. Zero means "no limit". OnExpiry
 // selects what happens when the policy fires.
 type PutResourceRequest struct {
-	ID              string
-	Visibility      Visibility
-	Blob            crypto.SealedBlob
-	EncryptedMeta   crypto.SealedBlob
-	WrappedKey      *crypto.WrappedKey
-	ChunkRefs       []string
-	ExpectedVersion int
-	MinClient       int
-	ExpireSeconds   int64
-	MaxReads        int64
-	OnExpiry        OnExpiry
+	ID              string             `json:"id,omitempty"`
+	Visibility      Visibility         `json:"visibility"`
+	Blob            crypto.SealedBlob  `json:"blob"`
+	EncryptedMeta   crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
+	ExpectedVersion int                `json:"expectedVersion,omitempty"`
+	MinClient       int                `json:"minClient,omitempty"`
+	ExpireSeconds   int64              `json:"expireSeconds,omitempty"`
+	MaxReads        int64              `json:"maxReads,omitempty"`
+	OnExpiry        OnExpiry           `json:"onExpiry,omitempty"`
+	// IdempotencyKey is carried in the HTTP Idempotency-Key header, not the body.
+	IdempotencyKey string `json:"-"`
 	// RevokeGrantee drops that grantee's grant in the same transaction as the write.
 	// Revocation is a key rotation plus a row delete, and the two must not be separable:
 	// if the rotation lands and the delete is lost, the stale row is still listed as a
 	// grant, so the next rotation re-wraps the new key to the account that was revoked.
 	// Ignored on a create (a new resource has no grants). Empty means revoke nobody.
-	RevokeGrantee string
+	RevokeGrantee string `json:"revokeGrantee,omitempty"`
 }
 
 // OnExpiry selects what a server does with a resource once its link's lifecycle
@@ -370,7 +373,8 @@ type PutResourceResponse struct {
 // blob. Used by `share` (private → public); making private again instead rotates
 // the content key via a full PutResource.
 type SetVisibilityRequest struct {
-	Visibility Visibility `json:"visibility"`
+	Visibility      Visibility `json:"visibility"`
+	ExpectedVersion int        `json:"expectedVersion,omitempty"`
 	// ExpireSeconds and MaxReads apply (or replace) a lifecycle policy on the public
 	// link, so a policy can be attached after the fact by `aqt share`. Applying a
 	// policy resets the read counter; flipping to Private clears the policy entirely.
@@ -393,28 +397,41 @@ type UpdateResourceMetadataRequest struct {
 // GetResourceResponse is an in-process type: on the wire it travels as the raw
 // envelope in wire.go (JSON header + ciphertext), never as JSON.
 type GetResourceResponse struct {
-	ID            string
-	Visibility    Visibility
-	Blob          crypto.SealedBlob
-	EncryptedMeta crypto.SealedBlob
-	WrappedKey    *crypto.WrappedKey
+	ID            string             `json:"id"`
+	Visibility    Visibility         `json:"visibility"`
+	Blob          crypto.SealedBlob  `json:"blob"`
+	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	// GrantKey is set instead of WrappedKey when the read was served through an
 	// account grant: the content key HPKE-wrapped to the caller (crypto.UnwrapGrant
 	// opens it). Owner carries the resource owner's opaque handle on those reads,
 	// which the grantee needs for the wrap's info binding; a wrong value from a
 	// hostile server just fails the unwrap.
-	GrantKey []byte
-	Owner    string
-	Version  int
+	GrantKey []byte `json:"grantKey,omitempty"`
+	Owner    string `json:"owner,omitempty"`
+	Version  int    `json:"version"`
 	// MinClient is the lowest client capability that can read this resource's sealed
 	// formats, so a current client can explain an incompatible remote instead of
 	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).
-	MinClient int
-	ExpiresAt int64
-	MaxReads  int64
-	Reads     int64
-	CreatedAt int64
-	UpdatedAt int64
+	MinClient int   `json:"minClient,omitempty"`
+	ExpiresAt int64 `json:"expiresAt,omitempty"`
+	MaxReads  int64 `json:"maxReads,omitempty"`
+	Reads     int64 `json:"reads,omitempty"`
+	CreatedAt int64 `json:"createdAt,omitempty"`
+	UpdatedAt int64 `json:"updatedAt,omitempty"`
+}
+
+// PublicResourcePreflight is the uncounted browser-share inspection response. It
+// deliberately omits resource ciphertext and owner key material: recipients get
+// only the encrypted metadata and lifecycle facts needed to decide whether a
+// counted browser fetch is supported and worth consuming.
+type PublicResourcePreflight struct {
+	ID            string            `json:"id"`
+	EncryptedMeta crypto.SealedBlob `json:"encryptedMeta"`
+	MinClient     int               `json:"minClient"`
+	ExpiresAt     int64             `json:"expiresAt,omitempty"`
+	MaxReads      int64             `json:"maxReads,omitempty"`
+	Reads         int64             `json:"reads,omitempty"`
 }
 
 // ResourceListItem describes one of the owner's resources. WrappedKey (the
@@ -476,6 +493,10 @@ type UsageResponse struct {
 	Resources    int64 `json:"resources"`
 	Snapshots    int64 `json:"snapshots"`
 	Devices      int64 `json:"devices"`
+	MaxResources int64 `json:"maxResources,omitempty"`
+	MaxSnapshots int64 `json:"maxSnapshots,omitempty"`
+	MaxObjects   int64 `json:"maxObjects,omitempty"`
+	MaxDevices   int64 `json:"maxDevices,omitempty"`
 }
 
 // --- snapshots ---
@@ -513,7 +534,8 @@ type CreateSnapshotRequest struct {
 	EncryptedLabel *crypto.SealedBlob `json:"encryptedLabel,omitempty"`
 	// Anchor pins the new snapshot against retention (see SnapshotInfo.Anchored). Set
 	// by `aqt checkpoint`; a plain `snapshot create` leaves it false.
-	Anchor bool `json:"anchor,omitempty"`
+	Anchor         bool   `json:"anchor,omitempty"`
+	IdempotencyKey string `json:"-"`
 }
 
 // SetSnapshotAnchorRequest toggles a snapshot's anchor: an anchored snapshot is
@@ -556,5 +578,8 @@ type ErrorResponse struct {
 	Code string `json:"code,omitempty"`
 	// MinClient accompanies an upgrade-required (426) error: the capability the
 	// resource needs, so the client can report exactly how far it is behind.
-	MinClient int `json:"minClient,omitempty"`
+	MinClient int    `json:"minClient,omitempty"`
+	LimitKind string `json:"limitKind,omitempty"`
+	Current   int64  `json:"current,omitempty"`
+	Limit     int64  `json:"limit,omitempty"`
 }

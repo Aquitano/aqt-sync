@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -35,6 +36,9 @@ var ErrConflict = errors.New("conflict")
 // matches the stored version: another writer got there first.
 var ErrVersionConflict = errors.New("version conflict")
 
+// ErrIdempotencyConflict is returned when a key is reused with another payload.
+var ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
+
 // ErrDropsRoots is returned when a replace would clear every GC root of a resource
 // that still has some: an object-backed resource (folder/streamed file) re-PUT with
 // no ChunkRefs. Committing it would orphan the still-referenced objects for the next
@@ -44,6 +48,16 @@ var ErrDropsRoots = errors.New("replace drops all chunk roots")
 // ErrQuotaExceeded is returned when storing a pack would push an owner's stored bytes
 // past the configured quota. Handlers map it to 507; the client surfaces it clearly.
 var ErrQuotaExceeded = errors.New("storage quota exceeded")
+
+type LimitExceededError struct {
+	Kind           string
+	Current, Limit int64
+}
+
+func (e *LimitExceededError) Error() string {
+	return fmt.Sprintf("%s limit exceeded: current=%d limit=%d", e.Kind, e.Current, e.Limit)
+}
+func (e *LimitExceededError) Unwrap() error { return ErrQuotaExceeded }
 
 // ErrSnapshotAnchored is returned when a delete targets an anchored snapshot. Anchors
 // exist precisely so retention (and an accidental explicit prune) cannot drop a pinned
@@ -190,6 +204,11 @@ func OpenStore(dataDir string) (*Store, error) {
 	rdb.SetMaxOpenConns(max(4, runtime.NumCPU()))
 	s.rdb = rdb
 	return s, nil
+}
+
+func (s *Store) Ping() error {
+	var one int
+	return s.rdb.QueryRow(`SELECT 1`).Scan(&one)
 }
 
 func (s *Store) Close() error {
@@ -409,6 +428,16 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	`ALTER TABLE resources ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;
 	 ALTER TABLE resources ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0;
 	 UPDATE resources SET created_at = unixepoch(), updated_at = unixepoch();`,
+	// 15: retry-safe creation keys, scoped by owner and operation kind.
+	`CREATE TABLE IF NOT EXISTS idempotency_keys (
+	    owner_handle TEXT NOT NULL,
+	    kind TEXT NOT NULL,
+	    key TEXT NOT NULL,
+	    request_hash BLOB NOT NULL,
+	    response TEXT NOT NULL,
+	    created_at INTEGER NOT NULL,
+	    PRIMARY KEY(owner_handle, kind, key)
+	);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -941,7 +970,8 @@ func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
 // AccountUsage summarizes what one account has stored. StorageBytes is the
 // pack-byte quota counter; the rest are row counts. Resources counts live rows
 // only — a reclaimed tombstone holds no content and exists just to keep its link
-// answering 410.
+// answering 410, so it is excluded from the modeled byte total too (otherwise a
+// delete-heavy account could sit over quota forever).
 type AccountUsage struct {
 	Owner        string
 	StorageBytes int64
@@ -954,7 +984,12 @@ type AccountUsage struct {
 
 const accountUsageColumns = `
 	a.owner_handle,
-	a.pack_bytes,
+	a.pack_bytes
+	  + COALESCE((SELECT SUM(length(r.encrypted_meta) + COALESCE(length(r.wrapped_key), 0) + length(r.blob_nonce) + 256) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0), 0)
+	  + COALESCE((SELECT SUM(length(sn.encrypted_meta) + COALESCE(length(sn.encrypted_label), 0) + COALESCE(length(sn.wrapped_key), 0) + length(sn.blob_nonce) + 256) FROM snapshots sn WHERE sn.owner_handle = a.owner_handle), 0)
+	  + COALESCE((SELECT SUM(length(g.wrapped_key) + 128) FROM grants g WHERE g.owner_handle = a.owner_handle), 0)
+	  + 96 * (SELECT COUNT(*) FROM objects o WHERE o.owner_handle = a.owner_handle)
+	  + 64 * (SELECT COUNT(*) FROM devices d WHERE d.owner_handle = a.owner_handle),
 	(SELECT COUNT(*) FROM packs p WHERE p.owner_handle = a.owner_handle),
 	(SELECT COUNT(*) FROM objects o WHERE o.owner_handle = a.owner_handle),
 	(SELECT COUNT(*) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0),
@@ -974,27 +1009,73 @@ func (s *Store) AccountUsage(owner string) (AccountUsage, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		return AccountUsage{}, ErrNotFound
 	}
+	if err != nil {
+		return AccountUsage{}, err
+	}
+	blobBytes, err := s.ownerBlobBytes(owner)
+	if err != nil {
+		return AccountUsage{}, err
+	}
+	u.StorageBytes += blobBytes
 	return u, err
+}
+
+func (s *Store) ownerBlobBytes(owner string) (int64, error) {
+	rows, err := s.rdb.Query(`SELECT id, blob_nonce FROM resources WHERE owner_handle = ? AND reclaimed = 0 UNION ALL SELECT snapshot_id, blob_nonce FROM snapshots WHERE owner_handle = ?`, owner, owner)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+	var total int64
+	for rows.Next() {
+		var id string
+		var nonce []byte
+		if err := rows.Scan(&id, &nonce); err != nil {
+			return 0, err
+		}
+		info, err := os.Stat(s.blobPath(id, nonce))
+		if errors.Is(err, os.ErrNotExist) {
+			// An orphaned row (operator-deleted file, crash window) holds no bytes.
+			// Failing here would wedge every usage-dependent path account-wide:
+			// metrics, pack/resource puts, and auto-snapshots all call AccountUsage.
+			continue
+		}
+		if err != nil {
+			return 0, err
+		}
+		total += info.Size()
+	}
+	return total, rows.Err()
 }
 
 // AccountUsageAll returns the storage summary for every account, for the metrics
 // collector and any operator-side reporting.
 func (s *Store) AccountUsageAll() ([]AccountUsage, error) {
-	rows, err := s.rdb.Query(
-		`SELECT ` + accountUsageColumns + ` FROM accounts a ORDER BY a.owner_handle`)
+	rows, err := s.rdb.Query(`SELECT owner_handle FROM accounts ORDER BY owner_handle`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []AccountUsage
+	var owners []string
 	for rows.Next() {
-		u, err := scanAccountUsage(rows)
+		var owner string
+		if err := rows.Scan(&owner); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		owners = append(owners, owner)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	out := make([]AccountUsage, 0, len(owners))
+	for _, owner := range owners {
+		u, err := s.AccountUsage(owner)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, u)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // OwnerByToken resolves a bearer token to its owning account handle, but only while
@@ -1108,6 +1189,61 @@ func (s *Store) Owners() ([]string, error) {
 	return owners, rows.Err()
 }
 
+type queryRower interface {
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func idempotencyDigest(v any) ([]byte, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	sum := sha256.Sum256(b)
+	return sum[:], nil
+}
+
+func lookupIdempotency(q queryRower, owner, kind, key string, digest []byte, out any) (bool, error) {
+	if key == "" {
+		return false, nil
+	}
+	var storedHash []byte
+	var response string
+	err := q.QueryRow(`SELECT request_hash, response FROM idempotency_keys WHERE owner_handle = ? AND kind = ? AND key = ?`, owner, kind, key).Scan(&storedHash, &response)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !bytes.Equal(storedHash, digest) {
+		return false, ErrIdempotencyConflict
+	}
+	return true, json.Unmarshal([]byte(response), out)
+}
+
+// idempotencyTTL bounds how long a recorded response stays replayable. Client
+// retries land within seconds; older rows are dead weight, and each stores a
+// full JSON response, so without the GC sweep the table grows forever.
+const idempotencyTTL = 48 * time.Hour
+
+func (s *Store) sweepIdempotencyKeys(owner string, now time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM idempotency_keys WHERE owner_handle = ? AND created_at < ?`,
+		owner, now.Add(-idempotencyTTL).Unix())
+	return err
+}
+
+func recordIdempotency(tx *sql.Tx, owner, kind, key string, digest []byte, response any) error {
+	if key == "" {
+		return nil
+	}
+	b, err := json.Marshal(response)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`INSERT INTO idempotency_keys(owner_handle, kind, key, request_hash, response, created_at) VALUES(?,?,?,?,?,unixepoch())`, owner, kind, key, digest, string(b))
+	return err
+}
+
 // --- Resources ---
 
 // PutResource creates a resource (req.ID empty) or replaces one in place
@@ -1139,6 +1275,16 @@ func (s *Store) PutResource(owner string, capability int, req api.PutResourceReq
 }
 
 func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
+	digest, err := idempotencyDigest(req)
+	if err != nil {
+		return "", 0, err
+	}
+	var prior api.PutResourceResponse
+	if found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
+		return "", 0, err
+	} else if found {
+		return prior.ID, prior.Version, nil
+	}
 	id := newID(8)
 	const version = 1
 
@@ -1167,6 +1313,16 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
+	// Authoritative duplicate check: the pre-tx lookup on the read pool may see a
+	// stale WAL snapshot; only this re-check on the single writer connection is
+	// race-free. Do not remove it as redundant.
+	if found, err := lookupIdempotency(tx, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
+		tx.Rollback()
+		return "", 0, err
+	} else if found {
+		tx.Rollback()
+		return prior.ID, prior.Version, nil
+	}
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
 		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at)
@@ -1177,6 +1333,10 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		return "", 0, err
 	}
 	if err := replaceResourceChunks(tx, id, owner, req.ChunkRefs); err != nil {
+		tx.Rollback()
+		return "", 0, err
+	}
+	if err := recordIdempotency(tx, owner, "resource.create", req.IdempotencyKey, digest, api.PutResourceResponse{ID: id, Version: version}); err != nil {
 		tx.Rollback()
 		return "", 0, err
 	}
@@ -1509,6 +1669,44 @@ func (s *Store) countPublicRead(id string) (int64, error) {
 	return reads, nil
 }
 
+// PublicResourcePreflight reads only lifecycle columns and encrypted metadata. It
+// never calls countPublicRead and therefore cannot consume a burn/read-limited link.
+func (s *Store) PublicResourcePreflight(id string) (api.PublicResourcePreflight, error) {
+	var (
+		visibility string
+		metaJSON   string
+		minClient  int
+		expiresAt  sql.NullInt64
+		maxReads   sql.NullInt64
+		reads      int64
+		reclaimed  bool
+	)
+	err := s.rdb.QueryRow(
+		`SELECT visibility, encrypted_meta, min_client, expires_at, max_reads, reads, reclaimed FROM resources WHERE id = ?`, id,
+	).Scan(&visibility, &metaJSON, &minClient, &expiresAt, &maxReads, &reads, &reclaimed)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && api.Visibility(visibility) != api.Public {
+		return api.PublicResourcePreflight{}, ErrNotFound
+	}
+	if err != nil {
+		return api.PublicResourcePreflight{}, err
+	}
+	if reclaimed || expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64 || maxReads.Valid && reads >= maxReads.Int64 {
+		return api.PublicResourcePreflight{}, ErrGone
+	}
+	var meta crypto.SealedBlob
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		return api.PublicResourcePreflight{}, err
+	}
+	out := api.PublicResourcePreflight{ID: id, EncryptedMeta: meta, MinClient: minClient, Reads: reads}
+	if expiresAt.Valid {
+		out.ExpiresAt = expiresAt.Int64
+	}
+	if maxReads.Valid {
+		out.MaxReads = maxReads.Int64
+	}
+	return out, nil
+}
+
 // ResourceVisibility returns a resource's visibility without loading its blob.
 // The web landing page uses it to decide whether to render (public), 410 (a gone
 // public link), or 404 (private or unknown), so a private resource's existence is
@@ -1547,6 +1745,17 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 		return 0, err
 	}
 	defer s.resLocks.lock(id)()
+	var current int
+	err = s.db.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if req.ExpectedVersion > 0 && req.ExpectedVersion != current {
+		return 0, ErrVersionConflict
+	}
 	res, err := s.db.Exec(
 		`UPDATE resources SET visibility = ?, version = version + 1, updated_at = unixepoch(),
 		   expires_at = ?, max_reads = ?, on_expiry = ?, reads = 0, exhausted_at = NULL
@@ -1559,11 +1768,7 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	if n, _ := res.RowsAffected(); n == 0 {
 		return 0, ErrNotFound
 	}
-	var version int
-	if err := s.db.QueryRow(`SELECT version FROM resources WHERE id = ?`, id).Scan(&version); err != nil {
-		return 0, err
-	}
-	return version, nil
+	return current + 1, nil
 }
 
 // UpdateResourceMetadata atomically replaces the opaque metadata blob without
@@ -1679,10 +1884,30 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 }
 
 func (s *Store) DeleteResource(owner, id string) error {
+	return s.DeleteResourceVersion(owner, id, 0)
+}
+
+func (s *Store) DeleteResourceVersion(owner, id string, expectedVersion int) error {
 	defer s.resLocks.lock(id)()
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
+	}
+	if expectedVersion > 0 {
+		var current int
+		err := tx.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			tx.Rollback()
+			return ErrNotFound
+		}
+		if err != nil {
+			tx.Rollback()
+			return err
+		}
+		if current != expectedVersion {
+			tx.Rollback()
+			return ErrVersionConflict
+		}
 	}
 	res, err := tx.Exec(`DELETE FROM resources WHERE id = ? AND owner_handle = ?`, id, owner)
 	if err != nil {
@@ -1790,13 +2015,31 @@ func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
 // sealed user label stored opaquely alongside. anchor pins the snapshot against
 // retention (see `aqt checkpoint`).
 func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob, anchor bool) (api.SnapshotInfo, error) {
-	return s.createSnapshot(owner, resourceID, label, false, anchor)
+	return s.createSnapshot(owner, resourceID, label, false, anchor, "")
 }
 
 // createSnapshot is CreateSnapshot plus the scheduled marker: the scheduled job's
 // snapshots are tagged so retention can prune them without touching manual ones.
 // anchored pins the snapshot against every retention path.
-func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled, anchored bool) (api.SnapshotInfo, error) {
+func (s *Store) CreateSnapshotIdempotent(owner string, req api.CreateSnapshotRequest) (api.SnapshotInfo, error) {
+	return s.createSnapshot(owner, req.ResourceID, req.EncryptedLabel, false, req.Anchor, req.IdempotencyKey)
+}
+
+func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled, anchored bool, idempotencyKey string) (api.SnapshotInfo, error) {
+	digest, err := idempotencyDigest(struct {
+		ResourceID string
+		Label      *crypto.SealedBlob
+		Anchored   bool
+	}{resourceID, label, anchored})
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	var prior api.SnapshotInfo
+	if found, err := lookupIdempotency(s.rdb, owner, "snapshot.create", idempotencyKey, digest, &prior); err != nil {
+		return api.SnapshotInfo{}, err
+	} else if found {
+		return prior, nil
+	}
 	// Serialize against a concurrent update/delete of the same resource so the
 	// snapshot copies a consistent (blob, chunk-roots) pair, not a torn mix of two
 	// versions. Held in the store so the keyless scheduled job is serialized too, not
@@ -1809,7 +2052,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		version              int
 		minClient            int
 	)
-	err := s.db.QueryRow(
+	err = s.db.QueryRow(
 		`SELECT visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client
 		 FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner,
 	).Scan(&visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient)
@@ -1863,6 +2106,19 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
+	// Authoritative duplicate check; see the matching re-check in createResource.
+	if found, err := lookupIdempotency(tx, owner, "snapshot.create", idempotencyKey, digest, &prior); err != nil {
+		tx.Rollback()
+		return api.SnapshotInfo{}, err
+	} else if found {
+		tx.Rollback()
+		return prior, nil
+	}
+	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored}
+	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
+		tx.Rollback()
+		return api.SnapshotInfo{}, err
+	}
 	if _, err := tx.Exec(
 		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled, min_client, anchored)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
@@ -1884,15 +2140,15 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
 	}
+	if err := recordIdempotency(tx, owner, "snapshot.create", idempotencyKey, digest, info); err != nil {
+		tx.Rollback()
+		return api.SnapshotInfo{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return api.SnapshotInfo{}, err
 	}
 	committed = true
 
-	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored}
-	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
-		return api.SnapshotInfo{}, err
-	}
 	return info, nil
 }
 
@@ -2134,6 +2390,10 @@ func (s *Store) SetAutoSnapshot(owner, resourceID string, enabled bool) error {
 // Version-dedup keeps the scheduled job's cost proportional to actual change rather
 // than to how often it ticks.
 func (s *Store) RunAutoSnapshots() (int, error) {
+	return s.RunAutoSnapshotsWithLimits(0, 0)
+}
+
+func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (int, error) {
 	// wrapped_key IS NOT NULL skips public resources: their content key only lives in
 	// a share URL fragment, so a keyless snapshot of one could never be restored, yet
 	// would pin its chunks forever. A manual snapshot stays the owner's call.
@@ -2169,16 +2429,63 @@ func (s *Store) RunAutoSnapshots() (int, error) {
 	// row/blob race a concurrent update can cause, which GetResource also tolerates)
 	// must not block the rest of the batch. The first error is returned for logging
 	// after the loop has done what it could.
+	// AccountUsage stats every blob the owner has, so an owner with many due
+	// resources must not recompute it per resource: read it once per owner and
+	// adjust the cached copy as snapshots land.
+	usageByOwner := map[string]*AccountUsage{}
 	created := 0
 	var firstErr error
 	for _, r := range due {
-		if _, err := s.createSnapshot(r.owner, r.id, nil, true, false); err != nil {
+		var u *AccountUsage
+		var added int64
+		if maxSnapshots > 0 || quotaBytes > 0 {
+			var ok bool
+			u, ok = usageByOwner[r.owner]
+			if !ok {
+				fresh, err := s.AccountUsage(r.owner)
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+				u = &fresh
+				usageByOwner[r.owner] = u
+			}
+			if maxSnapshots > 0 && u.Snapshots >= int64(maxSnapshots) {
+				if firstErr == nil {
+					firstErr = &LimitExceededError{Kind: "snapshots", Current: u.Snapshots, Limit: int64(maxSnapshots)}
+				}
+				continue
+			}
+			if quotaBytes > 0 {
+				res, err := s.GetResource(r.id, r.owner)
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
+				}
+				added = estimatedResourceBytes(api.PutResourceRequest{Blob: res.Blob, EncryptedMeta: res.EncryptedMeta, WrappedKey: res.WrappedKey})
+				if u.StorageBytes+added > quotaBytes {
+					if firstErr == nil {
+						firstErr = &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quotaBytes}
+					}
+					continue
+				}
+			}
+		}
+		if _, err := s.createSnapshot(r.owner, r.id, nil, true, false, ""); err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("auto-snapshot %s: %w", r.id, err)
 			}
 			continue
 		}
 		created++
+		if u != nil {
+			u.Snapshots++
+			u.StorageBytes += added
+		}
 	}
 	return created, firstErr
 }
@@ -2526,6 +2833,10 @@ func queryIDsBatched(q rowQueryer, query string, lead []any, ids []string, batch
 // adjusted in the same transaction that inserts the pack row, so it can never drift
 // from the rows it accounts for.
 func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (int, error) {
+	return s.PutPackWithLimits(owner, packID, data, quotaBytes, 0)
+}
+
+func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (int, error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
 		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
@@ -2582,7 +2893,8 @@ func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (in
 		tx.Rollback()
 		return 0, err
 	}
-	if inserted, _ := res.RowsAffected(); inserted == 0 {
+	inserted, _ := res.RowsAffected()
+	if inserted == 0 {
 		// The pack already exists; re-arm its GC age guard so a concurrent read of it
 		// is not reaped, exactly as the prior DO UPDATE did.
 		if _, err := tx.Exec(
@@ -2613,6 +2925,20 @@ func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (in
 	if err != nil {
 		tx.Rollback()
 		return 0, err
+	}
+	if maxObjects > 0 {
+		var count int64
+		if err := tx.QueryRow(`SELECT count(*) FROM objects WHERE owner_handle = ?`, owner).Scan(&count); err != nil {
+			tx.Rollback()
+			return 0, err
+		}
+		if count > int64(maxObjects) {
+			tx.Rollback()
+			if inserted > 0 {
+				_ = os.Remove(s.packPath(owner, packID))
+			}
+			return 0, &LimitExceededError{Kind: "objects", Current: count - int64(stored), Limit: int64(maxObjects)}
+		}
 	}
 	// The new rows change this pack's obj_count. They cannot be live yet — a root's
 	// FK requires a pre-existing object row, so a just-inserted object is unrooted
@@ -3097,6 +3423,9 @@ func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	// are eligible for the pack sweep in this same pass (still subject to the pack age
 	// guard, which is the point of the grace window on exhaustion).
 	if _, err := s.SweepExpired(owner, time.Now().Unix()); err != nil {
+		return api.GCResponse{}, err
+	}
+	if err := s.sweepIdempotencyKeys(owner, time.Now()); err != nil {
 		return api.GCResponse{}, err
 	}
 	deleted, freed, err := s.GCPacks(owner, minAge)

@@ -8,6 +8,7 @@ Wants=network-online.target
 [Service]
 Type=exec
 ExecStart=/usr/local/bin/aqt-server
+# A :443 listener without native TLS settings fails closed at startup.
 # StateDirectory creates and owns /var/lib/aqt-server for the dynamic user.
 Environment=AQT_DATA_DIR=/var/lib/aqt-server
 Environment=AQT_ADDR=:443

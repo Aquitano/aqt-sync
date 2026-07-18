@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,7 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
-func loginCmd() *cobra.Command {
+func signupCmd() *cobra.Command {
 	var (
 		email  string
 		ttl    time.Duration
@@ -23,16 +24,35 @@ func loginCmd() *cobra.Command {
 		kc     kdfChoice
 	)
 	cmd := &cobra.Command{
-		Use:   "login",
-		Short: "Create an account or attach this device, caching the unlocked key",
+		Use:   "signup",
+		Short: "Create a new account and attach this device",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runLogin(email, firstNonEmpty(invite, os.Getenv("AQT_INVITE_TOKEN")), ttl, kc)
+			return runSignup(email, firstNonEmpty(invite, os.Getenv("AQT_INVITE_TOKEN")), ttl, kc)
 		},
 	}
-	cmd.Flags().StringVar(&email, "email", "", "account email")
-	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until logout)")
+	cmd.Flags().StringVar(&email, "email", "", "new account email")
+	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until lock or logout)")
 	cmd.Flags().StringVar(&invite, "invite", "", "invite token, if the server requires one to register (or set AQT_INVITE_TOKEN)")
-	addKdfFlags(cmd, &kc) // only consulted when this login creates a new account
+	addKdfFlags(cmd, &kc)
+	return cmd
+}
+
+func loginCmd() *cobra.Command {
+	var (
+		email string
+		ttl   time.Duration
+	)
+	cmd := &cobra.Command{
+		Use:   "login",
+		Short: "Attach or unlock an existing account on this device",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runLogin(email, ttl)
+		},
+	}
+	cmd.Flags().StringVar(&email, "email", "", "existing account email")
+	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until lock or logout)")
 	return cmd
 }
 
@@ -68,7 +88,22 @@ func (k kdfChoice) resolve() (crypto.KdfParams, error) {
 // for the email or the passphrase is wrong.
 var errNoUnlock = errors.New("could not unlock: no account exists for this email, or the passphrase is wrong")
 
-func runLogin(email, invite string, ttl time.Duration, kc kdfChoice) error {
+func validateSessionTTL(ttl time.Duration) error {
+	if ttl < 0 {
+		return errors.New("--ttl must be zero or positive")
+	}
+	// The profile stores int64(ttl/time.Second), so a sub-second TTL truncates to
+	// 0, which means "cache until lock or logout" -- the opposite of a short expiry.
+	if ttl > 0 && ttl < time.Second {
+		return errors.New("--ttl minimum is 1s (0 means no expiry)")
+	}
+	return nil
+}
+
+func runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
+	if err := validateSessionTTL(ttl); err != nil {
+		return err
+	}
 	if email == "" {
 		entered, err := promptLine("email: ")
 		if err != nil {
@@ -76,12 +111,56 @@ func runLogin(email, invite string, ttl time.Duration, kc kdfChoice) error {
 		}
 		email = entered
 	}
+	if email == "" {
+		return errors.New("email is required")
+	}
+	// Signing up over an existing profile would overwrite its saved token and
+	// orphan that device's server-side session, leaving no way to revoke it.
+	name := firstNonEmpty(flagProfile, identity.DefaultProfile)
+	if _, err := identity.Load(name); err == nil {
+		return fmt.Errorf("a local profile %q already exists; run `aqt logout` first or pick a different --profile", name)
+	}
+	pass, err := promptPassphrase("New passphrase: ")
+	if err != nil {
+		return err
+	}
+	if pass == "" {
+		return errors.New("passphrase must not be empty")
+	}
+	confirm, err := promptPassphrase("Confirm passphrase: ")
+	if err != nil {
+		return err
+	}
+	if confirm != pass {
+		return errors.New("passphrases do not match")
+	}
 	server := serverURL()
 	cl, err := client.New(server, "")
 	if err != nil {
 		return err
 	}
+	return createAccount(cl, server, email, pass, invite, ttl, kc)
+}
 
+func runLogin(email string, ttl time.Duration) error {
+	if err := validateSessionTTL(ttl); err != nil {
+		return err
+	}
+	if email == "" {
+		entered, err := promptLine("email: ")
+		if err != nil {
+			return fmt.Errorf("read email: %w", err)
+		}
+		email = entered
+	}
+	if email == "" {
+		return errors.New("email is required")
+	}
+	server := serverURL()
+	cl, err := client.New(server, "")
+	if err != nil {
+		return err
+	}
 	boot, err := cl.Bootstrap(email)
 	if err != nil {
 		return err
@@ -97,16 +176,65 @@ func runLogin(email, invite string, ttl time.Duration, kc kdfChoice) error {
 	if err != nil {
 		return err
 	}
+	defer uk.Wipe()
 	rk, err := crypto.UnwrapRoot(boot.WrappedRoot, uk)
 	if err != nil {
-		// The wrapped root did not open: no account, or wrong passphrase. Offer to
-		// create an account with this passphrase (a real account would 409).
-		uk.Wipe()
-		return confirmAndCreate(cl, server, email, pass, invite, ttl, kc)
+		return errNoUnlock
 	}
 	defer rk.Wipe()
-	defer uk.Wipe()
+
+	name := firstNonEmpty(flagProfile, identity.DefaultProfile)
+	if prof, loadErr := identity.Load(name); loadErr == nil &&
+		sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email) && prof.Token != "" {
+		authed, newErr := client.New(server, prof.Token)
+		if newErr != nil {
+			return newErr
+		}
+		if err := validateAttachedDevice(authed, prof.DeviceID); err == nil {
+			prof.Kdf, prof.WrappedRoot = boot.Kdf, boot.WrappedRoot
+			prof.SessionTTLSeconds, prof.SessionTTLSet = int64(ttl/time.Second), true
+			if err := identity.Save(prof); err != nil {
+				return err
+			}
+			if err := cacheSession(rk, ttl); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "logged in as %s · reused device %s · %s\n", email, prof.DeviceID, server)
+			return nil
+		} else if !errors.Is(err, client.ErrUnauthorized) {
+			return fmt.Errorf("validate existing device: %w", err)
+		}
+	}
 	return attachDevice(cl, server, email, boot, rk, uk, ttl)
+}
+
+func validateAttachedDevice(cl *client.Client, deviceID string) error {
+	devices, err := cl.ListDevices()
+	if err != nil {
+		return err
+	}
+	for _, device := range devices {
+		if device.ID == deviceID {
+			return nil
+		}
+	}
+	return errors.New("authenticated device was not returned by the server")
+}
+
+func lockCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "lock",
+		Short: "Forget the cached unlocked key but keep this device attached",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := firstNonEmpty(flagProfile, identity.DefaultProfile)
+			if err := identity.ClearSession(name); err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "locked; this device remains attached")
+			return nil
+		},
+	}
 }
 
 func logoutCmd() *cobra.Command {
@@ -116,76 +244,52 @@ func logoutCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "logout",
-		Short: "Clear the cached session key (the passphrase is needed again next time)",
+		Short: "Revoke this device and remove its local profile and cached key",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// --all-devices revokes every *other* device first; this device stays
-			// attached but locked (its local key material is dropped below).
 			if allDevices {
-				if err := confirmDestructive("Revoke every other device on the account? Each must re-login. [y/N] ", yes); err != nil {
-					return err
-				}
-				if err := revokeOtherDevices(); err != nil {
+				if err := confirmDestructive("Revoke every device on the account and remove this local profile? [y/N] ", yes); err != nil {
 					return err
 				}
 			}
-			name := firstNonEmpty(flagProfile, identity.DefaultProfile)
-			if err := identity.ClearSession(name); err != nil {
+			cl, prof, err := authedClient()
+			if err != nil {
 				return err
 			}
-			fmt.Fprintln(os.Stderr, "session cleared")
+			if allDevices {
+				devices, err := cl.ListDevices()
+				if err != nil {
+					return err
+				}
+				for _, device := range devices {
+					if device.ID == prof.DeviceID {
+						continue
+					}
+					if err := cl.DeleteDevice(device.ID); err != nil {
+						return fmt.Errorf("revoke device %s: %w", device.ID, err)
+					}
+				}
+			}
+			if err := cl.DeleteDevice(prof.DeviceID); err != nil {
+				// A passphrase change on another device revokes this token, so the
+				// server already dropped the device. Treat that as done and still
+				// remove the local profile rather than stranding it.
+				if errors.Is(err, client.ErrUnauthorized) || errors.Is(err, client.ErrNotFound) {
+					fmt.Fprintln(os.Stderr, "device already revoked on the server; removing local profile")
+				} else {
+					return fmt.Errorf("revoke current device: %w", err)
+				}
+			}
+			if err := identity.Delete(prof.Name); err != nil {
+				return err
+			}
+			fmt.Fprintln(os.Stderr, "logged out; device revoked and local credentials removed")
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&allDevices, "all-devices", false, "also revoke every other device on the account")
+	cmd.Flags().BoolVar(&allDevices, "all-devices", false, "revoke every device on the account before removing this profile")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the --all-devices confirmation prompt")
 	return cmd
-}
-
-func revokeOtherDevices() error {
-	cl, prof, err := authedClient()
-	if err != nil {
-		return err
-	}
-	devices, err := cl.ListDevices()
-	if err != nil {
-		return err
-	}
-	revoked := 0
-	for _, d := range devices {
-		if d.ID == prof.DeviceID {
-			continue
-		}
-		if err := cl.DeleteDevice(d.ID); err != nil {
-			return fmt.Errorf("revoke device %s: %w", d.ID, err)
-		}
-		revoked++
-	}
-	fmt.Fprintf(os.Stderr, "revoked %d other device(s)\n", revoked)
-	return nil
-}
-
-// confirmAndCreate runs first-run signup after an unlock attempt failed. A typo'd
-// passphrase becomes the account passphrase with no recovery path, so on a terminal
-// we confirm it and warn explicitly; without a terminal we proceed (a scripted
-// signup), relying on the server's 409 to catch "account already exists".
-func confirmAndCreate(cl *client.Client, server, email, pass, invite string, ttl time.Duration, kc kdfChoice) error {
-	if interactiveStdin() {
-		create, err := promptYesNo(fmt.Sprintf("No account unlocked for %s. Create a new one? (cannot be reset) [y/N] ", email), false)
-		if err != nil {
-			return err
-		}
-		if !create {
-			return errNoUnlock
-		}
-		confirm, err := promptPassphrase("Confirm passphrase: ")
-		if err != nil {
-			return err
-		}
-		if confirm != pass {
-			return errors.New("passphrases do not match")
-		}
-	}
-	return createAccount(cl, server, email, pass, invite, ttl, kc)
 }
 
 // createAccount mints a random root key, wraps it under the passphrase-derived
@@ -227,16 +331,27 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	})
 	if errors.Is(err, client.ErrConflict) {
-		return errors.New("an account already exists for this email; the passphrase was incorrect")
+		return errors.New("an account already exists for this email; use `aqt login` to attach this device")
 	}
 	if err != nil {
 		return err
 	}
-	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
-	if err := saveProfile(server, email, fingerprint, kdf, wrappedRoot, resp); err != nil {
+	authed, err := client.New(server, resp.Token)
+	if err != nil {
 		return err
 	}
-	return cacheSession(rk, ttl)
+	if err := validateAttachedDevice(authed, resp.DeviceID); err != nil {
+		return fmt.Errorf("account creation was not authenticated; no profile was saved: %w", err)
+	}
+	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
+	if err := saveProfile(server, email, fingerprint, kdf, wrappedRoot, resp, ttl); err != nil {
+		return err
+	}
+	if err := cacheSession(rk, ttl); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "signed up as %s · device %s · %s\n", email, resp.DeviceID, server)
+	return nil
 }
 
 // attachDevice logs this device in to an existing account. The root key (rk) and
@@ -259,8 +374,15 @@ func attachDevice(cl *client.Client, server, email string, boot api.SaltResponse
 	if err != nil {
 		return err
 	}
+	authed, err := client.New(server, resp.Token)
+	if err != nil {
+		return err
+	}
+	if err := validateAttachedDevice(authed, resp.DeviceID); err != nil {
+		return fmt.Errorf("login was not authenticated; no profile was saved: %w", err)
+	}
 	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
-	if err := saveProfile(server, email, fingerprint, boot.Kdf, boot.WrappedRoot, resp); err != nil {
+	if err := saveProfile(server, email, fingerprint, boot.Kdf, boot.WrappedRoot, resp, ttl); err != nil {
 		return err
 	}
 	// Lazy enc-key backfill for accounts created before grants existed. Best
@@ -272,7 +394,11 @@ func attachDevice(cl *client.Client, server, email string, boot api.SaltResponse
 			EncKeySig:    crypto.SignEncKey(signing, encPub),
 		})
 	}
-	return cacheSession(rk, ttl)
+	if err := cacheSession(rk, ttl); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "logged in as %s · attached device %s · %s\n", email, resp.DeviceID, server)
+	return nil
 }
 
 // cacheSession stores the freshly recovered root key for the active profile.
@@ -280,23 +406,24 @@ func cacheSession(rk crypto.MasterKey, ttl time.Duration) error {
 	return identity.SaveSession(firstNonEmpty(flagProfile, identity.DefaultProfile), rk, ttl)
 }
 
-func saveProfile(server, email, fingerprint string, kdf crypto.KdfParams, wrappedRoot crypto.SealedBlob, resp api.AuthResponse) error {
+func saveProfile(server, email, fingerprint string, kdf crypto.KdfParams, wrappedRoot crypto.SealedBlob, resp api.AuthResponse, ttl time.Duration) error {
 	p := &identity.Profile{
-		Name:        firstNonEmpty(flagProfile, identity.DefaultProfile),
-		Server:      server,
-		Email:       email,
-		OwnerHandle: resp.OwnerHandle,
-		DeviceID:    resp.DeviceID,
-		Token:       resp.Token,
-		Fingerprint: fingerprint,
-		Kdf:         kdf,
-		WrappedRoot: wrappedRoot,
-		AuthEpoch:   resp.Epoch,
+		Name:              firstNonEmpty(flagProfile, identity.DefaultProfile),
+		Server:            server,
+		Email:             email,
+		OwnerHandle:       resp.OwnerHandle,
+		DeviceID:          resp.DeviceID,
+		Token:             resp.Token,
+		Fingerprint:       fingerprint,
+		Kdf:               kdf,
+		WrappedRoot:       wrappedRoot,
+		AuthEpoch:         resp.Epoch,
+		SessionTTLSeconds: int64(ttl / time.Second),
+		SessionTTLSet:     true,
 	}
 	if err := identity.Save(p); err != nil {
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "logged in as %s · device %s · %s\n", email, resp.DeviceID, server)
 	return nil
 }
 
@@ -610,7 +737,7 @@ func runRootKeyRotation(assumeYes bool) error {
 	if err := identity.Save(prof); err != nil {
 		return err
 	}
-	if err := cacheSession(newRoot, defaultSessionTTL); err != nil {
+	if err := cacheSession(newRoot, sessionTTL(prof)); err != nil {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "account root key rotated; all other devices were revoked and must re-login")

@@ -39,15 +39,19 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `AQT_DATA_DIR` | `./aqt-data` | Data directory (SQLite + `packs/` + `blobs/`). Back this up. |
-| `AQT_ADDR` | `:8080` | Listen address. Use `:443` when terminating TLS natively. |
+| `AQT_ADDR` | `127.0.0.1:8080` | Listen address. Use `:443` only with native TLS. |
 | `AQT_DEBUG` | unset | Any non-empty value enables Gin debug mode and verbose logging. |
 | `AQT_TLS_CERT` / `AQT_TLS_KEY` | unset | PEM certificate + private key for native TLS. Set both or neither. |
 | `AQT_TLS_AUTOCERT_DOMAINS` | unset | Comma-separated hostnames for automatic Let's Encrypt certificates. |
 | `AQT_TLS_AUTOCERT_CACHE` | `<data dir>/autocert` | Directory where autocert stores issued certificates. |
 | `AQT_TLS_AUTOCERT_EMAIL` | unset | Optional ACME contact address. |
+| `AQT_ALLOW_INSECURE_HTTP` | unset | Set to `1` to explicitly permit plain HTTP on a non-loopback listener (normally only behind a TLS proxy). |
 | `AQT_REGISTRATION` | `open` | `open` or `invite`. Invite mode gates every signup on a token. |
 | `AQT_INVITE_TOKENS` | unset | Comma-separated invite secrets (required in invite mode). |
-| `AQT_QUOTA_BYTES` | `0` | Per-owner stored-pack-byte cap. `0` = unlimited. |
+| `AQT_QUOTA_BYTES` | `0` | Per-owner physical storage cap across packs, resource blobs, retained snapshots, and attributable database growth. `0` = unlimited. |
+| `AQT_MAX_RESOURCES` | `0` | Per-account live resource-row cap. `0` = unlimited. |
+| `AQT_MAX_SNAPSHOTS` | `0` | Per-account retained snapshot-row cap. `0` = unlimited. |
+| `AQT_MAX_OBJECTS` | `0` | Per-account packed object-row cap. `0` = unlimited. |
 | `AQT_MAX_DEVICES` | `0` | Per-account device cap. `0` = unlimited. |
 | `AQT_AUTH_RATE` | `0` | Authenticated requests/sec per device token. `0` = default (50). |
 | `AQT_AUTH_BURST` | `0` | Authenticated burst per device token. `0` = default (500). |
@@ -55,6 +59,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_SNAPSHOT_INTERVAL` | `24h` | Scheduled snapshot cadence. `0` disables. |
 | `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. Anchored snapshots (`aqt checkpoint`) are exempt and never pruned. |
 | `AQT_GC_INTERVAL` | `6h` | Scheduled garbage-collection cadence. `0` disables. |
+| `AQT_SHUTDOWN_GRACE` | `20s` | Shared deadline for HTTP, metrics, snapshot, and GC draining. Must be positive. |
 | `AQT_METRICS_ADDR` | unset | Prometheus `/metrics` listen address (e.g. `127.0.0.1:9091`). Unset disables. See [Monitoring](#monitoring). |
 
 Notes:
@@ -66,12 +71,12 @@ Notes:
   ```
   AQT_REGISTRATION=invite AQT_INVITE_TOKENS=$(openssl rand -hex 16)
   ```
-  Clients pass the token with `aqt login --invite <token>` or `AQT_INVITE_TOKEN`.
+  Clients pass the token with `aqt signup --invite <token>` or `AQT_INVITE_TOKEN`.
 - **Trusted proxies.** Behind a reverse proxy, set `AQT_TRUSTED_PROXIES` to the
   proxy's address/CIDR so the share-page URL honors `X-Forwarded-Proto`. The
   rate-limit bucket keys on the real TCP peer regardless, so this is display-only.
 - **Quotas** are the main abuse control on a shared server; combine `AQT_QUOTA_BYTES`
-  and `AQT_MAX_DEVICES` with `invite` registration.
+  and the resource, snapshot, object, and device count caps with `invite` registration.
 
 ## TLS
 
@@ -156,7 +161,7 @@ root. If you use native static certificates, grant the service read access to th
 with `ReadOnlyPaths=` in a drop-in, or copy them under the state directory.
 
 On stop/restart, systemd sends `SIGTERM`; the server drains in-flight requests
-(up to 20s) and closes the store cleanly before exiting.
+(up to `AQT_SHUTDOWN_GRACE`) and closes the store cleanly before exiting.
 
 ## Docker
 
@@ -172,7 +177,7 @@ docker run -d --name aqt-server \
 ```
 
 `AQT_DATA_DIR` defaults to `/data` in the image; mount a volume there. The image
-has no shell, so define health checks in your orchestrator against `GET /healthz`
+has no shell, so define health checks in your orchestrator with `GET /livez` for liveness and `GET /readyz` for readiness
 rather than a container `HEALTHCHECK`.
 
 `deploy/docker-compose.yml` wires the server to a Caddy sidecar that terminates TLS
@@ -245,6 +250,10 @@ server from the copy, recovers on a clean client config from email + passphrase,
 clones, and diffs the result against the original. `go test ./cmd/aqt -run
 TestFullBackupRestoreDrill` is the in-process twin that runs on every CI build.
 
+## Privacy boundary
+
+Resource content, filenames, directory structure, and snapshot labels are encrypted by clients before upload. The server does not receive their plaintext or live content keys. This is a content-confidentiality boundary, not a metadata-anonymity claim: account emails, opaque owner handles, device labels, request timing and peer addresses, public/private visibility, expiry/read-limit policy and counters, resource/snapshot/device/object counts, storage usage, grant relationships, and other lifecycle or relationship metadata can remain observable in live server state, logs, metrics, and backups. Protect the data directory, backups, metrics listener, and operator access accordingly.
+
 ## Monitoring
 
 Set `AQT_METRICS_ADDR` to expose Prometheus metrics on a separate plain-HTTP
@@ -289,10 +298,10 @@ via `aqt usage` (`GET /v1/account/usage`).
 
 ## Health checks and upgrades
 
-- **Health.** `GET /healthz` returns `200 {"status":"ok"}` without authentication.
-  It touches no state, so use it for liveness/readiness probes.
+- **Liveness.** `GET /livez` (and the compatibility alias `/healthz`) returns `200` without touching storage.
+- **Readiness.** `GET /readyz` checks storage and returns `503` during shutdown or when storage is unavailable. Use it for traffic admission.
 - **Upgrades.** Build the new binary, replace it, and restart the service. The
-  graceful shutdown drains in-flight requests, so a restart does not sever an
+  graceful shutdown marks readiness false, stops new background work, and drains HTTP, metrics, snapshots, and GC, so a restart does not sever an
   upload mid-write. Storage formats are versioned; a newer server reads older data.
 - **Scheduled jobs.** Snapshots and GC run on the server timers above; there is no
   external cron to configure. Set the intervals to `0` to disable either.

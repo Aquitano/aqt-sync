@@ -1289,3 +1289,177 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 		t.Fatalf("foreign metadata update err = %v, want ErrNotFound", err)
 	}
 }
+
+func TestCreationIdempotencyKeysReplayAndRejectPayloadReuse(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "idem.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	req := api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, IdempotencyKey: "resource-key"}
+	id1, version1, err := s.PutResource(owner, api.ClientCapability, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, version2, err := s.PutResource(owner, api.ClientCapability, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id1 != id2 || version1 != version2 {
+		t.Fatalf("replay = %s/v%d, want %s/v%d", id2, version2, id1, version1)
+	}
+	changed := req
+	changed.Blob.Ciphertext = append([]byte(nil), req.Blob.Ciphertext...)
+	changed.Blob.Ciphertext[0] ^= 1
+	if _, _, err := s.PutResource(owner, api.ClientCapability, changed); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed replay error = %v", err)
+	}
+
+	snapReq := api.CreateSnapshotRequest{ResourceID: id1, IdempotencyKey: "snapshot-key"}
+	snap1, err := s.CreateSnapshotIdempotent(owner, snapReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap2, err := s.CreateSnapshotIdempotent(owner, snapReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snap1.ID != snap2.ID {
+		t.Fatalf("snapshot replay ids = %s/%s", snap1.ID, snap2.ID)
+	}
+	snapReq.Anchor = true
+	if _, err := s.CreateSnapshotIdempotent(owner, snapReq); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("changed snapshot replay error = %v", err)
+	}
+}
+
+func TestMutationsRejectStaleResourceVersions(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "cas.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	id, version, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err = s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, ExpectedVersion: version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Private, ExpectedVersion: version - 1}); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale visibility = %v", err)
+	}
+	if err := s.PutGrant(owner, id, "grantee", []byte("wrapped"), version); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.PutGrant(owner, id, "other", []byte("wrapped"), version); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale grant = %v", err)
+	}
+	if err := s.DeleteResourceVersion(owner, id, version); !errors.Is(err, ErrVersionConflict) {
+		t.Fatalf("stale delete = %v", err)
+	}
+}
+
+// A resource row whose blob file is gone (operator deletion, crash-window
+// orphan) must not fail usage accounting: AccountUsage feeds metrics, pack and
+// resource puts, and auto-snapshots, so a hard error would wedge the whole
+// account on one missing file.
+func TestAccountUsageToleratesMissingBlob(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "orphan@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	id, _, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(s.blobPath(id, blob.Nonce)); err != nil {
+		t.Fatal(err)
+	}
+	u, err := s.AccountUsage(owner)
+	if err != nil {
+		t.Fatalf("usage with missing blob: %v", err)
+	}
+	if u.Resources != 1 {
+		t.Fatalf("resources = %d, want 1", u.Resources)
+	}
+}
+
+// A reclaimed tombstone holds no ciphertext, so it must stop counting toward
+// the modeled quota; otherwise a delete-heavy account sits over quota with no
+// way to recover.
+func TestAccountUsageExcludesReclaimedTombstones(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "tombstone@example.com")
+	base, err := s.AccountUsage(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("public body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"p","size":11}`), ck, crypto.AADMeta)
+	if _, _, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{Visibility: api.Public, Blob: blob, EncryptedMeta: meta, ExpireSeconds: 1}); err != nil {
+		t.Fatal(err)
+	}
+	live, err := s.AccountUsage(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.StorageBytes <= base.StorageBytes {
+		t.Fatalf("live usage %d not above baseline %d", live.StorageBytes, base.StorageBytes)
+	}
+	if _, err := s.SweepExpired(owner, time.Now().Unix()+2); err != nil {
+		t.Fatal(err)
+	}
+	after, err := s.AccountUsage(owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StorageBytes != base.StorageBytes {
+		t.Fatalf("usage after reclaim = %d, want baseline %d", after.StorageBytes, base.StorageBytes)
+	}
+}
+
+// Recorded idempotency responses only matter for short-lived retries; GC must
+// reap rows past the TTL or the table grows without bound.
+func TestGCSweepsStaleIdempotencyKeys(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "idemgc@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	for _, key := range []string{"stale-key", "fresh-key"} {
+		blob, _ := crypto.Seal([]byte("body "+key), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+		if _, _, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, IdempotencyKey: key}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := s.db.Exec(`UPDATE idempotency_keys SET created_at = ? WHERE key = 'stale-key'`,
+		time.Now().Add(-idempotencyTTL-time.Hour).Unix()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.GC(owner, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	rows, err := s.rdb.Query(`SELECT key FROM idempotency_keys WHERE owner_handle = ?`, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k string
+		if err := rows.Scan(&k); err != nil {
+			t.Fatal(err)
+		}
+		keys = append(keys, k)
+	}
+	if len(keys) != 1 || keys[0] != "fresh-key" {
+		t.Fatalf("keys after gc = %v, want [fresh-key]", keys)
+	}
+}

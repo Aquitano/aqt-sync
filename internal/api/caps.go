@@ -69,6 +69,8 @@ const (
 	// ErrCodeInvalidPolicy accompanies a 400 when a link lifecycle policy is invalid
 	// (attached to a private resource, or carrying a negative value).
 	ErrCodeInvalidPolicy = "invalid_policy"
+	// ErrCodeIdempotencyConflict means one key was reused for a different payload.
+	ErrCodeIdempotencyConflict = "idempotency_conflict"
 	// ErrCodeDropsRoots accompanies a 400 when a replace would clear every chunk root
 	// of an object-backed resource.
 	ErrCodeDropsRoots = "drops_roots"

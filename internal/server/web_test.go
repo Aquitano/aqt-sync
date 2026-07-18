@@ -61,6 +61,10 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		`id="state-folder"`,            // the in-browser folder browser state
 		`id="folder-list"`,             // its listing container
 		"Files, folders, and streamed", // copy now advertises folder/streamed support
+		`for="password-input"`,         // password field has a visible accessible label
+		`role="alert"`,                 // failures are announced
+		`aria-live="polite"`,           // progress is announced without stealing semantics
+		`id="policy-note"`,             // expiry/read policy is shown before consent
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page missing %q", want)
@@ -72,6 +76,9 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	if strings.Contains(body, "single inline files only") {
 		t.Error("share page still claims browser decryption is inline-only after folder support landed")
 	}
+	if strings.Contains(body, "#…") {
+		t.Error("page must not present a truncated fragment as a runnable CLI command")
+	}
 
 	// The decryptor logic ships in the external page script, including the folder
 	// walk over content-addressed objects.
@@ -82,9 +89,13 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	for _, want := range []string{
 		"crypto_aead_xchacha20poly1305_ietf_decrypt",
 		"hashwasm.argon2id",
-		"aqt-treenode-v1",       // directory-node AAD, mirrors crypto.aadTreeNode
-		"/v1/public/resources/", // the exact-slice objects endpoint
-		"fzstd.decompress",      // zstd path for compressed objects/nodes
+		"aqt-treenode-v1",         // directory-node AAD, mirrors crypto.aadTreeNode
+		"/v1/public/resources/",   // the exact-slice objects endpoint
+		"fzstd.decompress",        // zstd path for compressed objects/nodes
+		"/preflight",              // uncounted metadata/policy inspection
+		`"X-Aqt-Capability": "3"`, // browser advertises sealed-format support
+		"INSPECTING ENCRYPTED METADATA",
+		"no read was consumed",
 	} {
 		if !strings.Contains(script.Body.String(), want) {
 			t.Errorf("share.js missing %q", want)

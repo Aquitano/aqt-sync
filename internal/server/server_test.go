@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -981,5 +983,37 @@ func TestCapabilityPublicReadEnforced(t *testing.T) {
 	}
 	if rec := h.getCap(id, "", "2"); rec.Code != http.StatusOK {
 		t.Fatalf("public cap-2 read: got %d, want 200", rec.Code)
+	}
+}
+
+func TestLivenessAndReadinessTransitions(t *testing.T) {
+	h := newHarness(t)
+	if rec := h.get("/livez"); rec.Code != http.StatusOK {
+		t.Fatalf("livez = %d", rec.Code)
+	}
+	if rec := h.get("/readyz"); rec.Code != http.StatusOK {
+		t.Fatalf("readyz = %d", rec.Code)
+	}
+	h.srv.BeginShutdown()
+	if rec := h.get("/readyz"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("readyz during shutdown = %d", rec.Code)
+	}
+	if rec := h.get("/livez"); rec.Code != http.StatusOK {
+		t.Fatalf("livez during shutdown = %d", rec.Code)
+	}
+}
+
+func TestBackgroundWorkersDrainAfterStop(t *testing.T) {
+	h := newHarness(t)
+	stop := make(chan struct{})
+	h.srv.StartAutoSnapshot(time.Millisecond, 1, stop)
+	h.srv.StartGC(time.Millisecond, stop)
+	time.Sleep(5 * time.Millisecond)
+	h.srv.BeginShutdown()
+	close(stop)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := h.srv.WaitWorkers(ctx); err != nil {
+		t.Fatalf("workers did not drain: %v", err)
 	}
 }

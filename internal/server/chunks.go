@@ -4,8 +4,11 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
+	"mime"
 	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -55,13 +58,31 @@ func (s *Server) putPack(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "read pack body failed")
 		return
 	}
-	stored, err := s.store.PutPack(owner, packID, data, s.cfg.QuotaBytes)
+	defer s.accountLimits.lock(owner)()
+	packQuota := s.cfg.QuotaBytes
+	if s.cfg.QuotaBytes > 0 {
+		u, usageErr := s.store.AccountUsage(owner)
+		packBytes, packErr := s.store.OwnerPackBytes(owner)
+		if usageErr != nil || packErr != nil {
+			abort(c, http.StatusInternalServerError, "usage lookup failed")
+			return
+		}
+		if u.StorageBytes+int64(len(data)) > s.cfg.QuotaBytes {
+			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: s.cfg.QuotaBytes})
+			return
+		}
+		packQuota = s.cfg.QuotaBytes - (u.StorageBytes - packBytes)
+	}
+	stored, err := s.store.PutPackWithLimits(owner, packID, data, packQuota, s.cfg.MaxObjects)
 	if errors.Is(err, ErrBadPack) {
 		abortCode(c, http.StatusBadRequest, "uploaded pack is malformed or fails verification", api.ErrCodeBadPack)
 		return
 	}
 	if errors.Is(err, ErrQuotaExceeded) {
-		abortCode(c, http.StatusInsufficientStorage, "storage quota exceeded; free space or raise the quota", api.ErrCodeQuotaExceeded)
+		if !abortLimit(c, err) {
+			u, _ := s.store.AccountUsage(owner)
+			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: s.cfg.QuotaBytes})
+		}
 		return
 	}
 	if err != nil {
@@ -160,7 +181,11 @@ func (s *Server) publicObjects(c *gin.Context) {
 // framing (4-byte big-endian length + bytes per id, in request order), shared by
 // the public and grant object endpoints.
 func (s *Server) writeObjectFrames(c *gin.Context, owner string, locs []api.ObjectLocation, counter prometheus.Counter) {
-	c.Header("Content-Type", "application/octet-stream")
+	if !acceptsObjectFrames(c.GetHeader("Accept")) {
+		abort(c, http.StatusNotAcceptable, "no acceptable object-frame representation; request version=1 object frames")
+		return
+	}
+	c.Header("Content-Type", api.ObjectFramesMediaType)
 	c.Status(http.StatusOK)
 
 	// Keep each pack open for the response's duration: a streamed file's objects
@@ -199,6 +224,34 @@ func (s *Server) writeObjectFrames(c *gin.Context, owner string, locs []api.Obje
 			return
 		}
 	}
+}
+
+func acceptsObjectFrames(header string) bool {
+	if header == "" {
+		return true
+	}
+	for _, item := range strings.Split(header, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(item))
+		if err != nil {
+			continue
+		}
+		q := 1.0
+		if raw := params["q"]; raw != "" {
+			q, err = strconv.ParseFloat(raw, 64)
+			if err != nil || q <= 0 || q > 1 {
+				continue
+			}
+		}
+		switch mediaType {
+		case "application/vnd.aqt.object-frames":
+			if params["version"] == "1" {
+				return true
+			}
+		case "application/octet-stream", "application/*", "*/*":
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) runGC(c *gin.Context) {
