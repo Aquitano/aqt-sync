@@ -20,6 +20,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/gitremote"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 func gitRemoteHelperCmd() *cobra.Command {
@@ -63,12 +64,22 @@ type helperFetch struct {
 	ref string
 }
 
+type helperPush struct {
+	raw      string
+	src      string
+	dst      string
+	force    bool
+	delete   bool
+	localOID string
+}
+
 func (h *remoteHelper) run() error {
 	scanner := bufio.NewScanner(h.in)
 	// Protocol lines contain hashes/ref names, but keep a generous bound so an
 	// adversarial invoking process gets a clean error rather than Scanner's tiny default.
 	scanner.Buffer(make([]byte, 4096), 1<<20)
 	var fetches []helperFetch
+	var pushes []helperPush
 	flushFetches := func() error {
 		if len(fetches) == 0 {
 			return nil
@@ -80,10 +91,21 @@ func (h *remoteHelper) run() error {
 		}
 		return h.respond("")
 	}
+	flushPushes := func() error {
+		if len(pushes) == 0 {
+			return nil
+		}
+		err := h.push(pushes)
+		pushes = nil
+		return err
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
 			if err := flushFetches(); err != nil {
+				return err
+			}
+			if err := flushPushes(); err != nil {
 				return err
 			}
 			continue
@@ -96,12 +118,23 @@ func (h *remoteHelper) run() error {
 			fetches = append(fetches, helperFetch{oid: parts[1], ref: parts[2]})
 			continue
 		}
+		if strings.HasPrefix(line, "push ") {
+			push, err := parsePushRefspec(strings.TrimPrefix(line, "push "))
+			if err != nil {
+				return err
+			}
+			pushes = append(pushes, push)
+			continue
+		}
 		if err := flushFetches(); err != nil {
+			return err
+		}
+		if err := flushPushes(); err != nil {
 			return err
 		}
 		switch {
 		case line == "capabilities":
-			if err := h.respond("fetch", "option", ""); err != nil {
+			if err := h.respond("fetch", "push", "option", ""); err != nil {
 				return err
 			}
 		case line == "list" || line == "list for-push":
@@ -119,7 +152,10 @@ func (h *remoteHelper) run() error {
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	return flushFetches()
+	if err := flushFetches(); err != nil {
+		return err
+	}
+	return flushPushes()
 }
 
 func (h *remoteHelper) respond(lines ...string) error {
@@ -230,6 +266,302 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 	return saveHelperState(statePath, state)
 }
 
+func parsePushRefspec(refspec string) (helperPush, error) {
+	p := helperPush{raw: refspec}
+	if strings.HasPrefix(refspec, "+") {
+		p.force = true
+		refspec = strings.TrimPrefix(refspec, "+")
+	}
+	src, dst, ok := strings.Cut(refspec, ":")
+	if !ok || dst == "" || !strings.HasPrefix(dst, "refs/") {
+		return helperPush{}, fmt.Errorf("invalid push refspec %q", p.raw)
+	}
+	p.src, p.dst, p.delete = src, dst, src == ""
+	return p, nil
+}
+
+func (h *remoteHelper) push(pushes []helperPush) error {
+	objectFormat, err := commandOutput("git", "rev-parse", "--show-object-format")
+	if err != nil {
+		return err
+	}
+	for i := range pushes {
+		if pushes[i].delete {
+			continue
+		}
+		oid, err := commandOutput("git", "rev-parse", "--verify", pushes[i].src+"^{object}")
+		if err != nil {
+			return fmt.Errorf("resolve push source %s: %w", pushes[i].src, err)
+		}
+		pushes[i].localOID = oid
+	}
+
+	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
+		remote, err := h.openRemote()
+		if err != nil {
+			return err
+		}
+		if remote.root.ObjectFormat != "" && remote.root.ObjectFormat != objectFormat {
+			remote.close()
+			return fmt.Errorf("git object format mismatch: local is %s, remote is %s", objectFormat, remote.root.ObjectFormat)
+		}
+		nonFF := nonFastForwardPushes(pushes, remote.root.Refs)
+		if len(nonFF) > 0 {
+			remote.close()
+			return h.rejectPushBatch(pushes, nonFF)
+		}
+
+		bundle, err := buildAndUploadPushBundle(remote.client, remote.key, remote.root, pushes)
+		if err != nil {
+			remote.close()
+			return err
+		}
+		next := applyPushes(remote.root, pushes, objectFormat)
+		if bundle != nil {
+			next.Bundles = append(next.Bundles, *bundle)
+		}
+		blob, err := gitremote.SealRefsRoot(next, remote.key, remote.res.ID)
+		if err != nil {
+			remote.close()
+			return err
+		}
+		meta, err := resealMetaBound(remote.res.EncryptedMeta, remote.key, remote.res.ID)
+		if err != nil {
+			remote.close()
+			return err
+		}
+		_, err = remote.client.PutResource(api.PutResourceRequest{
+			ID: remote.res.ID, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
+			WrappedKey: remote.res.WrappedKey, ChunkRefs: next.SegmentIDs(),
+			ExpectedVersion: remote.res.Version, MinClient: api.CapabilityGitRemote,
+			CompactAt: remote.res.CompactAt,
+		})
+		remote.close()
+		if errors.Is(err, client.ErrConflict) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		lines := make([]string, 0, len(pushes)+1)
+		for _, push := range pushes {
+			lines = append(lines, "ok "+push.dst)
+		}
+		lines = append(lines, "")
+		return h.respond(lines...)
+	}
+	return errors.New("remote busy, pull and retry")
+}
+
+func nonFastForwardPushes(pushes []helperPush, remoteRefs map[string]string) map[string]bool {
+	rejected := make(map[string]bool)
+	for _, push := range pushes {
+		remoteOID := remoteRefs[push.dst]
+		if push.delete || push.force || remoteOID == "" || remoteOID == push.localOID {
+			continue
+		}
+		cmd := exec.Command("git", "merge-base", "--is-ancestor", remoteOID, push.localOID)
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if cmd.Run() != nil {
+			rejected[push.dst] = true
+		}
+	}
+	return rejected
+}
+
+func (h *remoteHelper) rejectPushBatch(pushes []helperPush, nonFF map[string]bool) error {
+	lines := make([]string, 0, len(pushes)+1)
+	for _, push := range pushes {
+		if nonFF[push.dst] {
+			lines = append(lines, "error "+push.dst+" non-fast-forward")
+		} else {
+			lines = append(lines, "error "+push.dst+" atomic push failed")
+		}
+	}
+	lines = append(lines, "")
+	return h.respond(lines...)
+}
+
+func applyPushes(root gitremote.RefsRoot, pushes []helperPush, objectFormat string) gitremote.RefsRoot {
+	next := root
+	next.Refs = make(map[string]string, len(root.Refs))
+	for name, oid := range root.Refs {
+		next.Refs[name] = oid
+	}
+	if next.ObjectFormat == "" {
+		next.ObjectFormat = objectFormat
+	}
+	for _, push := range pushes {
+		if push.delete {
+			delete(next.Refs, push.dst)
+			continue
+		}
+		next.Refs[push.dst] = push.localOID
+		if next.Head == "" && strings.HasPrefix(push.dst, "refs/heads/") {
+			next.Head = push.dst
+		}
+	}
+	if next.Head != "" {
+		if _, ok := next.Refs[next.Head]; !ok {
+			next.Head = firstBranch(next.Refs)
+		}
+	}
+	return next
+}
+
+func firstBranch(refs map[string]string) string {
+	branches := make([]string, 0)
+	for name := range refs {
+		if strings.HasPrefix(name, "refs/heads/") {
+			branches = append(branches, name)
+		}
+	}
+	sort.Strings(branches)
+	if len(branches) == 0 {
+		return ""
+	}
+	return branches[0]
+}
+
+func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root gitremote.RefsRoot, pushes []helperPush) (*gitremote.BundleRef, error) {
+	var positives, tips []string
+	seenPositive := make(map[string]bool)
+	seenTip := make(map[string]bool)
+	for _, push := range pushes {
+		if push.delete {
+			continue
+		}
+		if !seenTip[push.localOID] {
+			tips = append(tips, push.localOID)
+			seenTip[push.localOID] = true
+		}
+		if !remoteContainsCommit(root.Refs, push.localOID) && !seenPositive[push.src] {
+			positives = append(positives, push.src)
+			seenPositive[push.src] = true
+		}
+	}
+	if len(positives) == 0 {
+		return nil, nil
+	}
+
+	var bases []string
+	seenBase := make(map[string]bool)
+	for _, oid := range root.Refs {
+		if !seenBase[oid] && gitObjectPresent(oid) {
+			bases = append(bases, oid)
+			seenBase[oid] = true
+		}
+	}
+	sort.Strings(bases)
+
+	tmp, err := os.CreateTemp("", "aqt-push-*.bundle")
+	if err != nil {
+		return nil, err
+	}
+	path := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		os.Remove(path)
+		return nil, err
+	}
+	if err := os.Remove(path); err != nil {
+		return nil, err
+	}
+	defer os.Remove(path)
+	args := []string{"bundle", "create", "--version=3", path}
+	for _, base := range bases {
+		args = append(args, "^"+base)
+	}
+	args = append(args, positives...)
+	cmd := exec.Command("git", args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("create git push bundle: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	uploader := &gitObjectUploader{cl: cl}
+	bundle, sealErr := gitremote.SealBundle(f, key, uploader)
+	closeErr := f.Close()
+	if sealErr != nil {
+		return nil, sealErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if err := uploader.Flush(); err != nil {
+		return nil, err
+	}
+	bundle.Tips, bundle.Bases = tips, bases
+	return &bundle, nil
+}
+
+func remoteContainsCommit(refs map[string]string, oid string) bool {
+	for _, remoteOID := range refs {
+		if remoteOID == oid {
+			return true
+		}
+		cmd := exec.Command("git", "merge-base", "--is-ancestor", oid, remoteOID)
+		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+		if cmd.Run() == nil {
+			return true
+		}
+	}
+	return false
+}
+
+type gitObjectUploader struct {
+	cl         *client.Client
+	candidates []gitObjectCandidate
+	size       int
+}
+
+type gitObjectCandidate struct {
+	id     string
+	object []byte
+}
+
+func (u *gitObjectUploader) Add(id string, object []byte) error {
+	u.candidates = append(u.candidates, gitObjectCandidate{id: id, object: append([]byte(nil), object...)})
+	u.size += len(object)
+	if u.size >= syncengine.DefaultPackTarget {
+		return u.flush()
+	}
+	return nil
+}
+
+func (u *gitObjectUploader) Flush() error { return u.flush() }
+
+func (u *gitObjectUploader) flush() error {
+	if len(u.candidates) == 0 {
+		return nil
+	}
+	ids := make([]string, len(u.candidates))
+	for i, candidate := range u.candidates {
+		ids[i] = candidate.id
+	}
+	missing, err := u.cl.CheckChunks(ids)
+	if err != nil {
+		return err
+	}
+	want := make(map[string]bool, len(missing))
+	for _, id := range missing {
+		want[id] = true
+	}
+	builder := syncengine.NewPackBuilder()
+	for _, candidate := range u.candidates {
+		if want[candidate.id] {
+			builder.Add(candidate.id, candidate.object)
+		}
+	}
+	u.candidates, u.size = nil, 0
+	if builder.Empty() {
+		return nil
+	}
+	packID, pack := builder.Finish()
+	return u.cl.PutPack(packID, pack)
+}
+
 func (h *remoteHelper) openRemote() (*openedGitRemote, error) {
 	cl, prof, err := authedClient()
 	if err != nil {
@@ -290,9 +622,11 @@ func (h *remoteHelper) openRemote() (*openedGitRemote, error) {
 }
 
 func gitRemoteTarget(rawURL string) (string, error) {
-	target, ok := strings.CutPrefix(rawURL, "aqt::")
-	if !ok || target == "" {
-		return "", fmt.Errorf("invalid aqt git remote URL %q (want aqt::<name-or-id>)", rawURL)
+	// Git strips the "aqt::" transport prefix before invoking git-remote-aqt;
+	// direct invocations of the hidden command may still carry the full spelling.
+	target := strings.TrimPrefix(rawURL, "aqt::")
+	if target == "" || strings.Contains(target, "://") {
+		return "", fmt.Errorf("invalid aqt git remote target %q (want aqt::<name-or-id>)", rawURL)
 	}
 	return target, nil
 }
