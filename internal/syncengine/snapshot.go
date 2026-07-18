@@ -1,6 +1,7 @@
 package syncengine
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -13,6 +14,27 @@ import (
 	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
+
+// EntryFromBytes seals one in-memory regular file into the same Entry shape Take
+// produces. It is used for bounded derived content such as a clean text merge,
+// avoiding a whole-tree rescan merely to upload one resolved file.
+func EntryFromBytes(path string, data []byte, mode uint32, conv crypto.ConvergenceKey, selector ChunkSelector, sink ChunkSink) (Entry, error) {
+	if sink == nil {
+		sink = nopSink{}
+	}
+	e := Entry{Path: path, Mode: mode, Size: int64(len(data)), Hash: hashOf(data)}
+	chunker := selector.ChunkerFor(e.Size)
+	if e.Size <= int64(chunker.Min) {
+		e.Inline, e.InlineAlg = compress.Encode(data)
+		return e, nil
+	}
+	chunks, _, err := sealStream(bytes.NewReader(data), conv, chunker, sink)
+	if err != nil {
+		return Entry{}, err
+	}
+	e.Chunks = chunks
+	return e, nil
+}
 
 // ChunkSink receives the ciphertext of each chunk a snapshot seals for a changed
 // file, so the caller can pack and upload it without the snapshot ever holding the

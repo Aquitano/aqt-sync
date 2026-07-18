@@ -21,6 +21,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
+	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
 
 // folderState is the per-folder pointer stored in .aqt/state.json: which resource
@@ -108,7 +109,7 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.reconcile, "reconcile", false, "reconcile without a base (.aqt/base.json missing): one-sided differences become conflicts to review")
 	f.BoolVar(&opts.rehash, "rehash", false, "re-hash every file instead of trusting size+mtime (catches edits that preserve them)")
 	f.BoolVar(&opts.acceptRollback, "accept-rollback", false, "proceed although the server reports an older version than previously seen (restored from backup): reconcile from scratch, one-sided differences become conflicts to review")
-	f.StringVar(&opts.conflicts, "conflicts", "", "conflict handling: block (default) or copy (keep local, write remote to <name>.conflict-<suffix>)")
+	f.StringVar(&opts.conflicts, "conflicts", "", "conflict handling: block (default), copy, or merge (three-way text merge; falls back to copy)")
 	markJSONSupported(cmd)
 	return cmd
 }
@@ -715,15 +716,19 @@ func runSync(dir string, opts syncOptions) error {
 		return err
 	}
 	if cfg.Pack {
-		if mode == conflictCopy {
-			return errors.New("--conflicts=copy does not apply to a pack-and-seal folder: it reconciles the whole folder at once, so there is no per-file conflict to copy")
+		if mode == conflictCopy || mode == conflictMerge {
+			return fmt.Errorf("--conflicts=%s does not apply to a pack-and-seal folder: it reconciles the whole folder at once, so there is no per-file conflict to resolve", mode)
 		}
 		return runPackSync(root, opts)
 	}
-	if mode == conflictCopy {
-		if err := validateCopyMode(opts); err != nil {
+	if mode == conflictCopy || mode == conflictMerge {
+		if err := validateResolvingMode(opts, mode); err != nil {
 			return err
 		}
+	}
+	selector, err := cfg.ChunkSelector()
+	if err != nil {
+		return err
 	}
 	st, err := loadState(root)
 	if err != nil {
@@ -764,10 +769,6 @@ func runSync(dir string, opts syncOptions) error {
 			return err
 		}
 	} else {
-		selector, cerr := cfg.ChunkSelector()
-		if cerr != nil {
-			return cerr
-		}
 		// With --progress on a terminal, size the upload up front so the bar shows a real
 		// percentage. Chunked content streams during Take (below) before any plan exists,
 		// so there is no cheaper moment to learn the total. A sizing scan tolerates a stale
@@ -815,7 +816,7 @@ func runSync(dir string, opts syncOptions) error {
 	// so copies made in the same run share a suffix and a retry does not re-time them.
 	var copyHost string
 	var copyMemo conflictCopyMemo
-	if mode == conflictCopy {
+	if mode == conflictCopy || mode == conflictMerge {
 		copyHost = conflictHost()
 		copyMemo = conflictCopyMemo{}
 	}
@@ -914,7 +915,7 @@ func runSync(dir string, opts syncOptions) error {
 		}
 		// Copy mode resolves conflicts local-wins (like --force) after preserving the
 		// remote side as a copy, so it must not abort on them.
-		if err := abortOnConflicts(actions, dirActions, opts.force || mode == conflictCopy); err != nil {
+		if err := abortOnConflicts(actions, dirActions, opts.force || mode == conflictCopy || mode == conflictMerge); err != nil {
 			return err
 		}
 		return applySync(applyCtx{
@@ -922,7 +923,7 @@ func runSync(dir string, opts syncOptions) error {
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
 			visibility: res.Visibility, version: res.Version, id: st.ID,
-			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo,
+			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo, selector: selector,
 		}, actions, dirActions)
 	}
 
@@ -965,6 +966,105 @@ type applyCtx struct {
 	host       string           // sanitized hostname stamped into conflict-copy names (copy mode)
 	now        time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
 	copyMemo   conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
+	selector   syncengine.ChunkSelector
+}
+
+type cleanMerge struct {
+	path  string
+	data  []byte
+	entry syncengine.Entry
+}
+
+// mergeConflictBytes is the pure per-file policy seam used by sync and fuzz tests:
+// a clean eligible merge replaces the primary with no copy; every other input keeps
+// local primary bytes and preserves remote bytes as the fallback copy.
+func mergeConflictBytes(base, local, remote []byte) (primary, copy []byte, merged bool) {
+	if textmerge.Eligible(base, local, remote) {
+		if result, clean := textmerge.ThreeWay(base, local, remote); clean {
+			return result, nil, true
+		}
+	}
+	return local, remote, false
+}
+
+// resolveTextMerges materializes the three versions of each regular-file conflict,
+// combines clean non-overlapping edits, and seals the result for the pending PUT.
+// A missing base object, binary/oversized content, delete/modify pair, or overlapping
+// edit is returned in fallback so normal copy semantics preserve both sides.
+func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, remoteByPath map[string]syncengine.Entry) ([]cleanMerge, map[string]bool, error) {
+	defer c.ck.Wipe()
+	defer c.conv.Wipe()
+	defer c.mk.Wipe()
+	fallback := map[string]bool{}
+	baseByPath := c.base.ByPath()
+	var candidates []string
+	var sourceEntries []syncengine.Entry
+	for _, a := range actions {
+		if a.Kind != syncengine.Conflict {
+			continue
+		}
+		le, lok := localByPath[a.Path]
+		be, bok := baseByPath[a.Path]
+		re, rok := remoteByPath[a.Path]
+		if !lok || !bok || !rok || le.IsSymlink() || be.IsSymlink() || re.IsSymlink() ||
+			le.Size > textmerge.MaxTextSize || be.Size > textmerge.MaxTextSize || re.Size > textmerge.MaxTextSize {
+			fallback[a.Path] = true
+			continue
+		}
+		candidates = append(candidates, a.Path)
+		sourceEntries = append(sourceEntries, be, re)
+	}
+	if len(candidates) == 0 {
+		return nil, fallback, nil
+	}
+	source, err := newPackSource(c.cl, distinctChunkIDs(sourceEntries))
+	if err != nil {
+		return nil, nil, err
+	}
+	uploader := newPackUploader(c.cl, nil)
+	var clean []cleanMerge
+	for _, path := range candidates {
+		le := localByPath[path]
+		be := baseByPath[path]
+		re := remoteByPath[path]
+		localData, err := os.ReadFile(filepath.Join(c.root, filepath.FromSlash(path)))
+		if err != nil {
+			uploader.Wait()
+			return nil, nil, err
+		}
+		remoteData, err := syncengine.FileBytes(re, source.get)
+		if err != nil {
+			uploader.Wait()
+			if errors.Is(err, client.ErrNotFound) {
+				return nil, nil, client.ErrConflict
+			}
+			return nil, nil, err
+		}
+		baseData, err := syncengine.FileBytes(be, source.get)
+		if errors.Is(err, client.ErrNotFound) {
+			fallback[path] = true
+			continue
+		}
+		if err != nil {
+			uploader.Wait()
+			return nil, nil, err
+		}
+		data, _, ok := mergeConflictBytes(baseData, localData, remoteData)
+		if !ok {
+			fallback[path] = true
+			continue
+		}
+		entry, err := syncengine.EntryFromBytes(path, data, le.Mode, c.conv, c.selector, uploader)
+		if err != nil {
+			uploader.Wait()
+			return nil, nil, err
+		}
+		clean = append(clean, cleanMerge{path: path, data: data, entry: entry})
+	}
+	if err := uploader.Flush(); err != nil {
+		return nil, nil, err
+	}
+	return clean, fallback, nil
 }
 
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
@@ -977,6 +1077,18 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	pull := !c.opts.pushOnly
 	localByPath := c.local.ByPath()
 	remoteByPath := c.remote.ByPath()
+	var cleanMerges []cleanMerge
+	mergeFallback := map[string]bool{}
+	if c.mode == conflictMerge {
+		var err error
+		cleanMerges, mergeFallback, err = resolveTextMerges(c, actions, localByPath, remoteByPath)
+		if err != nil {
+			return err
+		}
+		for _, resolution := range cleanMerges {
+			localByPath[resolution.path] = resolution.entry
+		}
+	}
 
 	merged := c.remote.ByPath() // becomes the new server manifest
 	newBase := c.base.ByPath()  // becomes the new last-synced record
@@ -1095,8 +1207,17 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	// even if the push below dies mid-apply. The primary path is then resolved
 	// local-wins by the action loop above. Copies land at fresh, collision-checked
 	// paths, so they never overwrite anything and skip the download drift guard.
-	if c.mode == conflictCopy {
-		if copies := planConflictCopies(c.root, actions, remoteByPath, c.host, c.now, c.copyMemo); len(copies) > 0 {
+	if c.mode == conflictCopy || c.mode == conflictMerge {
+		copyActions := actions
+		if c.mode == conflictMerge {
+			copyActions = nil
+			for _, action := range actions {
+				if mergeFallback[action.Path] {
+					copyActions = append(copyActions, action)
+				}
+			}
+		}
+		if copies := planConflictCopies(c.root, copyActions, remoteByPath, c.host, c.now, c.copyMemo); len(copies) > 0 {
 			entries := copyEntries(copies)
 			cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
 			cpErr := runDownloads(c.cl, c.root, entries, cpProg)
@@ -1133,6 +1254,14 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		}
 		syncedVersion = resp.Version
 		reclaimPacks(c.root, c.cl)
+	}
+	// The root now durably references the merged entry. Land the same bytes locally
+	// only after the optimistic PUT succeeds, so a CAS retry never leaves a partial
+	// merge in the working tree.
+	for _, resolution := range cleanMerges {
+		if err := syncengine.WriteFile(c.root, resolution.entry, resolution.data); err != nil {
+			return err
+		}
 	}
 
 	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, downloads, localDeletes, localByPath, remoteByPath, c.base.ByPath(), newBase)
@@ -1178,7 +1307,11 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		return err
 	}
 	recordRemoteVersion(c.root, syncedVersion)
-	summarize(uploads, downloads, localDeletes)
+	mergedPaths := make([]string, len(cleanMerges))
+	for i, resolution := range cleanMerges {
+		mergedPaths[i] = resolution.path
+	}
+	summarize(uploads, downloads, localDeletes, mergedPaths)
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
 		printPaths("conflict", conflicts)
@@ -2814,18 +2947,21 @@ func printPaths(label string, paths []string) {
 	}
 }
 
-func summarize(uploads, downloads []syncengine.Entry, localDeletes []string) {
+func summarize(uploads, downloads []syncengine.Entry, localDeletes, merged []string) {
 	if flagJSON {
 		_ = printJSON(map[string]any{
 			"uploaded": len(uploads), "uploadedBytes": entriesBytes(uploads),
 			"downloaded": len(downloads), "downloadedBytes": entriesBytes(downloads),
-			"removedLocally": len(localDeletes),
+			"removedLocally": len(localDeletes), "merged": merged,
 		})
 		return
 	}
 	fmt.Printf("synced: %d up (%s), %d down (%s), %d removed locally\n",
 		len(uploads), humanBytes(entriesBytes(uploads)),
 		len(downloads), humanBytes(entriesBytes(downloads)), len(localDeletes))
+	for _, path := range merged {
+		fmt.Printf("~ merged %s\n", path)
+	}
 }
 
 // entriesBytes sums the plaintext size of a set of entries — the logical volume a

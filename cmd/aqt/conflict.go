@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +16,7 @@ type conflictMode string
 const (
 	conflictBlock conflictMode = "block" // report the conflict and refuse (exit 4)
 	conflictCopy  conflictMode = "copy"  // keep local, preserve remote as a conflict-copy
+	conflictMerge conflictMode = "merge" // merge text, falling back to conflict-copy
 )
 
 // effectiveConflictMode resolves the mode from the flag (when set) falling back to
@@ -33,8 +33,10 @@ func effectiveConflictMode(opts syncOptions, cfg syncengine.Config) (conflictMod
 		return conflictBlock, nil
 	case "copy":
 		return conflictCopy, nil
+	case "merge":
+		return conflictMerge, nil
 	default:
-		return "", fmt.Errorf("invalid --conflicts value %q (want \"block\" or \"copy\")", v)
+		return "", fmt.Errorf("invalid --conflicts value %q (want \"block\", \"copy\", or \"merge\")", v)
 	}
 }
 
@@ -44,13 +46,17 @@ func effectiveConflictMode(opts syncOptions, cfg syncengine.Config) (conflictMod
 // no three-way both-sides change to copy; and a copy needs both a disk write and a
 // remote mutation, which a one-directional sync cannot do coherently.
 func validateCopyMode(opts syncOptions) error {
+	return validateResolvingMode(opts, conflictCopy)
+}
+
+func validateResolvingMode(opts syncOptions, mode conflictMode) error {
 	switch {
 	case opts.force:
-		return errors.New("--conflicts=copy and --force are contradictory: --force discards the remote version, --conflicts=copy keeps it")
+		return fmt.Errorf("--conflicts=%s and --force are contradictory: --force discards the remote version, --conflicts=%s preserves it", mode, mode)
 	case opts.reconcile || opts.acceptRollback:
-		return errors.New("--conflicts=copy requires a three-way sync; --reconcile and --accept-rollback reconcile without a base, where every one-sided difference is already a conflict")
+		return fmt.Errorf("--conflicts=%s requires a three-way sync; --reconcile and --accept-rollback reconcile without a base, where every one-sided difference is already a conflict", mode)
 	case opts.pushOnly || opts.pullOnly:
-		return errors.New("--conflicts=copy requires a full two-way sync and cannot be combined with --push-only or --pull-only")
+		return fmt.Errorf("--conflicts=%s requires a full two-way sync and cannot be combined with --push-only or --pull-only", mode)
 	}
 	return nil
 }

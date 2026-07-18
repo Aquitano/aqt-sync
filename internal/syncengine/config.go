@@ -47,7 +47,8 @@ type Config struct {
 
 	// Conflicts selects how a two-sided change is resolved: "block" (default)
 	// reports the conflict and refuses the sync, "copy" keeps the local version and
-	// writes the remote one alongside as <name>.conflict-<suffix>. Empty means block.
+	// writes the remote one alongside as <name>.conflict-<suffix>, and "merge" first
+	// attempts a three-way text merge before falling back to copy. Empty means block.
 	// The `--conflicts` flag overrides this per run.
 	Conflicts string `json:"conflicts"`
 }
@@ -238,9 +239,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("unsupported config version %d (this aqt understands version 1; upgrade aqt to use this folder's config)", c.Version)
 	}
 	switch c.Conflicts {
-	case "", "block", "copy":
+	case "", "block", "copy", "merge":
 	default:
-		return fmt.Errorf("invalid conflicts %q (want \"block\" or \"copy\")", c.Conflicts)
+		return fmt.Errorf("invalid conflicts %q (want \"block\", \"copy\", or \"merge\")", c.Conflicts)
 	}
 	if _, ok := namedChunkProfiles[c.ChunkProfile]; !ok {
 		return fmt.Errorf("unknown chunkProfile %q (want \"default\", \"large\", or \"huge\")", c.ChunkProfile)

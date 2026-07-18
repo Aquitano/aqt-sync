@@ -294,6 +294,105 @@ func TestSyncConflictCopyValidation(t *testing.T) {
 		!strings.Contains(err.Error(), "pack-and-seal") {
 		t.Fatalf("copy on a pack folder: got %v, want a pack error", err)
 	}
+	if err := runSync(packDir, syncOptions{conflicts: "merge"}); err == nil ||
+		!strings.Contains(err.Error(), "pack-and-seal") {
+		t.Fatalf("merge on a pack folder: got %v, want a pack error", err)
+	}
+}
+
+func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "notes.md", "one\ntwo\nthree\nfour\n")
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "notes.md", "ONE\ntwo\nthree\nfour\n")
+	h.sync(origin)
+	writeTree(t, replica, "notes.md", "one\ntwo\nthree\nFOUR\n")
+	h.syncOpts(replica, syncOptions{conflicts: "merge"})
+	if got, want := readTree(t, replica, "notes.md"), "ONE\ntwo\nthree\nFOUR\n"; got != want {
+		t.Fatalf("clean merge = %q, want %q", got, want)
+	}
+	if copies := globConflicts(t, replica); len(copies) != 0 {
+		t.Fatalf("clean merge wrote conflict copies: %v", copies)
+	}
+	h.sync(origin)
+	assertTreeEqual(t, origin, replica)
+
+	writeTree(t, origin, "notes.md", "ORIGIN\ntwo\nthree\nFOUR\n")
+	h.sync(origin)
+	writeTree(t, replica, "notes.md", "REPLICA\ntwo\nthree\nFOUR\n")
+	h.syncOpts(replica, syncOptions{conflicts: "merge"})
+	if got := readTree(t, replica, "notes.md"); got != "REPLICA\ntwo\nthree\nFOUR\n" {
+		t.Fatalf("overlap did not keep local primary: %q", got)
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("overlap conflict copies = %v, want exactly one", copies)
+	}
+	if got := readTree(t, replica, copies[0]); got != "ORIGIN\ntwo\nthree\nFOUR\n" {
+		t.Fatalf("overlap copy lost remote bytes: %q", got)
+	}
+	if bytes.Contains([]byte(readTree(t, replica, "notes.md")), []byte("<<<<<<<")) {
+		t.Fatal("merge fallback wrote conflict markers")
+	}
+	h.sync(replica) // publish the local-only conflict copy
+	h.sync(origin)
+	assertTreeEqual(t, origin, replica)
+}
+
+func TestSyncConflictMergeMissingBaseChunkFallsBackToCopy(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	lines := make([]string, 700)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("base line %04d", i)
+	}
+	base := strings.Join(lines, "\n") + "\n"
+	writeTree(t, origin, "chunked.txt", base)
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	originLines := append([]string(nil), lines...)
+	for i := range originLines {
+		originLines[i] = fmt.Sprintf("remote replacement %04d", i)
+	}
+	remote := strings.Join(originLines, "\n") + "\n"
+	writeTree(t, origin, "chunked.txt", remote)
+	h.sync(origin)
+
+	profile, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	removed, _, err := h.store.GCPacks(profile.OwnerHandle, -time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if removed == 0 {
+		t.Fatal("forced GC removed no packs; test did not make the base content unavailable")
+	}
+
+	replicaLines := append([]string(nil), lines...)
+	replicaLines[len(replicaLines)-1] = "local replacement at the end"
+	local := strings.Join(replicaLines, "\n") + "\n"
+	writeTree(t, replica, "chunked.txt", local)
+	h.syncOpts(replica, syncOptions{conflicts: "merge"})
+	if got := readTree(t, replica, "chunked.txt"); got != local {
+		t.Fatalf("missing-base fallback did not keep local primary")
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("missing-base conflict copies = %v, want exactly one", copies)
+	}
+	if got := readTree(t, replica, copies[0]); got != remote {
+		t.Fatalf("missing-base copy lost remote bytes")
+	}
 }
 
 // globConflicts returns the tracked conflict-copy files under root (paths containing

@@ -11,6 +11,7 @@ import (
 
 func TestEffectiveConflictMode(t *testing.T) {
 	cfgCopy := syncengine.Config{Conflicts: "copy"}
+	cfgMerge := syncengine.Config{Conflicts: "merge"}
 	cfgEmpty := syncengine.Config{}
 
 	// An unset flag falls back to the .aqtconfig default.
@@ -28,6 +29,12 @@ func TestEffectiveConflictMode(t *testing.T) {
 	// An explicit copy applies when the config is silent.
 	if m, err := effectiveConflictMode(syncOptions{conflicts: "copy"}, cfgEmpty); err != nil || m != conflictCopy {
 		t.Errorf("explicit copy: got (%v, %v), want copy", m, err)
+	}
+	if m, err := effectiveConflictMode(syncOptions{}, cfgMerge); err != nil || m != conflictMerge {
+		t.Errorf("config merge: got (%v, %v), want merge", m, err)
+	}
+	if m, err := effectiveConflictMode(syncOptions{conflicts: "merge"}, cfgEmpty); err != nil || m != conflictMerge {
+		t.Errorf("explicit merge: got (%v, %v), want merge", m, err)
 	}
 	// An invalid flag value is rejected.
 	if _, err := effectiveConflictMode(syncOptions{conflicts: "bogus"}, cfgEmpty); err == nil {
