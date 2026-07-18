@@ -970,7 +970,8 @@ func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
 // AccountUsage summarizes what one account has stored. StorageBytes is the
 // pack-byte quota counter; the rest are row counts. Resources counts live rows
 // only — a reclaimed tombstone holds no content and exists just to keep its link
-// answering 410.
+// answering 410, so it is excluded from the modeled byte total too (otherwise a
+// delete-heavy account could sit over quota forever).
 type AccountUsage struct {
 	Owner        string
 	StorageBytes int64
@@ -984,7 +985,7 @@ type AccountUsage struct {
 const accountUsageColumns = `
 	a.owner_handle,
 	a.pack_bytes
-	  + COALESCE((SELECT SUM(length(r.encrypted_meta) + COALESCE(length(r.wrapped_key), 0) + length(r.blob_nonce) + 256) FROM resources r WHERE r.owner_handle = a.owner_handle), 0)
+	  + COALESCE((SELECT SUM(length(r.encrypted_meta) + COALESCE(length(r.wrapped_key), 0) + length(r.blob_nonce) + 256) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0), 0)
 	  + COALESCE((SELECT SUM(length(sn.encrypted_meta) + COALESCE(length(sn.encrypted_label), 0) + COALESCE(length(sn.wrapped_key), 0) + length(sn.blob_nonce) + 256) FROM snapshots sn WHERE sn.owner_handle = a.owner_handle), 0)
 	  + COALESCE((SELECT SUM(length(g.wrapped_key) + 128) FROM grants g WHERE g.owner_handle = a.owner_handle), 0)
 	  + 96 * (SELECT COUNT(*) FROM objects o WHERE o.owner_handle = a.owner_handle)
@@ -1033,6 +1034,12 @@ func (s *Store) ownerBlobBytes(owner string) (int64, error) {
 			return 0, err
 		}
 		info, err := os.Stat(s.blobPath(id, nonce))
+		if errors.Is(err, os.ErrNotExist) {
+			// An orphaned row (operator-deleted file, crash window) holds no bytes.
+			// Failing here would wedge every usage-dependent path account-wide:
+			// metrics, pack/resource puts, and auto-snapshots all call AccountUsage.
+			continue
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -1214,6 +1221,17 @@ func lookupIdempotency(q queryRower, owner, kind, key string, digest []byte, out
 	return true, json.Unmarshal([]byte(response), out)
 }
 
+// idempotencyTTL bounds how long a recorded response stays replayable. Client
+// retries land within seconds; older rows are dead weight, and each stores a
+// full JSON response, so without the GC sweep the table grows forever.
+const idempotencyTTL = 48 * time.Hour
+
+func (s *Store) sweepIdempotencyKeys(owner string, now time.Time) error {
+	_, err := s.db.Exec(`DELETE FROM idempotency_keys WHERE owner_handle = ? AND created_at < ?`,
+		owner, now.Add(-idempotencyTTL).Unix())
+	return err
+}
+
 func recordIdempotency(tx *sql.Tx, owner, kind, key string, digest []byte, response any) error {
 	if key == "" {
 		return nil
@@ -1295,6 +1313,9 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
+	// Authoritative duplicate check: the pre-tx lookup on the read pool may see a
+	// stale WAL snapshot; only this re-check on the single writer connection is
+	// race-free. Do not remove it as redundant.
 	if found, err := lookupIdempotency(tx, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -2085,6 +2106,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
+	// Authoritative duplicate check; see the matching re-check in createResource.
 	if found, err := lookupIdempotency(tx, owner, "snapshot.create", idempotencyKey, digest, &prior); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -2407,16 +2429,28 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 	// row/blob race a concurrent update can cause, which GetResource also tolerates)
 	// must not block the rest of the batch. The first error is returned for logging
 	// after the loop has done what it could.
+	// AccountUsage stats every blob the owner has, so an owner with many due
+	// resources must not recompute it per resource: read it once per owner and
+	// adjust the cached copy as snapshots land.
+	usageByOwner := map[string]*AccountUsage{}
 	created := 0
 	var firstErr error
 	for _, r := range due {
+		var u *AccountUsage
+		var added int64
 		if maxSnapshots > 0 || quotaBytes > 0 {
-			u, err := s.AccountUsage(r.owner)
-			if err != nil {
-				if firstErr == nil {
-					firstErr = err
+			var ok bool
+			u, ok = usageByOwner[r.owner]
+			if !ok {
+				fresh, err := s.AccountUsage(r.owner)
+				if err != nil {
+					if firstErr == nil {
+						firstErr = err
+					}
+					continue
 				}
-				continue
+				u = &fresh
+				usageByOwner[r.owner] = u
 			}
 			if maxSnapshots > 0 && u.Snapshots >= int64(maxSnapshots) {
 				if firstErr == nil {
@@ -2432,7 +2466,7 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 					}
 					continue
 				}
-				added := estimatedResourceBytes(api.PutResourceRequest{Blob: res.Blob, EncryptedMeta: res.EncryptedMeta, WrappedKey: res.WrappedKey})
+				added = estimatedResourceBytes(api.PutResourceRequest{Blob: res.Blob, EncryptedMeta: res.EncryptedMeta, WrappedKey: res.WrappedKey})
 				if u.StorageBytes+added > quotaBytes {
 					if firstErr == nil {
 						firstErr = &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quotaBytes}
@@ -2448,6 +2482,10 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 			continue
 		}
 		created++
+		if u != nil {
+			u.Snapshots++
+			u.StorageBytes += added
+		}
 	}
 	return created, firstErr
 }
@@ -3385,6 +3423,9 @@ func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	// are eligible for the pack sweep in this same pass (still subject to the pack age
 	// guard, which is the point of the grace window on exhaustion).
 	if _, err := s.SweepExpired(owner, time.Now().Unix()); err != nil {
+		return api.GCResponse{}, err
+	}
+	if err := s.sweepIdempotencyKeys(owner, time.Now()); err != nil {
 		return api.GCResponse{}, err
 	}
 	deleted, freed, err := s.GCPacks(owner, minAge)

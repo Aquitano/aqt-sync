@@ -92,6 +92,11 @@ func validateSessionTTL(ttl time.Duration) error {
 	if ttl < 0 {
 		return errors.New("--ttl must be zero or positive")
 	}
+	// The profile stores int64(ttl/time.Second), so a sub-second TTL truncates to
+	// 0, which means "cache until lock or logout" -- the opposite of a short expiry.
+	if ttl > 0 && ttl < time.Second {
+		return errors.New("--ttl minimum is 1s (0 means no expiry)")
+	}
 	return nil
 }
 
@@ -108,6 +113,12 @@ func runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
 	}
 	if email == "" {
 		return errors.New("email is required")
+	}
+	// Signing up over an existing profile would overwrite its saved token and
+	// orphan that device's server-side session, leaving no way to revoke it.
+	name := firstNonEmpty(flagProfile, identity.DefaultProfile)
+	if _, err := identity.Load(name); err == nil {
+		return fmt.Errorf("a local profile %q already exists; run `aqt logout` first or pick a different --profile", name)
 	}
 	pass, err := promptPassphrase("New passphrase: ")
 	if err != nil {
@@ -260,7 +271,14 @@ func logoutCmd() *cobra.Command {
 				}
 			}
 			if err := cl.DeleteDevice(prof.DeviceID); err != nil {
-				return fmt.Errorf("revoke current device: %w", err)
+				// A passphrase change on another device revokes this token, so the
+				// server already dropped the device. Treat that as done and still
+				// remove the local profile rather than stranding it.
+				if errors.Is(err, client.ErrUnauthorized) || errors.Is(err, client.ErrNotFound) {
+					fmt.Fprintln(os.Stderr, "device already revoked on the server; removing local profile")
+				} else {
+					return fmt.Errorf("revoke current device: %w", err)
+				}
 			}
 			if err := identity.Delete(prof.Name); err != nil {
 				return err
@@ -313,7 +331,7 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	})
 	if errors.Is(err, client.ErrConflict) {
-		return errors.New("an account already exists for this email; the passphrase was incorrect")
+		return errors.New("an account already exists for this email; use `aqt login` to attach this device")
 	}
 	if err != nil {
 		return err

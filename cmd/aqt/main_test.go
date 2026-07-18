@@ -35,4 +35,15 @@ func TestAccountLifecycleCommandsAreExplicit(t *testing.T) {
 	if err := validateSessionTTL(-time.Second); err == nil {
 		t.Fatal("negative login TTL was accepted")
 	}
+	// A sub-second TTL truncates to 0 seconds on disk, which means "no expiry" --
+	// the opposite of the caller's intent, so it must be rejected.
+	if err := validateSessionTTL(500 * time.Millisecond); err == nil {
+		t.Fatal("sub-second login TTL was accepted")
+	}
+	if err := validateSessionTTL(0); err != nil {
+		t.Fatalf("zero TTL (no expiry) must be valid: %v", err)
+	}
+	if err := validateSessionTTL(time.Second); err != nil {
+		t.Fatalf("1s TTL must be valid: %v", err)
+	}
 }

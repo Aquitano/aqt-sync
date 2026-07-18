@@ -295,6 +295,26 @@ func TestCreateRetriesOnceWithSameIdempotencyKey(t *testing.T) {
 	}
 }
 
+// A definitive rejection (here the 507 quota response) never changes on replay:
+// retrying only doubles load on the server, so the create must fail on the
+// first attempt.
+func TestCreateDoesNotRetryOnRejection(t *testing.T) {
+	var attempts int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		http.Error(w, "full", http.StatusInsufficientStorage)
+	}))
+	defer srv.Close()
+	cl, _ := New(srv.URL, "tok")
+	_, err := cl.PutResource(api.PutResourceRequest{Visibility: api.Public})
+	if !errors.Is(err, ErrQuotaExceeded) {
+		t.Fatalf("error = %v, want ErrQuotaExceeded", err)
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1 (no retry on rejection)", attempts)
+	}
+}
+
 func TestUnsafeMutationSurfacesUnknownOutcome(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "lost", http.StatusInternalServerError) }))
 	defer srv.Close()

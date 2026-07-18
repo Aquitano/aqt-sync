@@ -743,6 +743,14 @@ func newIdempotencyKey() (string, error) {
 	return hex.EncodeToString(raw[:]), nil
 }
 
+// retryableCreate reports whether a failed idempotent create is worth one more
+// attempt: transport failures (send reports status 0) and transient 5xx, which
+// the idempotency key makes safe to replay. Definitive rejections — 4xx and the
+// quota 507 — would only repeat the same answer at double the load.
+func retryableCreate(status int) bool {
+	return status == 0 || (status >= 500 && status != http.StatusInsufficientStorage)
+}
+
 func (c *Client) doRawIdempotent(method, path string, body []byte, out any) error {
 	key, err := newIdempotencyKey()
 	if err != nil {
@@ -756,8 +764,11 @@ func (c *Client) doRawIdempotent(method, path string, body []byte, out any) erro
 		}
 		req.Header.Set("Content-Type", api.ResourceEnvelopeMediaType)
 		req.Header.Set("Idempotency-Key", key)
-		_, data, err := c.send(req, path)
+		status, data, err := c.send(req, path)
 		if err != nil {
+			if !retryableCreate(status) {
+				return err
+			}
 			last = err
 			continue
 		}
@@ -786,8 +797,11 @@ func (c *Client) doIdempotent(method, path string, body, out any) error {
 		}
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Idempotency-Key", key)
-		_, data, err := c.send(req, path)
+		status, data, err := c.send(req, path)
 		if err != nil {
+			if !retryableCreate(status) {
+				return err
+			}
 			last = err
 			continue
 		}

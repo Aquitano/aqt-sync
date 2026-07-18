@@ -95,6 +95,11 @@ func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error
 // PutGrant stores (or replaces) a grant on a resource the caller owns. The
 // grantee handle is not validated against accounts: a wrap to a decoy handle
 // (unknown-email lookup) must be accepted indistinguishably from a real one.
+//
+// resources.version deliberately covers the grant set, not just content: the
+// bump here is what makes ExpectedVersion a CAS over grant mutations. The cost
+// is that a content writer's If-Match can 409 on a concurrent grant change; its
+// refetch-and-retry resolves that like any other conflict.
 func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expectedVersions ...int) error {
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
@@ -210,6 +215,7 @@ func (s *Store) ListResourceGrants(owner, resourceID string, page pageParams) ([
 
 // DeleteGrant removes one grant from a resource the caller owns. ErrNotFound
 // covers a missing resource, foreign ownership, and a missing grant alike.
+// Bumps resources.version for the same reason PutGrant does.
 func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions ...int) error {
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
