@@ -1,6 +1,6 @@
 .PHONY: build build-server test test-short test-race vet fmt fuzz restore-drill docker clean
 
-# Build both binaries into ./bin.
+# Build the CLI, Git helper, and server into ./bin.
 build:
 	go build -o bin/aqt ./cmd/aqt
 	go build -o bin/git-remote-aqt ./cmd/git-remote-aqt

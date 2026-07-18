@@ -1,82 +1,93 @@
-# Backing up git repositories
+# Encrypted Git repositories
 
-aqt ignores `.git` by default. A tracked folder syncs your working files; the
-repository's internal directory — locks, loose objects, packfiles — is left out. For
-most repositories that is exactly right: the canonical history lives on your git host
-(GitHub, GitLab, a bare remote), and aqt covers the working tree.
+Use an `aqt::` Git remote when the repository history itself belongs in aqt. The
+`git-remote-aqt` helper stores Git bundles as zero-knowledge encrypted resource
+segments, so Git—not folder sync—owns commits, refs, rebases, and merge conflicts.
+The server sees ciphertext sizes, counts, and timing, but not repository paths, refs,
+commits, or object structure.
 
-Some repositories have no remote. A local-only Obsidian vault or notes repo keeps its
-entire history in `.git` and nowhere else. To back that up, aqt has to capture `.git`
-too — with the caveats below.
+## Setup
 
-## Tracking .git
+Build the CLI, helper, and server, then put `bin/` on `PATH`:
 
-`aqt init` detects a repository and offers to track its `.git`. Accepting writes a
-re-include rule into the starter `.aqtignore`:
-
-```
-# aqt ignores .git by default; ! re-includes it
-!.git/
+```sh
+make build
+export PATH="$PWD/bin:$PATH"
 ```
 
-You can add that line to any `.aqtignore` yourself. A `!.git/` rule at the root of a
-tracked folder brings the whole `.git` directory back into the sync.
+Create and attach a private remote from an existing repository:
 
-## The torn-write risk
+```sh
+aqt repo create notes
+git remote add origin aqt::notes
+git push -u origin main
+```
 
-`.git` is captured as plain files. If git rewrites its index or repacks objects at
-the moment a sync reads the tree, the sync can capture a half-written index or
-packfile — a `.git` that git would consider corrupt on restore.
+On another logged-in machine:
 
-aqt narrows that window with a **git-busy guard**:
+```sh
+git clone aqt::notes
+```
 
-- The `watch` daemon holds a sync back while any repository under the folder is
-  mid-operation — an index or ref lock (`index.lock`, `*.lock`) or a paused
-  merge/rebase/cherry-pick.
-- Manual `aqt sync` applies the same guard, but only when `.git` is actually tracked.
-  If a repository is busy, the sync waits briefly and then defers rather than push a
-  half-written repo, exiting with code 75 (the same "deferred, retry later" code as
-  `watch --once`). Folders that ignore `.git` (the default) are never affected.
+The URL may use the encrypted name or resource id. It deliberately contains no
+server or credential; the helper uses the active aqt profile and cached unlocked
+session. Headless jobs must log in and retain a valid session first—the helper does
+not prompt when Git invokes it without a terminal.
 
-The guard is a mitigation, not a guarantee: a commit that *starts* just after the
-check still races the read. Two things keep that from being a data-loss event:
+## Daily operation
 
-- Content-addressed chunking means a torn `.git` only re-uploads the `.git` objects
-  that changed. It never corrupts other files in the folder, and it never affects a
-  different sync.
-- A slightly-torn `.git` is usually recoverable with `git fsck`/`git gc`, or by
-  re-cloning history from a remote if one exists.
+Normal Git commands work:
 
-## Recommended patterns
+```sh
+git fetch origin
+git pull --rebase origin main
+git push origin main
+git push origin --delete old-branch
+git push origin v1
+```
 
-- **Repository with a remote (default): don't track `.git`.** Let your git host own
-  the history and let aqt sync the working files. Nothing to configure.
-- **Local-only repository (the notes-vault shape): track `.git`, keep the guard on.**
-  Accept the small torn-write window. Prefer syncing when you are not mid-commit; the
-  guard covers active locks. For a guaranteed-consistent snapshot, quiesce git first
-  — commit, then sync — or write history into a tracked file with
-  `git bundle create history.bundle --all` and let aqt back up the bundle instead of
-  the live `.git`.
-- **Disabling the guard.** Set it off per folder in `.aqtconfig` only if you
-  understand the risk:
-  ```json
-  { "watch": { "gitGuard": false } }
-  ```
-  This applies to both `watch` and manual `sync`.
+Pushes are optimistic and atomic. The helper rejects non-fast-forward updates unless
+the refspec is forced, retries a concurrent root update up to five times, and never
+publishes a root before every encrypted bundle segment is durable. A killed or losing
+push leaves only unreferenced, age-GC-eligible segments.
 
-## Restore
+Inspect and maintain remotes with:
 
-A tracked `.git` restores like any other subtree: `aqt clone` (or `aqt sync`)
-reproduces its files byte for byte. After restoring a local-only repository, run
-`git status` (and `git fsck` if the backup may have caught a repack) to confirm the
-working tree and history agree.
+```sh
+aqt repo ls
+aqt repo info notes
+aqt repo gc notes       # compact an even local clone to one full bundle
+aqt repo rm notes
+```
 
-## Adopting a repository already on disk
+The bundle chain compacts automatically at 64 bundles by default. Set another
+threshold at creation with `aqt repo create --compact-at N notes`. Compaction first
+snapshots the previous root, then swaps one full bundle under version CAS. A manual
+`repo gc` must run inside a clone whose refs are even with the remote; otherwise it
+leaves the chain unchanged.
 
-When the working tree is already checked out — a fresh `git clone` from the code
-host, or a machine that still has the repo — a plain `aqt clone` refuses the
-non-empty directory. Use `aqt clone --adopt <folder-id> <dir>` instead: it writes the
-tracking metadata in place, reuses every file that already matches the remote by
-content hash (no re-download), and surfaces one-sided differences as conflicts, the
-same as `aqt sync --reconcile`. On a conflict it still leaves the tracking written, so
-you can resolve and re-run `aqt sync --reconcile`.
+SHA-1 and SHA-256 repositories are supported, but one remote cannot mix object
+formats. Branches, annotated tags, forced updates, and ref deletion round-trip.
+Shallow clone, submodule recursion, grants/sharing, and the Git wire protocol are not
+part of the first version.
+
+## Backups and restore
+
+Back up the server ciphertext data directory as described in
+[`docs/deploy.md`](deploy.md). `make restore-drill` proves both storage paths: it
+restores a tracked folder and an encrypted Git remote on a fresh server, recovers the
+account from email plus passphrase, clones the repository, runs `git fsck`, and
+compares every branch and tag ref with the source.
+
+## Why not sync `.git/` as folder files?
+
+`.git` contains locks, loose objects, and packfiles that Git rewrites transactionally.
+Capturing those files mid-commit or mid-repack can produce a torn repository, and two
+machines cannot safely reconcile those internals file by file. Normal folder sync
+therefore ignores `.git/`; use `aqt::` for repository history and use `aqt sync` only
+for non-Git folders or working-tree data that is intentionally independent of Git.
+
+Legacy folders may still re-include `!.git/` in `.aqtignore`, and the git-busy guard
+reduces the torn-write window, but that is a compatibility escape hatch—not the
+recommended repository backup design. If restoring such a legacy capture, run
+`git status` and `git fsck` before trusting it.

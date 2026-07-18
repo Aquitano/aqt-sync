@@ -4,6 +4,29 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Encrypted Git remotes: `aqt repo create|ls|info|gc|rm` and the
+  `git-remote-aqt` helper make `git clone aqt::<repo>`, fetch, push, force-push,
+  tags, and ref deletion work through the existing zero-knowledge pack API.
+  Pushes use fast-forward checks plus bounded version-CAS retries; bundle chains
+  compact automatically or via `repo gc`, snapshotting the pre-compaction root.
+- `aqt sync --conflicts=merge` (and `.aqtconfig` `conflicts: "merge"`) performs
+  bounded three-way text merges for non-overlapping edits and falls back to the
+  collision-safe conflict-copy behavior for overlaps, binary/oversized files,
+  delete/modify conflicts, or unavailable base chunks. It never writes conflict
+  markers.
+- `aqt diff [path...] [dir]` renders unified local-versus-base diffs;
+  `--remote` shows incoming changes and `--against <snapshot-id>` compares a
+  snapshot with the working tree. Binary and oversized changes use a one-line
+  marker.
+
+### Changed
+
+- Client capability 4 gates the sealed `gitremote` root format. Git remotes are
+  private-only in this release; public visibility and grants are refused
+  server-side. Upgrade every Git-remote reader before creating one.
+
 ## [v0.4.1] - 2026-08-01
 
 ### Added

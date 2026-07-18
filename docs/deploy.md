@@ -244,10 +244,10 @@ never exercised is not a backup:
 make restore-drill        # or: scripts/restore-drill.sh
 ```
 
-It builds both binaries, pushes a realistic tree (nested dirs, a binary, an
-executable, a Unicode name, a tracked `.git`), takes a cold backup, stands up a fresh
-server from the copy, recovers on a clean client config from email + passphrase,
-clones, and diffs the result against the original. `go test ./cmd/aqt -run
+It builds all three binaries, pushes a realistic tree plus an encrypted Git remote,
+takes a cold backup, stands up a fresh server from the copy, recovers on a clean
+client config from email + passphrase, clones and diffs the folder, clones the Git
+remote, runs `git fsck`, and compares its branch/tag refs. `go test ./cmd/aqt -run
 TestFullBackupRestoreDrill` is the in-process twin that runs on every CI build.
 
 ## Privacy boundary
