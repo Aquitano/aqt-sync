@@ -107,8 +107,8 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 		return err
 	}
 	var resOwner string
-	var version int
-	if err := tx.QueryRow(`SELECT owner_handle, version FROM resources WHERE id = ?`, resourceID).Scan(&resOwner, &version); err != nil {
+	var version, compactAt int
+	if err := tx.QueryRow(`SELECT owner_handle, version, compact_at FROM resources WHERE id = ?`, resourceID).Scan(&resOwner, &version, &compactAt); err != nil {
 		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
@@ -118,6 +118,10 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 	if resOwner != owner {
 		tx.Rollback()
 		return ErrNotFound
+	}
+	if compactAt > 0 {
+		tx.Rollback()
+		return ErrGitRemotePolicy
 	}
 	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
 		tx.Rollback()
@@ -481,6 +485,10 @@ func (s *Server) createGrant(c *gin.Context) {
 	}
 	if errors.Is(err, ErrGrantLimit) {
 		abortCode(c, http.StatusBadRequest, "grant limit reached for this resource", api.ErrCodeGrantLimit)
+		return
+	}
+	if errors.Is(err, ErrGitRemotePolicy) {
+		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
 		return
 	}
 	if err != nil {

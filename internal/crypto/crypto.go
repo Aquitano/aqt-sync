@@ -296,6 +296,8 @@ var (
 	AADPack          = []byte("aqt-pack-v1")      // a pack-and-seal tarball segment (sealed under the folder content key)
 	AADPackRoot      = []byte("aqt-packroot-v1")  // a pack-and-seal folder's sealed root blob
 	AADTreeRoot      = []byte("aqt-treeroot-v1")  // a Merkle-DAG folder's sealed root blob (distinct from AADBlob, like AADPackRoot)
+	AADGitRefsRoot   = []byte("aqt-gitrefs-v1")   // a git-remote resource's sealed refs and bundle-chain root
+	AADGitBundle     = []byte("aqt-gitbundle-v1") // one opaque, per-push-unique git bundle segment
 	aadKeyWrap       = []byte("aqt-keywrap-v1")   // content key wrapped under the master key
 	aadGated         = []byte("aqt-gated-v1")     // content key wrapped under a link password
 	aadRootWrap      = []byte("aqt-rootwrap-v1")  // master (root) key wrapped under the unlock key

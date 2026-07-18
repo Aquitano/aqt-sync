@@ -235,6 +235,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
+	root.AddCommand(repoCmd())
 	root.AddCommand(tuiCmd(), updateCmd())
 
 	markJSONSupported(root) // the bare-path push sugar prints the push JSON

@@ -13,8 +13,11 @@ const (
 	// CapabilityRootKeyRotation is the first release that can rotate an account
 	// root key and migrate the identities derived from it.
 	CapabilityRootKeyRotation = 3
+	// CapabilityGitRemote is the first release that understands sealed Git remote
+	// roots and the server-side policy attached to them.
+	CapabilityGitRemote = 4
 	// ClientCapability is the highest format this build can read.
-	ClientCapability = CapabilityRootKeyRotation
+	ClientCapability = CapabilityGitRemote
 )
 
 // CapabilityHeader carries a request's client capability. Missing or malformed

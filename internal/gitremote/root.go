@@ -1,0 +1,132 @@
+// Package gitremote implements the sealed client-side data model used by the
+// git-remote-aqt helper. The server stores these values opaquely.
+package gitremote
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+
+	"github.com/aquitano/aqt-sync/internal/crypto"
+)
+
+const (
+	RefsRootVersion  = 1
+	DefaultCompactAt = 64
+)
+
+// Segment names one independently sealed slice of a Git bundle. Len is the
+// plaintext length and Size is the stored nonce+ciphertext length.
+type Segment struct {
+	ID   string `json:"id"`
+	Len  int    `json:"len"`
+	Size int    `json:"size"`
+}
+
+// BundleRef names one push's bundle and the refs needed to decide whether a
+// client must apply it. Segments are embedded because the existing public object
+// API roots and locates concrete object IDs; ID remains the stable group/cache key.
+type BundleRef struct {
+	ID       string    `json:"id"`
+	Tips     []string  `json:"tips,omitempty"`
+	Bases    []string  `json:"bases,omitempty"`
+	Segments []Segment `json:"segments,omitempty"`
+}
+
+// RefsRoot is the small sealed resource blob for a Git remote.
+type RefsRoot struct {
+	Version      int               `json:"version"`
+	Head         string            `json:"head,omitempty"`
+	Refs         map[string]string `json:"refs,omitempty"`
+	Bundles      []BundleRef       `json:"bundles,omitempty"`
+	Generation   int               `json:"generation"`
+	ObjectFormat string            `json:"objectFormat,omitempty"`
+}
+
+func NewRefsRoot() RefsRoot {
+	return RefsRoot{Version: RefsRootVersion, Refs: make(map[string]string)}
+}
+
+// SegmentIDs returns the concrete object IDs the server must retain for this root.
+func (r RefsRoot) SegmentIDs() []string {
+	var ids []string
+	for _, bundle := range r.Bundles {
+		for _, segment := range bundle.Segments {
+			ids = append(ids, segment.ID)
+		}
+	}
+	return ids
+}
+
+func (r RefsRoot) Size() int64 {
+	var size int64
+	for _, bundle := range r.Bundles {
+		for _, segment := range bundle.Segments {
+			size += int64(segment.Size)
+		}
+	}
+	return size
+}
+
+func (r RefsRoot) Validate() error {
+	if r.Version != RefsRootVersion {
+		return fmt.Errorf("unsupported git remote root version %d", r.Version)
+	}
+	if r.Generation < 0 {
+		return errors.New("git remote root has a negative generation")
+	}
+	if r.Head != "" && !strings.HasPrefix(r.Head, "refs/heads/") {
+		return fmt.Errorf("invalid git remote HEAD %q", r.Head)
+	}
+	switch r.ObjectFormat {
+	case "", "sha1", "sha256":
+	default:
+		return fmt.Errorf("unsupported git object format %q", r.ObjectFormat)
+	}
+	for name, oid := range r.Refs {
+		if !strings.HasPrefix(name, "refs/") || oid == "" {
+			return fmt.Errorf("invalid git ref %q", name)
+		}
+	}
+	for _, bundle := range r.Bundles {
+		if bundle.ID == "" || len(bundle.Segments) == 0 {
+			return errors.New("git bundle entry is missing its id or segments")
+		}
+		for _, segment := range bundle.Segments {
+			if segment.ID == "" || segment.Len < 0 || segment.Size <= crypto.NonceSize {
+				return fmt.Errorf("invalid segment in git bundle %q", bundle.ID)
+			}
+		}
+	}
+	return nil
+}
+
+func SealRefsRoot(root RefsRoot, key crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {
+	if err := root.Validate(); err != nil {
+		return crypto.SealedBlob{}, err
+	}
+	b, err := json.Marshal(root)
+	if err != nil {
+		return crypto.SealedBlob{}, err
+	}
+	return crypto.SealBound(b, key, crypto.AADGitRefsRoot, resourceID)
+}
+
+func OpenRefsRoot(blob crypto.SealedBlob, key crypto.ContentKey, resourceID string) (RefsRoot, error) {
+	var root RefsRoot
+	b, err := crypto.OpenBound(blob, key, crypto.AADGitRefsRoot, resourceID)
+	if err != nil {
+		return root, err
+	}
+	if err := json.Unmarshal(b, &root); err != nil {
+		return root, err
+	}
+	if err := root.Validate(); err != nil {
+		return root, err
+	}
+	if root.Refs == nil {
+		root.Refs = make(map[string]string)
+	}
+	return root, nil
+}

@@ -19,6 +19,7 @@ func seedEnvelopes(f *testing.F) {
 		EncryptedMeta: crypto.SealedBlob{Nonce: []byte("mn"), Ciphertext: []byte("mc")},
 		ChunkRefs:     []string{"aa", "bb"},
 		MinClient:     2,
+		CompactAt:     64,
 	})
 	if err != nil {
 		f.Fatal(err)
@@ -67,6 +68,7 @@ func FuzzResourceUploadRoundTrip(f *testing.F) {
 			Blob:            crypto.SealedBlob{Nonce: nonce, Ciphertext: ct},
 			ExpectedVersion: expectedVersion,
 			MinClient:       minClient,
+			CompactAt:       64,
 		}
 		encoded, err := EncodeResourceUpload(req)
 		if err != nil {
@@ -77,7 +79,7 @@ func FuzzResourceUploadRoundTrip(f *testing.F) {
 			t.Fatalf("decode: %v", err)
 		}
 		if got.ID != req.ID || got.Visibility != req.Visibility ||
-			got.ExpectedVersion != req.ExpectedVersion || got.MinClient != req.MinClient {
+			got.ExpectedVersion != req.ExpectedVersion || got.MinClient != req.MinClient || got.CompactAt != req.CompactAt {
 			t.Fatalf("scalar mismatch: got %+v want %+v", got, req)
 		}
 		if !bytes.Equal(got.Blob.Nonce, req.Blob.Nonce) || !bytes.Equal(got.Blob.Ciphertext, req.Blob.Ciphertext) {
@@ -100,6 +102,7 @@ func FuzzResourceDownloadRoundTrip(f *testing.F) {
 			Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ct},
 			Version:    version,
 			MinClient:  minClient,
+			CompactAt:  64,
 			ExpiresAt:  123, MaxReads: 9, Reads: 4, CreatedAt: 100, UpdatedAt: 120,
 		}
 		encoded, err := EncodeResourceDownload(res)
@@ -111,7 +114,7 @@ func FuzzResourceDownloadRoundTrip(f *testing.F) {
 			t.Fatalf("decode: %v", err)
 		}
 		if got.ID != res.ID || got.Visibility != res.Visibility ||
-			got.Version != res.Version || got.MinClient != res.MinClient ||
+			got.Version != res.Version || got.MinClient != res.MinClient || got.CompactAt != res.CompactAt ||
 			got.ExpiresAt != res.ExpiresAt || got.MaxReads != res.MaxReads || got.Reads != res.Reads ||
 			got.CreatedAt != res.CreatedAt || got.UpdatedAt != res.UpdatedAt {
 			t.Fatalf("scalar mismatch: got %+v want %+v", got, res)
