@@ -21,7 +21,7 @@ deliberately implementation-free — types and behavior, not code.
 | Default visibility | **Private.** `--public` opts into a shareable link. |
 | CLI shape | One-liner spine (`aqt push`) + explicit verbs + share/private model. |
 | Extras in v1 | `-P` password gate, clipboard auto-copy. |
-| Out of v1 | standalone `rotate`, FUSE `mount`. |
+| Out of v1 | FUSE `mount`. (Root-key rotation shipped as `aqt passphrase rotate-root`.) |
 | Runtime | Go. CLI on cobra; server on Gin; SQLite (modernc, pure-Go) + filesystem blobs. |
 | Crypto | Argon2id (KDF), XChaCha20-Poly1305 (AEAD), HKDF-SHA256 → Ed25519 auth signing key. |
 
@@ -77,7 +77,8 @@ so a typo'd subcommand never uploads a file.
 
 Global flags (all commands): `--server <url>` (default `http://localhost:8080`; the
 `aqt.sh` URLs below stand in for wherever you host it),
-`--profile <name>`, `--json`, `-q/--quiet`, `-h/--help`, `-v/--version`.
+`--profile <name>`, `--json`, `-q/--quiet`, `--progress` (live transfer bar on a
+terminal, for sync/clone), `-h/--help`, `-v/--version`.
 
 Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network ·
 `6` upgrade required (the remote resource is sealed in a newer format than this build
@@ -92,9 +93,11 @@ aqt <path>                Sugar for `aqt push <path>`.
 aqt push -                Read plaintext from stdin.
 
   --public            Mint a shareable fragment link instead of a private ref.
-  -P, --password      Password-gate a public link (prompts unless value given;
+  -P, --password      Password-gate a public link (bare -P prompts on a terminal;
                       an inline value must be attached: -P<pw> or --password=<pw>).
                       Implies --public. Recipient needs link AND password.
+      --password-stdin  Read the gate password from stdin, keeping it out of the
+                      process table (the path the TUI uses).
   -n, --name <label>  Human label shown in `aqt ls` (encrypted; not in the URL).
       --no-clip       Do not copy the resulting ref/URL to the clipboard.
       --expire <dur>  Server-expire the public link after a duration (30m, 24h, 7d).
@@ -143,9 +146,10 @@ https://aqt.sh/x/Qz81mn#p.R4t…         (copied to clipboard)
 aqt pull <url|id|ref>     Decrypt to disk (original name in CWD by default).
 aqt cat  <url|id|ref>     Decrypt to stdout, never touches disk.
 
-  -o, --out <path>        Write to a specific path.
-      --force             Overwrite an existing file.
-  -P, --password          Supply a gated link's password non-interactively.
+  -o, --out <path>        Write to a specific path (pull only).
+      --force             Overwrite an existing file (pull only).
+  -P, --password          Gated link's password (bare -P prompts; inline -P<pw>).
+      --password-stdin    Read the password from stdin (keeps it out of the process table).
 ```
 
 ```console
@@ -171,11 +175,15 @@ aqt unshare <id>          Take access back: ROTATES the content key, re-encrypts
                           lifecycle policy (it belongs to the public link).
                           --with <email> revokes that one grant instead.
                           Asks for confirmation (-y skips).
+aqt shares                Incoming: resources other accounts granted you (read-only).
+aqt contacts              Accounts pinned on first use for `--with` sharing;
+                          `rm <email>` drops a pin, `verify <email>` compares fingerprints.
 aqt ls      [--json]      List your resources: name, kind, size, visibility, id.
 aqt find    [query]       Fuzzy-search all files + folder contents in fzf; prints
                           the selected resource's ref. --json / --no-fzf for scripts.
 aqt info    <id|url>      Metadata for one resource (no decrypt needed for your own).
 aqt rm      <id>...       Delete server-side ciphertext + metadata (confirms; -y skips).
+                          --with-snapshots also drops every snapshot of each resource.
 ```
 
 ```console
@@ -201,8 +209,11 @@ aqt status [<dir>]        Local changes since last sync, plus incoming changes o
       --offline           Report only local changes; skip the server check.
 aqt sync   [<dir>]        Two-way reconcile: encrypt+push local changes, pull remote.
       --push-only / --pull-only / --dry-run / --force
+      --reconcile / --rehash / --accept-rollback
       --conflicts block|copy
 aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
+      --adopt             Bind an existing directory: reuse matching files by hash,
+                          reconcile differences as conflicts.
 ```
 
 `.aqtignore` uses gitignore syntax. The starter file seeds common build-artifact
@@ -258,10 +269,16 @@ stops cleanly (it can't prompt) rather than looping. Per-folder defaults live in
 
 ```
 aqt login   [--email <e>]   Prompt passphrase → derive master key → attach device.
-aqt logout  [--all-devices] Drop local key material (optionally revoke others).
+      --ttl <d>             Session cache lifetime (0 = until logout).
+      --invite <t>         Invite token if the server needs one (or AQT_INVITE_TOKEN).
+      --kdf-preset/--kdf-time/--kdf-memory/--kdf-threads   Argon2id tuning (new account only).
+aqt logout  [--all-devices] Drop local key material (optionally revoke others; -y skips).
 aqt whoami                  Account, device, key fingerprint, server.
 aqt devices [ls | rm <id>]  List / revoke attached devices.
 aqt passphrase change       Re-wrap master key under a new passphrase (no re-encrypt).
+aqt passphrase calibrate    Re-tune Argon2id cost, same passphrase (other devices re-login).
+aqt passphrase rotate-root  Compromise recovery: mint a fresh root key, re-wrap every
+                            resource/snapshot/grant, revoke every other device (-y skips).
 ```
 
 First-run auth is lazy: a push on a fresh machine prompts to create the account.
@@ -283,12 +300,42 @@ cached root key alone cannot re-attach after a change. The new-device bootstrap
 (`GET /account/salt`) returns `{kdf, wrappedRoot}` and serves an **indistinguishable
 decoy** for an unknown email, so it no longer reveals which emails have accounts. `aqt passphrase rotate-root` is the compromise-recovery operation: it mints a fresh RK, rewraps every recoverable resource and snapshot content key plus incoming grant, migrates the derived signing/encryption identities, and atomically switches the account record. The server issues a fresh token only to the initiating device and removes every other device; they recover by logging in again with the passphrase. Existing convergent objects remain readable because their per-object keys are sealed in their roots; future writes derive convergence from the new RK.
 
+### 3.7 Snapshots, checkpoints & restore
+
+Snapshots are immutable, account-global, point-in-time copies of a resource, pinned
+server-side so a later sync or delete cannot reclaim them. A checkpoint is a named,
+anchored snapshot; `restore` is the top-level command that brings either back.
+
+```
+aqt snapshot create [dir] [label]   Snapshot a tracked folder's current state.
+      -l, --label <s>               Label, encrypted on this machine (or positional).
+          --id <id>                 Snapshot this resource id directly.
+aqt snapshot list [dir]             List snapshots, newest first (alias: ls).
+      --id <id> / --limit <n> / --since <dur> / --before <dur>
+aqt snapshot find [query]           Fuzzy-search snapshots in fzf; prints the id.
+      --id <id> / --no-fzf
+aqt snapshot diff <snapshot-id>     Diff against the live tree (+ added, - removed, ~ modified).
+      --against <snapshot-id>       Compare two snapshots instead of the live resource.
+aqt snapshot export <snapshot-id>   Decrypt a snapshot to plaintext (leaves the boundary).
+      -o, --out <dir>               Destination (required).
+aqt snapshot prune [snapshot-id...] Delete by id, or by retention.
+      --keep-last <n> / --before <dur> / --id <id> / --dir <dir> / --dry-run / -y
+aqt snapshot anchor|unanchor <id>   Protect a snapshot from retention, or release it.
+aqt snapshot auto [dir]             Show, or toggle (--on/--off, --id), scheduled snapshots.
+aqt checkpoint <name> [dir]         Named, anchored snapshot retention never prunes.
+      --id <id>
+aqt restore <name-or-id> [dir]      Restore a checkpoint by name or a snapshot by id.
+      -o, --out <dir>               Side-by-side into a new dir (default aqt-restore-<id>).
+      --in-place                    Roll the live folder back and re-sync it (-y skips).
+      --id <id>                     Scope the name lookup to this resource id.
+```
+
 ---
 
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, rm, snapshot, checkpoint, restore, usage, watch/agent, tui  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, watch/agent, tui  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]

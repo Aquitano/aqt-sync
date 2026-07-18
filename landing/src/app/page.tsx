@@ -214,10 +214,10 @@ export default function Home() {
                   <span>aqt.sh/x/9fK2qd</span>
                   <span className="link-fragment">#k.Hs7nT4</span>
                 </p>
-                <p className="visual-caption">EXPIRY / BURN AFTER READ</p>
+                <p className="visual-caption">EXPIRY / BURN / ACCOUNT GRANTS</p>
               </div>
               <h3>The key stays after the #.</h3>
-              <p>Public links keep their content key in the URL fragment, which browsers never send to the server.</p>
+              <p>Public links keep their key after the #. For private account grants, aqt share --with gives read-only access, aqt shares lists incoming grants, and aqt contacts pins recipient keys.</p>
             </article>
 
             <article data-feature className="feature-cell feature-history">
@@ -226,7 +226,7 @@ export default function Home() {
               <div className="feature-visual" aria-hidden="true">
                 <div className="snap-rows">
                   <code><span>$</span> aqt checkpoint pre-release</code>
-                  <code><span>$</span> aqt diff pre-release</code>
+                  <code><span>$</span> aqt snapshot diff &lt;id&gt;</code>
                   <code><span>$</span> aqt restore pre-release</code>
                 </div>
               </div>

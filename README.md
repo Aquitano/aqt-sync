@@ -56,8 +56,14 @@ aqt clone --adopt <folder-id> ~/vault
 ```
 
 `aqt <path>` with no subcommand is shorthand for `aqt push <path>`. Run `aqt --help`
-for the full command set (`ls`, `find`, `cat`, `share`, `unshare`, `snapshot`,
-`checkpoint`, `restore`, `watch`, `devices`, `passphrase`, …).
+for the full command set (`ls`, `find`, `cat`, `share`, `unshare`, `shares`,
+`contacts`, `snapshot`, `checkpoint`, `restore`, `watch`, `devices`, `passphrase`, …).
+
+Grant a resource read-only to another account by email with `aqt share <id> --with
+<email>`; the recipient sees it under `aqt shares` and pulls or clones it, while you
+can never modify their copy. `aqt contacts` lists the accounts pinned on first use for
+`--with` sharing — `aqt contacts verify <email>` compares fingerprints out-of-band and
+`aqt contacts rm <email>` drops a pin so the next share re-pins.
 
 ## TUI
 
