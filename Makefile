@@ -3,6 +3,7 @@
 # Build both binaries into ./bin.
 build:
 	go build -o bin/aqt ./cmd/aqt
+	go build -o bin/git-remote-aqt ./cmd/git-remote-aqt
 	go build -o bin/aqt-server ./cmd/aqt-server
 
 build-server:
