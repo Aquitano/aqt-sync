@@ -970,9 +970,10 @@ type applyCtx struct {
 }
 
 type cleanMerge struct {
-	path  string
-	data  []byte
-	entry syncengine.Entry
+	path     string
+	data     []byte
+	entry    syncengine.Entry
+	original syncengine.Entry
 }
 
 // mergeConflictBytes is the pure per-file policy seam used by sync and fuzz tests:
@@ -992,9 +993,6 @@ func mergeConflictBytes(base, local, remote []byte) (primary, copy []byte, merge
 // A missing base object, binary/oversized content, delete/modify pair, or overlapping
 // edit is returned in fallback so normal copy semantics preserve both sides.
 func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, remoteByPath map[string]syncengine.Entry) ([]cleanMerge, map[string]bool, error) {
-	defer c.ck.Wipe()
-	defer c.conv.Wipe()
-	defer c.mk.Wipe()
 	fallback := map[string]bool{}
 	baseByPath := c.base.ByPath()
 	var candidates []string
@@ -1059,7 +1057,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			uploader.Wait()
 			return nil, nil, err
 		}
-		clean = append(clean, cleanMerge{path: path, data: data, entry: entry})
+		clean = append(clean, cleanMerge{path: path, data: data, entry: entry, original: le})
 	}
 	if err := uploader.Flush(); err != nil {
 		return nil, nil, err
@@ -1256,18 +1254,37 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		reclaimPacks(c.root, c.cl)
 	}
 	// The root now durably references the merged entry. Land the same bytes locally
-	// only after the optimistic PUT succeeds, so a CAS retry never leaves a partial
-	// merge in the working tree.
+	// only after the optimistic PUT succeeds, and only if the path still contains the
+	// entry resolveTextMerges read. A newer local edit in the merge->PUT window wins on
+	// disk and is re-planned against the committed merge on the next sync.
+	baseByPath := c.base.ByPath()
+	var mergeConflicts []string
+	landedMerges := make([]cleanMerge, 0, len(cleanMerges))
 	for _, resolution := range cleanMerges {
+		hash, exists, isDir, err := syncengine.HashOnDisk(c.root, resolution.path)
+		if err != nil {
+			return err
+		}
+		if !exists || isDir || (hash != resolution.original.Hash && hash != resolution.entry.Hash) {
+			if baseEntry, ok := baseByPath[resolution.path]; ok {
+				newBase[resolution.path] = baseEntry
+			} else {
+				delete(newBase, resolution.path)
+			}
+			mergeConflicts = append(mergeConflicts, resolution.path)
+			continue
+		}
 		if err := syncengine.WriteFile(c.root, resolution.entry, resolution.data); err != nil {
 			return err
 		}
+		landedMerges = append(landedMerges, resolution)
 	}
 
 	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, downloads, localDeletes, localByPath, remoteByPath, c.base.ByPath(), newBase)
 	if err != nil {
 		return err
 	}
+	conflicts = append(conflicts, mergeConflicts...)
 
 	// Server is updated; now bring the local tree in line. A local file or symlink the
 	// remote turned into a directory must be removed before the download that creates
@@ -1307,8 +1324,8 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		return err
 	}
 	recordRemoteVersion(c.root, syncedVersion)
-	mergedPaths := make([]string, len(cleanMerges))
-	for i, resolution := range cleanMerges {
+	mergedPaths := make([]string, len(landedMerges))
+	for i, resolution := range landedMerges {
 		mergedPaths[i] = resolution.path
 	}
 	summarize(uploads, downloads, localDeletes, mergedPaths)

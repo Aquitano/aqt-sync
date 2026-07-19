@@ -344,6 +344,53 @@ func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
+func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
+	var armed, blocked atomic.Bool
+	putStarted := make(chan struct{})
+	releasePUT := make(chan struct{})
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" &&
+			blocked.CompareAndSwap(false, true) {
+			close(putStarted)
+			<-releasePUT
+		}
+		pass(w, r)
+	})
+
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "notes.md", "one\ntwo\nthree\nfour\n")
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "notes.md", "ONE\ntwo\nthree\nfour\n")
+	h.sync(origin)
+	writeTree(t, replica, "notes.md", "one\ntwo\nthree\nFOUR\n")
+
+	armed.Store(true)
+	result := make(chan error, 1)
+	go func() { result <- runSync(replica, syncOptions{conflicts: "merge"}) }()
+	<-putStarted
+	newer := "one\nTWO\nthree\nFOUR\n"
+	writeTree(t, replica, "notes.md", newer)
+	close(releasePUT)
+	if err := <-result; !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("merge with local drift: want errConflictsRemain, got %v", err)
+	}
+	if got := readTree(t, replica, "notes.md"); got != newer {
+		t.Fatalf("merge clobbered newer local edit: %q", got)
+	}
+
+	armed.Store(false)
+	if err := runSync(replica, syncOptions{conflicts: "merge"}); err != nil {
+		t.Fatalf("reconcile preserved edit: %v", err)
+	}
+	if got, want := readTree(t, replica, "notes.md"), "ONE\nTWO\nthree\nFOUR\n"; got != want {
+		t.Fatalf("reconciled merge = %q, want %q", got, want)
+	}
+}
+
 func TestSyncConflictMergeMissingBaseChunkFallsBackToCopy(t *testing.T) {
 	h := newE2E(t)
 	origin := t.TempDir()
