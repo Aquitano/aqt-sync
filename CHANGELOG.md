@@ -6,20 +6,26 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
-- Encrypted Git remotes: `aqt repo create|ls|info|gc|rm` and the
+- Encrypted Git remotes: `aqt repo create|ls|info|gc|restore|rm` and the
   `git-remote-aqt` helper make `git clone aqt::<repo>`, fetch, push, force-push,
   tags, and ref deletion work through the existing zero-knowledge pack API.
   Pushes use fast-forward checks plus bounded version-CAS retries; bundle chains
-  compact automatically or via `repo gc`, snapshotting the pre-compaction root.
+  compact automatically or via `repo gc`, snapshotting the pre-compaction root;
+  `repo restore` rolls back to that root after snapshotting the current chain.
+  SHA-1 and SHA-256 clone formats are negotiated through Git's remote-helper
+  object-format extension. Already-full GC and same-version CAS retries reuse
+  their bundle/snapshot work.
 - `aqt sync --conflicts=merge` (and `.aqtconfig` `conflicts: "merge"`) performs
   bounded three-way text merges for non-overlapping edits and falls back to the
   collision-safe conflict-copy behavior for overlaps, binary/oversized files,
   delete/modify conflicts, or unavailable base chunks. It never writes conflict
-  markers.
+  markers, and a post-CAS drift check preserves edits made while a merge PUT is
+  in flight. Clean results are also checked line-by-line against all three inputs,
+  so adjacent unterminated hunks cannot synthesize content by concatenation.
 - `aqt diff [path...] [dir]` renders unified local-versus-base diffs;
   `--remote` shows incoming changes and `--against <snapshot-id>` compares a
-  snapshot with the working tree. Binary and oversized changes use a one-line
-  marker.
+  snapshot with the working tree without requiring `base.json`. Binary,
+  oversized, and excessive-edit-distance changes use a one-line marker.
 
 ### Changed
 

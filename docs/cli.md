@@ -46,8 +46,9 @@ require a chunked folder; pack-and-seal folders can use the snapshot form.
 
 ## Encrypted Git remotes
 
-`aqt repo create|ls|info|gc|rm` manages private `gitremote` resources. `create`
+`aqt repo create|ls|info|gc|restore|rm` manages private `gitremote` resources. `create`
 prints the Git URL (`aqt::<name>`); `--compact-at` sets the chain threshold. `ls`,
-`info`, `gc`, and `create` support `--json`; `rm` uses the normal confirmation flow.
+`info`, `gc`, `restore`, and `create` support `--json`; `restore` and `rm` use the
+normal confirmation flow.
 Git itself invokes `git-remote-aqt`, which must be on `PATH` and uses the active aqt
 profile/session. See [`git-repositories.md`](git-repositories.md) for the workflow.

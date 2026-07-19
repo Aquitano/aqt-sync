@@ -394,7 +394,8 @@ files: **docs/updates.md**.
 aqt repo create <name> [--compact-at N]  Create a private encrypted Git remote.
 aqt repo ls                              List remotes and bundle-chain state.
 aqt repo info <name-or-id>               Show refs, HEAD, format and snapshots.
-aqt repo gc <name-or-id>                 Compact the chain from an even local clone.
+aqt repo gc <name-or-id>                 Compact from locally available remote refs.
+aqt repo restore <snapshot-id> [-y]      Restore a pre-compaction bundle chain.
 aqt repo rm <name-or-id> [-y]            Delete the remote and reclaim its packs.
 
 git clone aqt::<name-or-id> [dir]
@@ -722,17 +723,24 @@ commits, or object structure. Git remotes cannot be public or granted in v1.
 
 `git-remote-aqt` implements the standard `list`, `fetch`, `push`, and `option`
 remote-helper protocol and delegates identity/session handling to
-`aqt git-remote-helper`. Fetch applies only missing bundles in chain order and treats its
-`.git/aqt/<remote>/state.json` cache as disposable, re-deriving applicability from
-locally present tips after cache loss. Push checks fast-forward policy, creates one
+`aqt git-remote-helper`. Fetch applies only missing bundles in chain order, deriving
+applicability directly from locally present tips with no helper-side state file. Push
+checks fast-forward policy, creates one
 incremental bundle for the ref batch, uploads its segments, then flips `RefsRoot` with
 `ExpectedVersion`. A 409 re-reads refs, re-checks ancestry, rebuilds, and retries up to
 five times; losing uploads remain unrooted and age-GC eligible. Ref deletion changes
-only the root. The first push records SHA-1 or SHA-256 and later mismatches are refused.
+only the root. A standalone annotated tag always includes its tag object. The helper's
+`object-format` capability and list keyword initialize fresh clones with the first
+push's recorded SHA-1 or SHA-256 format; later mismatches are refused clearly.
 
-At the per-repo threshold (64 by default), an even clone compacts the chain to one
-`git bundle --all`, snapshots the pre-compaction root, and CAS-swaps the new root while
-incrementing `generation`; `aqt repo gc` requests the same operation explicitly.
+At the per-repo threshold (64 by default), a clone containing every remote tip through
+a local or matching remote-tracking ref compacts exactly those refs to one bundle,
+snapshots the pre-compaction root, and CAS-swaps the new root while incrementing
+`generation`; unrelated local refs are excluded. `aqt repo gc` requests the same
+operation explicitly, and `aqt repo restore` version-CAS restores a saved root after
+snapshotting the current chain. Full bundles carry an explicit marker, making repeated
+GC a no-op; a spurious compaction CAS retry reuses the already-uploaded full bundle and
+pre-compaction snapshot while the source resource version is unchanged.
 Every root PUT lists all live segment ids, so old chains become ordinary mark-and-sweep
 garbage. Segment-before-root ordering, the resource mutex, and CAS make a killed helper
 or concurrent push leave either the old complete root or the new complete root, never
@@ -933,7 +941,7 @@ function currentSession(): Session | null;                                 // fo
 - **Defense-in-depth crypto** — *resolved:* AEAD additional-data domain separation across blob/wrap/gated-wrap has been in since v1; the resource id is now bound into the AAD as well (`SealBound`/`OpenBound`, tag form `aqt-<role>-v2:<id>` over the meta, inline body, and the FileRoot/TreeRoot/PackRoot resource blobs, plus snapshot labels), so a server swapping whole records (blob + meta + wrapped key are mutually consistent under the per-resource key) between ids fails the tag check. The id the check verifies against is the client's own: `GetResource` rejects a response whose echoed id differs from the requested one (and a filtered snapshot listing rejects rows claiming another resource), so the server cannot satisfy the binding by echoing the id of whatever record it chose to serve. Chunk objects, directory nodes, and pack segments stay id-free — they are content-addressed, client-verified against their address, and reachable only through an id-bound root, and binding them would kill cross-resource dedup. Bounded caveats: (1) a create seals before the server assigns the id, so a resource is unbound until its first re-seal (folder syncs upgrade the root — and once, the metadata — on the next update; a one-shot `push` stays unbound); (2) the v1 fallback that keeps old blobs readable means a server can serve a stale unbound blob (it still cannot forge or cross-open one) — full strictness would need client-generated ids and a fallback cut-off; (3) a snapshot browsed without naming a resource has no client-side expectation to pin its claimed resource id to (in-place restore checks the tracked folder's id; `--out` restores trust the claim); (4) once a folder has synced with an id-binding client, its root no longer opens on clients from before this change — upgrade every device together. Capability negotiation (`X-Aqt-Capability` request header + a per-resource `min_client` the server enforces with `426 Upgrade Required`, see §4.3 and `docs/compatibility.md`) gates every declared format boundary: a client below a resource's `min_client`, including a header-less client treated as baseline capability 1, is refused before any ciphertext is served. Key wiping: `ContentKey.Wipe` exists and every acquisition site scrubs on scope exit, including the longest-lived by-value copies in the sync/pack apply contexts; transient by-value copies on intermediate stack frames remain out of reach, the inherent Go caveat `Wipe` documents.
 - **Session cache at rest** — *resolved:* the cached master key is sealed under a random per-profile key kept in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service, via pure-Go `zalando/go-keyring`); the on-disk 0600 file holds only ciphertext + `expiresAt` and is useless without the keychain entry. The device token moves into the keychain too. A host with no keychain backend (headless server), or one that sets `AQT_NO_KEYCHAIN=1`, falls back to the machine-bound key/file, so non-interactive operation is unchanged there. Remaining caveat: a process running as the same user can still reach the keychain (or re-derive the machine key); fully closing that needs a passphrase/biometric-gated agent or hardware enclave, still deferred. Exposure stays bounded by `--ttl` and cleared by `logout`.
 - **Local base manifest at rest** — *resolved:* `.aqt/base.json` (the last-synced manifest) carries per-chunk decryption keys and inline small-file plaintext, so it is now sealed at rest under the **same** per-profile sealing key as the session cache (keychain, or machine-bound fallback), with a distinct `aqt-base-at-rest-v1` AAD. A backed-up / cloud-synced / stolen-disk copy is therefore useless off-machine, closing the same vectors the session-cache seal does, and it inherits the same residual caveat (a same-user process that reaches the keychain). The seal is read offline by `status` and before `unlockMaster`, so it uses the sealing key, not the master key. Old plaintext bases are read transparently and upgraded to the sealed form on the next sync (disjoint top-level keys make the two forms unambiguous). Retention note: an atomic rename replaces the file so no torn plaintext lingers, but pre-migration plaintext in freed disk blocks is not scrubbed — a forensic-only residue on the local disk.
-- **Conflict copies and text merge** — *resolved:* a chunked `sync` defaults to report-and-block (exit 4), and `--conflicts=copy` preserves the remote side beside a local-wins primary. `--conflicts=merge` first materializes base/local/remote text, combines non-overlapping line edits without markers, seals the result before the root CAS, and writes it locally only after that CAS succeeds. Binary/oversized content, overlapping hunks, delete/modify pairs, and a GC'd base chunk use the collision-safe copy path. Both resolving modes are refused with `--force`, baseless reconcile/rollback, one-direction sync, and pack mode. `aqt diff` reuses the materializers and Myers diff for unified local, incoming, and snapshot comparisons.
+- **Conflict copies and text merge** — *resolved:* a chunked `sync` defaults to report-and-block (exit 4), and `--conflicts=copy` preserves the remote side beside a local-wins primary. `--conflicts=merge` first materializes base/local/remote text, combines non-overlapping line edits without markers, seals the result before the root CAS, then re-hashes the planned local entry before writing after the CAS; drift preserves the newer edit and reports a conflict. Binary/oversized content, excessive edit distance, overlapping hunks, adjacent unterminated hunks that would invent a line, delete/modify pairs, and a GC'd base chunk use the collision-safe copy path. Both resolving modes are refused with `--force`, baseless reconcile/rollback, one-direction sync, and pack mode. `aqt diff` reuses the materializers, one incremental pack source/LRU per manifest side, and bounded Myers diff for unified local, incoming, and snapshot comparisons; snapshot comparison does not require `base.json`.
 
 Resolved since the first draft: device attach is now an Ed25519 challenge/response
 (no secret sent); resources support owner-checked in-place update + versioning; the

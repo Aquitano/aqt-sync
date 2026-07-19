@@ -56,18 +56,23 @@ Inspect and maintain remotes with:
 ```sh
 aqt repo ls
 aqt repo info notes
-aqt repo gc notes       # compact an even local clone to one full bundle
+aqt repo gc notes       # compact from locally available remote refs
+aqt repo restore <snapshot-id> -y
 aqt repo rm notes
 ```
 
 The bundle chain compacts automatically at 64 bundles by default. Set another
 threshold at creation with `aqt repo create --compact-at N notes`. Compaction first
 snapshots the previous root, then swaps one full bundle under version CAS. A manual
-`repo gc` must run inside a clone whose refs are even with the remote; otherwise it
-leaves the chain unchanged.
+`repo gc` must run inside a clone that has fetched every remote branch and tag. Local
+branches are not required: matching remote-tracking refs are sufficient, and unrelated
+local/WIP refs are excluded from the full bundle. `repo restore` rolls the remote back
+to a pre-compaction snapshot after first snapshotting the current chain. Running
+`repo gc` on an already-full chain is a no-op.
 
-SHA-1 and SHA-256 repositories are supported, but one remote cannot mix object
-formats. Branches, annotated tags, forced updates, and ref deletion round-trip.
+SHA-1 and SHA-256 repositories are supported. The helper negotiates the remote object
+format during clone and retains a mismatch guard for older callers. Branches,
+annotated tags, forced updates, and ref deletion round-trip.
 Shallow clone, submodule recursion, grants/sharing, and the Git wire protocol are not
 part of the first version.
 
