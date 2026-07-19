@@ -1,6 +1,7 @@
 package merge
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 )
@@ -41,5 +42,15 @@ func TestUnifiedNoTrailingNewline(t *testing.T) {
 func TestUnifiedEqualIsEmpty(t *testing.T) {
 	if got := Unified("a/f", "b/f", []byte("same\n"), []byte("same\n")); got != nil {
 		t.Fatalf("equal diff = %q, want nil", got)
+	}
+}
+
+func TestUnifiedComplexDiffFallsBackToBinary(t *testing.T) {
+	oldData := bytes.Repeat([]byte("old\n"), maxEditDistance/2+1)
+	newData := bytes.Repeat([]byte("new\n"), maxEditDistance/2+1)
+	got := string(Unified("a/generated.csv", "b/generated.csv", oldData, newData))
+	want := "Binary files a/generated.csv and b/generated.csv differ\n"
+	if got != want {
+		t.Fatalf("complex diff fallback = %q, want %q", got, want)
 	}
 }

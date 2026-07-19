@@ -6,8 +6,9 @@ import "bytes"
 
 const (
 	// MaxTextSize bounds content materialized in memory for a diff or merge.
-	MaxTextSize = 8 << 20
-	binarySniff = 8 << 10
+	MaxTextSize     = 8 << 20
+	binarySniff     = 8 << 10
+	maxEditDistance = 2048
 )
 
 // Hunk replaces the half-open base line range [Start, End) with Lines.
@@ -55,8 +56,14 @@ func ThreeWay(base, local, remote []byte) (result []byte, clean bool) {
 	}
 
 	baseLines := splitLines(base)
-	localChanges := Changes(base, local)
-	remoteChanges := Changes(base, remote)
+	localChanges, ok := Changes(base, local)
+	if !ok {
+		return nil, false
+	}
+	remoteChanges, ok := Changes(base, remote)
+	if !ok {
+		return nil, false
+	}
 	merged := make([]Hunk, 0, len(localChanges)+len(remoteChanges))
 
 	for li, ri := 0, 0; li < len(localChanges) || ri < len(remoteChanges); {
@@ -96,16 +103,38 @@ func ThreeWay(base, local, remote []byte) (result []byte, clean bool) {
 	for _, line := range baseLines[pos:] {
 		out.Write(line)
 	}
-	return out.Bytes(), true
+	result = out.Bytes()
+	if !outputLinesComeFromInputs(result, base, local, remote) {
+		return nil, false
+	}
+	return result, true
+}
+
+func outputLinesComeFromInputs(output []byte, inputs ...[]byte) bool {
+	known := make(map[string]struct{})
+	for _, input := range inputs {
+		for _, line := range splitLines(input) {
+			known[string(line)] = struct{}{}
+		}
+	}
+	for _, line := range splitLines(output) {
+		if _, ok := known[string(line)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // Changes computes a shortest line edit script with Myers' algorithm and collapses
-// it into replacement hunks against base.
-func Changes(base, other []byte) []Hunk {
+// it into replacement hunks against base. ok is false when the edit distance is
+// too large to compute safely in memory; callers should use their binary/copy fallback.
+func Changes(base, other []byte) (hunks []Hunk, ok bool) {
 	a, b := splitLines(base), splitLines(other)
-	ops := myers(a, b)
+	ops, ok := myers(a, b)
+	if !ok {
+		return nil, false
+	}
 	var (
-		hunks   []Hunk
 		current *Hunk
 		basePos int
 	)
@@ -134,7 +163,7 @@ func Changes(base, other []byte) []Hunk {
 		}
 	}
 	flush()
-	return hunks
+	return hunks, true
 }
 
 func strictlyBefore(a, b Hunk) bool {
@@ -188,48 +217,64 @@ type operation struct {
 	line []byte
 }
 
-// myers returns one shortest edit script. Each trace snapshot is the frontier before
-// distance d; backtracking walks those frontiers from the completed path to (0,0).
-func myers(a, b [][]byte) []operation {
+// myers returns one shortest edit script. It caps edit distance because trace
+// storage is quadratic in D even though file byte size is bounded elsewhere.
+func myers(a, b [][]byte) ([]operation, bool) {
 	max := len(a) + len(b)
-	v := map[int]int{1: 0}
-	trace := make([]map[int]int, 0, max+1)
-	for d := 0; d <= max; d++ {
-		trace = append(trace, cloneFrontier(v))
+	limit := min(max, maxEditDistance)
+	offset := limit + 1
+	v := make([]int, 2*limit+3)
+	v[offset+1] = 0
+	trace := make([]frontier, 0, limit+1)
+	for d := 0; d <= limit; d++ {
+		trace = append(trace, snapshotFrontier(v, offset, d))
 		for k := -d; k <= d; k += 2 {
 			var x int
-			if k == -d || (k != d && v[k-1] < v[k+1]) {
-				x = v[k+1]
+			if k == -d || (k != d && v[offset+k-1] < v[offset+k+1]) {
+				x = v[offset+k+1]
 			} else {
-				x = v[k-1] + 1
+				x = v[offset+k-1] + 1
 			}
 			y := x - k
 			for x < len(a) && y < len(b) && bytes.Equal(a[x], b[y]) {
 				x++
 				y++
 			}
-			v[k] = x
+			v[offset+k] = x
 			if x == len(a) && y == len(b) {
-				return backtrack(trace, a, b, d)
+				return backtrack(trace, a, b, d), true
 			}
 		}
 	}
-	return nil
+	return nil, false
 }
 
-func backtrack(trace []map[int]int, a, b [][]byte, distance int) []operation {
+type frontier struct {
+	minK int
+	x    []int
+}
+
+func (f frontier) at(k int) int { return f.x[k-f.minK] }
+
+func snapshotFrontier(v []int, offset, distance int) frontier {
+	minK, maxK := -distance-1, distance+1
+	x := append([]int(nil), v[offset+minK:offset+maxK+1]...)
+	return frontier{minK: minK, x: x}
+}
+
+func backtrack(trace []frontier, a, b [][]byte, distance int) []operation {
 	x, y := len(a), len(b)
 	reversed := make([]operation, 0, x+y)
 	for d := distance; d > 0; d-- {
 		v := trace[d]
 		k := x - y
 		var prevK int
-		if k == -d || (k != d && v[k-1] < v[k+1]) {
+		if k == -d || (k != d && v.at(k-1) < v.at(k+1)) {
 			prevK = k + 1
 		} else {
 			prevK = k - 1
 		}
-		prevX := v[prevK]
+		prevX := v.at(prevK)
 		prevY := prevX - prevK
 		for x > prevX && y > prevY {
 			x--
@@ -261,12 +306,4 @@ func backtrack(trace []map[int]int, a, b [][]byte, distance int) []operation {
 		reversed[left], reversed[right] = reversed[right], reversed[left]
 	}
 	return reversed
-}
-
-func cloneFrontier(in map[int]int) map[int]int {
-	out := make(map[int]int, len(in))
-	for k, v := range in {
-		out[k] = v
-	}
-	return out
 }

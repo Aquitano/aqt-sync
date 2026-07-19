@@ -13,7 +13,10 @@ func Unified(oldName, newName string, oldData, newData []byte) []byte {
 	if bytes.Equal(oldData, newData) {
 		return nil
 	}
-	ops := myers(splitLines(oldData), splitLines(newData))
+	ops, ok := myers(splitLines(oldData), splitLines(newData))
+	if !ok {
+		return fmt.Appendf(nil, "Binary files %s and %s differ\n", oldName, newName)
+	}
 	ranges := unifiedRanges(ops, unifiedContext)
 	var out bytes.Buffer
 	fmt.Fprintf(&out, "--- %s\n+++ %s\n", oldName, newName)

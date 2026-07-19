@@ -87,7 +87,11 @@ func TestChangesReconstructsTarget(t *testing.T) {
 	}
 	for _, tc := range cases {
 		base, target := []byte(tc[0]), []byte(tc[1])
-		if got := apply(base, Changes(base, target)); !bytes.Equal(got, target) {
+		changes, ok := Changes(base, target)
+		if !ok {
+			t.Fatalf("Changes(%q, %q) exceeded edit bound", base, target)
+		}
+		if got := apply(base, changes); !bytes.Equal(got, target) {
 			t.Errorf("apply(%q) = %q, want %q", base, got, target)
 		}
 	}
@@ -106,6 +110,22 @@ func TestIsText(t *testing.T) {
 	lateNUL := append(bytes.Repeat([]byte{'x'}, binarySniff), 0)
 	if !IsText(lateNUL) {
 		t.Fatal("NUL after sniff window should not classify the file as binary")
+	}
+}
+
+func TestThreeWayComplexDiffIsNotClean(t *testing.T) {
+	lines := maxEditDistance/2 + 1
+	base := bytes.Repeat([]byte("base\n"), lines)
+	local := bytes.Repeat([]byte("local\n"), lines)
+	remote := bytes.Repeat([]byte("remote\n"), lines)
+	if got, clean := ThreeWay(base, local, remote); clean || got != nil {
+		t.Fatalf("complex merge = clean %v content %d bytes, want copy fallback", clean, len(got))
+	}
+}
+
+func TestThreeWayDoesNotConcatenateAdjacentUnterminatedHunks(t *testing.T) {
+	if got, clean := ThreeWay([]byte("\n"), []byte("\n0"), []byte("0")); clean || got != nil {
+		t.Fatalf("unterminated adjacent hunks = clean %v, content %q; want fallback", clean, got)
 	}
 }
 
