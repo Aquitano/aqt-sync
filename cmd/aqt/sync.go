@@ -1948,6 +1948,13 @@ func newEmptyPackSource(cl *client.Client) *packSource {
 // objSpan, so it must not run concurrently with get — callers either locate once
 // up front (downloads) or interleave locate/get on a single goroutine (tree walk).
 func (s *packSource) locate(ids []string) error {
+	unseen := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, exists := s.locs[id]; !exists {
+			unseen = append(unseen, id)
+		}
+	}
+	ids = unseen
 	if len(ids) == 0 {
 		return nil
 	}

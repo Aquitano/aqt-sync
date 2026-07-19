@@ -74,14 +74,19 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	if err != nil {
 		return err
 	}
-	base, exists, err := loadBaseForSync(root)
-	if err != nil {
-		return err
+	var base, local syncengine.Manifest
+	if opts.against != "" {
+		local, err = syncengine.Scan(root)
+	} else {
+		var exists bool
+		base, exists, err = loadBaseForSync(root)
+		if err == nil && !exists {
+			return errSyncNoBase
+		}
+		if err == nil {
+			local, err = syncengine.ScanReusing(root, &base, true)
+		}
 	}
-	if !exists {
-		return errSyncNoBase
-	}
-	local, err := syncengine.ScanReusing(root, &base, true)
 	if err != nil {
 		return err
 	}
@@ -172,7 +177,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 type entryReader func(syncengine.Entry) ([]byte, error)
 
 func manifestEntryReader(cl *client.Client) entryReader {
-	var sources = map[string]*packSource{}
+	source := newEmptyPackSource(cl)
 	return func(e syncengine.Entry) ([]byte, error) {
 		if e.IsSymlink() {
 			return []byte(e.Link), nil
@@ -180,17 +185,8 @@ func manifestEntryReader(cl *client.Client) entryReader {
 		if len(e.Chunks) == 0 {
 			return syncengine.FileBytes(e, nil)
 		}
-		// One source per entry keeps this closure simple; packSource still coalesces all
-		// chunks of that file into ranges. The renderer only calls it for changed files.
-		key := e.Path + "\x00" + e.Hash
-		source := sources[key]
-		if source == nil {
-			var err error
-			source, err = newPackSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
-			if err != nil {
-				return nil, err
-			}
-			sources[key] = source
+		if err := source.locate(distinctChunkIDs([]syncengine.Entry{e})); err != nil {
+			return nil, err
 		}
 		return syncengine.FileBytes(e, source.get)
 	}

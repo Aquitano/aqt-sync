@@ -89,6 +89,9 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 		t.Fatalf("remote diff did not isolate incoming changes:\n%s", remoteOut)
 	}
 
+	if err := os.Remove(controlPath(replica, baseFile)); err != nil {
+		t.Fatal(err)
+	}
 	snapshotOut := captureStdout(t, func() {
 		runErr = runDiff(replica, []string{"notes/a.txt"}, diffOptions{against: snapshot.ID})
 	})
