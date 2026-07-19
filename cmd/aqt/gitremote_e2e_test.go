@@ -54,6 +54,18 @@ func TestGitRemotePushAndClone(t *testing.T) {
 	}
 	gitRun(t, clone, "fsck", "--full")
 
+	// The tag object itself is new even though its peeled commit is already on
+	// main. A fresh clone proves the standalone tag push uploaded that object.
+	gitRun(t, source, "tag", "-a", "v0", "-m", "version zero", "main")
+	gitRun(t, source, "push", "origin", "refs/tags/v0")
+	tagCloneParent := t.TempDir()
+	gitRun(t, tagCloneParent, "clone", "aqt::brain", "tag-clone")
+	tagClone := filepath.Join(tagCloneParent, "tag-clone")
+	if got, want := gitOutput(t, tagClone, "rev-parse", "refs/tags/v0^{object}"), gitOutput(t, source, "rev-parse", "refs/tags/v0^{object}"); got != want {
+		t.Fatalf("cloned annotated tag = %s, want %s", got, want)
+	}
+	gitRun(t, tagClone, "fsck", "--full")
+
 	gitRun(t, source, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(source, "feature.txt"), []byte("feature\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -156,7 +168,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	}
 }
 
-func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
+func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -168,6 +180,54 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
 	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
 	newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := runRepoCreate("sha256", 64); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+	source := t.TempDir()
+	gitRun(t, source, "init", "--object-format=sha256", "-b", "main")
+	gitRun(t, source, "config", "user.email", "sha256@example.com")
+	gitRun(t, source, "config", "user.name", "SHA256 Writer")
+	writeTree(t, source, "README.md", "sha256\n")
+	gitRun(t, source, "add", "README.md")
+	gitRun(t, source, "commit", "-m", "sha256")
+	gitRun(t, source, "remote", "add", "origin", "aqt::sha256")
+	gitRun(t, source, "push", "origin", "main")
+
+	cloneParent := t.TempDir()
+	gitRun(t, cloneParent, "clone", "aqt::sha256", "clone")
+	clone := filepath.Join(cloneParent, "clone")
+	if got := gitOutput(t, clone, "rev-parse", "--show-object-format"); got != "sha256" {
+		t.Fatalf("cloned object format = %q, want sha256", got)
+	}
+	if got, want := gitOutput(t, clone, "rev-parse", "refs/heads/main"), gitOutput(t, source, "rev-parse", "refs/heads/main"); got != want {
+		t.Fatalf("cloned SHA-256 main = %s, want %s", got, want)
+	}
+	gitRun(t, clone, "fsck", "--full")
+}
+
+func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
+	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	var armed, injected atomic.Bool
+	var resourcePuts atomic.Int32
+	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" {
+			if resourcePuts.Add(1) == 2 && injected.CompareAndSwap(false, true) {
+				w.WriteHeader(http.StatusConflict)
+				return
+			}
+		}
+		pass(w, r)
+	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("compact", 2); err != nil {
 		t.Fatalf("repo create: %v", err)
@@ -182,8 +242,9 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	}
 	gitRun(t, source, "add", "history.txt")
 	gitRun(t, source, "commit", "-m", "one")
+	gitRun(t, source, "branch", "feature")
 	gitRun(t, source, "remote", "add", "origin", "aqt::compact")
-	gitRun(t, source, "push", "-u", "origin", "main")
+	gitRun(t, source, "push", "-u", "origin", "main", "feature")
 
 	preexistingParent := t.TempDir()
 	gitRun(t, preexistingParent, "clone", "aqt::compact", "preexisting")
@@ -193,10 +254,14 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	}
 	gitRun(t, source, "add", "history.txt")
 	gitRun(t, source, "commit", "-m", "two")
+	armed.Store(true)
 	gitRun(t, source, "push", "origin", "main") // reaches threshold and compacts
+	if !injected.Load() {
+		t.Fatal("compaction retry was not exercised")
+	}
 
 	remote := openRemoteForTest(t, "compact")
-	if len(remote.root.Bundles) != 1 || remote.root.Generation != 1 {
+	if len(remote.root.Bundles) != 1 || !remote.root.Bundles[0].Full || remote.root.Generation != 1 {
 		remote.close()
 		t.Fatalf("compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
 	}
@@ -209,29 +274,42 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 		t.Fatalf("pre-compaction snapshots = %+v", snapshots)
 	}
 
-	if err := os.RemoveAll(filepath.Join(preexisting, ".git", "aqt")); err != nil {
-		t.Fatal(err)
-	}
 	gitRun(t, preexisting, "fetch", "origin")
 	want := gitOutput(t, source, "rev-parse", "refs/heads/main")
 	if got := gitOutput(t, preexisting, "rev-parse", "refs/remotes/origin/main"); got != want {
 		t.Fatalf("pre-existing clone fetched %s, want %s", got, want)
 	}
+	gitRun(t, preexisting, "fetch", "origin") // object-presence checks make this idempotent
+	gitMustFail(t, preexisting, "rev-parse", "--verify", "refs/heads/feature")
+	if got := gitOutput(t, preexisting, "rev-parse", "refs/remotes/origin/feature"); got == "" {
+		t.Fatal("fresh clone is missing the feature remote-tracking ref")
+	}
+	gitRun(t, preexisting, "branch", "wip") // unrelated local refs must not block or enter compaction
 	freshParent := t.TempDir()
 	gitRun(t, freshParent, "clone", "aqt::compact", "fresh")
 	gitRun(t, filepath.Join(freshParent, "fresh"), "fsck", "--full")
 
-	oldGeneration := 1
-	t.Chdir(source)
+	t.Chdir(preexisting)
 	if err := runRepoGC("compact", false); err != nil {
 		t.Fatalf("explicit repo gc: %v", err)
 	}
 	remote = openRemoteForTest(t, "compact")
-	if len(remote.root.Bundles) != 1 || remote.root.Generation != oldGeneration+1 {
+	if len(remote.root.Bundles) != 1 || !remote.root.Bundles[0].Full || remote.root.Generation != 1 {
 		remote.close()
-		t.Fatalf("explicitly compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
+		t.Fatalf("no-op compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
 	}
+	if _, exists := remote.root.Refs["refs/heads/wip"]; exists {
+		remote.close()
+		t.Fatal("local WIP branch leaked into compacted remote refs")
+	}
+	snapshots, err = remote.client.ListSnapshots(remote.res.ID)
 	remote.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 {
+		t.Fatalf("no-op gc created snapshots: got %d, want 1", len(snapshots))
+	}
 	if err := runRepoRemove("compact", true); err != nil {
 		t.Fatalf("repo rm: %v", err)
 	}
@@ -240,6 +318,72 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 		remote.close()
 		t.Fatal("deleted git remote is still resolvable")
 	}
+}
+
+func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
+	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if err := runRepoCreate("restore", 2); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+
+	source := t.TempDir()
+	gitRun(t, source, "init", "-b", "main")
+	gitRun(t, source, "config", "user.email", "restore@example.com")
+	gitRun(t, source, "config", "user.name", "Restore Writer")
+	writeTree(t, source, "history.txt", "one\n")
+	gitRun(t, source, "add", "history.txt")
+	gitRun(t, source, "commit", "-m", "one")
+	gitRun(t, source, "remote", "add", "origin", "aqt::restore")
+	gitRun(t, source, "push", "-u", "origin", "main")
+	writeTree(t, source, "history.txt", "one\ntwo\n")
+	gitRun(t, source, "add", "history.txt")
+	gitRun(t, source, "commit", "-m", "two")
+	gitRun(t, source, "push", "origin", "main")
+
+	remote := openRemoteForTest(t, "restore")
+	snapshots, err := remote.client.ListSnapshots(remote.res.ID)
+	remote.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshots) != 1 || !snapshots[0].Automatic {
+		t.Fatalf("pre-compaction snapshots = %+v", snapshots)
+	}
+	if err := runRepoRestore(snapshots[0].ID, true, false); err != nil {
+		t.Fatalf("repo restore: %v", err)
+	}
+	remote = openRemoteForTest(t, "restore")
+	if len(remote.root.Bundles) != 2 || remote.root.Generation != 0 {
+		remote.close()
+		t.Fatalf("restored root = bundles %d generation %d, want 2/0", len(remote.root.Bundles), remote.root.Generation)
+	}
+	postRestoreSnapshots, err := remote.client.ListSnapshots(remote.res.ID)
+	remote.close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(postRestoreSnapshots) != 2 {
+		t.Fatalf("restore safety snapshots = %d, want 2", len(postRestoreSnapshots))
+	}
+
+	cloneParent := t.TempDir()
+	gitRun(t, cloneParent, "clone", "aqt::restore", "clone")
+	clone := filepath.Join(cloneParent, "clone")
+	if got := readTree(t, clone, "history.txt"); got != "one\ntwo\n" {
+		t.Fatalf("restored remote content = %q", got)
+	}
+	gitRun(t, clone, "fsck", "--full")
 }
 
 func TestGitRemoteConcurrentPushRace(t *testing.T) {

@@ -10,7 +10,7 @@ import (
 )
 
 func TestGitRemoteHelperCapabilitiesAndOptions(t *testing.T) {
-	input := strings.NewReader("capabilities\noption verbosity 2\noption progress true\noption unknown value\n")
+	input := strings.NewReader("capabilities\noption verbosity 2\noption progress true\noption object-format true\noption unknown value\n")
 	var output bytes.Buffer
 	h := &remoteHelper{
 		remoteName: "origin", rawURL: "aqt::brain", in: input,
@@ -19,12 +19,12 @@ func TestGitRemoteHelperCapabilitiesAndOptions(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatal(err)
 	}
-	want := "fetch\npush\noption\n\nok\nok\nunsupported\n"
+	want := "fetch\npush\noption\nobject-format\n\nok\nok\nok\nunsupported\n"
 	if output.String() != want {
 		t.Fatalf("protocol output:\n%q\nwant:\n%q", output.String(), want)
 	}
-	if h.verbosity != 2 || !h.progress {
-		t.Fatalf("options not recorded: verbosity=%d progress=%t", h.verbosity, h.progress)
+	if h.verbosity != 2 || !h.progress || !h.objectFormat {
+		t.Fatalf("options not recorded: verbosity=%d progress=%t object-format=%t", h.verbosity, h.progress, h.objectFormat)
 	}
 }
 
@@ -85,11 +85,5 @@ func TestGitRemoteTarget(t *testing.T) {
 		if _, err := gitRemoteTarget(raw); err == nil {
 			t.Fatalf("gitRemoteTarget(%q) succeeded", raw)
 		}
-	}
-}
-
-func TestSafeRemoteNameCannotEscapeStateDirectory(t *testing.T) {
-	if got := safeRemoteName("../../evil/remote"); strings.Contains(got, "/") || got == "." || got == ".." {
-		t.Fatalf("unsafe remote name %q", got)
 	}
 }

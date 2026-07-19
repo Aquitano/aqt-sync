@@ -2,17 +2,14 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"os/exec"
-	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
-	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -40,13 +37,14 @@ func gitRemoteHelperCmd() *cobra.Command {
 }
 
 type remoteHelper struct {
-	remoteName string
-	rawURL     string
-	in         io.Reader
-	out        *bufio.Writer
-	errOut     io.Writer
-	verbosity  int
-	progress   bool
+	remoteName   string
+	rawURL       string
+	in           io.Reader
+	out          *bufio.Writer
+	errOut       io.Writer
+	verbosity    int
+	progress     bool
+	objectFormat bool
 }
 
 type openedGitRemote struct {
@@ -66,12 +64,13 @@ type helperFetch struct {
 }
 
 type helperPush struct {
-	raw      string
-	src      string
-	dst      string
-	force    bool
-	delete   bool
-	localOID string
+	raw          string
+	src          string
+	dst          string
+	force        bool
+	delete       bool
+	localOID     string
+	annotatedTag bool
 }
 
 func (h *remoteHelper) run() error {
@@ -135,7 +134,7 @@ func (h *remoteHelper) run() error {
 		}
 		switch {
 		case line == "capabilities":
-			if err := h.respond("fetch", "push", "option", ""); err != nil {
+			if err := h.respond("fetch", "push", "option", "object-format", ""); err != nil {
 				return err
 			}
 		case line == "list" || line == "list for-push":
@@ -182,6 +181,12 @@ func (h *remoteHelper) option(value string) error {
 	case "progress":
 		h.progress = setting == "true"
 		return h.respond("ok")
+	case "object-format":
+		if setting != "true" {
+			return h.respond("unsupported")
+		}
+		h.objectFormat = true
+		return h.respond("ok")
 	default:
 		return h.respond("unsupported")
 	}
@@ -199,6 +204,9 @@ func (h *remoteHelper) list() error {
 	}
 	sort.Strings(names)
 	lines := make([]string, 0, len(names)+2)
+	if h.objectFormat && remote.root.ObjectFormat != "" {
+		lines = append(lines, ":object-format "+remote.root.ObjectFormat)
+	}
 	for _, name := range names {
 		lines = append(lines, remote.root.Refs[name]+" "+name)
 	}
@@ -218,15 +226,13 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 		return err
 	}
 	defer remote.close()
-
-	statePath, state, err := loadHelperState(h.remoteName)
+	localFormat, err := commandOutput("git", "rev-parse", "--show-object-format")
 	if err != nil {
-		return err
+		return fmt.Errorf("detect local git object format: %w", err)
 	}
-	if state.Generation != remote.root.Generation {
-		state.AppliedBundles = nil
+	if remote.root.ObjectFormat != "" && remote.root.ObjectFormat != localFormat {
+		return fmt.Errorf("git object format mismatch: remote is %s, local repository is %s; use a matching repository format", remote.root.ObjectFormat, localFormat)
 	}
-	state.Generation = remote.root.Generation
 
 	var needed []gitremote.BundleRef
 	for _, bundle := range remote.root.Bundles {
@@ -256,15 +262,13 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 		if err := applyBundle(bundle, remote.key, source.get); err != nil {
 			return err
 		}
-		state.AppliedBundles = appendUnique(state.AppliedBundles, bundle.ID)
 	}
 	for _, request := range requests {
 		if !gitObjectPresent(request.oid) {
 			return fmt.Errorf("remote bundle chain does not contain requested object %s for %s", request.oid, request.ref)
 		}
 	}
-	state.RemoteVersion = remote.res.Version
-	return saveHelperState(statePath, state)
+	return nil
 }
 
 func parsePushRefspec(refspec string) (helperPush, error) {
@@ -295,6 +299,11 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 			return fmt.Errorf("resolve push source %s: %w", pushes[i].src, err)
 		}
 		pushes[i].localOID = oid
+		objectType, err := commandOutput("git", "cat-file", "-t", oid)
+		if err != nil {
+			return fmt.Errorf("inspect push source %s: %w", pushes[i].src, err)
+		}
+		pushes[i].annotatedTag = objectType == "tag"
 	}
 
 	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
@@ -350,6 +359,14 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 		if err != nil {
 			return err
 		}
+		lines := make([]string, 0, len(pushes)+1)
+		for _, push := range pushes {
+			lines = append(lines, "ok "+push.dst)
+		}
+		lines = append(lines, "")
+		if err := h.respond(lines...); err != nil {
+			return err
+		}
 		if compactAt > 0 && len(next.Bundles) >= compactAt {
 			if _, _, _, compactErr := h.compact(false); compactErr != nil {
 				// The push already committed. Never report failure to Git at this point:
@@ -357,12 +374,7 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 				fmt.Fprintf(h.errOut, "warning: aqt git remote compaction skipped: %v\n", compactErr)
 			}
 		}
-		lines := make([]string, 0, len(pushes)+1)
-		for _, push := range pushes {
-			lines = append(lines, "ok "+push.dst)
-		}
-		lines = append(lines, "")
-		return h.respond(lines...)
+		return nil
 	}
 	return errors.New("remote busy, pull and retry")
 }
@@ -370,20 +382,33 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 // compact replaces a remote's delta chain with one full bundle. explicit controls
 // whether a not-even local clone is an error (`aqt repo gc`) or a silent auto-skip.
 func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generation int, err error) {
+	var prepared struct {
+		version int
+		full    gitremote.BundleRef
+		ok      bool
+	}
 	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
 		remote, err := h.openRemote()
 		if err != nil {
 			return false, 0, 0, err
 		}
-		local, err := localGitRefs()
+		if len(remote.root.Bundles) == 1 && remote.root.Bundles[0].Full {
+			before, generation = 1, remote.root.Generation
+			remote.close()
+			return false, before, generation, nil
+		}
+		local, err := localGitRefs(h.remoteName, remote.item.ID, remote.meta.Name)
 		if err != nil {
 			remote.close()
 			return false, 0, 0, err
 		}
-		if !maps.Equal(local, remote.root.Refs) {
+		if !local.contains(remote.root.Refs) {
+			if !explicit && remote.res.CompactAt > 0 && len(remote.root.Bundles) == 2*remote.res.CompactAt {
+				fmt.Fprintf(h.errOut, "warning: aqt git remote has %d bundles because compaction needs every remote branch and tag locally; fetch all refs or run `aqt repo gc` from a complete clone\n", len(remote.root.Bundles))
+			}
 			remote.close()
 			if explicit {
-				return false, 0, 0, errors.New("local refs are not even with the remote; fetch/reconcile every branch and tag before `aqt repo gc`")
+				return false, 0, 0, errors.New("local clone does not contain every remote branch and tag; fetch all refs before `aqt repo gc`")
 			}
 			return false, 0, 0, nil
 		}
@@ -395,22 +420,20 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 			return false, 0, 0, nil
 		}
 
-		full, err := buildAndUploadFullBundle(remote.client, remote.key, remote.root)
-		if err != nil {
-			remote.close()
-			return false, 0, 0, err
-		}
-		snapshot, err := remote.client.CreateAutoSnapshot(remote.res.ID)
-		if err != nil {
-			remote.close()
-			return false, 0, 0, fmt.Errorf("create pre-compaction snapshot: %w", err)
-		}
-		if !snapshot.Automatic {
-			remote.close()
-			return false, 0, 0, errors.New("server did not mark the pre-compaction snapshot automatic")
+		if !prepared.ok || prepared.version != remote.res.Version {
+			full, err := buildAndUploadFullBundle(remote.client, remote.key, remote.root, local.bundleRefs(remote.root.Refs))
+			if err != nil {
+				remote.close()
+				return false, 0, 0, err
+			}
+			if _, err = remote.client.CreateAutoSnapshot(remote.res.ID); err != nil {
+				remote.close()
+				return false, 0, 0, fmt.Errorf("create pre-compaction snapshot: %w", err)
+			}
+			prepared.version, prepared.full, prepared.ok = remote.res.Version, full, true
 		}
 		next := remote.root
-		next.Bundles = []gitremote.BundleRef{full}
+		next.Bundles = []gitremote.BundleRef{prepared.full}
 		next.Generation++
 		blob, err := gitremote.SealRefsRoot(next, remote.key, remote.res.ID)
 		if err != nil {
@@ -442,26 +465,80 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 	return false, 0, 0, errors.New("remote busy, pull and retry")
 }
 
-func localGitRefs() (map[string]string, error) {
-	output, err := commandOutput("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags")
-	if err != nil {
-		return nil, err
+type localRefSet struct {
+	refs map[string][]localRef
+}
+
+type localRef struct{ oid, source string }
+
+func (s localRefSet) contains(remote map[string]string) bool {
+	for name, oid := range remote {
+		if !slices.ContainsFunc(s.refs[name], func(ref localRef) bool { return ref.oid == oid }) {
+			return false
+		}
 	}
-	refs := make(map[string]string)
+	return true
+}
+
+func (s localRefSet) bundleRefs(remote map[string]string) []string {
+	refs := make([]string, 0, len(remote))
+	for name, oid := range remote {
+		for _, ref := range s.refs[name] {
+			if ref.oid == oid {
+				refs = append(refs, ref.source)
+				break
+			}
+		}
+	}
+	sort.Strings(refs)
+	return refs
+}
+
+func localGitRefs(remoteName string, remoteTargets ...string) (localRefSet, error) {
+	output, err := commandOutput("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags", "refs/remotes")
+	if err != nil {
+		return localRefSet{}, err
+	}
+	set := localRefSet{refs: make(map[string][]localRef)}
 	for _, line := range strings.Split(output, "\n") {
 		if line == "" {
 			continue
 		}
 		name, oid, ok := strings.Cut(line, " ")
 		if !ok || name == "" || oid == "" {
-			return nil, fmt.Errorf("unexpected git ref record %q", line)
+			return localRefSet{}, fmt.Errorf("unexpected git ref record %q", line)
 		}
-		refs[name] = oid
+		if strings.HasPrefix(name, "refs/heads/") || strings.HasPrefix(name, "refs/tags/") {
+			set.refs[name] = append(set.refs[name], localRef{oid: oid, source: name})
+			continue
+		}
+		rest := strings.TrimPrefix(name, "refs/remotes/")
+		trackingRemote, branch, ok := strings.Cut(rest, "/")
+		if !ok || branch == "HEAD" || !gitRemoteMatches(trackingRemote, remoteName, remoteTargets) {
+			continue
+		}
+		canonical := "refs/heads/" + branch
+		set.refs[canonical] = append(set.refs[canonical], localRef{oid: oid, source: name})
 	}
-	return refs, nil
+	return set, nil
 }
 
-func buildAndUploadFullBundle(cl *client.Client, key crypto.ContentKey, root gitremote.RefsRoot) (gitremote.BundleRef, error) {
+func gitRemoteMatches(name, hintedName string, targets []string) bool {
+	if name == hintedName {
+		return true
+	}
+	rawURL, err := commandOutput("git", "remote", "get-url", name)
+	if err != nil {
+		return false
+	}
+	target, err := gitRemoteTarget(rawURL)
+	if err != nil {
+		return false
+	}
+	return slices.Contains(targets, target)
+}
+
+func buildAndUploadFullBundle(cl *client.Client, key crypto.ContentKey, root gitremote.RefsRoot, refs []string) (gitremote.BundleRef, error) {
 	tmp, err := os.CreateTemp("", "aqt-full-*.bundle")
 	if err != nil {
 		return gitremote.BundleRef{}, err
@@ -474,7 +551,9 @@ func buildAndUploadFullBundle(cl *client.Client, key crypto.ContentKey, root git
 	if err := os.Remove(path); err != nil {
 		return gitremote.BundleRef{}, err
 	}
-	cmd := exec.Command("git", "bundle", "create", "--version=3", path, "--all")
+	args := []string{"bundle", "create", "--version=3", path}
+	args = append(args, refs...)
+	cmd := exec.Command("git", args...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return gitremote.BundleRef{}, fmt.Errorf("create full git bundle: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -494,6 +573,7 @@ func buildAndUploadFullBundle(cl *client.Client, key crypto.ContentKey, root git
 	if err := uploader.Flush(); err != nil {
 		return gitremote.BundleRef{}, err
 	}
+	bundle.Full = true
 	seen := make(map[string]bool)
 	for _, oid := range root.Refs {
 		if !seen[oid] {
@@ -587,7 +667,8 @@ func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root git
 			tips = append(tips, push.localOID)
 			seenTip[push.localOID] = true
 		}
-		if !remoteContainsCommit(root.Refs, push.localOID) && !seenPositive[push.src] {
+		needsObject := push.annotatedTag && !remoteContainsObject(root.Refs, push.localOID)
+		if (needsObject || !remoteContainsCommit(root.Refs, push.localOID)) && !seenPositive[push.src] {
 			positives = append(positives, push.src)
 			seenPositive[push.src] = true
 		}
@@ -662,6 +743,15 @@ func remoteContainsCommit(refs map[string]string, oid string) bool {
 	return false
 }
 
+func remoteContainsObject(refs map[string]string, oid string) bool {
+	for _, remoteOID := range refs {
+		if remoteOID == oid {
+			return true
+		}
+	}
+	return false
+}
+
 type gitObjectUploader struct {
 	cl         *client.Client
 	candidates []gitObjectCandidate
@@ -688,28 +778,11 @@ func (u *gitObjectUploader) flush() error {
 	if len(u.candidates) == 0 {
 		return nil
 	}
-	ids := make([]string, len(u.candidates))
-	for i, candidate := range u.candidates {
-		ids[i] = candidate.id
-	}
-	missing, err := u.cl.CheckChunks(ids)
-	if err != nil {
-		return err
-	}
-	want := make(map[string]bool, len(missing))
-	for _, id := range missing {
-		want[id] = true
-	}
 	builder := syncengine.NewPackBuilder()
 	for _, candidate := range u.candidates {
-		if want[candidate.id] {
-			builder.Add(candidate.id, candidate.object)
-		}
+		builder.Add(candidate.id, candidate.object)
 	}
 	u.candidates, u.size = nil, 0
-	if builder.Empty() {
-		return nil
-	}
 	packID, pack := builder.Finish()
 	return u.cl.PutPack(packID, pack)
 }
@@ -734,10 +807,7 @@ func (h *remoteHelper) openRemote() (*openedGitRemote, error) {
 	}
 	var matches []api.ResourceListItem
 	var metas []api.Metadata
-	for _, item := range items {
-		if item.CompactAt == 0 {
-			continue
-		}
+	for _, item := range gitRemoteItems(items) {
 		meta, ok := openMetadata(item, mk)
 		if !ok || meta.Kind != api.KindGitRemote {
 			continue
@@ -825,74 +895,13 @@ func applyBundle(bundle gitremote.BundleRef, key crypto.ContentKey, get func(str
 	return nil
 }
 
-type helperState struct {
-	RemoteVersion  int      `json:"remoteVersion"`
-	Generation     int      `json:"generation"`
-	AppliedBundles []string `json:"appliedBundles"`
-}
-
-func loadHelperState(remoteName string) (string, helperState, error) {
-	gitDir, err := commandOutput("git", "rev-parse", "--git-dir")
-	if err != nil {
-		return "", helperState{}, fmt.Errorf("locate git directory: %w", err)
-	}
-	abs, err := filepath.Abs(gitDir)
-	if err != nil {
-		return "", helperState{}, err
-	}
-	path := filepath.Join(abs, "aqt", safeRemoteName(remoteName), "state.json")
-	b, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return path, helperState{}, nil
-	}
-	if err != nil {
-		return "", helperState{}, err
-	}
-	var state helperState
-	if json.Unmarshal(b, &state) != nil {
-		// The cache is disposable; treat corruption exactly like cache loss.
-		return path, helperState{}, nil
-	}
-	return path, state, nil
-}
-
-func saveHelperState(path string, state helperState) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	b, err := json.MarshalIndent(state, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(path, b, 0o600)
-}
-
-func safeRemoteName(name string) string {
-	clean := strings.Map(func(r rune) rune {
-		if unicode.IsLetter(r) || unicode.IsDigit(r) || strings.ContainsRune("._-", r) {
-			return r
-		}
-		return '_'
-	}, name)
-	if clean == "" || clean == "." || clean == ".." {
-		return "remote"
-	}
-	return clean
-}
-
 func commandOutput(name string, args ...string) (string, error) {
-	output, err := exec.Command(name, args...).CombinedOutput()
+	cmd := exec.Command(name, args...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(string(output)))
+		return "", fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(output)), nil
-}
-
-func appendUnique(values []string, value string) []string {
-	for _, existing := range values {
-		if existing == value {
-			return values
-		}
-	}
-	return append(values, value)
 }

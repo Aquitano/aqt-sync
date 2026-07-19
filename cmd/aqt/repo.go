@@ -19,7 +19,22 @@ import (
 
 func repoCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "repo", Short: "Manage encrypted Git remotes", Args: cobra.NoArgs}
-	cmd.AddCommand(repoCreateCmd(), repoListCmd(), repoInfoCmd(), repoGCCmd(), repoRemoveCmd())
+	cmd.AddCommand(repoCreateCmd(), repoListCmd(), repoInfoCmd(), repoGCCmd(), repoRestoreCmd(), repoRemoveCmd())
+	return cmd
+}
+
+func repoRestoreCmd() *cobra.Command {
+	var yes bool
+	cmd := &cobra.Command{
+		Use:   "restore <snapshot-id>",
+		Short: "Restore an encrypted Git remote from a pre-compaction snapshot",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runRepoRestore(args[0], yes, flagJSON)
+		},
+	}
+	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -87,6 +102,18 @@ type repoInfoRow struct {
 	SnapshotCount int               `json:"snapshotCount"`
 }
 
+// gitRemoteItems centralizes the server-visible discriminator for encrypted Git
+// remotes. Metadata kind is still verified after decryption at each trust boundary.
+func gitRemoteItems(items []api.ResourceListItem) []api.ResourceListItem {
+	remotes := make([]api.ResourceListItem, 0, len(items))
+	for _, item := range items {
+		if item.CompactAt > 0 {
+			remotes = append(remotes, item)
+		}
+	}
+	return remotes
+}
+
 func repoListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ls",
@@ -135,10 +162,7 @@ func runRepoCreate(name string, compactAt int) error {
 	if err != nil {
 		return err
 	}
-	for _, item := range items {
-		if item.CompactAt == 0 {
-			continue
-		}
+	for _, item := range gitRemoteItems(items) {
 		if meta, ok := openMetadata(item, mk); ok && meta.Kind == api.KindGitRemote && meta.Name == name {
 			return fmt.Errorf("git remote %q already exists (%s)", name, item.ID)
 		}
@@ -190,13 +214,13 @@ func loadRepoRows(cl *client.Client, mk crypto.MasterKey) ([]repoRow, map[string
 	}
 	rows := make([]repoRow, 0)
 	byID := make(map[string]api.ResourceListItem)
-	for _, item := range items {
-		if item.CompactAt == 0 {
-			continue
-		}
+	for _, item := range gitRemoteItems(items) {
 		meta, ok := openMetadata(item, mk)
 		if !ok || meta.Kind != api.KindGitRemote {
 			continue
+		}
+		if item.WrappedKey == nil {
+			return nil, nil, fmt.Errorf("git remote %s has no owner key", item.ID)
 		}
 		res, err := cl.GetResource(item.ID)
 		if err != nil {
@@ -345,7 +369,7 @@ func runRepoGC(ref string, asJSON bool) error {
 	}
 	defer mk.Wipe()
 	h := &remoteHelper{
-		remoteName: "repo-gc", rawURL: ref,
+		rawURL: ref,
 		errOut: os.Stderr,
 	}
 	compacted, before, generation, err := h.compact(true)
@@ -353,12 +377,82 @@ func runRepoGC(ref string, asJSON bool) error {
 		return err
 	}
 	if !compacted {
+		if asJSON {
+			return printJSON(map[string]any{"compacted": false, "bundlesBefore": before, "bundlesAfter": before, "generation": generation})
+		}
+		fmt.Printf("already compacted · %d bundle(s) · generation %d\n", before, generation)
 		return nil
 	}
 	if asJSON {
 		return printJSON(map[string]any{"compacted": true, "bundlesBefore": before, "bundlesAfter": 1, "generation": generation})
 	}
 	fmt.Printf("compacted %d bundle(s) to 1 · generation %d\n", before, generation)
+	return nil
+}
+
+func runRepoRestore(snapshotID string, assumeYes, asJSON bool) error {
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	snap, err := cl.GetSnapshot(snapshotID)
+	if errors.Is(err, client.ErrNotFound) {
+		return fmt.Errorf("snapshot %s not found (or not yours)", snapshotID)
+	}
+	if err != nil {
+		return err
+	}
+	if snap.Snapshot.WrappedKey == nil {
+		return errors.New("git remote snapshot has no owner key")
+	}
+	ck, err := crypto.UnwrapKey(*snap.Snapshot.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		return fmt.Errorf("unwrap git remote snapshot key: %w", err)
+	}
+	defer ck.Wipe()
+	meta, err := decodeMeta(snap.Snapshot.EncryptedMeta, ck, snap.Snapshot.ResourceID)
+	if err != nil {
+		return err
+	}
+	if meta.Kind != api.KindGitRemote {
+		return fmt.Errorf("snapshot %s is %s content, not a git remote", snapshotID, meta.Kind)
+	}
+	root, err := gitremote.OpenRefsRoot(snap.Blob, ck, snap.Snapshot.ResourceID)
+	if err != nil {
+		return fmt.Errorf("open git remote snapshot root: %w", err)
+	}
+	current, err := cl.GetResource(snap.Snapshot.ResourceID)
+	if err != nil {
+		return fmt.Errorf("get live git remote: %w", err)
+	}
+	if current.CompactAt == 0 {
+		return errors.New("live resource is no longer a git remote")
+	}
+	if err := confirmDestructive(fmt.Sprintf("Restore git remote %q to snapshot %s? Current refs are replaced. [y/N] ", meta.Name, snapshotID), assumeYes); err != nil {
+		return err
+	}
+	if _, err := cl.CreateAutoSnapshot(snap.Snapshot.ResourceID); err != nil {
+		return fmt.Errorf("create pre-restore snapshot: %w", err)
+	}
+	resp, err := cl.PutResource(api.PutResourceRequest{
+		ID: snap.Snapshot.ResourceID, Visibility: api.Private,
+		Blob: snap.Blob, EncryptedMeta: snap.Snapshot.EncryptedMeta,
+		WrappedKey: snap.Snapshot.WrappedKey, ChunkRefs: root.SegmentIDs(),
+		ExpectedVersion: current.Version, MinClient: max(snap.MinClient, api.CapabilityGitRemote),
+		CompactAt: current.CompactAt,
+	})
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		return printJSON(map[string]any{"restored": true, "snapshotId": snapshotID, "resourceId": resp.ID, "version": resp.Version, "generation": root.Generation, "bundles": len(root.Bundles)})
+	}
+	fmt.Printf("restored %q to snapshot %s · %d bundle(s) · generation %d · version %d\n", meta.Name, snapshotID, len(root.Bundles), root.Generation, resp.Version)
 	return nil
 }
 

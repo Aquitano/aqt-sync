@@ -17,7 +17,7 @@ func TestRefsRootRoundTripBound(t *testing.T) {
 		Version: RefsRootVersion, Head: "refs/heads/main",
 		Refs: map[string]string{"refs/heads/main": "abc"}, Generation: 2,
 		ObjectFormat: "sha256",
-		Bundles: []BundleRef{{ID: "group", Tips: []string{"abc"}, Bases: []string{"def"},
+		Bundles: []BundleRef{{ID: "group", Full: true, Tips: []string{"abc"}, Bases: []string{"def"},
 			Segments: []Segment{{ID: "segment", Len: 4, Size: crypto.NonceSize + 20}}}},
 	}
 	sealed, err := SealRefsRoot(want, key, "resource")

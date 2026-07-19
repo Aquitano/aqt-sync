@@ -28,7 +28,10 @@ type Segment struct {
 // client must apply it. Segments are embedded because the existing public object
 // API roots and locates concrete object IDs; ID remains the stable group/cache key.
 type BundleRef struct {
-	ID       string    `json:"id"`
+	ID string `json:"id"`
+	// Full distinguishes a compaction bundle from a one-push delta with no bases,
+	// allowing repeated GC to stop without uploading or snapshotting again.
+	Full     bool      `json:"full,omitempty"`
 	Tips     []string  `json:"tips,omitempty"`
 	Bases    []string  `json:"bases,omitempty"`
 	Segments []Segment `json:"segments,omitempty"`
