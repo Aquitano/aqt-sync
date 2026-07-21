@@ -16,7 +16,7 @@ API layer, *before* any payload is served.
 | ---------- | ------- | ------------------- |
 | `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata |
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
-| `3` (root rotation) | unreleased | account root-key rotation and migrated identities |
+| `3` (root rotation) | v0.3.0 | account root-key rotation and migrated identities |
 
 `api.ClientCapability` is `3` today. Capability 3 is required for the root-key recovery API because it changes the account signing and encryption identities.
 

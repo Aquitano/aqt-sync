@@ -640,10 +640,9 @@ fetch) or an overwriting write, a requester whose capability is below the resour
 stored `min_client` gets `426 Upgrade Required` with a structured body
 (`{ error, code: "upgrade_required", minClient }`) *before* any payload — an
 actionable "upgrade aqt" instead of a downstream decryption failure. A request with
-no (or an unparseable) capability header is assumed to be `2`: the header ships only
-after v0.2.0, so any header-less client is no newer than v0.2.x, whose newest release
-reads id-bound resources; pre-0.2 clients are indistinguishable and keep the
-status-quo AEAD failure on id-bound resources only. A declared `minClient` above the
+no (or an unparseable) capability header fails closed to `1` (baseline): a
+header-less binary is indistinguishable from a pre-0.2 one, so assuming `2` could
+hand it an id-bound root that only failed at AEAD open. A declared `minClient` above the
 writer's own capability is rejected `400`; an omitted declaration stores the baseline.
 
 ```
