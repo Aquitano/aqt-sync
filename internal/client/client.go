@@ -316,11 +316,11 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 func (c *Client) SetVisibility(id string, req api.SetVisibilityRequest) (api.PutResourceResponse, error) {
 	var r api.PutResourceResponse
 	if req.ExpectedVersion <= 0 {
-		current, err := c.GetResource(id)
+		version, err := c.versionToPin(id)
 		if err != nil {
 			return r, err
 		}
-		req.ExpectedVersion = current.Version
+		req.ExpectedVersion = version
 	}
 	err := c.do(http.MethodPost, "/v1/resources/"+url.PathEscape(id)+"/visibility", req, &r)
 	err = mutationOutcome("set visibility", err)
@@ -366,11 +366,28 @@ func withCursor(path, cursor string) string {
 }
 
 func (c *Client) DeleteResource(id string) error {
-	current, err := c.GetResource(id)
+	version, err := c.versionToPin(id)
 	if err != nil {
 		return err
 	}
-	return c.DeleteResourceVersion(id, current.Version)
+	return c.DeleteResourceVersion(id, version)
+}
+
+// versionToPin resolves the version a read-modify-write should pin itself to. A
+// reclaimed tombstone answers 410 and has no content left to race over, so it pins
+// nothing (the server treats 0 as unpinned) rather than failing — otherwise the row
+// the owner is told to `aqt rm` could never be removed. Prefer passing a version you
+// already hold: this costs a round trip, and for an inline resource it downloads the
+// whole ciphertext to read an integer.
+func (c *Client) versionToPin(id string) (int, error) {
+	current, err := c.GetResource(id)
+	if errors.Is(err, ErrGone) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return current.Version, nil
 }
 
 func (c *Client) DeleteResourceVersion(id string, version int) error {

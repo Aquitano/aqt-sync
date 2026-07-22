@@ -37,17 +37,24 @@ var (
 func sealingKeyID(name string) string { return "session-key:" + name }
 func tokenID(name string) string      { return "token:" + name }
 
-// keychainSealingKey returns the per-profile random key that seals the session
-// cache, fetching it from the OS keychain. With create set, it mints and stores a
-// fresh key when none exists. It returns ok=false when the keychain backend is
-// unavailable (e.g. a headless host with no Secret Service), so callers fall back
-// to the machine-bound key and keep working.
-func keychainSealingKey(name string, create bool) (crypto.ContentKey, bool) {
+// baseKeyID names the key that seals tracked folders' base manifests. It is
+// deliberately separate from sealingKeyID: the session key is dropped on every
+// lock and logout, whereas a sealed base.json lives in a tracked folder that
+// outlives both, and nothing on the profile side can reach those folders to
+// re-seal them. Sharing one key made `aqt lock` destroy every tracked folder's
+// base, forcing a `--reconcile` that resurrects deletions.
+func baseKeyID(name string) string { return "base-key:" + name }
+
+// keychainKey returns a per-profile random key by keychain id. With create set, it
+// mints and stores a fresh key when none exists. It returns ok=false when the
+// keychain backend is unavailable (e.g. a headless host with no Secret Service),
+// so callers fall back to the machine-bound key and keep working.
+func keychainKey(id string, create bool) (crypto.ContentKey, bool) {
 	var ck crypto.ContentKey
 	if keychainDisabled() {
 		return ck, false
 	}
-	v, err := keyringGet(keychainService, sealingKeyID(name))
+	v, err := keyringGet(keychainService, id)
 	switch {
 	case err == nil:
 		if raw, derr := base64.StdEncoding.DecodeString(v); derr == nil && len(raw) == crypto.KeySize {
@@ -67,7 +74,7 @@ func keychainSealingKey(name string, create bool) (crypto.ContentKey, bool) {
 	if _, err := rand.Read(ck[:]); err != nil {
 		return ck, false
 	}
-	if err := keyringSet(keychainService, sealingKeyID(name), base64.StdEncoding.EncodeToString(ck[:])); err != nil {
+	if err := keyringSet(keychainService, id, base64.StdEncoding.EncodeToString(ck[:])); err != nil {
 		return ck, false
 	}
 	return ck, true
@@ -77,7 +84,7 @@ func keychainSealingKey(name string, create bool) (crypto.ContentKey, bool) {
 // the random keychain key (minting one if needed), or the machine-bound key when
 // no keychain backend is present.
 func saveSealingKey(name string) crypto.ContentKey {
-	if k, ok := keychainSealingKey(name, true); ok {
+	if k, ok := keychainKey(sealingKeyID(name), true); ok {
 		return k
 	}
 	return machineBoundKey()
@@ -89,7 +96,30 @@ func saveSealingKey(name string) crypto.ContentKey {
 // format.
 func loadSealingKeys(name string) []crypto.ContentKey {
 	var keys []crypto.ContentKey
-	if k, ok := keychainSealingKey(name, false); ok {
+	if k, ok := keychainKey(sealingKeyID(name), false); ok {
+		keys = append(keys, k)
+	}
+	return append(keys, machineBoundKey())
+}
+
+// saveBaseSealingKey returns the key to seal a folder's base manifest under.
+func saveBaseSealingKey(name string) crypto.ContentKey {
+	if k, ok := keychainKey(baseKeyID(name), true); ok {
+		return k
+	}
+	return machineBoundKey()
+}
+
+// loadBaseSealingKeys returns the candidate keys to try when opening a sealed base,
+// strongest first. The session key is still tried so bases written before base
+// sealing had its own key keep opening; the machine-bound key covers both the
+// no-keychain host and the pre-keychain format.
+func loadBaseSealingKeys(name string) []crypto.ContentKey {
+	var keys []crypto.ContentKey
+	if k, ok := keychainKey(baseKeyID(name), false); ok {
+		keys = append(keys, k)
+	}
+	if k, ok := keychainKey(sealingKeyID(name), false); ok {
 		keys = append(keys, k)
 	}
 	return append(keys, machineBoundKey())
@@ -99,6 +129,8 @@ func keychainDropSealingKey(name string) {
 	if keychainDisabled() {
 		return
 	}
+	// Only the session key. The base key is never dropped: tracked folders still
+	// reference it, and this process cannot find them to re-seal.
 	_ = keyringDelete(keychainService, sealingKeyID(name))
 }
 

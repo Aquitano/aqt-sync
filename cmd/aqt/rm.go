@@ -7,7 +7,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 )
 
@@ -48,8 +47,13 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		return err
 	}
 	knownResources := make(map[string]bool, len(items))
+	// The listing already carries every version, so the delete pins itself from it
+	// rather than re-fetching each resource (which, for an inline one, would download
+	// the whole ciphertext to read an integer).
+	versions := make(map[string]int, len(items))
 	for _, item := range items {
 		knownResources[item.ID] = true
+		versions[item.ID] = item.Version
 	}
 	// Resolve and inspect every target before asking for confirmation or mutating.
 	seen := make(map[string]bool, len(refs))
@@ -85,7 +89,9 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 	}
 
-	snapshots := make(map[string][]api.SnapshotInfo, len(ids))
+	// Preflight only refuses anchored snapshots; the list the deletes actually work
+	// from is re-fetched after each resource is gone, so a snapshot pinned in between
+	// is not missed.
 	if withSnapshots {
 		failures := make(map[int]error)
 		for i, id := range ids {
@@ -94,7 +100,6 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 				failures[i] = fmt.Errorf("list snapshots of %s: %w", id, listErr)
 				continue
 			}
-			snapshots[id] = snaps
 			for _, snapshot := range snaps {
 				if snapshot.Anchored {
 					failures[i] = fmt.Errorf("resource %s has anchored snapshot %s; unanchor it before deleting with --with-snapshots", id, snapshot.ID)
@@ -120,7 +125,7 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		return err
 	}
 	for i, id := range ids {
-		deleteErr := cl.DeleteResource(id)
+		deleteErr := cl.DeleteResourceVersion(id, versions[id])
 		if deleteErr != nil {
 			if errors.Is(deleteErr, client.ErrNotFound) {
 				deleteErr = fmt.Errorf("resource %s not found (or not yours); run `aqt ls` to list yours", id)
@@ -131,15 +136,16 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		// Snapshots pin the resource's ciphertext independently of the live row, so a
 		// plain rm leaves every snapshotted version fetchable. Listing after the delete
 		// closes the race where the scheduled snapshot job pins the resource again
-		// between a list and the delete; snapshot rows outlive their resource.
-		snaps := snapshots[id]
-		if !withSnapshots {
-			snaps, err = cl.ListSnapshots(id)
-			if err != nil {
-				err = markBatchFailure(results, i, fmt.Errorf("list snapshots of %s: %w", id, err))
-				return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
-			}
+		// between a list and the delete; snapshot rows outlive their resource. That
+		// applies just as much to --with-snapshots, which would otherwise leave the
+		// newly-pinned snapshot behind and still report success.
+		snaps, listErr := cl.ListSnapshots(id)
+		if listErr != nil {
+			err = markBatchFailure(results, i, fmt.Errorf("list snapshots of %s: %w", id, listErr))
+			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 		}
+		// The resource itself is already gone; from here on a failure must not be
+		// reported as a failed delete, or a retry hits "resource not found".
 		switch {
 		case len(snaps) == 0:
 		case !withSnapshots:
@@ -149,12 +155,14 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 			}
 		default:
 			for _, sn := range snaps {
-				if deleteErr := cl.DeleteSnapshot(sn.ID); deleteErr != nil {
-					err = markBatchFailure(results, i, fmt.Errorf("delete snapshot %s of %s: %w", sn.ID, id, deleteErr))
+				if snapErr := cl.DeleteSnapshot(sn.ID); snapErr != nil {
+					results[i].SnapshotsRemaining = len(snaps) - results[i].SnapshotsDeleted
+					results[i].Status = batchSucceeded
+					err = fmt.Errorf("deleted resource %s, but snapshot %s could not be deleted: %w; remove the rest with `aqt snapshot prune --id %s`", id, sn.ID, snapErr, id)
 					return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 				}
+				results[i].SnapshotsDeleted++
 			}
-			results[i].SnapshotsDeleted = len(snaps)
 		}
 		results[i].Status = batchSucceeded
 	}

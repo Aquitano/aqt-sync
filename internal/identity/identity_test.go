@@ -188,8 +188,40 @@ func TestSessionSealedByKeychainKey(t *testing.T) {
 	if err := ClearSession("default"); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := keychainSealingKey("default", false); ok {
+	if _, ok := keychainKey(sealingKeyID("default"), false); ok {
 		t.Fatal("ClearSession should drop the keychain sealing key")
+	}
+}
+
+// A sealed base outlives the session: it lives in a tracked folder that `aqt lock`
+// and `aqt logout` do not touch, so dropping the session key must leave it readable.
+// Sharing one key made a routine lock force a baseless --reconcile on every folder.
+func TestSealedBaseSurvivesLockAndLogout(t *testing.T) {
+	isolateConfigDir(t) // mock keychain is available
+
+	plain := []byte(`{"version":1,"entries":{}}`)
+	blob, err := SealBase("default", plain)
+	if err != nil {
+		t.Fatalf("SealBase: %v", err)
+	}
+	if err := ClearSession("default"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := OpenBase("default", blob)
+	if err != nil {
+		t.Fatalf("OpenBase after lock: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("base after lock = %q, want %q", got, plain)
+	}
+	if err := Delete("default"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = OpenBase("default", blob); err != nil {
+		t.Fatalf("OpenBase after logout: %v", err)
+	}
+	if string(got) != string(plain) {
+		t.Fatalf("base after logout = %q, want %q", got, plain)
 	}
 }
 

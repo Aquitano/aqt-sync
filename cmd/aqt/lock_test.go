@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -19,14 +20,15 @@ func tempTrackedRoot(t *testing.T) string {
 
 func TestSyncLockExcludesConcurrent(t *testing.T) {
 	root := tempTrackedRoot(t)
+	lockPath := filepath.Join(root, syncengine.ControlDir, "lock")
 
 	release, err := acquireSyncLock(root)
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	// A second acquire while this (live) process holds it must fail.
-	if _, err := acquireSyncLock(root); err == nil {
-		t.Fatal("expected the second acquire to fail while the lock is held")
+	// Another live process must still be excluded; the pid file is what enforces it.
+	if _, err := acquirePIDFile(lockPath, func(int) error { return errLockBusy }); err == nil {
+		t.Fatal("expected a second process to be excluded while the lock is held")
 	}
 	release()
 	// After release the lock is free again.
@@ -35,6 +37,33 @@ func TestSyncLockExcludesConcurrent(t *testing.T) {
 		t.Fatalf("acquire after release: %v", err)
 	}
 	release2()
+}
+
+var errLockBusy = errors.New("busy")
+
+// In-place restore takes the sync lock before swapping the tree and then calls
+// runSync underneath it, so the lock must be re-entrant within one process — and the
+// pid file must survive until the outermost release.
+func TestSyncLockIsReentrantInProcess(t *testing.T) {
+	root := tempTrackedRoot(t)
+	lockPath := filepath.Join(root, syncengine.ControlDir, "lock")
+
+	outer, err := acquireSyncLock(root)
+	if err != nil {
+		t.Fatalf("outer acquire: %v", err)
+	}
+	inner, err := acquireSyncLock(root)
+	if err != nil {
+		t.Fatalf("nested acquire: %v", err)
+	}
+	inner()
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("pid file gone after the inner release: %v", err)
+	}
+	outer()
+	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
+		t.Fatalf("pid file still present after the outer release: %v", err)
+	}
 }
 
 func TestSyncLockReclaimsStale(t *testing.T) {

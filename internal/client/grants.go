@@ -60,7 +60,7 @@ func (c *Client) ListGrants(resourceID string) ([]api.GrantEntry, error) {
 
 // RevokeGrant deletes one grant from a resource the caller owns.
 func (c *Client) RevokeGrant(resourceID, granteeHandle string) error {
-	current, err := c.GetResource(resourceID)
+	version, err := c.versionToPin(resourceID)
 	if err != nil {
 		return err
 	}
@@ -69,7 +69,7 @@ func (c *Client) RevokeGrant(resourceID, granteeHandle string) error {
 	if err != nil {
 		return err
 	}
-	req.Header.Set("If-Match", strconv.Itoa(current.Version))
+	req.Header.Set("If-Match", strconv.Itoa(version))
 	_, _, err = c.send(req, path)
 	return mutationOutcome("revoke grant", err)
 }

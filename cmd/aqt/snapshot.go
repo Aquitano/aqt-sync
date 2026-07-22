@@ -511,6 +511,16 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if meta.Kind != api.KindFolder {
 		return errors.New("in-place restore is only for tracked folders; use --out for a single file")
 	}
+	// The swap and the sync that publishes it are one operation and must hold the
+	// sync lock together. A watcher firing on the swap's deletions would otherwise
+	// take the lock first and push a manifest of the half-emptied root — committing
+	// the deletions to the server and to every other device. The lock is re-entrant,
+	// so the runSync below acquires it again underneath this one.
+	release, err := acquireSyncLock(root)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
 	}

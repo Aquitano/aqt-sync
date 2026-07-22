@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -51,10 +52,38 @@ var (
 )
 
 func main() {
-	if err := rootCmd().Execute(); err != nil {
+	root := rootCmd()
+	root.SetArgs(escapeLeadingDashIDs(os.Args[1:]))
+	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(exitCode(err))
 	}
+}
+
+// idLikeArg matches the shape of a server-minted resource or snapshot id that
+// begins with a dash. Ids are base64url of 8 random bytes, so 11 characters from
+// that alphabet; the leading dash is what cobra would otherwise parse as a flag
+// cluster. Servers no longer mint these, but ids handed out before that stay valid
+// forever, and no server-side change can reach them.
+var idLikeArg = regexp.MustCompile(`^-[A-Za-z0-9_-]{10}$`)
+
+// escapeLeadingDashIDs rewrites a bare positional that can only be a legacy
+// dash-leading id into its aqt:// form, which the ref parser already accepts and
+// cobra does not treat as flags. Everything after a "--" is left alone: the user
+// has already said those are positionals. A real flag cluster is never 10 letters
+// long, so this cannot shadow one.
+func escapeLeadingDashIDs(args []string) []string {
+	out := make([]string, len(args))
+	copy(out, args)
+	for i, a := range out {
+		if a == "--" {
+			return out
+		}
+		if idLikeArg.MatchString(a) {
+			out[i] = "aqt://" + a
+		}
+	}
+	return out
 }
 
 // exitCode maps an error to the documented CLI contract (DESIGN.md §3):

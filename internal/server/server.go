@@ -673,6 +673,9 @@ func (s *Server) accountUsage(c *gin.Context) {
 	})
 }
 
+// checkAccountLimit refuses a write that would push the account past its byte quota
+// or past the row cap for kind ("resources", "snapshots", "objects"). An empty kind
+// checks bytes only, for a write that replaces an existing row rather than adding one.
 func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	u, err := s.store.AccountUsage(owner)
 	if err != nil {
@@ -778,9 +781,23 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	if req.ID == "" {
+	// An in-place update writes just as many physical bytes as a create, so it is
+	// charged too; it replaces the resource's current bytes rather than adding to
+	// them, so only the difference counts, and it adds no row (no count check).
+	// A replayed create is already stored and must not be charged again.
+	if !s.store.ResourceCreateReplayed(owner, req) {
 		defer s.accountLimits.lock(owner)()
-		if err := s.checkAccountLimit(owner, "resources", estimatedResourceBytes(req)); err != nil {
+		added, kind := estimatedResourceBytes(req), "resources"
+		if req.ID != "" {
+			kind = ""
+			stored, err := s.store.ResourceStoredBytes(owner, req.ID)
+			if err != nil {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+				return
+			}
+			added = max(0, added-stored)
+		}
+		if err := s.checkAccountLimit(owner, kind, added); err != nil {
 			if !abortLimit(c, err) {
 				abort(c, http.StatusInternalServerError, "usage lookup failed")
 			}
@@ -891,7 +908,14 @@ func (s *Server) getResource(c *gin.Context) {
 			owner = o
 		}
 	}
-	res, err := s.store.GetResource(c.Param("id"), owner)
+	// Negotiate before the resource is touched at all: a request whose Accept we
+	// cannot satisfy must not spend one of a `--burn` link's reads.
+	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
+	if !ok {
+		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
+		return
+	}
+	res, countRead, err := s.store.GetResourceUncounted(c.Param("id"), owner)
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -907,15 +931,23 @@ func (s *Server) getResource(c *gin.Context) {
 	// Gate the read on the requester's capability before any payload is written: a
 	// client too old to open the sealed format gets an actionable 426 instead of the
 	// bytes and a downstream AEAD failure. This route is public, so the check lives
-	// here rather than in the authed middleware.
+	// here rather than in the authed middleware. It precedes the read count for the
+	// same reason the Accept check does.
 	if capability := requestCapability(c); capability < res.MinClient {
 		abortUpgradeRequired(c, res.MinClient, capability)
 		return
 	}
-	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
-	if !ok {
-		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
-		return
+	// Everything that could refuse this read has passed, so the permit is spent now.
+	// This is also what enforces exhaustion: an already-spent link answers 410 here.
+	if countRead {
+		if err := s.store.CountResourceRead(c.Param("id")); err != nil {
+			if errors.Is(err, ErrGone) {
+				abortGone(c)
+			} else {
+				abort(c, http.StatusInternalServerError, "fetch failed")
+			}
+			return
+		}
 	}
 	if format == resourceEnvelope {
 		body, err := api.EncodeResourceDownload(res)

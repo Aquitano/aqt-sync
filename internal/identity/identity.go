@@ -347,8 +347,9 @@ func Delete(name string) error {
 }
 
 // baseAAD domain-separates the at-rest seal of a folder's local base manifest from
-// the session-cache seal. Both use the same per-profile sealing key, so distinct
-// AAD stops a session blob and a base blob from being interchanged.
+// the session-cache seal, so a session blob and a base blob can never be
+// interchanged even where the two seals share a key (a host with no keychain, where
+// both fall back to the machine-bound key).
 const baseAAD = "aqt-base-at-rest-v1"
 
 // ErrBaseSeal is returned by OpenBase when no candidate sealing key opens the base
@@ -356,26 +357,26 @@ const baseAAD = "aqt-base-at-rest-v1"
 // another machine.
 var ErrBaseSeal = errors.New("aqt: could not open sealed base manifest (different profile or machine?)")
 
-// SealBase encrypts a folder's local base manifest for storage at rest, under the
-// same per-profile sealing key (the random keychain key, or the machine-bound
-// fallback) that protects the session cache. A backed-up or copied .aqt/base.json
+// SealBase encrypts a folder's local base manifest for storage at rest, under a
+// per-profile key that survives lock and logout (see baseKeyID), falling back to the
+// machine-bound key where no keychain exists. A backed-up or copied .aqt/base.json
 // is therefore useless on another machine and exposes neither the chunk decryption
 // keys nor the inline plaintext it holds.
 func SealBase(name string, plaintext []byte) (crypto.SealedBlob, error) {
 	if name == "" {
 		name = DefaultProfile
 	}
-	return crypto.Seal(plaintext, saveSealingKey(name), []byte(baseAAD))
+	return crypto.Seal(plaintext, saveBaseSealingKey(name), []byte(baseAAD))
 }
 
-// OpenBase decrypts a base manifest sealed by SealBase, trying the keychain key
-// then the machine-bound fallback (as LoadSession does), so a base still opens if
-// the keychain came or went between save and load.
+// OpenBase decrypts a base manifest sealed by SealBase, trying each candidate key in
+// turn so a base still opens if the keychain came or went between save and load, or
+// if it was sealed by a build that used the session key.
 func OpenBase(name string, blob crypto.SealedBlob) ([]byte, error) {
 	if name == "" {
 		name = DefaultProfile
 	}
-	for _, ck := range loadSealingKeys(name) {
+	for _, ck := range loadBaseSealingKeys(name) {
 		if plain, err := crypto.Open(blob, ck, []byte(baseAAD)); err == nil {
 			return plain, nil
 		}

@@ -241,6 +241,7 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions 
 		resourceID, owner, grantee,
 	)
 	if err != nil {
+		tx.Rollback()
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
