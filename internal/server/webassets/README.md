@@ -15,6 +15,11 @@ zstd frames, so it decompresses exactly what `internal/compress` produces.
 `share.js` is the page's own state machine and decrypt flow. It is served as an
 asset (not inlined) so the share CSP can omit `'unsafe-inline'` for scripts.
 
+The files as served are pinned by SHA-256 in `integrity_test.go`, which fails the
+build if any of them changes. The npm digests below verify the packages these builds
+were made *from*; they cannot verify a re-wrapped single-file build, so they document
+provenance rather than integrity.
+
 Source package SHA-512 digests:
 
 - `libsodium@0.7.10`: `798fb3ee10eb0cac6400af9029954dbfdd80e4a624c5fbc8b21b412649a0e534a20a762a64fde2f4e3bdc2113bf4fc209b88c66a81e090ce1aa3f6fd0b2bb8cd`

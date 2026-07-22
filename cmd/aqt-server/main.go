@@ -123,14 +123,26 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("data dir: %s", dataDir)
-	var stopOnce sync.Once
+	// serveWithShutdown runs this as part of its own drain, on a context bounded by
+	// grace. Running it a second time there with a fresh grace would let a drain that
+	// timed out consume up to 2 x AQT_SHUTDOWN_GRACE, so the second call is a
+	// fallback for the paths that return without draining (a listener that never came
+	// up, or a serve error) and does nothing once the first has run.
+	var (
+		stopOnce  sync.Once
+		drainOnce sync.Once
+	)
 	shutdownComponents := func(ctx context.Context) error {
-		api.BeginShutdown()
-		stopOnce.Do(func() { close(workerStop) })
-		if metricsServer != nil {
-			_ = metricsServer.Shutdown(ctx)
-		}
-		return api.WaitWorkers(ctx)
+		var err error
+		drainOnce.Do(func() {
+			api.BeginShutdown()
+			stopOnce.Do(func() { close(workerStop) })
+			if metricsServer != nil {
+				_ = metricsServer.Shutdown(ctx)
+			}
+			err = api.WaitWorkers(ctx)
+		})
+		return err
 	}
 	serveErr := serveWithShutdown(srv, tlsCfg, grace, shutdownComponents)
 	ctx, cancel := context.WithTimeout(context.Background(), grace)

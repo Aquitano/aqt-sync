@@ -414,11 +414,20 @@ func (s *Server) createAccount(c *gin.Context) {
 	}
 	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
 	if errors.Is(err, ErrConflict) {
-		// A duplicate email must not answer differently from a fresh signup, or the
-		// endpoint becomes an existence oracle. Return the same 201 success shape with a
-		// decoy token that grants nothing: the caller's next authenticated call fails,
-		// indistinguishable from the wrong-passphrase path. The existing account is
-		// untouched — the duplicate creates no device on it.
+		// The email is taken. Tell the caller so only if they prove they are its owner
+		// by presenting the account's passphrase verifier; anyone else gets the decoy,
+		// a success-shaped response whose token authenticates nothing. The existing
+		// account is untouched either way — a duplicate signup creates no device on it.
+		//
+		// Note this does not make open registration unenumerable, and no server-side
+		// response shape can: signing up for a free email must succeed, so "the token
+		// worked" still means "the email was free". Registration=invite is the setting
+		// that actually closes it. What the decoy buys is that a prober cannot confirm
+		// a *specific* address without also taking it. See DESIGN.md section 6.
+		if s.signupProvesOwnership(req.Email, req.AuthVerifier) {
+			abortCode(c, http.StatusConflict, "an account already exists for this email; use `aqt login` to attach this device", api.ErrCodeAccountExists)
+			return
+		}
 		c.JSON(http.StatusCreated, s.decoyAuthResponse())
 		return
 	}
@@ -434,6 +443,19 @@ func (s *Server) createAccount(c *gin.Context) {
 	c.JSON(http.StatusCreated, api.AuthResponse{
 		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token, Epoch: 1,
 	})
+}
+
+// signupProvesOwnership reports whether a duplicate signup carried the existing
+// account's own passphrase verifier. Only then is it safe to confirm the account
+// exists: the caller already knows the secret that would let them log in, so the
+// confirmation tells them nothing they could not learn from `aqt login`.
+func (s *Server) signupProvesOwnership(email string, verifier []byte) bool {
+	_, _, storedHash, _, err := s.store.AccountForAuth(email)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(verifier)
+	return subtle.ConstantTimeCompare(sum[:], storedHash) == 1
 }
 
 // decoyAuthResponse builds a success-shaped auth response whose fields match a real
@@ -1213,9 +1235,15 @@ func (s *Server) createSnapshot(c *gin.Context) {
 	defer s.accountLimits.lock(owner)()
 	resource, err := s.store.GetResource(req.ResourceID, owner)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			abortNotFound(c)
-		} else {
+		case errors.Is(err, ErrGone):
+			// A reclaimed tombstone has no ciphertext left to pin. Answer the stable
+			// 410 rather than a 500, which doIdempotent would retry against an
+			// operation that can never succeed.
+			abortGone(c)
+		default:
 			abort(c, http.StatusInternalServerError, "resource lookup failed")
 		}
 		return

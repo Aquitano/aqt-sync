@@ -30,3 +30,13 @@ func processAlive(pid int) bool {
 	}
 	return proc.Signal(syscall.Signal(0)) == nil
 }
+
+// currentUmask reads the process umask without leaving it changed. There is no
+// portable way to query it, so it is set and immediately restored; aqt is
+// single-threaded at the point materializeStaged calls this (before any goroutine
+// that creates files), so the window cannot affect another creation.
+func currentUmask() os.FileMode {
+	m := syscall.Umask(0)
+	syscall.Umask(m)
+	return os.FileMode(m)
+}

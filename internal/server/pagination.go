@@ -22,8 +22,16 @@ const (
 )
 
 // cursorSep joins the ordering-key parts inside a cursor. It is the ASCII unit
-// separator, which never appears in the ids/handles/timestamps a cursor carries.
+// separator, chosen because it does not occur in the ids and timestamps a cursor
+// carries. It is not assumed absent: grantee handles are deliberately unvalidated
+// (so a decoy handle is indistinguishable from a real one) and so can contain
+// anything, hence the escaping below.
 const cursorSep = "\x1f"
+
+// cursorEsc escapes an occurrence of cursorSep inside a part, so a part carrying the
+// separator cannot forge an extra field and be mis-parsed as another endpoint's key
+// shape.
+const cursorEsc = "\x1e"
 
 // errBadCursor is returned by a store list query when its ?cursor= does not decode
 // (wrong shape or corrupt). Handlers map it to a 400 with ErrCodeInvalidCursor.
@@ -71,7 +79,11 @@ func (p pageParams) effectiveLimit() int {
 // encodeCursor builds the opaque cursor for a page's last row from its ordering-key
 // parts (the same columns the query's ORDER BY uses).
 func encodeCursor(parts ...string) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(strings.Join(parts, cursorSep)))
+	escaped := make([]string, len(parts))
+	for i, p := range parts {
+		escaped[i] = strings.NewReplacer(cursorEsc, cursorEsc+cursorEsc, cursorSep, cursorEsc+"s").Replace(p)
+	}
+	return base64.RawURLEncoding.EncodeToString([]byte(strings.Join(escaped, cursorSep)))
 }
 
 // decodeCursor reverses encodeCursor, returning errBadCursor unless it decodes into
@@ -86,5 +98,35 @@ func decodeCursor(cursor string, want int) ([]string, error) {
 	if len(parts) != want {
 		return nil, errBadCursor
 	}
+	for i, p := range parts {
+		unescaped, err := unescapeCursorPart(p)
+		if err != nil {
+			return nil, err
+		}
+		parts[i] = unescaped
+	}
 	return parts, nil
+}
+
+func unescapeCursorPart(p string) (string, error) {
+	var b strings.Builder
+	for i := 0; i < len(p); i++ {
+		if p[i] != cursorEsc[0] {
+			b.WriteByte(p[i])
+			continue
+		}
+		i++
+		if i >= len(p) {
+			return "", errBadCursor
+		}
+		switch p[i] {
+		case cursorEsc[0]:
+			b.WriteByte(cursorEsc[0])
+		case 's':
+			b.WriteByte(cursorSep[0])
+		default:
+			return "", errBadCursor
+		}
+	}
+	return b.String(), nil
 }

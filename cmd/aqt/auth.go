@@ -127,12 +127,19 @@ func runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
 	if pass == "" {
 		return errors.New("passphrase must not be empty")
 	}
-	confirm, err := promptPassphrase("Confirm passphrase: ")
-	if err != nil {
-		return err
-	}
-	if confirm != pass {
-		return errors.New("passphrases do not match")
+	// A typo'd first passphrase is unrecoverable (zero-knowledge), so on a terminal it
+	// is confirmed. Without one there is nobody to confirm to and no second read to
+	// make — a scripted signup (provisioning, containers, CI) pipes the passphrase
+	// once — so the confirmation is skipped rather than failing with the misleading
+	// "passphrases do not match".
+	if interactiveStdin() {
+		confirm, err := promptPassphrase("Confirm passphrase: ")
+		if err != nil {
+			return err
+		}
+		if confirm != pass {
+			return errors.New("passphrases do not match")
+		}
 	}
 	server := serverURL()
 	cl, err := client.New(server, "")
@@ -157,6 +164,18 @@ func runLogin(email string, ttl time.Duration) error {
 		return errors.New("email is required")
 	}
 	server := serverURL()
+	// Logging a *different* account into an occupied profile would overwrite its token
+	// and device id, orphaning that device's server-side session with nothing left to
+	// revoke it by. `aqt signup` refuses exactly this; login must too — and before
+	// prompting, so the user is not asked for a passphrase that was never going to be
+	// used. Re-logging the same account into its own profile is the normal refresh
+	// path and is handled below.
+	name := firstNonEmpty(flagProfile, identity.DefaultProfile)
+	if prof, loadErr := identity.Load(name); loadErr == nil && prof.Token != "" &&
+		!(sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email)) {
+		return fmt.Errorf("profile %q is already logged in as %s on %s; run `aqt logout` first (which revokes that device), or use a different --profile",
+			name, prof.Email, prof.Server)
+	}
 	cl, err := client.New(server, "")
 	if err != nil {
 		return err
@@ -183,7 +202,6 @@ func runLogin(email string, ttl time.Duration) error {
 	}
 	defer rk.Wipe()
 
-	name := firstNonEmpty(flagProfile, identity.DefaultProfile)
 	if prof, loadErr := identity.Load(name); loadErr == nil &&
 		sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email) && prof.Token != "" {
 		authed, newErr := client.New(server, prof.Token)
@@ -340,8 +358,14 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 	if err != nil {
 		return err
 	}
+	// A signup for an email that is already taken gets a success-shaped response with
+	// a token that authenticates nothing (the server's enumeration defence), so the
+	// validation below is what detects it. Report the likely cause rather than the
+	// mechanism — and do not claim the account exists, which is what the server
+	// deliberately declined to say.
 	if err := validateAttachedDevice(authed, resp.DeviceID); err != nil {
-		return fmt.Errorf("account creation was not authenticated; no profile was saved: %w", err)
+		return fmt.Errorf("account creation was not authenticated; no profile was saved. "+
+			"If you already have an account for %s, run `aqt login --email %s` instead: %w", email, email, err)
 	}
 	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
 	if err := saveProfile(server, email, fingerprint, kdf, wrappedRoot, resp, ttl); err != nil {

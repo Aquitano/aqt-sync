@@ -268,11 +268,16 @@ stops cleanly (it can't prompt) rather than looping. Per-folder defaults live in
 ### 3.6 Identity
 
 ```
+aqt signup  [--email <e>]   Create the account: mint a root key, wrap it under the
+                            passphrase, attach this device.
+      --invite <t>          Invite token if the server needs one (or AQT_INVITE_TOKEN).
+      --kdf-preset/--kdf-time/--kdf-memory/--kdf-threads   Argon2id tuning.
 aqt login   [--email <e>]   Prompt passphrase → derive master key → attach device.
-      --ttl <d>             Session cache lifetime (0 = until logout).
-      --invite <t>         Invite token if the server needs one (or AQT_INVITE_TOKEN).
-      --kdf-preset/--kdf-time/--kdf-memory/--kdf-threads   Argon2id tuning (new account only).
-aqt logout  [--all-devices] Drop local key material (optionally revoke others; -y skips).
+                            Does not create accounts; that is `signup`.
+      --ttl <d>             Session cache lifetime (0 = until lock/logout).
+aqt lock                    Forget the cached key; this device stays attached.
+aqt logout  [--all-devices] Revoke this device and delete its local profile
+                            (optionally revoke others; -y skips).
 aqt whoami                  Account, device, key fingerprint, server.
 aqt devices [ls | rm <id>]  List / revoke attached devices.
 aqt passphrase change       Re-wrap master key under a new passphrase (no re-encrypt).
@@ -281,9 +286,15 @@ aqt passphrase rotate-root  Compromise recovery: mint a fresh root key, re-wrap 
                             resource/snapshot/grant, revoke every other device (-y skips).
 ```
 
-First-run auth is lazy: a push on a fresh machine prompts to create the account.
-Because a typo'd first passphrase is **unrecoverable** (zero-knowledge), first run
-requires a confirm prompt and an explicit "this cannot be reset" warning.
+Because a typo'd first passphrase is **unrecoverable** (zero-knowledge), `signup` on a
+terminal confirms it and warns explicitly that it cannot be reset. Without a terminal
+(a scripted signup) the passphrase is read once and the confirmation is skipped.
+
+A tracked folder records the account that created it (`.aqt/state.json`), and every
+command that touches its remote resource refuses to run under a different account.
+The binding is on the account's owner handle, not its signing key, so
+`passphrase rotate-root` — which mints a new signing key on every device — does not
+strand tracked folders.
 
 **Wrapped-root key model (implemented).** The account's *master key* is a random
 root key (`RK`), minted at signup and rotated only during compromise recovery; it wraps content keys and
@@ -767,8 +778,16 @@ AQT_AUTH_BURST       0                             # authed burst per token; 0 =
 AQT_TRUSTED_PROXIES  (unset = loopback)            # X-Forwarded-* trust; "none" trusts none
 ```
 
-A client whose server runs in invite mode passes the token via `aqt login --invite`
-(or `AQT_INVITE_TOKEN`).
+A client whose server runs in invite mode passes the token via `aqt signup --invite`
+(or `AQT_INVITE_TOKEN`). `aqt login` attaches a device to an account that already
+exists and needs no invite.
+
+Note that open registration (the default) is enumerable by design: signing up for an
+unused address must succeed, so "the signup worked" always reveals that the address
+was free. A duplicate signup that cannot prove ownership gets a success-shaped decoy
+response rather than a confirmation, so a prober cannot confirm a *specific* address
+without also taking it — but only `AQT_REGISTRATION=invite` actually closes
+enumeration.
 
 ### 4.4 Identity / local keystore (`@aqt/identity`)
 

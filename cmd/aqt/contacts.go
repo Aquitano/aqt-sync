@@ -47,6 +47,23 @@ func fetchAccountKeys(cl *client.Client, email string) (api.AccountKeysResponse,
 // opens — and once they do register, the honest key mismatches the pinned decoy and
 // every later share fails as if the server were attacking. So the mismatch is never
 // treated as proof of an attack, and both paths point at `aqt contacts rm`.
+// confirmPinnedKeys re-checks a stored pin against the server's current keys for
+// that contact. Used on the re-wrap path, where the alternative — trusting the pin
+// blindly — silently produces a wrap the grantee cannot open if they have rotated
+// their root key since. A lookup failure is reported rather than swallowed: not
+// re-wrapping leaves the grantee on the old key, which still works, whereas
+// re-wrapping to a stale key does not.
+func confirmPinnedKeys(cl *client.Client, prof *identity.Profile, pin identity.Contact) error {
+	current, err := lookupGrantee(cl, prof, pin.Email)
+	if err != nil {
+		return err
+	}
+	if current.Handle != pin.Handle || !bytes.Equal(current.EncPublicKey, pin.EncPublicKey) {
+		return fmt.Errorf("their published keys have changed since this grant was made; re-run `aqt share --with %s`", pin.Email)
+	}
+	return nil
+}
+
 func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (identity.Contact, error) {
 	keys, err := fetchAccountKeys(cl, email)
 	if err != nil {

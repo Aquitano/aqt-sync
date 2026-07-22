@@ -68,6 +68,10 @@ var ErrGone = errors.New("link expired or read limit reached")
 // "storage quota exceeded" distinctly from a generic server error.
 var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the server operator to raise the quota")
 
+// ErrRateLimited means the server answered 429 and the request had already ridden
+// out its budget of Retry-After waits.
+var ErrRateLimited = errors.New("server rate limit exceeded; retry in a moment")
+
 // ErrDeviceLimit maps the device_limit code (a 403 on attach) so a caller can tell
 // "revoke a device first" apart from a generic authorization failure.
 var ErrDeviceLimit = errors.New("device limit reached; revoke a device before attaching another")
@@ -205,17 +209,20 @@ func (c *Client) AttachDevice(req api.AttachDeviceRequest) (api.AuthResponse, er
 // pagination transparently.
 func (c *Client) ListDevices() ([]api.Device, error) {
 	var all []api.Device
-	cursor := ""
+	cursor, pages := "", 0
 	for {
 		var r api.ListDevicesResponse
 		if err := c.do(http.MethodGet, withCursor("/v1/devices", cursor), nil, &r); err != nil {
 			return nil, err
 		}
 		all = append(all, r.Devices...)
-		if r.NextCursor == "" {
+		more, err := nextPage(&cursor, r.NextCursor, &pages)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			return all, nil
 		}
-		cursor = r.NextCursor
 	}
 }
 
@@ -338,18 +345,48 @@ func (c *Client) UpdateResourceMetadata(id string, req api.UpdateResourceMetadat
 // pagination transparently so a CLI caller still gets the whole slice in one call.
 func (c *Client) ListResources() ([]api.ResourceListItem, error) {
 	var all []api.ResourceListItem
-	cursor := ""
+	cursor, pages := "", 0
 	for {
 		var r api.ListResourcesResponse
 		if err := c.do(http.MethodGet, withCursor("/v1/resources", cursor), nil, &r); err != nil {
 			return nil, err
 		}
 		all = append(all, r.Resources...)
-		if r.NextCursor == "" {
+		more, err := nextPage(&cursor, r.NextCursor, &pages)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			return all, nil
 		}
-		cursor = r.NextCursor
 	}
+}
+
+// maxListPages bounds every paginated listing. The cursor loops trust the server to
+// terminate them, and nothing else does: a server that returns a constant nextCursor
+// spins forever, and the stall guard never fires because each request completes
+// normally. This layer distrusts the server everywhere else (redirect cap, id pin,
+// per-frame content-address verification); the page count is the same kind of bound.
+const maxListPages = 10_000
+
+// errTooManyPages is what a listing returns when the server will not end it.
+var errTooManyPages = errors.New("server did not end the listing (cursor never terminated)")
+
+// nextPage advances a cursor loop, returning false once the listing is done. It
+// refuses a cursor that did not move and a page count past maxListPages, so a
+// misbehaving or hostile server ends the loop instead of pinning the client.
+func nextPage(cursor *string, next string, pages *int) (bool, error) {
+	if next == "" {
+		return false, nil
+	}
+	if next == *cursor {
+		return false, errTooManyPages
+	}
+	if *pages++; *pages >= maxListPages {
+		return false, errTooManyPages
+	}
+	*cursor = next
+	return true, nil
 }
 
 // withCursor appends an opaque pagination cursor to a path, respecting any query
@@ -558,7 +595,7 @@ func (c *Client) ListSnapshots(resourceID string) ([]api.SnapshotInfo, error) {
 		base += "?resource=" + url.QueryEscape(resourceID)
 	}
 	var all []api.SnapshotInfo
-	cursor := ""
+	cursor, pages := "", 0
 	for {
 		var r api.ListSnapshotsResponse
 		if err := c.do(http.MethodGet, withCursor(base, cursor), nil, &r); err != nil {
@@ -574,10 +611,13 @@ func (c *Client) ListSnapshots(resourceID string) ([]api.SnapshotInfo, error) {
 			}
 		}
 		all = append(all, r.Snapshots...)
-		if r.NextCursor == "" {
+		more, err := nextPage(&cursor, r.NextCursor, &pages)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			return all, nil
 		}
-		cursor = r.NextCursor
 	}
 }
 
@@ -698,20 +738,83 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 	// a boundary it cannot cross with a 426 rather than serving bytes that fail to open.
 	req.Header.Set(api.CapabilityHeader, strconv.Itoa(api.ClientCapability))
 
-	resp, err := c.http.Do(req.WithContext(ctx))
-	if err != nil {
-		return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
-	}
-	defer resp.Body.Close()
+	for attempt := 0; ; attempt++ {
+		resp, err := c.http.Do(req.WithContext(ctx))
+		if err != nil {
+			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
+		}
+		data, readErr := io.ReadAll(&progressBody{rc: resp.Body, touch: guard.touch})
+		resp.Body.Close()
 
-	data, readErr := io.ReadAll(&progressBody{rc: resp.Body, touch: guard.touch})
-	if err := statusError(resp.StatusCode, path, data); err != nil {
-		return resp.StatusCode, data, err
+		// The server computes Retry-After from the bucket's own refill rate, so waiting
+		// it out is exactly long enough. Retrying here rather than failing the command
+		// keeps a large sync from dying on a burst it will be allowed to finish.
+		if wait, ok := retryAfterDelay(resp, attempt); ok {
+			replay, rewound := rewindBody(req)
+			if rewound {
+				req = replay
+				guard.touch()
+				select {
+				case <-time.After(wait):
+					continue
+				case <-ctx.Done():
+					return resp.StatusCode, data, ctx.Err()
+				}
+			}
+		}
+		if err := statusError(resp.StatusCode, path, data); err != nil {
+			return resp.StatusCode, data, err
+		}
+		if readErr != nil {
+			return resp.StatusCode, nil, fmt.Errorf("read response %s %s: %w", req.Method, path, unwrapStall(ctx, readErr))
+		}
+		return resp.StatusCode, data, nil
 	}
-	if readErr != nil {
-		return resp.StatusCode, nil, fmt.Errorf("read response %s %s: %w", req.Method, path, unwrapStall(ctx, readErr))
+}
+
+// maxRateLimitRetries bounds how many 429s one request rides out. The server's
+// Retry-After is authoritative for how long to wait; this bounds how often, so a
+// server answering 429 indefinitely fails the command instead of hanging it.
+const maxRateLimitRetries = 3
+
+// maxRetryAfter caps the advertised wait. A hostile or misconfigured server must not
+// be able to park a client for an arbitrary length of time.
+const maxRetryAfter = 30 * time.Second
+
+// retryAfterDelay reports how long to wait before retrying a 429, and whether it is
+// worth retrying at all.
+func retryAfterDelay(resp *http.Response, attempt int) (time.Duration, bool) {
+	if resp.StatusCode != http.StatusTooManyRequests || attempt >= maxRateLimitRetries {
+		return 0, false
 	}
-	return resp.StatusCode, data, nil
+	secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if err != nil || secs < 0 {
+		return 0, false
+	}
+	wait := time.Duration(secs) * time.Second
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return min(wait, maxRetryAfter), true
+}
+
+// rewindBody returns a replayable copy of req. A bodyless request always replays; a
+// request with a body only does if it carries GetBody (every request this package
+// builds from a buffer does).
+func rewindBody(req *http.Request) (*http.Request, bool) {
+	if req.Body == nil {
+		return req, true
+	}
+	if req.GetBody == nil {
+		return req, false
+	}
+	body, err := req.GetBody()
+	if err != nil {
+		return req, false
+	}
+	clone := req.Clone(req.Context())
+	clone.Body = body
+	return clone, true
 }
 
 func unwrapStall(ctx context.Context, err error) error {
@@ -888,9 +991,15 @@ func statusError(status int, path string, body []byte) error {
 		return ErrBadPack
 	case api.ErrCodeNotFound:
 		return ErrNotFound
+	case api.ErrCodeRateLimited:
+		return ErrRateLimited
+	case api.ErrCodeAccountExists:
+		return ErrConflict
 	}
 
 	switch status {
+	case http.StatusTooManyRequests:
+		return ErrRateLimited
 	case http.StatusUnauthorized:
 		return ErrUnauthorized
 	case http.StatusNotFound:

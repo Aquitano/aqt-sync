@@ -279,6 +279,121 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+Release-audit fixes. Every item below is a defect found auditing this release
+before tagging; each is covered by a regression test.
+
+- `aqt lock` and `aqt logout` no longer destroy every tracked folder's sync base.
+  `.aqt/base.json` was sealed under the session key, which locking deletes, so
+  the next `aqt sync` in each folder reported no base and demanded `--reconcile`
+  (which resurrects deletions). The base now has its own key that survives both.
+- `aqt passphrase rotate-root` no longer wedges every tracked folder on every
+  device. Rotation mints a new signing key, and folders were bound to that key's
+  fingerprint with no bypass. Binding is now on the account's owner handle, which
+  rotation preserves; the recorded fingerprint is refreshed as folders are used.
+- `aqt unshare` can always kill a link. On a folder whose tree could not be
+  re-sealed under the current account key — what a root-key rotation leaves
+  behind until the next sync — the rotation refused and the folder stayed public
+  with its original link still decrypting. It now falls back to making the
+  resource private and says plainly that the key was not rotated.
+- `AQT_QUOTA_BYTES` is enforced on in-place updates. The check ran only on
+  create, so a `PUT` carrying an id wrote up to the route cap regardless of
+  quota. An update is charged the difference between its new and current bytes,
+  so a same-size rewrite is not charged twice.
+- A refused read no longer spends a `--burn` / `--max-reads` permit. A `426`
+  (client too old) or `406` (unacceptable `Accept`) served no bytes but had
+  already counted the read, so a link-unfurling bot could exhaust a burn link and
+  the intended recipient got `410` forever.
+- `DeleteGrant` rolls back the transaction whose statement failed. It previously
+  returned without one, and since the store has a single writer connection the
+  abandoned transaction held it permanently — every later write on the server,
+  for any account, blocked until the process was restarted.
+- Reclaimed link tombstones can be deleted. `aqt rm` fetched the resource version
+  first and a tombstone answers `410`, so the row `aqt ls` told you to remove
+  could not be removed. Mutations now pin the version they already hold and
+  tolerate a tombstone.
+- `aqt restore --in-place` holds the sync lock across the tree swap and the sync
+  that publishes it. A concurrent `aqt watch` could otherwise observe the
+  half-swapped root, take the lock first, and commit the mass deletion to the
+  server and every other device. The lock is now re-entrant within a process.
+- Resource ids no longer begin with `-`, which cobra parsed as a flag cluster,
+  making roughly one resource in 65 unaddressable as a bare argument to `rm`,
+  `info`, `share`, `unshare`, `mv`, `pull`, and `cat`. Both id generators fold
+  the leading character identically, so a decoy account handle stays
+  indistinguishable from a real one. Ids minted before this are repaired at the
+  CLI layer and remain usable.
+- `aqt restore -o` and `aqt snapshot export -o` no longer silently overwrite an
+  existing file at the destination; both take `--force`, matching `aqt pull`.
+- `aqt rm --with-snapshots` re-lists snapshots after the delete, so one pinned by
+  the scheduled job mid-command is not left behind under a `succeeded` result. A
+  snapshot that cannot be deleted no longer reports the resource delete as failed
+  (a retry then hit "resource not found").
+- Clone, share-clone, `pullSubtree`, snapshot export, and side-by-side restore
+  respect the umask again when creating their destination directory:
+  `umask 077; aqt clone <id> ~/secrets` produced `0755` and now produces `0700`.
+- A tracked folder is no longer locked out by an explicit `--profile` naming a
+  different local profile for the same account, which a restored `$HOME` produces.
+- `aqt login --email <other-account>` refuses to overwrite a profile already
+  logged into a different account, which orphaned that device's server-side
+  session with no way to revoke it. `aqt signup` already refused this.
+- A grant re-wrap re-verifies the grantee's pinned keys against the server, as a
+  fresh share does. A grantee who had rotated their own root key previously had
+  their working wrap silently and permanently replaced with a dead one by an
+  unrelated revocation.
+- `aqt unshare --with <email>` on a public resource no longer reports a bare
+  "revoked": removing the grant does not remove access while the resource is
+  public, and stdout now says so.
+- Scripted `aqt signup` works again. The passphrase confirmation is skipped
+  without a terminal, instead of reading twice and failing with "passphrases do
+  not match".
+- A duplicate signup that proves ownership (by presenting the account's own
+  passphrase verifier) gets a clear `409 account_exists` instead of the
+  enumeration decoy, which authenticates nothing and previously left the real
+  owner with an opaque error. `DESIGN.md` now states plainly that open
+  registration is enumerable regardless, and that invite mode is what closes it.
+- Content objects stop serving 10 minutes after a link's last read is spent.
+  Exhaustion did not gate them at all, so a recipient (or anyone they forwarded
+  the link to) could keep pulling the bytes until the GC sweep ran — up to
+  `AQT_GC_INTERVAL + 1h`, about seven hours at the defaults.
+- An idempotent create replay is no longer refused with `507` at a quota or row
+  cap: the limit check ran before the store consulted the idempotency table, so a
+  `push` whose response was lost reported "storage quota exceeded" for a resource
+  that already existed.
+- `POST /v1/snapshots` against a reclaimed tombstone returns `410` instead of
+  `500`, which the client's idempotent retry treated as worth repeating.
+- Paginated listings are bounded: a server returning a constant or unchanging
+  cursor now ends the listing with an error rather than spinning `aqt ls`
+  forever. The stall guard never fired because every request completed normally.
+- Clients honour `Retry-After` on `429`, retrying a bounded number of times
+  instead of failing the command, and `429` carries the `rate_limited` code like
+  every other error condition.
+- Shutdown fails readiness before closing listeners, so a load balancer sees a
+  `/readyz` `503` and drains rather than connection-refused. A timed-out drain
+  can no longer consume up to twice `AQT_SHUTDOWN_GRACE`.
+- Account usage no longer runs one `os.Stat` per resource and per snapshot on
+  every resource create, snapshot create, pack `PUT`, and Prometheus scrape.
+  Blob sizes are recorded on write (migration 16); rows predating it fall back to
+  a stat until they are next rewritten.
+- The browser share page bounds allocations from attacker-declared lengths: the
+  zstd frame's declared size is checked before the decompressor allocates from
+  it, the inline path is bounded rather than unchecked, and assembly is capped by
+  what the chunk list actually references rather than the entry's declared size.
+- Vendored browser crypto runtimes are pinned by the SHA-256 of the files as
+  served, enforced by a test. The README's npm digests verify the packages the
+  builds came from and cannot detect an edit to a re-wrapped single-file build.
+- Pagination cursors escape their parts, so a grantee handle containing the
+  separator (handles are deliberately unvalidated) cannot forge an extra field.
+- `aqt snapshot auto --on/--off --json` emits JSON instead of prose on stdout.
+- `DESIGN.md` §3.6 documents `aqt signup` and `aqt lock`, and no longer shows
+  `login --invite` or the `--kdf-*` flags, which moved to `signup`.
+- The landing site sends CSP, HSTS, `nosniff`, `Referrer-Policy`, and
+  `X-Frame-Options`, and pins `postcss` to the patched line so the transitive
+  `8.4.31` advisory no longer appears.
+- `make restore-drill` works again. It created the account with
+  `aqt login --kdf-*`, which moved to `signup`, so the only end-to-end proof that
+  a backup is restorable had been failing silently. It now runs in CI.
+
+Other fixes in this release:
+
 - A download response no longer exposes a link's lifecycle fields (expiry, read
   counts, create/update timestamps) to public-link recipients or grantees; they
   are returned to the owner only. Enforcement is unchanged.

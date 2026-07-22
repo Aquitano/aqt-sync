@@ -732,6 +732,14 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 			fmt.Fprintf(os.Stderr, "warning: grant for %s cannot be re-wrapped from this device (no pinned contact); re-run `aqt share --with` where it was granted\n", g.GranteeHandle)
 			continue
 		}
+		// Re-verify the pin against the server's current keys, exactly as a fresh
+		// share does. Wrapping to the stored pin blindly means a grantee who rotated
+		// their own root key gets their working wrap silently overwritten with a dead
+		// one by an unrelated revocation — permanently, since nothing re-checks later.
+		if err := confirmPinnedKeys(cl, prof, pin); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant for %s: %v\n", pin.Email, err)
+			continue
+		}
 		wrap, err := crypto.WrapGrant(newCK, pin.EncPublicKey, id, prof.OwnerHandle, pin.Handle)
 		if err == nil {
 			err = cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: pin.Handle, WrappedKey: wrap})

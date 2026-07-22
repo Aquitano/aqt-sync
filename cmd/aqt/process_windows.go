@@ -52,3 +52,7 @@ func processAlive(pid int) bool {
 	}
 	return code == stillActive
 }
+
+// currentUmask reports no umask: Windows has none, and directory modes are not
+// meaningful there.
+func currentUmask() os.FileMode { return 0 }

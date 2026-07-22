@@ -675,6 +675,23 @@ func (h *e2eHarness) signup(email, pass string) {
 	}
 }
 
+// unlockSession re-caches the master key, standing in for the `aqt login` that
+// follows an `aqt lock`.
+func (h *e2eHarness) unlockSession() {
+	h.t.Helper()
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		h.t.Fatal(err)
+	}
+	mk, err := prof.Unlock("correct horse battery staple")
+	if err != nil {
+		h.t.Fatalf("unlock: %v", err)
+	}
+	if err := identity.SaveSession(identity.DefaultProfile, mk, time.Hour); err != nil {
+		h.t.Fatalf("save session: %v", err)
+	}
+}
+
 func (h *e2eHarness) init(dir string) {
 	h.t.Helper()
 	if err := runInit(dir); err != nil {

@@ -44,17 +44,20 @@ func (c *Client) CreateGrant(resourceID string, req api.CreateGrantRequest) erro
 func (c *Client) ListGrants(resourceID string) ([]api.GrantEntry, error) {
 	base := "/v1/resources/" + url.PathEscape(resourceID) + "/grants"
 	var all []api.GrantEntry
-	cursor := ""
+	cursor, pages := "", 0
 	for {
 		var out api.ListGrantsResponse
 		if err := c.do(http.MethodGet, withCursor(base, cursor), nil, &out); err != nil {
 			return nil, err
 		}
 		all = append(all, out.Grants...)
-		if out.NextCursor == "" {
+		more, err := nextPage(&cursor, out.NextCursor, &pages)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			return all, nil
 		}
-		cursor = out.NextCursor
 	}
 }
 
@@ -77,17 +80,20 @@ func (c *Client) RevokeGrant(resourceID, granteeHandle string) error {
 // ListShares lists the caller's incoming grants, following pagination transparently.
 func (c *Client) ListShares() ([]api.ShareItem, error) {
 	var all []api.ShareItem
-	cursor := ""
+	cursor, pages := "", 0
 	for {
 		var out api.ListSharesResponse
 		if err := c.do(http.MethodGet, withCursor("/v1/shares", cursor), nil, &out); err != nil {
 			return nil, err
 		}
 		all = append(all, out.Shares...)
-		if out.NextCursor == "" {
+		more, err := nextPage(&cursor, out.NextCursor, &pages)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
 			return all, nil
 		}
-		cursor = out.NextCursor
 	}
 }
 

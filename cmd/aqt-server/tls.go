@@ -172,11 +172,21 @@ func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listen
 		defer cancel()
 		errCh := make(chan error, 2)
 		n := 1
-		go func() { errCh <- srv.Shutdown(shutCtx) }()
+		// before() flips /readyz to 503 as its first act, and that has to be visible
+		// to a load balancer *before* the listeners close — otherwise the balancer
+		// sees connection-refused instead of an unready backend it can drain away
+		// from. Racing the two goroutines made the ordering a coin flip; starting the
+		// drain only after before() has begun makes it the documented one.
 		if before != nil {
 			n++
-			go func() { errCh <- before(shutCtx) }()
+			started := make(chan struct{})
+			go func() {
+				close(started)
+				errCh <- before(shutCtx)
+			}()
+			<-started
 		}
+		go func() { errCh <- srv.Shutdown(shutCtx) }()
 		var first error
 		for i := 0; i < n; i++ {
 			select {

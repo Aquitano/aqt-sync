@@ -111,7 +111,8 @@ log "server A listening at $URL_A"
 wait_health "$URL_A"
 
 log "creating account $EMAIL"
-printf '%s\n' "$PASS" | "$AQT" --server "$URL_A" login --email "$EMAIL" \
+# signup prompts for the passphrase and then for a confirmation, so feed it twice.
+printf '%s\n%s\n' "$PASS" "$PASS" | "$AQT" --server "$URL_A" signup --email "$EMAIL" \
 	--kdf-time 2 --kdf-memory 64 --kdf-threads 1
 
 ORIGIN="$WORK/origin"

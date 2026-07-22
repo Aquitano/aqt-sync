@@ -66,6 +66,12 @@ const (
 	// ErrCodeGrantLimit accompanies a 400 when a resource already carries the maximum
 	// number of grants.
 	ErrCodeGrantLimit = "grant_limit"
+	// ErrCodeAccountExists accompanies a 409 when a signup names an email that already
+	// has an account AND proves ownership of it, so confirming its existence leaks
+	// nothing. A signup that cannot prove ownership never sees this code.
+	ErrCodeAccountExists = "account_exists"
+	// ErrCodeRateLimited accompanies a 429. The response also carries Retry-After.
+	ErrCodeRateLimited = "rate_limited"
 	// ErrCodeInvalidPolicy accompanies a 400 when a link lifecycle policy is invalid
 	// (attached to a private resource, or carrying a negative value).
 	ErrCodeInvalidPolicy = "invalid_policy"

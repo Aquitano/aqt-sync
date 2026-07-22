@@ -30,6 +30,32 @@
     zstd: function (payload) {
       return window.fzstd.decompress(payload);
     },
+    // zstdSize reads the plaintext length a zstd frame declares in its header,
+    // without decompressing. Callers bound it before handing the frame to fzstd,
+    // which allocates that much up front. Returns Infinity when the frame does not
+    // declare one, so an undeclared size is refused rather than waved through.
+    zstdSize: function (payload) {
+      // Frame header: 4-byte magic, then a descriptor byte whose top two bits select
+      // the width of the frame content size field (0/1/2/4/8 bytes) and whose bit 5
+      // (single-segment) shifts the field forward when no window descriptor follows.
+      if (payload.length < 6 || payload[0] !== 0x28 || payload[1] !== 0xb5 ||
+          payload[2] !== 0x2f || payload[3] !== 0xfd) {
+        return Infinity;
+      }
+      var desc = payload[4];
+      if ((desc >> 3) & 1) return Infinity; // reserved bit set: not a frame we read
+      var singleSegment = (desc >> 5) & 1;
+      var width = [singleSegment ? 1 : 0, 2, 4, 8][desc >> 6];
+      if (width === 0) return Infinity;
+      // Window_Descriptor (absent when single-segment), then Dictionary_ID, then the
+      // frame content size.
+      var off = 5 + (singleSegment ? 0 : 1) + [0, 1, 2, 4][desc & 3];
+      if (off + width > payload.length) return Infinity;
+      var size = 0;
+      for (var i = width - 1; i >= 0; i--) size = size * 256 + payload[off + i];
+      // The 2-byte form is stored biased by 256.
+      return width === 2 ? size + 256 : size;
+    },
   };
   if (window.__aqtTestHooks && window.__aqtTestHooks.crypto) {
     AqtCrypto = window.__aqtTestHooks.crypto;
@@ -112,14 +138,22 @@
   var AAD_CHUNK = utf8("aqt-chunk-aad-v1");
   var AAD_CHUNKLIST = utf8("aqt-chunklist-v1");
 
+  // decompress expands one frame. rawLen is the manifest's recorded plaintext
+  // length, or -1 where the manifest carries none (an inline entry). The bound is
+  // applied BEFORE fzstd runs: it allocates from the frame header's declared content
+  // size, so checking the result afterwards is already too late — a hostile share
+  // could declare gigabytes and kill the tab before any check ran.
   function decompress(payload, alg, rawLen) {
+    var limit = rawLen >= 0 ? rawLen : maxDownloadBytes;
     if (alg === "zstd") {
       if (!window.fzstd) throw new Error("no-decompressor");
+      if (AqtCrypto.zstdSize(payload) > limit) throw new Error("object-corrupt");
       var raw = AqtCrypto.zstd(payload);
       if (rawLen >= 0 && raw.length !== rawLen) throw new Error("object-corrupt");
       return raw;
     }
     if (alg) throw new Error("object-corrupt");
+    if (payload.length > limit) throw new Error("object-corrupt");
     if (rawLen >= 0 && payload.length !== rawLen) throw new Error("object-corrupt");
     return payload;
   }
@@ -196,6 +230,12 @@
   // copying it into a Blob costs roughly twice the file size transiently, so very
   // large files are sent to the CLI instead of risking a killed tab.
   var maxDownloadBytes = 512 * 1024 * 1024;
+
+  // maxChunkListBytes caps an indirect chunk list's decoded JSON. A list is metadata
+  // about a file, not the file, so it is orders of magnitude smaller than the
+  // download cap; bounding it separately keeps a hostile share from spending the
+  // whole download budget on a manifest before any content is fetched.
+  var maxChunkListBytes = 64 * 1024 * 1024;
 
   function fetchPreflight() {
     return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/preflight", {
@@ -412,6 +452,9 @@
     var parts = new Array(chunks.length);
     var totalLen = 0;
     for (var t = 0; t < chunks.length; t++) totalLen += chunks[t].len || 0;
+    // The caller gated on the entry's declared size; this gates on what the chunk
+    // list actually references, which a hostile share can make far larger.
+    if (totalLen > maxDownloadBytes) return Promise.reject(new Error("unsupported:large"));
     var done = 0;
     var i = 0;
 
@@ -446,6 +489,7 @@
     return fetchObjects(segs.map(function (s) { return s.id; })).then(function (frames) {
       var plains = frames.map(function (frame, i) { return openObject(frame, segs[i], AAD_CHUNKLIST); });
       var total = plains.reduce(function (n, p) { return n + p.length; }, 0);
+      if (total > maxChunkListBytes) throw new Error("object-corrupt");
       var joined = new Uint8Array(total);
       var off = 0;
       plains.forEach(function (p) { joined.set(p, off); off += p.length; });
@@ -468,7 +512,7 @@
   // in place; inline or indirect chunk lists fetch their content objects.
   function resolveEntryChunks(child, onProgress) {
     if (child.inline != null) {
-      return Promise.resolve([decompress(b64Decode(child.inline), child.inlineAlg || "", -1)]);
+      return Promise.resolve([decompress(b64Decode(child.inline), child.inlineAlg || "", child.size >= 0 ? child.size : -1)]);
     }
     var listP = (child.chunksRef && child.chunksRef.length)
       ? resolveChunkList(child.chunksRef)

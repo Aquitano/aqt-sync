@@ -2556,9 +2556,17 @@ func materializeStaged(dest string, fn func(staging string) error) error {
 	if err := fn(staging); err != nil {
 		return err
 	}
-	// MkdirTemp creates 0700; the committed directory keeps the mode ensureEmptyDir
-	// used to create.
-	if err := os.Chmod(staging, 0o755); err != nil {
+	// MkdirTemp creates 0700; the committed directory takes the mode a plain
+	// MkdirAll would have produced here — 0755 filtered through the umask, so
+	// `umask 077; aqt clone <id> ~/secrets` still lands 0700 rather than 0755.
+	// An existing (empty) destination keeps the mode it already had.
+	mode := os.FileMode(0o755) &^ currentUmask()
+	if existedEmpty {
+		if fi, err := os.Stat(dest); err == nil {
+			mode = fi.Mode().Perm()
+		}
+	}
+	if err := os.Chmod(staging, mode); err != nil {
 		return err
 	}
 	if existedEmpty {

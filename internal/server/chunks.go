@@ -28,6 +28,12 @@ const maxPublicObjectIDs = 10_000
 // manifest commits and roots their objects.
 const gcMinAge = time.Hour
 
+// exhaustedObjectGrace bounds how long a link's content objects stay fetchable after
+// its last read permit is spent. The root read is the gate; this window only has to
+// outlast the pull that read consented to, so a recipient cannot keep pulling (or
+// forward the link and let someone else pull) until the GC sweep reclaims the row.
+const exhaustedObjectGrace = 10 * time.Minute
+
 func (s *Server) checkChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.ChunkCheckRequest
