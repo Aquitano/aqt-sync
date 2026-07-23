@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"errors"
+	mrand "math/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,16 +16,12 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-// pushRandomStreamedFile writes size random bytes, pushes them with opts, and returns
-// the resource id, the plaintext, and the ref printed to stdout. opts must set quiet so
-// the printed line is just the ref.
-func pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string, data []byte, printed string) {
+// pushStreamedFile writes data to a temp file, pushes it with opts, and returns the
+// resource id and the ref printed to stdout. opts must set quiet so the printed line is
+// just the ref.
+func pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, printed string) {
 	t.Helper()
 	src := filepath.Join(t.TempDir(), "data.bin")
-	data = make([]byte, size)
-	if _, err := rand.Read(data); err != nil {
-		t.Fatal(err)
-	}
 	if err := os.WriteFile(src, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -37,6 +34,19 @@ func pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string
 	if id == "" {
 		t.Fatalf("could not parse id from push output %q", printed)
 	}
+	return id, printed
+}
+
+// pushRandomStreamedFile writes size random bytes, pushes them with opts, and returns
+// the resource id, the plaintext, and the ref printed to stdout. opts must set quiet so
+// the printed line is just the ref.
+func pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string, data []byte, printed string) {
+	t.Helper()
+	data = make([]byte, size)
+	if _, err := rand.Read(data); err != nil {
+		t.Fatal(err)
+	}
+	id, printed = pushStreamedFile(t, data, opts)
 	return id, data, printed
 }
 
@@ -148,12 +158,21 @@ func TestShareStreamedLinkPull(t *testing.T) {
 func TestShareStreamedIndirectLinkPull(t *testing.T) {
 	newE2E(t)
 
-	id, data, _ := pushRandomStreamedFile(t, 40<<20, pushOptions{noClip: true, quiet: true})
+	// A chunk list goes indirect strictly above chunkListInlineMax (128) records.
+	// Content-defined chunking of a 40 MiB file averages ~160 chunks but is a random
+	// variable over the input bytes; with crypto/rand it once cut only 126 in CI,
+	// leaving the list inline and failing the assertion below. Seed the payload so the
+	// chunk count is reproducible, and size it to sit well clear of the boundary.
+	data := make([]byte, 48<<20)
+	if _, err := mrand.New(mrand.NewSource(0x5eaf00d)).Read(data); err != nil {
+		t.Fatal(err)
+	}
+	id, _ := pushStreamedFile(t, data, pushOptions{noClip: true, quiet: true})
 
 	// The stored root must be indirect, else the test does not exercise segment reads.
 	root := ownerFileRoot(t, id)
 	if !root.Indirect() {
-		t.Fatalf("expected an indirect chunk list for a 40 MiB file, got %d inline chunks", len(root.Chunks))
+		t.Fatalf("expected an indirect chunk list for a 48 MiB file, got %d inline chunks", len(root.Chunks))
 	}
 
 	link := strings.TrimSpace(captureStdout(t, func() {
