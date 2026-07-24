@@ -10,11 +10,13 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/atotto/clipboard"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 	"golang.org/x/term"
 
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -51,10 +53,93 @@ var (
 )
 
 func main() {
-	if err := rootCmd().Execute(); err != nil {
+	root := rootCmd()
+	root.SetArgs(escapeLeadingDashIDs(root, os.Args[1:]))
+	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(exitCode(err))
 	}
+}
+
+// idLikeArg matches the shape of a server-minted resource or snapshot id that
+// begins with a dash. Ids are base64url of 8 random bytes, so 11 characters from
+// that alphabet; the leading dash is what cobra would otherwise parse as a flag
+// cluster. Servers no longer mint these, but ids handed out before that stay valid
+// forever, and no server-side change can reach them.
+var idLikeArg = regexp.MustCompile(`^-[A-Za-z0-9_-]{10}$`)
+
+// escapeLeadingDashIDs rewrites an otherwise-bare legacy dash-leading id into its
+// aqt:// form, which the ref parser accepts and cobra does not treat as flags. Flag
+// values must be identified first: profile names, labels, output paths, and similar
+// strings may legitimately have exactly the same shape as an old id.
+func escapeLeadingDashIDs(root *cobra.Command, args []string) []string {
+	valueFlags := make(map[string]bool)
+	knownShorthands := make(map[byte]bool)
+	valueShorthands := make(map[byte]bool)
+	var collect func(*cobra.Command)
+	collect = func(cmd *cobra.Command) {
+		for _, flags := range []*pflag.FlagSet{cmd.LocalNonPersistentFlags(), cmd.PersistentFlags()} {
+			flags.VisitAll(func(flag *pflag.Flag) {
+				if len(flag.Shorthand) == 1 {
+					knownShorthands[flag.Shorthand[0]] = true
+				}
+				if flag.NoOptDefVal != "" {
+					return
+				}
+				valueFlags[flag.Name] = true
+				if len(flag.Shorthand) == 1 {
+					valueShorthands[flag.Shorthand[0]] = true
+				}
+			})
+		}
+		for _, child := range cmd.Commands() {
+			collect(child)
+		}
+	}
+	collect(root)
+
+	out := make([]string, len(args))
+	copy(out, args)
+	wantValue := false
+	for i, a := range out {
+		if a == "--" {
+			return out
+		}
+		if wantValue {
+			wantValue = false
+			continue
+		}
+		if strings.HasPrefix(a, "--") {
+			name, _, attached := strings.Cut(strings.TrimPrefix(a, "--"), "=")
+			wantValue = !attached && valueFlags[name]
+			continue
+		}
+		if len(a) >= 2 && a[0] == '-' {
+			isFlag := true
+			for j := 1; j < len(a); j++ {
+				short := a[j]
+				if !knownShorthands[short] {
+					isFlag = false
+					break
+				}
+				if valueShorthands[short] {
+					// The first value-taking shorthand consumes the rest of the token,
+					// or the next argument when it is the final shorthand. Attached short
+					// values are inherently ambiguous with an old id and retain flag
+					// semantics; the positional can still use -- or an aqt:// prefix.
+					wantValue = j == len(a)-1
+					break
+				}
+			}
+			if isFlag {
+				continue
+			}
+		}
+		if idLikeArg.MatchString(a) {
+			out[i] = "aqt://" + a
+		}
+	}
+	return out
 }
 
 // exitCode maps an error to the documented CLI contract (DESIGN.md §3):

@@ -96,6 +96,7 @@ func restoreCmd() *cobra.Command {
 		out     string
 		inPlace bool
 		yes     bool
+		force   bool
 	)
 	cmd := &cobra.Command{
 		Use:   "restore <name-or-id> [dir]",
@@ -138,7 +139,7 @@ func restoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			meta, err := reconstructSnapshot(cl, prof, snap, abs)
+			meta, err := reconstructSnapshot(cl, prof, snap, abs, force)
 			if err != nil {
 				return err
 			}
@@ -154,6 +155,7 @@ func restoreCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope the name lookup to this resource id instead of a tracked dir")
 	cmd.Flags().StringVarP(&out, "out", "o", "", "restore side-by-side into this (new) directory (default aqt-restore-<snapshot-id>)")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing file at the destination")
 	cmd.Flags().BoolVar(&inPlace, "in-place", false, "roll the live tracked folder back and re-sync it to every device")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the in-place confirmation prompt")
 	markJSONSupported(cmd)

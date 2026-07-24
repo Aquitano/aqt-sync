@@ -1,3 +1,11 @@
 allowBuilds:
   sharp: true
   unrs-resolver: true
+
+# next 16.2.10 pins postcss 8.4.31 among its own dependencies, which trips a
+# Dependabot advisory. It is not real exposure here — the advisory needs PostCSS to
+# process attacker-authored CSS, and this site compiles only first-party CSS at build
+# time — but the transitive pin cannot be raised from direct deps, so it is overridden
+# to the patched line the Tailwind path already resolves.
+overrides:
+  postcss: ^8.5.17

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -169,6 +170,62 @@ func TestServeListenerReportsServeError(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("serveListener hung on a serve error")
+	}
+}
+
+type orderedCloseListener struct {
+	net.Listener
+	seq        *atomic.Int64
+	closeOrder atomic.Int64
+}
+
+func (l *orderedCloseListener) Close() error {
+	l.closeOrder.Store(l.seq.Add(1))
+	return l.Listener.Close()
+}
+
+// Readiness must flip before http.Server.Shutdown closes the listener. Starting a
+// goroutine that will eventually flip it is not sufficient: the waiting goroutine
+// can close the listener as soon as it is unblocked.
+func TestServeListenerMarksUnreadyBeforeClosingListener(t *testing.T) {
+	raw, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seq atomic.Int64
+	ln := &orderedCloseListener{Listener: raw, seq: &seq}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	var readyOrder atomic.Int64
+	go func() {
+		done <- serveListenerLifecycle(ctx, srv, ln, nil, time.Second, func() {
+			readyOrder.Store(seq.Add(1))
+		}, nil)
+	}()
+
+	resp, err := (&http.Client{Timeout: time.Second}).Get("http://" + raw.Addr().String())
+	if err != nil {
+		t.Fatalf("server did not start: %v", err)
+	}
+	resp.Body.Close()
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("serveListenerLifecycle: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serveListenerLifecycle did not return after cancellation")
+	}
+	if readyOrder.Load() == 0 {
+		t.Fatal("shutdown did not mark readiness false")
+	}
+	if ln.closeOrder.Load() <= readyOrder.Load() {
+		t.Fatalf("listener close order %d did not follow readiness order %d", ln.closeOrder.Load(), readyOrder.Load())
 	}
 }
 

@@ -48,7 +48,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	dest := filepath.Join(t.TempDir(), "restored")
-	if _, err := reconstructSnapshot(cl, prof, got, dest); err != nil {
+	if _, err := reconstructSnapshot(cl, prof, got, dest, false); err != nil {
 		t.Fatalf("reconstruct: %v", err)
 	}
 	if c := readTree(t, dest, "a.txt"); c != "original A" {

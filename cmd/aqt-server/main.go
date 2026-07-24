@@ -123,16 +123,30 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 	}
 	log.Printf("data dir: %s", dataDir)
-	var stopOnce sync.Once
+	// serveWithShutdown flips readiness synchronously before closing listeners, then
+	// runs the component drain on the same context as HTTP shutdown. The calls after
+	// it returns are fallbacks for paths that never entered that drain (a listener that
+	// never came up, or a serve error); the Once guards keep them idempotent and avoid
+	// consuming a second AQT_SHUTDOWN_GRACE window.
+	var (
+		readyOnce sync.Once
+		stopOnce  sync.Once
+		drainOnce sync.Once
+		drainErr  error
+	)
+	beginShutdown := func() { readyOnce.Do(api.BeginShutdown) }
 	shutdownComponents := func(ctx context.Context) error {
-		api.BeginShutdown()
-		stopOnce.Do(func() { close(workerStop) })
-		if metricsServer != nil {
-			_ = metricsServer.Shutdown(ctx)
-		}
-		return api.WaitWorkers(ctx)
+		drainOnce.Do(func() {
+			stopOnce.Do(func() { close(workerStop) })
+			if metricsServer != nil {
+				_ = metricsServer.Shutdown(ctx)
+			}
+			drainErr = api.WaitWorkers(ctx)
+		})
+		return drainErr
 	}
-	serveErr := serveWithShutdown(srv, tlsCfg, grace, shutdownComponents)
+	serveErr := serveWithShutdown(srv, tlsCfg, grace, beginShutdown, shutdownComponents)
+	beginShutdown()
 	ctx, cancel := context.WithTimeout(context.Background(), grace)
 	shutdownErr := shutdownComponents(ctx)
 	cancel()

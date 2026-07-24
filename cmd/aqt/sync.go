@@ -28,13 +28,16 @@ import (
 type folderState struct {
 	ID     string `json:"id"`
 	Server string `json:"server"`
-	// Profile and Fingerprint bind the folder to the account that owns its remote
-	// resource: Profile is the local profile name commands default to, and
-	// Fingerprint pins the account's signing-key fingerprint so a profile that was
-	// re-logged into a different account is detected instead of silently syncing
-	// this folder against it. Empty on state written by an older build; backfilled
-	// by bindTrackedRoot once the recorded server identity checks out.
+	// Profile, Account, and Fingerprint bind the folder to the account that owns its
+	// remote resource: Profile is the local profile name commands default to, and
+	// Account is the server-side owner handle — the account's stable identity, which
+	// a root-key rotation preserves. Fingerprint pins the account's signing key and
+	// is the legacy form of the same check; because rotation mints a new signing key,
+	// it is only authoritative when no Account is recorded. Empty on state written by
+	// an older build; backfilled by bindTrackedRoot once the recorded identity checks
+	// out.
 	Profile     string `json:"profile,omitempty"`
+	Account     string `json:"account,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
 	LastGC      int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
 	// RemoteVersion is the highest resource version this machine has observed —
@@ -234,10 +237,10 @@ func runInit(dir string) error {
 // Split out (as a var) so a test can fail the local commit and assert the remote
 // resource is cleaned up.
 var commitInitState = func(abs string, prof *identity.Profile, resp api.PutResourceResponse, manifest syncengine.Manifest) error {
-	profileName, fingerprint := stateIdentity(prof)
+	profileName, account, fingerprint := stateIdentity(prof)
 	if err := saveState(abs, folderState{
 		ID: resp.ID, Server: prof.Server,
-		Profile: profileName, Fingerprint: fingerprint,
+		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: resp.Version,
 	}); err != nil {
 		return err
@@ -1326,7 +1329,7 @@ func runClone(ref, dir string, adopt bool, password string) error {
 	// so an interrupted clone leaves no destination at all rather than a partial
 	// tree (or a complete tree that is not yet tracked).
 	var base syncengine.Manifest
-	profileName, fingerprint := stateIdentity(prof)
+	profileName, account, fingerprint := stateIdentity(prof)
 	if err := materializeStaged(abs, func(staging string) error {
 		var mErr error
 		base, mErr = materializeClone(cl, staging, res, ck, meta)
@@ -1338,7 +1341,7 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		}
 		if err := saveState(staging, folderState{
 			ID: id, Server: prof.Server,
-			Profile: profileName, Fingerprint: fingerprint,
+			Profile: profileName, Account: account, Fingerprint: fingerprint,
 			RemoteVersion: res.Version,
 		}); err != nil {
 			return err
@@ -1466,10 +1469,10 @@ func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Me
 	}
 	// Deliberately no saveBase: an empty base would resurrect deletions; the reconcile
 	// below writes base.json once local and remote agree.
-	profileName, fingerprint := stateIdentity(prof)
+	profileName, account, fingerprint := stateIdentity(prof)
 	if err := saveState(abs, folderState{
 		ID: id, Server: prof.Server,
-		Profile: profileName, Fingerprint: fingerprint,
+		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: version,
 	}); err != nil {
 		return err
@@ -2553,9 +2556,17 @@ func materializeStaged(dest string, fn func(staging string) error) error {
 	if err := fn(staging); err != nil {
 		return err
 	}
-	// MkdirTemp creates 0700; the committed directory keeps the mode ensureEmptyDir
-	// used to create.
-	if err := os.Chmod(staging, 0o755); err != nil {
+	// MkdirTemp creates 0700; the committed directory takes the mode a plain
+	// MkdirAll would have produced here — 0755 filtered through the umask, so
+	// `umask 077; aqt clone <id> ~/secrets` still lands 0700 rather than 0755.
+	// An existing (empty) destination keeps the mode it already had.
+	mode := os.FileMode(0o755) &^ currentUmask()
+	if existedEmpty {
+		if fi, err := os.Stat(dest); err == nil {
+			mode = fi.Mode().Perm()
+		}
+	}
+	if err := os.Chmod(staging, mode); err != nil {
 		return err
 	}
 	if existedEmpty {

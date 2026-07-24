@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/aquitano/aqt-sync/internal/api"
 )
 
 // Rate-limit defaults for the unauthenticated routes (account creation, salt
@@ -147,7 +149,7 @@ func (l *ipRateLimiter) middlewareKeyed(key func(*gin.Context) string) gin.Handl
 			// Retry-After in whole seconds, computed from the bucket's own refill rate,
 			// so a client backs off exactly long enough rather than guessing.
 			c.Header("Retry-After", strconv.Itoa(int(wait.Seconds())))
-			abort(c, http.StatusTooManyRequests, "rate limit exceeded; slow down")
+			abortCode(c, http.StatusTooManyRequests, "rate limit exceeded; slow down", api.ErrCodeRateLimited)
 			return
 		}
 		c.Next()

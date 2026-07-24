@@ -414,11 +414,20 @@ func (s *Server) createAccount(c *gin.Context) {
 	}
 	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
 	if errors.Is(err, ErrConflict) {
-		// A duplicate email must not answer differently from a fresh signup, or the
-		// endpoint becomes an existence oracle. Return the same 201 success shape with a
-		// decoy token that grants nothing: the caller's next authenticated call fails,
-		// indistinguishable from the wrong-passphrase path. The existing account is
-		// untouched — the duplicate creates no device on it.
+		// The email is taken. Tell the caller so only if they prove they are its owner
+		// by presenting the account's passphrase verifier; anyone else gets the decoy,
+		// a success-shaped response whose token authenticates nothing. The existing
+		// account is untouched either way — a duplicate signup creates no device on it.
+		//
+		// Note this does not make open registration unenumerable, and no server-side
+		// response shape can: signing up for a free email must succeed, so "the token
+		// worked" still means "the email was free". Registration=invite is the setting
+		// that actually closes it. What the decoy buys is that a prober cannot confirm
+		// a *specific* address without also taking it. See DESIGN.md section 6.
+		if s.signupProvesOwnership(req.Email, req.AuthVerifier) {
+			abortCode(c, http.StatusConflict, "an account already exists for this email; use `aqt login` to attach this device", api.ErrCodeAccountExists)
+			return
+		}
 		c.JSON(http.StatusCreated, s.decoyAuthResponse())
 		return
 	}
@@ -434,6 +443,19 @@ func (s *Server) createAccount(c *gin.Context) {
 	c.JSON(http.StatusCreated, api.AuthResponse{
 		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token, Epoch: 1,
 	})
+}
+
+// signupProvesOwnership reports whether a duplicate signup carried the existing
+// account's own passphrase verifier. Only then is it safe to confirm the account
+// exists: the caller already knows the secret that would let them log in, so the
+// confirmation tells them nothing they could not learn from `aqt login`.
+func (s *Server) signupProvesOwnership(email string, verifier []byte) bool {
+	_, _, storedHash, _, err := s.store.AccountForAuth(email)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(verifier)
+	return subtle.ConstantTimeCompare(sum[:], storedHash) == 1
 }
 
 // decoyAuthResponse builds a success-shaped auth response whose fields match a real
@@ -673,6 +695,9 @@ func (s *Server) accountUsage(c *gin.Context) {
 	})
 }
 
+// checkAccountLimit refuses a write that would push the account past its byte quota
+// or past the row cap for kind ("resources", "snapshots", "objects"). An empty kind
+// checks bytes only, for a write that replaces an existing row rather than adding one.
 func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	u, err := s.store.AccountUsage(owner)
 	if err != nil {
@@ -778,9 +803,23 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "visibility must be private or public")
 		return
 	}
-	if req.ID == "" {
+	// An in-place update writes just as many physical bytes as a create, so it is
+	// charged too; it replaces the resource's current bytes rather than adding to
+	// them, so only the difference counts, and it adds no row (no count check).
+	// A replayed create is already stored and must not be charged again.
+	if !s.store.ResourceCreateReplayed(owner, req) {
 		defer s.accountLimits.lock(owner)()
-		if err := s.checkAccountLimit(owner, "resources", estimatedResourceBytes(req)); err != nil {
+		added, kind := estimatedResourceBytes(req), "resources"
+		if req.ID != "" {
+			kind = ""
+			stored, err := s.store.ResourceStoredBytes(owner, req.ID)
+			if err != nil {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+				return
+			}
+			added = max(0, added-stored)
+		}
+		if err := s.checkAccountLimit(owner, kind, added); err != nil {
 			if !abortLimit(c, err) {
 				abort(c, http.StatusInternalServerError, "usage lookup failed")
 			}
@@ -891,7 +930,14 @@ func (s *Server) getResource(c *gin.Context) {
 			owner = o
 		}
 	}
-	res, err := s.store.GetResource(c.Param("id"), owner)
+	// Negotiate before the resource is touched at all: a request whose Accept we
+	// cannot satisfy must not spend one of a `--burn` link's reads.
+	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
+	if !ok {
+		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
+		return
+	}
+	res, countRead, err := s.store.GetResourceUncounted(c.Param("id"), owner)
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -907,15 +953,23 @@ func (s *Server) getResource(c *gin.Context) {
 	// Gate the read on the requester's capability before any payload is written: a
 	// client too old to open the sealed format gets an actionable 426 instead of the
 	// bytes and a downstream AEAD failure. This route is public, so the check lives
-	// here rather than in the authed middleware.
+	// here rather than in the authed middleware. It precedes the read count for the
+	// same reason the Accept check does.
 	if capability := requestCapability(c); capability < res.MinClient {
 		abortUpgradeRequired(c, res.MinClient, capability)
 		return
 	}
-	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
-	if !ok {
-		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
-		return
+	// Everything that could refuse this read has passed, so the permit is spent now.
+	// This is also what enforces exhaustion: an already-spent link answers 410 here.
+	if countRead {
+		if err := s.store.CountResourceRead(c.Param("id")); err != nil {
+			if errors.Is(err, ErrGone) {
+				abortGone(c)
+			} else {
+				abort(c, http.StatusInternalServerError, "fetch failed")
+			}
+			return
+		}
 	}
 	if format == resourceEnvelope {
 		body, err := api.EncodeResourceDownload(res)
@@ -1181,9 +1235,15 @@ func (s *Server) createSnapshot(c *gin.Context) {
 	defer s.accountLimits.lock(owner)()
 	resource, err := s.store.GetResource(req.ResourceID, owner)
 	if err != nil {
-		if errors.Is(err, ErrNotFound) {
+		switch {
+		case errors.Is(err, ErrNotFound):
 			abortNotFound(c)
-		} else {
+		case errors.Is(err, ErrGone):
+			// A reclaimed tombstone has no ciphertext left to pin. Answer the stable
+			// 410 rather than a 500, which doIdempotent would retry against an
+			// operation that can never succeed.
+			abortGone(c)
+		default:
 			abort(c, http.StatusInternalServerError, "resource lookup failed")
 		}
 		return

@@ -438,6 +438,15 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	    created_at INTEGER NOT NULL,
 	    PRIMARY KEY(owner_handle, kind, key)
 	);`,
+	// 16: blob sizes recorded on write. Usage previously summed them with one
+	// os.Stat per live resource and per snapshot, on the hot path of every resource
+	// create, snapshot create, and pack PUT (all under the per-account lock) and for
+	// every account on every Prometheus scrape. A column makes it one SUM. Existing
+	// rows are left at -1, meaning "not recorded"; those still fall back to a stat,
+	// so the backfill happens as rows are rewritten rather than in one pass over
+	// every blob at upgrade time.
+	`ALTER TABLE resources ADD COLUMN blob_size INTEGER NOT NULL DEFAULT -1;
+	 ALTER TABLE snapshots ADD COLUMN blob_size INTEGER NOT NULL DEFAULT -1;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -1020,13 +1029,74 @@ func (s *Store) AccountUsage(owner string) (AccountUsage, error) {
 	return u, err
 }
 
+// ResourceStoredBytes reports what one live resource already contributes to its
+// owner's usage, in the same shape estimatedResourceBytes models a pending write.
+// An in-place update replaces those bytes rather than adding to them, so the quota
+// check charges only the difference. A missing row or blob reports 0, which charges
+// the write in full — the fail-closed direction.
+func (s *Store) ResourceStoredBytes(owner, id string) (int64, error) {
+	var (
+		metaLen, wrappedLen int64
+		nonce               []byte
+	)
+	err := s.rdb.QueryRow(
+		`SELECT length(encrypted_meta), length(COALESCE(wrapped_key, '')), blob_nonce
+		 FROM resources WHERE id = ? AND owner_handle = ? AND reclaimed = 0`, id, owner,
+	).Scan(&metaLen, &wrappedLen, &nonce)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	info, err := os.Stat(s.blobPath(id, nonce))
+	if err != nil {
+		return 0, nil
+	}
+	return info.Size() + int64(len(nonce)) + metaLen + wrappedLen + 256, nil
+}
+
+// ResourceCreateReplayed reports whether req's Idempotency-Key already names a
+// completed create of this resource. A replay stores nothing new, so charging it
+// against the quota would answer 507 for a resource that exists — defeating the
+// retry the key exists for.
+func (s *Store) ResourceCreateReplayed(owner string, req api.PutResourceRequest) bool {
+	if req.IdempotencyKey == "" || req.ID != "" {
+		return false
+	}
+	digest, err := idempotencyDigest(req)
+	if err != nil {
+		return false
+	}
+	var prior api.PutResourceResponse
+	found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior)
+	return err == nil && found
+}
+
+// ownerBlobBytes totals the resource and snapshot blob bytes an account holds.
+// Rows written since migration 16 carry their size, so the common case is one
+// aggregate query; only rows predating it (blob_size = -1) are stat'ed, and each
+// such stat is replaced by a recorded size the next time that row is rewritten.
 func (s *Store) ownerBlobBytes(owner string) (int64, error) {
-	rows, err := s.rdb.Query(`SELECT id, blob_nonce FROM resources WHERE owner_handle = ? AND reclaimed = 0 UNION ALL SELECT snapshot_id, blob_nonce FROM snapshots WHERE owner_handle = ?`, owner, owner)
+	var recorded int64
+	if err := s.rdb.QueryRow(
+		`SELECT COALESCE(SUM(blob_size), 0) FROM (
+		   SELECT blob_size FROM resources WHERE owner_handle = ? AND reclaimed = 0 AND blob_size >= 0
+		   UNION ALL
+		   SELECT blob_size FROM snapshots WHERE owner_handle = ? AND blob_size >= 0
+		 )`, owner, owner,
+	).Scan(&recorded); err != nil {
+		return 0, err
+	}
+	rows, err := s.rdb.Query(
+		`SELECT id, blob_nonce FROM resources WHERE owner_handle = ? AND reclaimed = 0 AND blob_size < 0
+		 UNION ALL
+		 SELECT snapshot_id, blob_nonce FROM snapshots WHERE owner_handle = ? AND blob_size < 0`, owner, owner)
 	if err != nil {
 		return 0, err
 	}
 	defer rows.Close()
-	var total int64
+	total := recorded
 	for rows.Next() {
 		var id string
 		var nonce []byte
@@ -1325,9 +1395,9 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	}
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
-		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now,
+		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, blob_size, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now,
 	); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -1415,7 +1485,7 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// folder sync pushing a new manifest is not a re-share, and clearing the expiry —
 	// or restarting the read counter — behind the owner's back would quietly un-share
 	// the folder they shared.
-	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, version=?, min_client=?, updated_at=unixepoch()`
+	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, blob_size=?, version=?, min_client=?, updated_at=unixepoch()`
 	replacePolicy := req.Visibility != api.Public || req.ExpireSeconds > 0 || req.MaxReads > 0 || reclaimed
 
 	var res sql.Result
@@ -1424,14 +1494,14 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 			`UPDATE resources SET `+setContent+`,
 			   expires_at=?, max_reads=?, on_expiry=?, reads=0, exhausted_at=NULL, reclaimed=0
 			 WHERE id=? AND owner_handle=? AND version=?`,
-			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient),
+			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient),
 			expiresAt, maxReads, onExpiry, req.ID, owner, current,
 		)
 	} else {
 		res, err = tx.Exec(
 			`UPDATE resources SET `+setContent+`
 			 WHERE id=? AND owner_handle=? AND version=?`,
-			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, version, normalizeMinClient(req.MinClient),
+			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient),
 			req.ID, owner, current,
 		)
 	}
@@ -1490,10 +1560,37 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	return req.ID, version, nil
 }
 
-// GetResource loads a resource by id. requireOwner, when non-empty, restricts
-// access to that owner; a mismatch returns ErrNotFound (private resources never
-// confirm their own existence to non-owners).
+// GetResource loads a resource by id and spends a max-reads permit if the read is
+// subject to one. requireOwner, when non-empty, restricts access to that owner; a
+// mismatch returns ErrNotFound (private resources never confirm their own existence
+// to non-owners).
 func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, error) {
+	res, countRead, err := s.GetResourceUncounted(id, requireOwner)
+	if err != nil {
+		return res, err
+	}
+	if countRead {
+		if err := s.CountResourceRead(id); err != nil {
+			return api.GetResourceResponse{}, err
+		}
+	}
+	return res, nil
+}
+
+// CountResourceRead spends one of a public link's max-reads permits, returning
+// ErrGone once none are left (or the row has been reclaimed since).
+func (s *Store) CountResourceRead(id string) error {
+	_, err := s.countPublicRead(id)
+	return err
+}
+
+// GetResourceUncounted is GetResource with the max-reads permit left unspent.
+// countRead reports that this read is subject to the link's read limit and that the
+// caller owes exactly one CountResourceRead — which is also what enforces
+// exhaustion — before it serves any bytes. The public read handler uses this so a
+// request it goes on to refuse (too old a client, no acceptable representation)
+// cannot burn a link the intended recipient never received.
+func (s *Store) GetResourceUncounted(id, requireOwner string) (api.GetResourceResponse, bool, error) {
 	var (
 		out         api.GetResourceResponse
 		owner       string
@@ -1515,17 +1612,17 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		 FROM resources WHERE id = ?`, id,
 	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient, &expiresAt, &maxReads, &reads, &reclaimed, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return out, ErrNotFound
+		return out, false, ErrNotFound
 	}
 	if err != nil {
-		return out, err
+		return out, false, err
 	}
 
 	// A reclaimed tombstone is gone for everyone (its ciphertext is deleted), including
 	// the owner; the owner reaches it only to `aqt rm` the row. Short-circuit before any
 	// blob load, whose file no longer exists.
 	if reclaimed {
-		return out, ErrGone
+		return out, false, ErrGone
 	}
 
 	vis := api.Visibility(visibility)
@@ -1539,7 +1636,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	if !isOwner && requireOwner != "" {
 		w, ok, err := s.grantWrappedKey(id, requireOwner)
 		if err != nil {
-			return out, err
+			return out, false, err
 		}
 		if ok {
 			grantKey = w
@@ -1547,32 +1644,26 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	}
 	isGrantee := grantKey != nil
 	if vis == api.Private && !isOwner && !isGrantee {
-		return out, ErrNotFound
+		return out, false, ErrNotFound
 	}
 	// A non-owner read of a public link is subject to the lifecycle policy. Expiry is a
-	// pure time check (no state to mutate); the max-reads count is done under the
-	// resource lock after the blob loads, so a successful serve is what increments.
-	// Owner reads are never counted or gated (until reclaimed, handled above), and
-	// neither are grantee reads: lifecycle is a property of the public link, and a
-	// grant is a per-account credential, not a link.
+	// pure time check (no state to mutate); the max-reads count is left to the caller,
+	// so only a read that is actually served spends a permit. Owner reads are never
+	// counted or gated (until reclaimed, handled above), and neither are grantee reads:
+	// lifecycle is a property of the public link, and a grant is a per-account
+	// credential, not a link.
 	if !isOwner && !isGrantee {
 		now := time.Now().Unix()
 		if expiresAt.Valid && now >= expiresAt.Int64 {
-			return out, ErrGone
+			return out, false, ErrGone
 		}
 	}
 
 	ciphertext, err := s.readBlob(id, nonce)
 	if err != nil {
-		return out, err
+		return out, false, err
 	}
-	if !isOwner && !isGrantee && maxReads.Valid {
-		counted, err := s.countPublicRead(id)
-		if err != nil {
-			return out, err
-		}
-		reads = counted
-	}
+	countRead := !isOwner && !isGrantee && maxReads.Valid
 	out = api.GetResourceResponse{
 		ID:         id,
 		Visibility: vis,
@@ -1593,7 +1684,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		out.UpdatedAt = updatedAt
 	}
 	if err := json.Unmarshal([]byte(metaJSON), &out.EncryptedMeta); err != nil {
-		return out, err
+		return out, false, err
 	}
 	// The wrapped key is the owner's recovery path and is meaningless to anyone
 	// else (it is ciphertext under the owner's master key). Only return it to the
@@ -1601,7 +1692,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 	if wrappedJSON.Valid && requireOwner == owner {
 		var wk crypto.WrappedKey
 		if err := json.Unmarshal([]byte(wrappedJSON.String), &wk); err != nil {
-			return out, err
+			return out, false, err
 		}
 		out.WrappedKey = &wk
 	}
@@ -1611,7 +1702,7 @@ func (s *Store) GetResource(id, requireOwner string) (api.GetResourceResponse, e
 		out.GrantKey = grantKey
 		out.Owner = owner
 	}
-	return out, nil
+	return out, countRead, nil
 }
 
 // countPublicRead atomically records one non-owner serve of a max-reads-limited public
@@ -2083,6 +2174,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	if err := s.writeBlob(snapID, nonce, blob); err != nil {
 		return api.SnapshotInfo{}, err
 	}
+	blobSize := int64(len(blob))
 
 	var labelJSON sql.NullString
 	if label != nil {
@@ -2120,9 +2212,9 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, version_captured, created_at, scheduled, min_client, anchored)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, version, createdAt, sched, minClient, anchor,
+		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, blob_size, version_captured, created_at, scheduled, min_client, anchored)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, blobSize, version, createdAt, sched, minClient, anchor,
 	); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -3074,13 +3166,14 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 // pack is touched so a concurrent GC cannot reap a pack this download is mid-read of.
 func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []api.ObjectLocation, error) {
 	var (
-		owner, vis string
-		expiresAt  sql.NullInt64
-		reclaimed  bool
+		owner, vis  string
+		expiresAt   sql.NullInt64
+		exhaustedAt sql.NullInt64
+		reclaimed   bool
 	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, visibility, expires_at, reclaimed FROM resources WHERE id = ?`, resourceID,
-	).Scan(&owner, &vis, &expiresAt, &reclaimed)
+		`SELECT owner_handle, visibility, expires_at, exhausted_at, reclaimed FROM resources WHERE id = ?`, resourceID,
+	).Scan(&owner, &vis, &expiresAt, &exhaustedAt, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, ErrNotFound
 	}
@@ -3090,11 +3183,17 @@ func (s *Store) PublicObjectSlices(resourceID string, ids []string) (string, []a
 	if api.Visibility(vis) != api.Public {
 		return "", nil, ErrNotFound
 	}
-	// Expiry and reclamation gate object reads, but max-reads exhaustion does not: the
-	// root fetch is the per-link-holder gate, and blocking objects on exhaustion would
-	// break the final permitted streamed pull mid-flight (it fetches objects after the
-	// root read that consumed the last permit).
+	// Expiry and reclamation gate object reads. Exhaustion does not gate them
+	// immediately: the root fetch is the per-link-holder gate, and refusing objects
+	// the moment the last permit is spent would break that very pull mid-flight (it
+	// fetches its objects after the root read that spent it). It is bounded instead
+	// by a grace window from the moment of exhaustion — long enough for the pull it
+	// protects, short enough that the link does not keep serving until the GC sweep
+	// (up to AQT_GC_INTERVAL + gcMinAge, ~7h at the defaults) notices.
 	if reclaimed || (expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64) {
+		return "", nil, ErrGone
+	}
+	if exhaustedAt.Valid && time.Now().Unix() >= exhaustedAt.Int64+int64(exhaustedObjectGrace/time.Second) {
 		return "", nil, ErrGone
 	}
 	out, err := s.orderedObjectSlices(owner, resourceID, ids)
@@ -3397,7 +3496,7 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 		return err
 	}
 	if _, err := tx.Exec(
-		`UPDATE resources SET reclaimed = 1, wrapped_key = NULL, version = version + 1 WHERE id = ?`, id,
+		`UPDATE resources SET reclaimed = 1, wrapped_key = NULL, blob_size = 0, version = version + 1 WHERE id = ?`, id,
 	); err != nil {
 		tx.Rollback()
 		return err
@@ -3970,13 +4069,27 @@ func (s *Store) writePack(owner, id string, data []byte) error {
 
 // newID returns a URL-safe random identifier encoding nBytes of entropy.
 func newID(nBytes int) string {
-	return base64.RawURLEncoding.EncodeToString(randomBytes(nBytes))
+	return encodeID(randomBytes(nBytes))
 }
 
 // newIDFrom encodes given bytes in the newID shape, so a deterministic decoy
 // handle is indistinguishable from a freshly minted one.
 func newIDFrom(b []byte) string {
-	return base64.RawURLEncoding.EncodeToString(b)
+	return encodeID(b)
+}
+
+// encodeID is the one id spelling both generators share. base64url's alphabet
+// includes '-', and a leading one makes the id unaddressable as a bare CLI
+// positional (cobra reads it as a flag cluster), so it is folded to 'A'. Doing the
+// fold here rather than by re-drawing keeps newIDFrom byte-deterministic and leaves
+// the two generators' output distributions identical, so a leading character can
+// never distinguish a decoy handle from a minted one.
+func encodeID(b []byte) string {
+	s := base64.RawURLEncoding.EncodeToString(b)
+	if strings.HasPrefix(s, "-") {
+		return "A" + s[1:]
+	}
+	return s
 }
 
 func randomBytes(n int) []byte {

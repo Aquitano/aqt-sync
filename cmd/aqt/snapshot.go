@@ -504,13 +504,23 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 		return err
 	}
 	defer os.RemoveAll(staging)
-	meta, err := reconstructSnapshot(cl, prof, snap, staging)
+	meta, err := reconstructSnapshot(cl, prof, snap, staging, false)
 	if err != nil {
 		return err
 	}
 	if meta.Kind != api.KindFolder {
 		return errors.New("in-place restore is only for tracked folders; use --out for a single file")
 	}
+	// The swap and the sync that publishes it are one operation and must hold the
+	// sync lock together. A watcher firing on the swap's deletions would otherwise
+	// take the lock first and push a manifest of the half-emptied root — committing
+	// the deletions to the server and to every other device. The lock is re-entrant,
+	// so the runSync below acquires it again underneath this one.
+	release, err := acquireSyncLock(root)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
 	}
@@ -586,7 +596,10 @@ func swapTree(root, staging string) error {
 // --- export ---
 
 func snapshotExportCmd() *cobra.Command {
-	var out string
+	var (
+		out   string
+		force bool
+	)
 	cmd := &cobra.Command{
 		Use:   "export <snapshot-id>",
 		Short: "Decrypt a snapshot to a plaintext tree for offsite backup",
@@ -614,7 +627,7 @@ func snapshotExportCmd() *cobra.Command {
 				return err
 			}
 			fmt.Fprintf(os.Stderr, "warning: writing DECRYPTED plaintext to %s (outside aqt's encryption)\n", abs)
-			meta, err := reconstructSnapshot(cl, prof, snap, abs)
+			meta, err := reconstructSnapshot(cl, prof, snap, abs, force)
 			if err != nil {
 				return err
 			}
@@ -629,6 +642,7 @@ func snapshotExportCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&out, "out", "o", "", "write the decrypted plaintext tree here (required)")
+	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing file at the destination")
 	markJSONSupported(cmd)
 	return cmd
 }
@@ -1188,6 +1202,9 @@ func snapshotAutoCmd() *cobra.Command {
 			} else if err != nil {
 				return err
 			}
+			if flagJSON {
+				return printJSON(map[string]any{"id": resourceID, "autoSnapshot": enabled})
+			}
 			state := "enabled"
 			if !enabled {
 				state = "disabled"
@@ -1257,7 +1274,7 @@ func printAutoStatus(cl *client.Client, prof *identity.Profile) error {
 // destDir, reusing the same paths as clone/pull: a folder is untarred or streamed
 // from its objects, a single file is written by its name. It returns the decrypted
 // metadata. The server only ever returned ciphertext and the wrapped key.
-func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.GetSnapshotResponse, destDir string) (api.Metadata, error) {
+func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.GetSnapshotResponse, destDir string, force bool) (api.Metadata, error) {
 	info := snap.Snapshot
 	if info.WrappedKey == nil {
 		return api.Metadata{}, errors.New("snapshot has no owner key (the resource was public); cannot restore")
@@ -1272,7 +1289,7 @@ func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.Get
 		return api.Metadata{}, fmt.Errorf("unwrap snapshot key: %w", err)
 	}
 	defer ck.Wipe()
-	return materializeResource(cl, snapshotAsResource(snap), ck, destDir)
+	return materializeResource(cl, snapshotAsResource(snap), ck, destDir, force)
 }
 
 // snapshotAsResource adapts a fetched snapshot to the resource shape the materialize
@@ -1292,7 +1309,7 @@ func snapshotAsResource(snap api.GetSnapshotResponse) api.GetResourceResponse {
 // materializeResource decrypts a resource's sealed root under the content key ck and
 // writes its plaintext tree under destDir: a folder is untarred or streamed from its
 // objects, a single file is written by its name. The caller owns ck's lifetime.
-func materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string) (api.Metadata, error) {
+func materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string, force bool) (api.Metadata, error) {
 	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return api.Metadata{}, err
@@ -1303,11 +1320,19 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 			return err
 		})
 	}
-	// A single file (inline or streamed): write it under destDir by its name.
+	// A single file (inline or streamed): write it under destDir by its name. The
+	// folder branch above refuses a non-empty destination; this one refuses an
+	// existing file for the same reason, and the way `aqt pull` does — a restore is
+	// side-by-side by default and must not overwrite what it lands next to.
 	if err := os.MkdirAll(destDir, 0o700); err != nil {
 		return meta, err
 	}
 	dest := filepath.Join(destDir, safeOutputName(meta.Name))
+	if !force {
+		if _, err := os.Stat(dest); err == nil {
+			return meta, fmt.Errorf("%s already exists (use --force to overwrite)", dest)
+		}
+	}
 	if meta.Streamed {
 		root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
 		if err != nil {
@@ -1351,7 +1376,7 @@ func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetRe
 		return api.Metadata{}, fmt.Errorf("unwrap key: %w", err)
 	}
 	defer ck.Wipe()
-	return materializeResource(cl, res, ck, destDir)
+	return materializeResource(cl, res, ck, destDir, false) // diff always lands in a fresh temp dir
 }
 
 // resolveResourceID maps a tracked-folder path (or an explicit --id) to a resource

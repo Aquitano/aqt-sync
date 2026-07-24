@@ -397,14 +397,17 @@ func runShareRevoke(idArg, email string) error {
 		return nil
 	}
 	if res.Visibility == api.Public {
+		// Dropping the grant changes nothing while the resource is public: the link
+		// serves it to anyone unauthenticated, this account included. Say so on stdout —
+		// reporting a bare "revoked" here reads as access removed when it is not.
 		if err := revoke(); err != nil {
 			return err
 		}
 		if flagJSON {
-			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false})
+			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": false})
 		}
-		fmt.Printf("revoked %s from aqt://%s\n", email, id)
-		fmt.Fprintln(os.Stderr, "the resource is public, so its content key was not rotated; `aqt unshare` rotates it")
+		fmt.Printf("removed %s's grant on aqt://%s, but did NOT remove their access: the resource is public\n", email, id)
+		fmt.Fprintf(os.Stderr, "anyone with the link can still read it. Run `aqt unshare %s` to make it private and rotate the key.\n", id)
 		return nil
 	}
 	if res.WrappedKey == nil {
@@ -432,6 +435,20 @@ func runShareRevoke(idArg, email string) error {
 		return err
 	}
 	newCK, err := rotateResourceKey(cl, id, res, oldCK, mk, meta, handle)
+	if errors.Is(err, errTreeRootDrift) {
+		// The grant delete must still land; it is what actually cuts this grantee off
+		// on a private resource.
+		if visErr := revokeWithoutRotation(cl, id, res.Version, handle); visErr != nil {
+			return fmt.Errorf("revoking %s failed: %w", email, visErr)
+		}
+		if flagJSON {
+			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": true})
+		}
+		fmt.Printf("revoked %s from aqt://%s\n", email, id)
+		fmt.Fprintf(os.Stderr, "warning: the content key was NOT rotated (%v); %s cannot fetch it again, but can still decrypt bytes they already had\n", err, email)
+		fmt.Fprintf(os.Stderr, "run `aqt sync` in the folder to re-seal it under the current account key, then `aqt unshare %s` to rotate\n", id)
+		return nil
+	}
 	if err != nil {
 		// The rotate+revoke is one PUT, but a lost response leaves its outcome unknown:
 		// it may have committed. Do not claim it did not. Forward secrecy is safe either
@@ -599,6 +616,20 @@ func runPrivate(idArg string) error {
 		return err
 	}
 	newCK, err := rotateResourceKey(cl, id, res, oldCK, mk, meta, "")
+	if errors.Is(err, errTreeRootDrift) {
+		// Killing the link must not depend on being able to re-seal the tree.
+		if visErr := revokeWithoutRotation(cl, id, res.Version, ""); visErr != nil {
+			return visErr
+		}
+		if flagJSON {
+			return printJSON(map[string]any{"id": id, "ref": "aqt://" + id, "rotated": false})
+		}
+		fmt.Println("aqt://" + id)
+		fmt.Fprintf(os.Stderr, "link revoked: %s is private again and no longer serves to link holders\n", id)
+		fmt.Fprintf(os.Stderr, "warning: its content key was NOT rotated (%v); anyone who saved the old link can still decrypt bytes they already fetched\n", err)
+		fmt.Fprintf(os.Stderr, "run `aqt sync` in the folder to re-seal it under the current account key, then re-run `aqt unshare %s` to rotate\n", id)
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -611,6 +642,36 @@ func runPrivate(idArg string) error {
 	fmt.Println("aqt://" + id)
 	fmt.Fprintln(os.Stderr, "rotated content key — any previous public link no longer decrypts")
 	return nil
+}
+
+// errTreeRootDrift means a folder's directory nodes can no longer be reproduced
+// from the account's current convergence key, so its root cannot be re-sealed. The
+// ordinary cause is `aqt passphrase rotate-root`: the convergence key derives from
+// the root key, so every node id a pre-rotation folder stored is unreachable until
+// the next sync re-seals the tree. Revocation must not depend on that having
+// happened — see revokeWithoutRotation.
+var errTreeRootDrift = errors.New("folder tree cannot be re-sealed under the current account key")
+
+// revokeWithoutRotation is the fallback when the content key cannot be rotated: flip
+// the resource private, which is what actually severs an unauthenticated link, then
+// drop the grant. It leaves anyone who saved the old fragment key able to decrypt
+// bytes they already fetched, so callers say so — but a link that still serves is
+// strictly worse, and refusing outright left one live.
+//
+// The flip goes first deliberately. These are two requests, not one, so either can be
+// the last to land; ending with the resource private and a stale grant row is
+// recoverable by re-running, whereas ending with the grant gone and the resource
+// still public would have handed everyone the access the command was asked to remove.
+func revokeWithoutRotation(cl *client.Client, id string, version int, revoke string) error {
+	if _, err := cl.SetVisibility(id, api.SetVisibilityRequest{
+		Visibility: api.Private, ExpectedVersion: version,
+	}); err != nil {
+		return err
+	}
+	if revoke == "" {
+		return nil
+	}
+	return cl.RevokeGrant(id, revoke)
 }
 
 // rotateResourceKey re-seals a resource's root (and, inline, its body) under a
@@ -669,6 +730,14 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 		pin, ok := byHandle[g.GranteeHandle]
 		if !ok {
 			fmt.Fprintf(os.Stderr, "warning: grant for %s cannot be re-wrapped from this device (no pinned contact); re-run `aqt share --with` where it was granted\n", g.GranteeHandle)
+			continue
+		}
+		// Re-verify the pin against the server's current keys, exactly as a fresh
+		// share does. Wrapping to the stored pin blindly means a grantee who rotated
+		// their own root key gets their working wrap silently overwritten with a dead
+		// one by an unrelated revocation — permanently, since nothing re-checks later.
+		if err := confirmPinnedKeys(cl, prof, pin); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant for %s: %v\n", pin.Email, err)
 			continue
 		}
 		wrap, err := crypto.WrapGrant(newCK, pin.EncPublicKey, id, prof.OwnerHandle, pin.Handle)
@@ -765,7 +834,7 @@ func rotateTree(cl *client.Client, id string, res api.GetResourceResponse, oldCK
 	// and the sealer disagree, and PUTting the recomputed refs could orphan live
 	// objects. Refuse rather than risk the folder's object graph.
 	if sealed.Root.ID != root.Root.ID {
-		return crypto.ContentKey{}, fmt.Errorf("recomputed tree root %s does not match stored root %s; not rotating", sealed.Root.ID, root.Root.ID)
+		return crypto.ContentKey{}, fmt.Errorf("%w: recomputed tree root %s does not match stored root %s", errTreeRootDrift, sealed.Root.ID, root.Root.ID)
 	}
 
 	newCK, err := crypto.GenerateContentKey()

@@ -108,9 +108,9 @@ func TestBindingRefusesLegacyStateFromOtherServer(t *testing.T) {
 	}
 }
 
-// A profile that was re-logged into a different account (new key fingerprint) must
-// not sync a folder the old account owns.
-func TestBindingRefusesFingerprintMismatch(t *testing.T) {
+// A profile that was re-logged into a different account must not sync a folder the
+// old account owns. The owner handle is what identifies the account.
+func TestBindingRefusesAccountMismatch(t *testing.T) {
 	h := newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -119,7 +119,29 @@ func TestBindingRefusesFingerprintMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	st.Fingerprint = "recorded-owner-key"
+	st.Account = "recorded-owner-handle"
+	if err := saveState(dir, st); err != nil {
+		t.Fatal(err)
+	}
+
+	err = runSync(dir, syncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "different account") {
+		t.Fatalf("sync under a swapped account = %v, want a binding error", err)
+	}
+}
+
+// Legacy state that predates the recorded owner handle still binds on the
+// fingerprint, which is the only evidence it carries.
+func TestBindingRefusesFingerprintMismatchWithoutAccount(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	h.init(dir)
+
+	st, err := loadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.Account, st.Fingerprint = "", "recorded-owner-key"
 	if err := saveState(dir, st); err != nil {
 		t.Fatal(err)
 	}
@@ -135,6 +157,59 @@ func TestBindingRefusesFingerprintMismatch(t *testing.T) {
 	err = runSync(dir, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "different account") {
 		t.Fatalf("sync under a swapped account = %v, want a binding error", err)
+	}
+}
+
+// `aqt passphrase rotate-root` mints a new signing key, so every tracked folder's
+// recorded fingerprint goes stale on every device at once. The account is unchanged,
+// so the folder must keep syncing — and catch its fingerprint up.
+func TestBindingToleratesRootKeyRotation(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	h.init(dir)
+
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prof.Fingerprint = "fingerprint-after-rotation"
+	if err := identity.Save(prof); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runSync(dir, syncOptions{}); err != nil {
+		t.Fatalf("sync after a root-key rotation = %v, want success", err)
+	}
+	st, err := loadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Fingerprint != "fingerprint-after-rotation" {
+		t.Fatalf("recorded fingerprint = %q, want it caught up to the rotated key", st.Fingerprint)
+	}
+}
+
+// The same account under a different local profile name is still the owner: a
+// restored $HOME re-logged in as --profile work must not lock the folder out.
+func TestBindingAcceptsRenamedProfileForSameAccount(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	h.init(dir)
+
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	renamed := *prof
+	renamed.Name = "work"
+	if err := identity.Save(&renamed); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { flagProfile = "" })
+	flagProfile = "work"
+
+	if err := bindTrackedRoot(dir); err != nil {
+		t.Fatalf("binding under a renamed profile for the same account = %v, want success", err)
 	}
 }
 

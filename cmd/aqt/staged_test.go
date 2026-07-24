@@ -22,8 +22,30 @@ func TestMaterializeStaged(t *testing.T) {
 		if got := readTree(t, dest, "f.txt"); got != "x" {
 			t.Fatalf("f.txt = %q", got)
 		}
-		if fi, err := os.Stat(dest); err != nil || fi.Mode().Perm() != 0o755 {
-			t.Fatalf("dest mode = %v err=%v, want 0755", fi.Mode(), err)
+		want := os.FileMode(0o755) &^ currentUmask()
+		if fi, err := os.Stat(dest); err != nil || fi.Mode().Perm() != want {
+			t.Fatalf("dest mode = %v err=%v, want %v", fi.Mode(), err, want)
+		}
+	})
+
+	// The destination must not be more permissive than a plain MkdirAll would have
+	// made it: `umask 077; aqt clone <id> ~/secrets` has to land 0700, not 0755.
+	t.Run("the destination mode respects the umask", func(t *testing.T) {
+		restore := setUmask(t, 0o077)
+		defer restore()
+
+		dest := filepath.Join(t.TempDir(), "secrets")
+		if err := materializeStaged(dest, func(staging string) error {
+			return os.WriteFile(filepath.Join(staging, "f.txt"), []byte("x"), 0o600)
+		}); err != nil {
+			t.Fatal(err)
+		}
+		fi, err := os.Stat(dest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fi.Mode().Perm() != 0o700 {
+			t.Fatalf("dest mode under umask 077 = %v, want 0700", fi.Mode().Perm())
 		}
 	})
 
