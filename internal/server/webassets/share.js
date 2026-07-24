@@ -143,8 +143,13 @@
   // applied BEFORE fzstd runs: it allocates from the frame header's declared content
   // size, so checking the result afterwards is already too late — a hostile share
   // could declare gigabytes and kill the tab before any check ran.
-  function decompress(payload, alg, rawLen) {
-    var limit = rawLen >= 0 ? rawLen : maxDownloadBytes;
+  function decompress(payload, alg, rawLen, maxRawLen) {
+    if (!Number.isSafeInteger(rawLen) || rawLen < -1 ||
+        !Number.isSafeInteger(maxRawLen) || maxRawLen < 0 ||
+        rawLen > maxRawLen) {
+      throw new Error("object-corrupt");
+    }
+    var limit = rawLen >= 0 ? rawLen : maxRawLen;
     if (alg === "zstd") {
       if (!window.fzstd) throw new Error("no-decompressor");
       if (AqtCrypto.zstdSize(payload) > limit) throw new Error("object-corrupt");
@@ -161,12 +166,32 @@
   // openObject decrypts one content-addressed frame using the key/len/alg carried
   // in its manifest record (a crypto.Chunk). Throws "object-corrupt" if the frame
   // fails the AEAD tag or does not decompress to the recorded length.
-  function openObject(frame, chunk, aad) {
+  function objectLen(chunk, maxRawLen) {
+    if (!chunk || !Number.isSafeInteger(chunk.len) || chunk.len < 0 ||
+        chunk.len > maxRawLen) {
+      throw new Error("object-corrupt");
+    }
+    return chunk.len;
+  }
+
+  function boundedObjectBytes(chunks, perObjectLimit, totalLimit) {
+    if (!Array.isArray(chunks)) throw new Error("object-corrupt");
+    var total = 0;
+    for (var i = 0; i < chunks.length; i++) {
+      var n = objectLen(chunks[i], perObjectLimit);
+      if (n > totalLimit - total) throw new Error("object-corrupt");
+      total += n;
+    }
+    return total;
+  }
+
+  function openObject(frame, chunk, aad, maxRawLen) {
     var key = b64Decode(chunk.key);
     if (key.length !== 32) throw new Error("object-corrupt");
+    var rawLen = objectLen(chunk, maxRawLen);
     var payload = AqtCrypto.xchachaOpen(key, ZERO_NONCE, frame, aad);
     if (payload === null) throw new Error("object-corrupt");
-    return decompress(payload, chunk.alg, typeof chunk.len === "number" ? chunk.len : -1);
+    return decompress(payload, chunk.alg, rawLen, maxRawLen);
   }
 
   /* ---------------- page state machine ------------------------------ */
@@ -230,6 +255,13 @@
   // copying it into a Blob costs roughly twice the file size transiently, so very
   // large files are sent to the CLI instead of risking a killed tab.
   var maxDownloadBytes = 512 * 1024 * 1024;
+
+  // These mirror the format bounds in syncengine: directory nodes are capped at
+  // MaxNodeBytes and indirect chunk lists are split into chunkListSegmentBytes
+  // pieces. Keep them explicit here because every manifest length is controlled by
+  // the sender of a zero-knowledge share and must be validated before decompression.
+  var maxTreeNodeBytes = 24 * 1024 * 1024;
+  var maxChunkListSegmentBytes = 4 * 1024 * 1024;
 
   // maxChunkListBytes caps an indirect chunk list's decoded JSON. A list is metadata
   // about a file, not the file, so it is orders of magnitude smaller than the
@@ -302,9 +334,14 @@
   // fetchNode fetches and opens one directory node, returning its children. The node
   // ciphertext is verified against its content address inside openObject.
   function fetchNode(node) {
+    try {
+      objectLen(node, maxTreeNodeBytes);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     if (nodeCache[node.id]) return Promise.resolve(nodeCache[node.id]);
     return fetchObjects([node.id]).then(function (frames) {
-      var plain = openObject(frames[0], node, AAD_NODE);
+      var plain = openObject(frames[0], node, AAD_NODE, maxTreeNodeBytes);
       var parsed = JSON.parse(new TextDecoder().decode(plain));
       if (typeof parsed.version === "number" && parsed.version > 2) throw new Error("newer-format");
       var children = parsed.children || [];
@@ -449,12 +486,16 @@
   // list make a whole-file hash check redundant, so parts are never concatenated
   // into one contiguous buffer here.
   function collectChunks(chunks, onProgress) {
+    var totalLen;
+    try {
+      // The caller gated on the entry's declared size; this gates on what the chunk
+      // list actually references, which a hostile share can make far larger. It also
+      // validates every declared length before any frame is fetched or decompressed.
+      totalLen = boundedObjectBytes(chunks, maxDownloadBytes, maxDownloadBytes);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     var parts = new Array(chunks.length);
-    var totalLen = 0;
-    for (var t = 0; t < chunks.length; t++) totalLen += chunks[t].len || 0;
-    // The caller gated on the entry's declared size; this gates on what the chunk
-    // list actually references, which a hostile share can make far larger.
-    if (totalLen > maxDownloadBytes) return Promise.reject(new Error("unsupported:large"));
     var done = 0;
     var i = 0;
 
@@ -473,7 +514,7 @@
       return fetchObjects(ids).then(function (frames) {
         for (var j = 0; j < frames.length; j++) {
           var ch = chunks[start + j];
-          parts[start + j] = openObject(frames[j], ch, AAD_CHUNK);
+          parts[start + j] = openObject(frames[j], ch, AAD_CHUNK, maxDownloadBytes);
           done += parts[start + j].length;
           if (onProgress) onProgress(done, totalLen);
         }
@@ -486,10 +527,19 @@
   // resolveChunkList opens a file's indirect chunk-list segments and returns the
   // recovered chunk records.
   function resolveChunkList(segs) {
+    var total;
+    try {
+      // Enforce both Go-side format limits before fzstd sees a frame. Checking the
+      // decoded total afterwards is too late: fzstd allocates the declared output
+      // size while each segment is opened.
+      total = boundedObjectBytes(segs, maxChunkListSegmentBytes, maxChunkListBytes);
+    } catch (err) {
+      return Promise.reject(err);
+    }
     return fetchObjects(segs.map(function (s) { return s.id; })).then(function (frames) {
-      var plains = frames.map(function (frame, i) { return openObject(frame, segs[i], AAD_CHUNKLIST); });
-      var total = plains.reduce(function (n, p) { return n + p.length; }, 0);
-      if (total > maxChunkListBytes) throw new Error("object-corrupt");
+      var plains = frames.map(function (frame, i) {
+        return openObject(frame, segs[i], AAD_CHUNKLIST, maxChunkListSegmentBytes);
+      });
       var joined = new Uint8Array(total);
       var off = 0;
       plains.forEach(function (p) { joined.set(p, off); off += p.length; });
@@ -512,7 +562,10 @@
   // in place; inline or indirect chunk lists fetch their content objects.
   function resolveEntryChunks(child, onProgress) {
     if (child.inline != null) {
-      return Promise.resolve([decompress(b64Decode(child.inline), child.inlineAlg || "", child.size >= 0 ? child.size : -1)]);
+      var rawLen = typeof child.size === "number" ? child.size : -1;
+      return Promise.resolve([decompress(
+        b64Decode(child.inline), child.inlineAlg || "", rawLen, maxDownloadBytes
+      )]);
     }
     var listP = (child.chunksRef && child.chunksRef.length)
       ? resolveChunkList(child.chunksRef)

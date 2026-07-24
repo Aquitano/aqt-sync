@@ -126,14 +126,14 @@ func serve(srv *http.Server, tlsCfg *tls.Config) error {
 	return serveListener(ctx, srv, ln, tlsCfg)
 }
 
-func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration, before func(context.Context) error) error {
+func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration, begin func(), drain func(context.Context) error) error {
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, grace, before)
+	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, grace, begin, drain)
 }
 
 // serveListener serves ln until it errors or ctx is cancelled, then drains
@@ -147,10 +147,10 @@ func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration
 // a server that only speaks HTTP/1.1 would break. ServeTLS also preserves the
 // acme-tls/1 challenge protocol needed for autocert issuance.
 func serveListener(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config) error {
-	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, shutdownGrace, nil)
+	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, shutdownGrace, nil, nil)
 }
 
-func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config, grace time.Duration, before func(context.Context) error) error {
+func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config, grace time.Duration, begin func(), drain func(context.Context) error) error {
 	serve := srv.Serve
 	scheme := "http"
 	if tlsCfg != nil {
@@ -170,21 +170,19 @@ func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listen
 		log.Print("shutting down; draining in-flight requests")
 		shutCtx, cancel := context.WithTimeout(context.Background(), grace)
 		defer cancel()
+		// Readiness must fail synchronously before Shutdown closes the listeners.
+		// Merely starting a goroutine whose first action flips readiness does not order
+		// that action before the close: the scheduler may resume this goroutine as soon
+		// as the start signal is sent. Keep the fast readiness transition separate from
+		// the potentially blocking component drain below.
+		if begin != nil {
+			begin()
+		}
 		errCh := make(chan error, 2)
 		n := 1
-		// before() flips /readyz to 503 as its first act, and that has to be visible
-		// to a load balancer *before* the listeners close — otherwise the balancer
-		// sees connection-refused instead of an unready backend it can drain away
-		// from. Racing the two goroutines made the ordering a coin flip; starting the
-		// drain only after before() has begun makes it the documented one.
-		if before != nil {
+		if drain != nil {
 			n++
-			started := make(chan struct{})
-			go func() {
-				close(started)
-				errCh <- before(shutCtx)
-			}()
-			<-started
+			go func() { errCh <- drain(shutCtx) }()
 		}
 		go func() { errCh <- srv.Shutdown(shutCtx) }()
 		var first error

@@ -66,6 +66,31 @@ func TestLeadingDashIDsAreAddressable(t *testing.T) {
 			want: []string{"sync", "--force", "-y", "-q"},
 		},
 		{
+			name: "a long flag value is untouched",
+			in:   []string{"whoami", "--profile", "-aCPpqvuOEo"},
+			want: []string{"whoami", "--profile", "-aCPpqvuOEo"},
+		},
+		{
+			name: "another command flag value is untouched",
+			in:   []string{"snapshot", "create", "release", "--label", "-aCPpqvuOEo"},
+			want: []string{"snapshot", "create", "release", "--label", "-aCPpqvuOEo"},
+		},
+		{
+			name: "a short flag value is untouched",
+			in:   []string{"pull", "some-id", "-o", "-aCPpqvuOEo"},
+			want: []string{"pull", "some-id", "-o", "-aCPpqvuOEo"},
+		},
+		{
+			name: "an attached short flag value is untouched",
+			in:   []string{"pull", "some-id", "-oaCPpqvuOE"},
+			want: []string{"pull", "some-id", "-oaCPpqvuOE"},
+		},
+		{
+			name: "a combined short flag value is untouched",
+			in:   []string{"pull", "some-id", "-qoCPpqvuOE"},
+			want: []string{"pull", "some-id", "-qoCPpqvuOE"},
+		},
+		{
 			name: "an already-prefixed ref is untouched",
 			in:   []string{"rm", "aqt://-aCPpqvuOEo"},
 			want: []string{"rm", "aqt://-aCPpqvuOEo"},
@@ -82,7 +107,7 @@ func TestLeadingDashIDsAreAddressable(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := escapeLeadingDashIDs(tc.in)
+			got := escapeLeadingDashIDs(rootCmd(), tc.in)
 			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
 				t.Fatalf("escapeLeadingDashIDs(%q) = %q, want %q", tc.in, got, tc.want)
 			}
@@ -92,7 +117,7 @@ func TestLeadingDashIDsAreAddressable(t *testing.T) {
 
 // The rewritten form has to survive the ref parser, or the fix just moves the error.
 func TestRewrittenDashIDParsesBackToTheID(t *testing.T) {
-	rewritten := escapeLeadingDashIDs([]string{"-aCPpqvuOEo"})[0]
+	rewritten := escapeLeadingDashIDs(rootCmd(), []string{"-aCPpqvuOEo"})[0]
 	if id, _, _ := parseRef(rewritten); id != "-aCPpqvuOEo" {
 		t.Fatalf("parseRef(%q) = %q, want the original id", rewritten, id)
 	}
