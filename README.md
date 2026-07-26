@@ -107,6 +107,15 @@ The full operator runbook — every environment variable, TLS options (static ce
 built-in Let's Encrypt, or a reverse proxy), a systemd unit, Docker/Compose, and the
 backup-and-restore procedure — is in **[docs/deploy.md](docs/deploy.md)**.
 
+## Staying current
+
+`aqt update --check` reports whether a newer release has been published. It verifies
+a signed release manifest against signing keys compiled into the binary before it
+trusts any of its contents, and never modifies the installation. `--prerelease` opts
+into the beta channel; `--json` is machine-readable. Source builds report that
+automatic updates do not apply to them. The manifest format, signing-key custody, and
+rotation policy are in **[docs/updates.md](docs/updates.md)**.
+
 ## Backing up a git repository
 
 `.git` is ignored by default. Backing up a repository's local-only history has
