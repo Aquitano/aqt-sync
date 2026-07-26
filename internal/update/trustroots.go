@@ -28,10 +28,11 @@ var trustedKeys = []struct {
 	Comment   string
 	AddedIn   string
 }{
-	// No production release-signing key is provisioned yet. Paste the entry printed
-	// by `go run ./cmd/updatectl keygen` here; until then `aqt update --check`
-	// refuses to trust anything (ErrNoTrustRoots), which is the correct answer for
-	// a build that cannot authenticate a manifest.
+	{
+		PublicKey: "XAuky+YLzz3myeGlE8pxekPdmHIa/V8tOiOOaONqVwo=",
+		Comment:   "release signing key 1",
+		AddedIn:   "v0.4.0",
+	},
 }
 
 // TrustRoots returns the keys this build accepts on a release manifest.
