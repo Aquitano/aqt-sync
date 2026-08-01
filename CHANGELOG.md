@@ -4,7 +4,7 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
-## [v0.4.0] - 2026-08-01
+## [v0.4.1] - 2026-08-01
 
 ### Added
 
@@ -55,6 +55,9 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Replaced the unrecoverable signing key from the unpublished v0.4.0 attempt and
+  added an encrypted recovery-copy procedure. v0.4.1 is the first release that
+  publishes updater metadata and binaries signed by a compiled trust root.
 - The release workflow is split into `build` and a tag-only `publish` job. Checksums
   and attestations are computed after signing, so the update manifest, its signature,
   and the SBOM are all covered. A manual `workflow_dispatch` run builds and uploads
@@ -69,6 +72,11 @@ All notable changes to this project are documented in this file.
   keep Go sources and digest-pinned embedded JavaScript on LF bytes, accept CRLF in
   the documented config example, and avoid asserting POSIX permissions or umask
   behavior that Windows does not implement.
+
+## [v0.4.0] - 2026-08-01
+
+No release artifacts were published. The signing key was lost before publication,
+and this tag is superseded by v0.4.1.
 
 ## [v0.3.0] - 2026-07-21
 

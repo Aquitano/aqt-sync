@@ -281,22 +281,27 @@ so a malformed file cannot pass because its first entry happened to be well form
 ## Signing keys
 
 The public halves are compiled into the client in `internal/update/trustroots.go`. The
-private half exists only as the `AQT_UPDATE_SIGNING_KEYS` secret in the
-`release-signing` GitHub environment.
+operational private half exists only as the `AQT_UPDATE_SIGNING_KEYS` secret in the
+`release-signing` GitHub environment. Keep one recovery copy encrypted to an
+access-controlled maintainer key and outside the repository; never store the seed as
+plaintext, in agent memory, or in an ordinary shared password vault.
 
 ### Provisioning (one-time)
 
-1. `go run ./cmd/updatectl keygen --comment "release signing key 1" --added-in v0.4.0`
+1. `go run ./cmd/updatectl keygen --comment "release signing key 2" --added-in v0.4.1`
    on a trusted machine. It prints the key id, the public key, the private key, and
    the `trustroots.go` entry to paste.
 2. Store the private key as the `AQT_UPDATE_SIGNING_KEYS` secret in the
-   `release-signing` environment. Nowhere else — not a repository secret, not a file,
-   not a password manager shared with anyone who does not cut releases.
-3. Commit the `trustroots.go` entry.
-4. Cut a release. The workflow signs, then verifies the signature against the
+   `release-signing` environment. Never put it in a repository secret or a plaintext
+   file.
+3. Encrypt one recovery copy to a release maintainer's key, store it outside the
+   repository, and test that it decrypts to the generated seed before deleting any
+   plaintext or clearing the terminal.
+4. Commit the `trustroots.go` entry.
+5. Cut a release. The workflow signs, then verifies the signature against the
    committed trust roots — that step is what proves shipped clients will accept it.
 
-Until step 3 lands, `aqt update --check` refuses to trust anything
+Until step 4 lands, `aqt update --check` refuses to trust anything
 (`this build has no release-signing keys compiled in`), and the release workflow's
 verify step fails. That is the intended behavior for a build that cannot authenticate
 a manifest; it is not a state to work around.
@@ -323,6 +328,15 @@ Rotation is planned, overlapping, and slow on purpose:
 Clients that never upgrade past step 1 stop being able to verify releases at step 3.
 They fail closed with "signed by an unknown key" — they are left out, not fooled.
 
+### Loss
+
+If a private key is lost before its first release publishes any artifacts, replace
+the unshipped trust root and cut the next version. If it is lost after clients ship
+and no recovery copy exists, those clients cannot authenticate a rotation release;
+they require a manual reinstall from independently verified artifacts. This is why a
+tested encrypted recovery copy is part of provisioning rather than an optional
+backup.
+
 ### Compromise
 
 Removing a key from `trustroots.go` only affects builds shipped *after* the removal.
@@ -347,7 +361,7 @@ installation. A forged manifest can misreport a version, not install anything.
 ## Verifying a release by hand
 
 ```
-gh release download v0.4.0 --pattern 'aqt-update.json*' --dir /tmp/aqt
+gh release download v0.4.1 --pattern 'aqt-update.json*' --dir /tmp/aqt
 go run ./cmd/updatectl verify --in /tmp/aqt/aqt-update.json --sig /tmp/aqt/aqt-update.json.sig
 ```
 

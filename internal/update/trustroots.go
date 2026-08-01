@@ -29,9 +29,9 @@ var trustedKeys = []struct {
 	AddedIn   string
 }{
 	{
-		PublicKey: "XAuky+YLzz3myeGlE8pxekPdmHIa/V8tOiOOaONqVwo=",
-		Comment:   "release signing key 1",
-		AddedIn:   "v0.4.0",
+		PublicKey: "BwNXo1smVKIpvC54/iSV+86pQQuTND8py60WPVjGLXE=",
+		Comment:   "release signing key 2",
+		AddedIn:   "v0.4.1",
 	},
 }
 
