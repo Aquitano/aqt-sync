@@ -344,9 +344,12 @@ aqt restore <name-or-id> [dir]      Restore a checkpoint by name or a snapshot b
 ### 3.8 Updates
 
 ```
-aqt update [--check]                Report whether a newer release is published.
+aqt update                          Check, show the transition, confirm, then install.
+      --check                       Report only; change nothing.
+      --yes                         Install without asking (non-interactive).
       --prerelease                  Check the beta channel, which also carries stable.
       --json                        currentVersion / availableVersion / channel / status / releaseUrl.
+aqt update policy [off|notify|auto] Show or set what ordinary commands do (default off).
 ```
 
 Every tagged release publishes a canonical manifest (`aqt-update.json`) describing
@@ -363,8 +366,23 @@ signatures, malformed or oversized metadata, duplicated platforms, a missing bui
 this platform, a foreign asset URL, and a published version older than the running one
 all fail closed. Stable never carries a prerelease; beta is opt-in and a superset. A
 source build reports that updates do not apply to it rather than guessing its version.
-Nothing in this path writes to the installation. Format, key custody, rotation, and
-compromise recovery: **docs/updates.md**.
+
+Installing replaces only a standalone binary. Homebrew, WinGet, and Scoop
+installations are recognized from the resolved executable path and the receipts
+beside it — not from what `PATH` resolves to — and are reported with their owner's
+upgrade command instead of being overwritten. The archive is downloaded to the
+install directory, checked against the signed length and digest as it arrives, and
+unpacked to exactly one regular `aqt`; the candidate must run and report the promised
+version before the installed binary is touched. The old binary is renamed aside
+rather than overwritten (the one thing Windows refuses on a running image) and
+renamed back on any failure.
+
+An opt-in policy (`off` by default, `notify`, `auto`) lets ordinary commands check at
+most once a day, only after a successful command on a terminal, never for
+`--json`/`--quiet`/scripts/watch agents, and never affecting that command's status.
+`auto` installs stable releases only, and defers while any registered watch agent is
+running. Format, key custody, rotation, compromise recovery, ownership, and rollback
+files: **docs/updates.md**.
 
 ---
 

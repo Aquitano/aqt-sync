@@ -1,9 +1,9 @@
-# Update metadata and `aqt update --check`
+# Updates: signed metadata, `aqt update`, and update policy
 
-Every tagged release publishes a signed description of itself. `aqt update --check`
-fetches that description, verifies it against signing keys compiled into the binary,
-and reports whether the running build is current. The check is read-only: nothing in
-this path writes to the installation.
+Every tagged release publishes a signed description of itself. `aqt update` fetches
+that description, verifies it against signing keys compiled into the binary, and
+either reports what is available or installs it. `--check` keeps the whole path
+read-only.
 
 The transport is not trusted. Whoever serves the metadata — the GitHub CLI today, a
 static origin later — can only make the check fail, never make it lie: the signature
@@ -12,13 +12,16 @@ is what makes an answer usable, and every field is refused until it verifies.
 ## Using it
 
 ```
-aqt update --check              # stable channel
+aqt update                      # check, show the transition, ask, then install
+aqt update --yes                # install without asking (scripts, CI)
+aqt update --check              # report only, change nothing
 aqt update --check --prerelease # beta channel, which includes prereleases
-aqt update --check --json       # machine-readable
+aqt update --json               # machine-readable
 ```
 
-`aqt update` with no flags does the same check. Installing updates is not
-implemented yet; the command prints the release and asset to download.
+`aqt update` shows the current and available versions and the release URL, then asks
+before writing anything. Without a terminal it refuses rather than assuming consent;
+`--yes` is the explicit non-interactive path.
 
 **Prerequisite:** the repository is private, so release assets are only reachable
 with credentials. The check shells out to the [GitHub CLI](https://cli.github.com)
@@ -63,6 +66,131 @@ published on, so a beta check that lands on a stable release says `stable`.
 
 The containment is one-directional, and the channel is part of what is signed: a
 beta manifest served to a stable check is refused even though it is authentic.
+
+## Installation ownership
+
+`aqt update` replaces only an installation nothing else is tracking. Everything else
+is reported with the command its real owner expects, and is never overwritten:
+rewriting a file a package manager installed would leave that manager's records
+describing bytes that no longer match, and the next `brew upgrade` would quietly
+revert the update anyway.
+
+| Owner | How it is recognized | What `aqt update` does |
+| --- | --- | --- |
+| standalone | none of the below | replaces it |
+| source | `buildKind` is not `release` | refuses; suggests `make build` or installing a release |
+| Homebrew | `…/Cellar/<formula>/<version>/` with `INSTALL_RECEIPT.json` | refuses; prints `brew upgrade <formula>` |
+| Scoop | `…/apps/<app>/<version>/` with a sibling `shims/` and an `install.json` | refuses; prints `scoop update <app>` |
+| WinGet | `…/Microsoft/WinGet/Packages/<PackageId>_…/` | refuses; prints `winget upgrade <PackageId>` |
+
+Detection resolves symlinks first and reads the receipts on disk, so a shim on
+`PATH` is classified by what it points at rather than by where it was found. A
+directory that merely looks like one of these layouts but carries no receipt stays
+standalone: the receipt is what distinguishes a real formula from a coincidence.
+
+aqt never invokes a package manager itself. Shelling out to `brew` from inside a
+binary brew owns is how an upgrade ends up half-applied.
+
+## Installing
+
+The replacement is ordered so that there is no point at which the installed path
+holds nothing usable:
+
+1. Download the archive to a temporary file **in the install directory**, so the
+   final rename is a same-filesystem operation rather than a copy across devices.
+   Length and SHA-256 are checked as the bytes arrive, against the signed manifest;
+   one byte over the declared size aborts the transfer rather than filling the disk.
+2. Extract exactly one regular file named `aqt` (`aqt.exe` on Windows) from the root
+   of the archive. Directories, symlinks, hard links, devices, a second copy, and any
+   other member are refused rather than skipped — release archives are flat and hold
+   one file, so anything else is not the archive the release process produces.
+   Extraction output is bounded, so a crafted archive cannot expand without limit.
+3. Run the extracted file and require it to report the version the manifest promised.
+   This happens **before** the installed binary is touched, so a download that
+   verified but does not run changes nothing.
+4. Rename the current binary aside to `.aqt-update-previous.old`, then rename the new
+   file into place.
+5. Run the installed binary and check its version again. If that fails, the previous
+   binary is renamed back.
+
+Step 4 is the same on every platform. The operation Windows refuses is *overwriting*
+a running image, not *renaming* one — so moving the old file aside first works there,
+and on Unix the running process keeps its inode either way.
+
+Permissions are carried over from the binary being replaced, so a deliberately
+restricted install stays restricted. `setuid`, `setgid`, and the sticky bit are
+dropped rather than preserved, and owner-execute is forced on.
+
+### Rollback files and recovery
+
+A file named `.aqt-update-*` in the install directory is update debris:
+
+- `.aqt-update-*.part` — a download that did not finish.
+- `.aqt-update-*.new` — an extracted binary that was never installed.
+- `.aqt-update-previous.old` — the binary that was just replaced.
+
+All three are safe to delete. Every `aqt update` clears them before it starts, which
+is the only way the last one can go on Windows: the file is this process's own
+running image, and the OS keeps it locked until the process exits.
+
+If an update is interrupted, the installed binary is whichever of the two the last
+completed rename left in place — never a partial file, because the new binary is
+written and flushed under a temporary name before any rename happens. To recover by
+hand, move `.aqt-update-previous.old` back over the installed path.
+
+## Update policy
+
+By default nothing checks for updates unless asked. Installing aqt must not add
+background network traffic to commands that were never pointed at the network.
+
+```
+aqt update policy            # show the current mode
+aqt update policy notify     # check daily, print one line when a release exists
+aqt update policy auto       # additionally install stable releases
+aqt update policy off        # the default
+```
+
+Under `notify` and `auto`, a check runs **after** a command that succeeded, and only
+when all of these hold:
+
+- the policy is not `off`;
+- at least 24 hours have passed since the last check (a failed check counts, so an
+  unreachable network cannot turn "once a day" into "on every command");
+- stdout and stdin are both a terminal;
+- neither `--json` nor `--quiet` was passed;
+- the command is not `watch`, `agent`, `update`, or `tui`.
+
+The check is bounded to five seconds and its result never changes the exit status or
+output of the command that triggered it. A notice is printed once per version rather
+than on every check.
+
+`auto` additionally installs, and only when every one of these holds — otherwise it
+falls back to a notice:
+
+- the installation is standalone (see above);
+- the release is on the **stable** channel. A prerelease is something a user opts into
+  per invocation with `--prerelease`, never something a policy decides for them;
+- it is newer than the running build. A published version that is older is refused as
+  a rollback, not offered;
+- there is a build for this OS and architecture;
+- no registered watch agent is running.
+
+### Watch agents
+
+Replacing the binary under a running watch agent is safe on these filesystems, but
+the agent would keep executing the old code with no way to know. So `auto` defers
+instead, and says which agents are in the way.
+
+Each agent records its root and pid in a global registry (`agents.json`, beside the
+policy), because the per-folder `.aqt/agent.pid` is only visible from inside that
+folder — and the point is for an update started anywhere to see agents everywhere.
+Entries are removed on clean shutdown and reaped on read when the process is gone,
+which is what keeps a killed agent from deferring updates forever. That matters most
+on Windows, where stopping an agent terminates it rather than letting it clean up.
+
+Stop the agents (`aqt agent stop` in each folder) and run `aqt update`, or wait: the
+deferred install is retried at the next idle invocation rather than after another
+full day.
 
 ## Manifest
 
@@ -222,7 +350,16 @@ check against a specific key instead.
 
 ## Privacy
 
-The check contacts GitHub (or `AQT_UPDATE_BASE_URL`) and nothing else, only when run.
-It sends no account identifier, no profile, and no telemetry: it downloads two small
-files. Nothing about it runs on its own — there are no background checks in this
-version.
+A check contacts GitHub (or `AQT_UPDATE_BASE_URL`) and nothing else. It sends no
+account identifier, no profile, and no telemetry: it downloads two small files, and
+an install downloads one archive.
+
+Under the default `off` policy nothing runs on its own — the only network traffic is
+from an explicit `aqt update`. Turning on `notify` or `auto` adds at most one check
+per 24 hours, under the conditions listed above. Nothing is reported back: the
+request is an ordinary asset download, and what the client decides afterwards stays
+local.
+
+The persisted state (`update.json`, beside the profiles) records the policy, the time
+of the last check, and the last version seen, so a notice is not repeated. It holds
+nothing about the account.

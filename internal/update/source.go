@@ -44,6 +44,9 @@ type GHSource struct {
 	// Run executes gh and returns its stdout, bounded to max bytes. Tests
 	// substitute it so no gh binary or network is involved.
 	Run func(ctx context.Context, max int64, args ...string) ([]byte, error)
+	// RunStream executes gh and pipes its stdout to w, for payloads too large to
+	// hold in memory. Tests substitute it for the same reason as Run.
+	RunStream func(ctx context.Context, w io.Writer, args ...string) error
 }
 
 func (g GHSource) Fetch(ctx context.Context, ch Channel) (Release, error) {

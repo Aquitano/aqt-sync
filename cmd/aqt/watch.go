@@ -201,6 +201,10 @@ func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 		return err
 	}
 	defer release()
+	// The per-folder lock above says whether this folder has an agent; the global
+	// registry is what lets an update started somewhere else see that it does.
+	registerWatchAgent(root)
+	defer unregisterWatchAgent(root)
 	if err := ensureSession(); err != nil {
 		return err
 	}
