@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v0.4.0] - 2026-08-01
+
 ### Added
 
 - Tagged releases now publish a canonical update manifest (`aqt-update.json`) and a
