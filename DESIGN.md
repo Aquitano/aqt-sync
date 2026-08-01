@@ -345,7 +345,7 @@ aqt restore <name-or-id> [dir]      Restore a checkpoint by name or a snapshot b
 
 ```
 aqt update [--check]                Report whether a newer release is published.
-      --prerelease                  Check the beta channel instead of stable.
+      --prerelease                  Check the beta channel, which also carries stable.
       --json                        currentVersion / availableVersion / channel / status / releaseUrl.
 ```
 
@@ -361,7 +361,7 @@ Selection is by `(GOOS, GOARCH)` and the archive name is derived per platform, s
 `aqt-server` archive published in the same release is unreachable. Unknown keys, bad
 signatures, malformed or oversized metadata, duplicated platforms, a missing build for
 this platform, a foreign asset URL, and a published version older than the running one
-all fail closed. Stable never carries a prerelease; the beta channel is opt-in. A
+all fail closed. Stable never carries a prerelease; beta is opt-in and a superset. A
 source build reports that updates do not apply to it rather than guessing its version.
 Nothing in this path writes to the installation. Format, key custody, rotation, and
 compromise recovery: **docs/updates.md**.

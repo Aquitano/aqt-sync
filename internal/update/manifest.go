@@ -66,6 +66,15 @@ const (
 
 func (c Channel) valid() bool { return c == ChannelStable || c == ChannelBeta }
 
+// accepts reports whether a manifest published on got answers a check for c.
+// Beta is a superset of stable rather than a separate track: it carries
+// prereleases in addition to stable releases, and most of the time the newest
+// release is a stable one. The reverse never holds, which is what keeps a
+// prerelease off a stable check even when its manifest is authentic.
+func (c Channel) accepts(got Channel) bool {
+	return got == c || (c == ChannelBeta && got == ChannelStable)
+}
+
 // Platform is an OS/architecture pair, matching runtime.GOOS/runtime.GOARCH.
 type Platform struct {
 	OS   string

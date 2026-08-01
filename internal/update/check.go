@@ -121,12 +121,15 @@ func Check(ctx context.Context, opts Options) (Result, error) {
 	if err != nil {
 		return res, err
 	}
-	if m.Channel != ch {
+	if !ch.accepts(m.Channel) {
 		return res, fmt.Errorf("%w: asked for %s, got %s", ErrChannelMismatch, ch, m.Channel)
 	}
 	if err := m.CheckURLs(repo); err != nil {
 		return res, err
 	}
+	// Report the track the answer actually came from, so a beta check that lands on
+	// a stable release does not describe it as a prerelease.
+	res.Channel = string(m.Channel)
 
 	available, err := ParseVersion(m.Version)
 	if err != nil {

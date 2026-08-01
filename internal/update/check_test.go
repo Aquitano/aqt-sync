@@ -154,6 +154,26 @@ func TestCheckKeepsPrereleasesOffTheStableChannel(t *testing.T) {
 	}
 }
 
+// Beta carries stable releases as well as prereleases, and the newest release is
+// a stable one most of the time. Refusing it would make `--prerelease` fail for
+// everyone whenever no prerelease is outstanding.
+func TestCheckOnBetaAcceptsAStableRelease(t *testing.T) {
+	key := fixtureKey(t, seedA)
+	src := sourceFor(t, fixtureManifest("v0.4.0", ChannelStable), key)
+
+	res, err := checkFixture(t, releaseBuild("v0.3.0"), ChannelBeta, src, key)
+	if err != nil {
+		t.Fatalf("beta check against a stable release: %v", err)
+	}
+	if res.Status != StatusUpdateAvailable || res.AvailableVersion != "v0.4.0" {
+		t.Fatalf("result = %+v", res)
+	}
+	// The reported channel is where the release came from, not what was asked for.
+	if res.Channel != string(ChannelStable) {
+		t.Fatalf("channel = %q, want %q", res.Channel, ChannelStable)
+	}
+}
+
 // Every release publishes an aqt-server archive whose name differs from the client
 // archive by five characters. Nothing in the check may select it.
 func TestCheckNeverSelectsTheServerArchive(t *testing.T) {

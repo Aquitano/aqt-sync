@@ -54,9 +54,15 @@ failed check exits `1`, or `5` for a network error.
 
 `stable` is the default and never carries a prerelease. `beta` is opt-in via
 `--prerelease` and additionally carries tags with a prerelease suffix (`v0.4.0-rc.1`),
-which the release workflow already marks as GitHub prereleases. The channel is part
-of what is signed, so a beta manifest served to a stable check is refused even though
-it is authentic.
+which the release workflow already marks as GitHub prereleases.
+
+Beta is a superset, not a separate track: when no prerelease is outstanding — the
+usual case — the newest release is a stable one, and a beta check reports it rather
+than failing. The `channel` field in the output names the track the release was
+published on, so a beta check that lands on a stable release says `stable`.
+
+The containment is one-directional, and the channel is part of what is signed: a
+beta manifest served to a stable check is refused even though it is authentic.
 
 ## Manifest
 
@@ -96,7 +102,8 @@ when correctly signed.
 **Rules a client enforces before trusting anything** (all fail closed):
 
 - schema is exactly `1`; a newer schema is refused rather than partially read
-- the channel matches what was asked for, and `stable` carries no prerelease version
+- the channel answers what was asked for (`stable` only for a stable check, `stable`
+  or `beta` for a beta one), and `stable` carries no prerelease version
 - the version is an exact `vMAJOR.MINOR.PATCH[-prerelease]`; `v1.2` is a packaging bug
 - `publishedAt` is RFC3339 UTC
 - 1–32 artifacts, each platform appearing at most once
