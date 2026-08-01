@@ -22,6 +22,34 @@ All notable changes to this project are documented in this file.
   manifest. Signing runs in a protected `release-signing` environment; key custody,
   rotation with overlapping keys, and compromise recovery are documented in
   `docs/updates.md`.
+- `aqt update` now installs the release it finds, after showing the transition and
+  asking for confirmation; `--yes` is the explicit non-interactive path and `--check`
+  keeps the old report-only behavior. The archive is downloaded into the install
+  directory and verified against the signed length and SHA-256 as it arrives,
+  unpacked to exactly one regular `aqt` executable (path traversal, links, devices,
+  duplicates, extra payloads, and decompression bombs are all refused), and run to
+  confirm it reports the promised version before the installed binary is touched. The
+  old binary is renamed aside rather than overwritten — the one operation Windows
+  refuses on a running image — and renamed back on any failure. Permissions are
+  preserved; setuid, setgid, and sticky bits are dropped.
+- Installation ownership detection. Homebrew, WinGet, and Scoop installations are
+  recognized from the resolved executable path and the receipts beside it rather than
+  from what `PATH` resolves to, and are reported with their owner's upgrade command
+  instead of being replaced. Source builds refuse self-replacement. aqt never invokes
+  a package manager itself.
+- `aqt update policy [off|notify|auto]`, an opt-in global policy stored atomically.
+  The default `off` means installing aqt adds no background network traffic. `notify`
+  and `auto` check at most once per 24 hours with a five-second timeout, only after a
+  command that succeeded on a terminal, and never for `--json`, `--quiet`,
+  non-interactive scripts, or watch agents; a failed check never changes the exit
+  status or output of the command that triggered it. `auto` installs stable releases
+  only — never a prerelease, a downgrade, unsigned metadata, or an asset for another
+  platform — and its install is budgeted separately from the check, at two minutes,
+  because it moves an archive rather than a few kilobytes of metadata.
+- A global watch-agent registry, so an update started in one folder can see agents
+  running in every other. `auto` defers while any registered agent is live and reports
+  how to complete the install; entries are dropped on clean shutdown and reaped when
+  the process is gone.
 
 ### Changed
 

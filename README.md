@@ -109,12 +109,25 @@ backup-and-restore procedure — is in **[docs/deploy.md](docs/deploy.md)**.
 
 ## Staying current
 
-`aqt update --check` reports whether a newer release has been published. It verifies
-a signed release manifest against signing keys compiled into the binary before it
-trusts any of its contents, and never modifies the installation. `--prerelease` opts
-into the beta channel; `--json` is machine-readable. Source builds report that
-automatic updates do not apply to them. The manifest format, signing-key custody, and
-rotation policy are in **[docs/updates.md](docs/updates.md)**.
+`aqt update` reports whether a newer release has been published and installs it after
+asking. It verifies a signed release manifest against signing keys compiled into the
+binary before trusting any of its contents, checks the archive against the signed
+length and digest, and keeps the previous binary until the new one has run and
+reported the expected version. `--check` changes nothing; `--yes` skips the prompt;
+`--prerelease` opts into the beta channel; `--json` is machine-readable.
+
+Only a standalone installation is replaced. Homebrew, WinGet, and Scoop
+installations, and builds from source, are reported with the command their owner
+expects and are never overwritten.
+
+Nothing checks on its own by default. `aqt update policy notify` prints one line a day
+when a release is available; `auto` also installs stable releases once no watch agent
+is using the binary. Both run only after a successful command on a terminal and never
+change that command's output or status.
+
+Installation ownership, the install and rollback sequence, recovery from an
+interrupted update, the manifest format, signing-key custody, and rotation policy are
+in **[docs/updates.md](docs/updates.md)**.
 
 ## Backing up a git repository
 

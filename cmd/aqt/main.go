@@ -62,10 +62,15 @@ var (
 func main() {
 	root := rootCmd()
 	root.SetArgs(escapeLeadingDashIDs(root, os.Args[1:]))
-	if err := root.Execute(); err != nil {
+	cmd, err := root.ExecuteC()
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(exitCode(err))
 	}
+	// Only after the command succeeded and printed what it was asked for: the
+	// update policy is off by default, and even when on it never affects this
+	// command's output or status.
+	maybeBackgroundUpdate(cmd)
 }
 
 // idLikeArg matches the shape of a server-minted resource or snapshot id that

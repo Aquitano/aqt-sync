@@ -99,7 +99,7 @@ func TestUpdateCheckJSONContract(t *testing.T) {
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	out := captureStdout(t, func() {
-		if err := runUpdateCheck(false, true); err != nil {
+		if err := runUpdate(updateOptions{checkOnly: true, asJSON: true}); err != nil {
 			t.Fatalf("update --check --json: %v", err)
 		}
 	})
@@ -133,7 +133,7 @@ func TestUpdateCheckReportsTheAvailableAssetForThisPlatform(t *testing.T) {
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	out := captureStdout(t, func() {
-		if err := runUpdateCheck(false, false); err != nil {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("update --check: %v", err)
 		}
 	})
@@ -151,7 +151,7 @@ func TestUpdateCheckReportsUpToDate(t *testing.T) {
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	out := captureStdout(t, func() {
-		if err := runUpdateCheck(false, false); err != nil {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("update --check: %v", err)
 		}
 	})
@@ -167,7 +167,7 @@ func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
 	withBuild(t, "0.3.0-dev", "dev")
 
 	out := captureStdout(t, func() {
-		if err := runUpdateCheck(false, false); err != nil {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("update --check: %v", err)
 		}
 	})
@@ -181,7 +181,7 @@ func TestUpdateCheckRefusesARollback(t *testing.T) {
 	serveUpdateFixture(t, "v0.2.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
-	if err := runUpdateCheck(false, false); err == nil {
+	if err := runUpdate(updateOptions{checkOnly: true}); err == nil {
 		t.Fatal("a downgrade was reported as an update")
 	}
 }
@@ -192,10 +192,13 @@ func TestUpdateCommandSurface(t *testing.T) {
 	if cmd.Annotations[jsonAnnotation] == "" {
 		t.Error("`aqt update` does not advertise --json support")
 	}
-	for _, name := range []string{"check", "prerelease"} {
+	for _, name := range []string{"check", "prerelease", "yes"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("`aqt update` is missing --%s", name)
 		}
+	}
+	if subcommand(t, cmd, "policy") == nil {
+		t.Error("`aqt update policy` is missing")
 	}
 	// The default build is a source build, so nothing shipped from this tree can
 	// present itself as an installable release.

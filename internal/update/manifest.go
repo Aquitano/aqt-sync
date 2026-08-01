@@ -121,11 +121,16 @@ func (a Artifact) Platform() Platform { return Platform{OS: a.OS, Arch: a.Arch} 
 // what keeps the `aqt` client apart from the `aqt-server` archive published beside
 // it: an `aqt-server_...` name can never equal this, whatever slot it claims.
 func ArchiveName(version string, p Platform) string {
-	ext := ".tar.gz"
+	return fmt.Sprintf("aqt_%s_%s_%s%s", version, p.OS, p.Arch, archiveExt(p))
+}
+
+// archiveExt is how the release packs a platform's archive. Extraction reads it
+// too, so the two never disagree about what the downloaded bytes are.
+func archiveExt(p Platform) string {
 	if p.OS == "windows" {
-		ext = ".zip"
+		return ".zip"
 	}
-	return fmt.Sprintf("aqt_%s_%s_%s%s", version, p.OS, p.Arch, ext)
+	return ".tar.gz"
 }
 
 // ReleaseTagURL and AssetURL derive the only URLs a manifest may carry for a
