@@ -30,6 +30,13 @@ const defaultServer = "http://localhost:8080"
 // -ldflags "-X main.version=...".
 var version = "0.3.0-dev"
 
+// buildKind records where this binary came from. The release workflow stamps
+// "release" on a tagged build; anything else is a source build whose version
+// string says nothing about which release it corresponds to, so `aqt update`
+// reports it as unsupported rather than guessing. Overridable at build time via
+// -ldflags "-X main.buildKind=release", so the value stays a plain string literal.
+var buildKind = "dev"
+
 // defaultSessionTTL bounds how long the unlocked master key stays cached after a
 // passphrase prompt. `aqt login --ttl` overrides it; `aqt lock` clears it.
 const defaultSessionTTL = 8 * time.Hour
@@ -223,7 +230,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(initCmd(), statusCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
-	root.AddCommand(tuiCmd())
+	root.AddCommand(tuiCmd(), updateCmd())
 
 	markJSONSupported(root) // the bare-path push sugar prints the push JSON
 

@@ -2,6 +2,34 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- Tagged releases now publish a canonical update manifest (`aqt-update.json`) and a
+  detached Ed25519 signature (`aqt-update.json.sig`) alongside the archives,
+  checksums, SBOM, and attestations. The manifest carries the version, channel,
+  publication time, and one exact name/size/SHA-256/URL tuple per published platform.
+- `aqt update --check` reports whether a newer release is published. It verifies the
+  signature against keys compiled into the binary before trusting any field, selects
+  only the `aqt` archive for the running OS and architecture, and never modifies the
+  installation. `--prerelease` opts into the beta channel; `--json` emits
+  `currentVersion`, `availableVersion`, `channel`, `status`, and `releaseUrl`.
+  Unknown keys, bad signatures, malformed or oversized metadata, duplicated
+  platforms, missing platform builds, and downgrades all fail closed. Source builds
+  report that automatic updates do not apply to them.
+- `cmd/updatectl`, the release-side tool that generates, signs, and verifies the
+  manifest. Signing runs in a protected `release-signing` environment; key custody,
+  rotation with overlapping keys, and compromise recovery are documented in
+  `docs/updates.md`.
+
+### Changed
+
+- The release workflow is split into `build` and a tag-only `publish` job. Checksums
+  and attestations are computed after signing, so the update manifest, its signature,
+  and the SBOM are all covered. A manual `workflow_dispatch` run builds and uploads
+  archives without signing, attesting, or publishing.
+
 ## [v0.3.0] - 2026-07-21
 
 ### Breaking Changes

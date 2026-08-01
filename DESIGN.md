@@ -341,19 +341,46 @@ aqt restore <name-or-id> [dir]      Restore a checkpoint by name or a snapshot b
       --id <id>                     Scope the name lookup to this resource id.
 ```
 
+### 3.8 Updates
+
+```
+aqt update [--check]                Report whether a newer release is published.
+      --prerelease                  Check the beta channel, which also carries stable.
+      --json                        currentVersion / availableVersion / channel / status / releaseUrl.
+```
+
+Every tagged release publishes a canonical manifest (`aqt-update.json`) describing
+its version, channel, publication time, and one exact name/size/SHA-256/URL tuple per
+published platform, plus a detached Ed25519 signature over those bytes. The client
+verifies the signature against public keys compiled into the binary *before* it reads
+any field, then re-encodes what it parsed and requires byte equality, so only the one
+canonical form of a manifest is acceptable. Multiple trusted keys are supported and a
+release can carry several signatures, which is what makes key rotation survivable.
+
+Selection is by `(GOOS, GOARCH)` and the archive name is derived per platform, so the
+`aqt-server` archive published in the same release is unreachable. Unknown keys, bad
+signatures, malformed or oversized metadata, duplicated platforms, a missing build for
+this platform, a foreign asset URL, and a published version older than the running one
+all fail closed. Stable never carries a prerelease; beta is opt-in and a superset. A
+source build reports that updates do not apply to it rather than guessing its version.
+Nothing in this path writes to the installation. Format, key custody, rotation, and
+compromise recovery: **docs/updates.md**.
+
 ---
 
 ## 3a. Project layout & status
 
 ```
-cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, watch/agent, tui  [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, watch/agent, tui, update  [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]
+cmd/updatectl/      release tooling: generate/sign/verify the update manifest   [implemented + tested]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
 internal/api/       shared wire types                                          [implemented]
 internal/server/    Gin handlers + SQLite/FS store + packed object store + GC   [implemented + tested]
 internal/identity/  local profile, keystore, session cache                     [implemented + tested]
 internal/client/    HTTP API client                                            [implemented]
 internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
+internal/update/    signed release manifest + `aqt update --check`              [implemented + tested]
 ```
 
 Working end-to-end today: signup/device-attach (Ed25519 challenge/response),
