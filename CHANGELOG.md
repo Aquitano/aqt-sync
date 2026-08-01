@@ -57,6 +57,16 @@ All notable changes to this project are documented in this file.
   and attestations are computed after signing, so the update manifest, its signature,
   and the SBOM are all covered. A manual `workflow_dispatch` run builds and uploads
   archives without signing, attesting, or publishing.
+- Windows now runs the native build, vet, formatting, and test gate on every pull
+  request and push to `main`, instead of discovering platform regressions only when a
+  release tag is built.
+
+### Fixed
+
+- Windows tests now isolate profiles, sessions, and contact pins through `AppData`,
+  keep Go sources and digest-pinned embedded JavaScript on LF bytes, accept CRLF in
+  the documented config example, and avoid asserting POSIX permissions or umask
+  behavior that Windows does not implement.
 
 ## [v0.3.0] - 2026-07-21
 

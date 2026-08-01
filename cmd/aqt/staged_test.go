@@ -22,15 +22,20 @@ func TestMaterializeStaged(t *testing.T) {
 		if got := readTree(t, dest, "f.txt"); got != "x" {
 			t.Fatalf("f.txt = %q", got)
 		}
-		want := os.FileMode(0o755) &^ currentUmask()
-		if fi, err := os.Stat(dest); err != nil || fi.Mode().Perm() != want {
-			t.Fatalf("dest mode = %v err=%v, want %v", fi.Mode(), err, want)
+		if supportsPOSIXPermissions {
+			want := os.FileMode(0o755) &^ currentUmask()
+			if fi, err := os.Stat(dest); err != nil || fi.Mode().Perm() != want {
+				t.Fatalf("dest mode = %v err=%v, want %v", fi.Mode(), err, want)
+			}
 		}
 	})
 
 	// The destination must not be more permissive than a plain MkdirAll would have
 	// made it: `umask 077; aqt clone <id> ~/secrets` has to land 0700, not 0755.
 	t.Run("the destination mode respects the umask", func(t *testing.T) {
+		if !supportsPOSIXPermissions {
+			t.Skip("Windows has no POSIX umask")
+		}
 		restore := setUmask(t, 0o077)
 		defer restore()
 
@@ -118,6 +123,9 @@ func TestMaterializeStaged(t *testing.T) {
 	})
 
 	t.Run("an unwritable parent fails without debris", func(t *testing.T) {
+		if !supportsPOSIXPermissions {
+			t.Skip("POSIX directory write permissions are not enforced on Windows")
+		}
 		if os.Geteuid() == 0 {
 			t.Skip("running as root; permission bits do not apply")
 		}

@@ -50,15 +50,19 @@ func pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string
 	return id, data, printed
 }
 
-// withFreshEnv runs fn with HOME/XDG_CONFIG_HOME pointed at an empty temp dir, so the
-// callee has no profile, session, or master key — a link holder on a fresh machine. The
-// original owner env is restored afterwards (t.Setenv only restores at test end, but a
-// mid-test rotate needs to switch back to the owner).
+// withFreshEnv points every platform's UserConfigDir input at an empty temp dir, so
+// the callee has no profile, session, or master key — a link holder on a fresh
+// machine. The original owner env is restored afterwards (t.Setenv only restores at
+// test end, but a mid-test rotate needs to switch back to the owner).
 func withFreshEnv(t *testing.T, fn func()) {
 	t.Helper()
 	home := t.TempDir()
+	oldAppData, hadAppData := os.LookupEnv("AppData")
 	oldHome, hadHome := os.LookupEnv("HOME")
 	oldXDG, hadXDG := os.LookupEnv("XDG_CONFIG_HOME")
+	if err := os.Setenv("AppData", home); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.Setenv("HOME", home); err != nil {
 		t.Fatal(err)
 	}
@@ -66,6 +70,7 @@ func withFreshEnv(t *testing.T, fn func()) {
 		t.Fatal(err)
 	}
 	defer func() {
+		restoreEnv(t, "AppData", oldAppData, hadAppData)
 		restoreEnv(t, "HOME", oldHome, hadHome)
 		restoreEnv(t, "XDG_CONFIG_HOME", oldXDG, hadXDG)
 	}()

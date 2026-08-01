@@ -1,0 +1,6 @@
+# gofmt emits LF and treats CRLF checkouts as unformatted.
+*.go text eol=lf
+
+# Embedded web assets are built into the server and some are pinned by SHA-256.
+# Keep their served bytes identical on every checkout, including Windows.
+internal/server/webassets/*.js text eol=lf

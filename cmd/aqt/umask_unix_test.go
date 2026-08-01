@@ -7,6 +7,8 @@ import (
 	"testing"
 )
 
+const supportsPOSIXPermissions = true
+
 // setUmask installs a umask for the duration of a test and returns its restore.
 func setUmask(t *testing.T, mask int) func() {
 	t.Helper()

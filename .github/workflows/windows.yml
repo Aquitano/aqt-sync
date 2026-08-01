@@ -1,0 +1,39 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: native test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        shell: pwsh
+        run: |
+          $unformatted = gofmt -l .
+          if ($unformatted) {
+            Write-Output "These files are not gofmt-clean:"
+            $unformatted
+            exit 1
+          }
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./cmd/...
+      - name: Test
+        run: go test ./...

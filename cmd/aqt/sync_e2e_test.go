@@ -556,8 +556,7 @@ func newE2E(t *testing.T) *e2eHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	home := t.TempDir()
-	t.Setenv("HOME", home)                                      // darwin config dir
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config")) // linux config dir
+	isolateConfigEnv(t, home)
 
 	dataDir := t.TempDir()
 	store, err := server.OpenStore(dataDir)
@@ -580,8 +579,7 @@ func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	isolateConfigEnv(t, home)
 
 	dataDir := t.TempDir()
 	store, err := server.OpenStore(dataDir)

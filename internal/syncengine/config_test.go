@@ -220,12 +220,13 @@ func TestDesignConfigExampleParses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	design := strings.ReplaceAll(string(b), "\r\n", "\n")
 	marker := "**`.aqtconfig`** (JSON)"
-	i := strings.Index(string(b), marker)
+	i := strings.Index(design, marker)
 	if i < 0 {
 		t.Fatalf("DESIGN.md no longer contains the marker %q", marker)
 	}
-	rest := string(b)[i:]
+	rest := design[i:]
 	start := strings.Index(rest, "```json\n")
 	if start < 0 {
 		t.Fatal("no ```json fence after the .aqtconfig marker in DESIGN.md")

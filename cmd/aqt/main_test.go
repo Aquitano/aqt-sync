@@ -1,7 +1,9 @@
 package main
 
 import (
+	"fmt"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -9,19 +11,33 @@ import (
 // TestMain forces the keychain off for the e2e suite so it exercises the
 // machine-bound file fallback and never reaches the real OS keychain — which on a
 // locked CI keychain (notably headless macOS) would block the `security` call.
-// The node cache is pointed at a throwaway directory so tests never read or write
-// the developer's real cache (t.Setenv in individual tests still overrides it).
+// Config and node-cache paths are pointed at a throwaway directory so tests never
+// read or write the developer's real profiles, sessions, contacts, or cache. Keep
+// all three UserConfigDir inputs set: Windows reads AppData, Linux reads
+// XDG_CONFIG_HOME, and macOS derives its path from HOME.
 func TestMain(m *testing.M) {
 	os.Setenv("AQT_NO_KEYCHAIN", "1")
-	cacheDir, err := os.MkdirTemp("", "aqt-test-nodecache-*")
-	if err == nil {
-		os.Setenv("AQT_NODE_CACHE_DIR", cacheDir)
+	testRoot, err := os.MkdirTemp("", "aqt-test-*")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "create isolated test root: %v\n", err)
+		os.Exit(1)
 	}
+	os.Setenv("AppData", testRoot)
+	os.Setenv("XDG_CONFIG_HOME", filepath.Join(testRoot, ".config"))
+	os.Setenv("HOME", testRoot)
+	os.Setenv("AQT_NODE_CACHE_DIR", filepath.Join(testRoot, "nodecache"))
 	code := m.Run()
-	if err == nil {
-		os.RemoveAll(cacheDir)
-	}
+	os.RemoveAll(testRoot)
 	os.Exit(code)
+}
+
+// isolateConfigEnv points os.UserConfigDir at base on every supported platform.
+// Tests that need to switch identities mid-test must also switch AppData on Windows.
+func isolateConfigEnv(t *testing.T, base string) {
+	t.Helper()
+	t.Setenv("AppData", base)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(base, ".config"))
+	t.Setenv("HOME", base)
 }
 
 func TestAccountLifecycleCommandsAreExplicit(t *testing.T) {

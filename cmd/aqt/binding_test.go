@@ -273,6 +273,9 @@ func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 
 // An unwritable destination fails init before anything is created on the server.
 func TestInitPermissionFailureCreatesNoRemote(t *testing.T) {
+	if !supportsPOSIXPermissions {
+		t.Skip("POSIX directory write permissions are not enforced on Windows")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; permission bits do not apply")
 	}
