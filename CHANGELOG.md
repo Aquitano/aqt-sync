@@ -44,7 +44,8 @@ All notable changes to this project are documented in this file.
   non-interactive scripts, or watch agents; a failed check never changes the exit
   status or output of the command that triggered it. `auto` installs stable releases
   only — never a prerelease, a downgrade, unsigned metadata, or an asset for another
-  platform.
+  platform — and its install is budgeted separately from the check, at two minutes,
+  because it moves an archive rather than a few kilobytes of metadata.
 - A global watch-agent registry, so an update started in one folder can see agents
   running in every other. `auto` defers while any registered agent is live and reports
   how to complete the install; entries are dropped on clean shutdown and reaped when

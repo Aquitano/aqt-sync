@@ -55,10 +55,8 @@ type State struct {
 	// Failures count, so an unreachable network cannot turn into a check on every
 	// single command.
 	LastCheckAt string `json:"lastCheckAt,omitempty"`
-	// LastSeenVersion is the newest version a check reported, so notify can stay
-	// quiet about a release the user has already been told about.
-	LastSeenVersion string `json:"lastSeenVersion,omitempty"`
-	// NotifiedVersion is the version the user was last shown a notice for.
+	// NotifiedVersion is the version the user was last shown a notice for, so a
+	// release the user has already been told about stays quiet.
 	NotifiedVersion string `json:"notifiedVersion,omitempty"`
 	// DeferredVersion is an auto-mode install that was postponed because a watch
 	// agent was using the binary. It is what lets the next idle invocation finish

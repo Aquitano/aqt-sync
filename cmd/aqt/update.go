@@ -205,8 +205,9 @@ func updateSource() update.Source {
 
 // updateArtifactSource fetches the archive itself, over the same transport as the
 // metadata. Its contents are checked against the signed size and digest, so this
-// is a delivery mechanism and not a trust boundary.
-func updateArtifactSource() update.ArtifactSource {
+// is a delivery mechanism and not a trust boundary. A variable because artifact
+// URLs are pinned to github.com, which is the one thing a test cannot serve.
+var updateArtifactSource = func() update.ArtifactSource {
 	if base := os.Getenv(updateBaseURLEnv); base != "" {
 		return update.HTTPSource{BaseURL: base}
 	}

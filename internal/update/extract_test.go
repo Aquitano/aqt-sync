@@ -89,8 +89,15 @@ func zipArchive(t *testing.T, entries ...archiveEntry) []byte {
 	return buf.Bytes()
 }
 
-// writeArchive puts fixture bytes on disk under a name whose suffix picks the
-// format, matching how ExtractExecutable dispatches on a real artifact name.
+// The two shapes a release archive comes in: a tar.gz carrying `aqt` everywhere
+// but Windows, where it is a zip carrying `aqt.exe`.
+var (
+	tarGzPlatform = Platform{OS: "linux", Arch: "amd64"}
+	zipPlatform   = Platform{OS: "windows", Arch: "amd64"}
+)
+
+// writeArchive puts fixture bytes on disk. The name is for a reader of a failing
+// test; extraction takes the format from the platform, not from this.
 func writeArchive(t *testing.T, name string, data []byte) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), name)
@@ -104,7 +111,7 @@ func TestExtractAcceptsTheReleaseArchive(t *testing.T) {
 	archive := writeArchive(t, "aqt.tar.gz", tarGz(t, archiveEntry{name: "aqt", body: "binary"}))
 	dst := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractExecutable(archive, "aqt", dst); err != nil {
+	if err := ExtractExecutable(archive, tarGzPlatform, dst); err != nil {
 		t.Fatalf("ExtractExecutable: %v", err)
 	}
 	got, err := os.ReadFile(dst)
@@ -120,7 +127,7 @@ func TestExtractAcceptsTheWindowsReleaseArchive(t *testing.T) {
 	archive := writeArchive(t, "aqt.zip", zipArchive(t, archiveEntry{name: "aqt.exe", body: "binary"}))
 	dst := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractExecutable(archive, "aqt.exe", dst); err != nil {
+	if err := ExtractExecutable(archive, zipPlatform, dst); err != nil {
 		t.Fatalf("ExtractExecutable: %v", err)
 	}
 	got, err := os.ReadFile(dst)
@@ -218,7 +225,7 @@ func TestExtractRefusesAnythingButTheExecutable(t *testing.T) {
 			archive := writeArchive(t, "aqt.tar.gz", tarGz(t, tc.entries...))
 			dst := filepath.Join(t.TempDir(), "out")
 
-			err := ExtractExecutable(archive, "aqt", dst)
+			err := ExtractExecutable(archive, tarGzPlatform, dst)
 			if !errors.Is(err, tc.want) {
 				t.Fatalf("got %v, want %v", err, tc.want)
 			}
@@ -233,7 +240,7 @@ func TestExtractRefusesANonRegularZipEntry(t *testing.T) {
 	archive := writeArchive(t, "aqt.zip", zipArchive(t, entry))
 	dst := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractExecutable(archive, "aqt.exe", dst); !errors.Is(err, ErrUnexpectedEntry) {
+	if err := ExtractExecutable(archive, zipPlatform, dst); !errors.Is(err, ErrUnexpectedEntry) {
 		t.Fatalf("got %v, want ErrUnexpectedEntry", err)
 	}
 }
@@ -245,7 +252,7 @@ func TestExtractRefusesADecompressionBomb(t *testing.T) {
 	archive := writeArchive(t, "aqt.tar.gz", tarGz(t, bomb))
 	dst := filepath.Join(t.TempDir(), "out")
 
-	if err := ExtractExecutable(archive, "aqt", dst); !errors.Is(err, ErrArchiveTooLarge) {
+	if err := ExtractExecutable(archive, tarGzPlatform, dst); !errors.Is(err, ErrArchiveTooLarge) {
 		t.Fatalf("got %v, want ErrArchiveTooLarge", err)
 	}
 }

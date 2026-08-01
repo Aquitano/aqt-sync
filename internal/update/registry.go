@@ -66,16 +66,47 @@ func (s Store) LiveAgents(alive func(pid int) bool) ([]Agent, error) {
 		return nil, err
 	}
 	live := make([]Agent, 0, len(recorded))
+	dead := make(map[string]bool)
 	for _, a := range recorded {
 		if alive(a.PID) {
 			live = append(live, a)
+			continue
 		}
+		dead[agentKey(a)] = true
 	}
-	if len(live) != len(recorded) {
+	if len(dead) > 0 {
 		// Best effort: the caller asked who is running, not to repair the file.
-		_ = s.withAgentLock(func() error { return s.writeAgents(live) })
+		_ = s.withAgentLock(func() error { return s.reap(dead) })
 	}
 	return live, nil
+}
+
+// reap drops the named entries. The file is re-read under the lock and only those
+// entries are removed, rather than writing back the set that was probed: an agent
+// that registered while the pids were being probed would otherwise be erased, and
+// since an agent registers once at startup it would stay invisible for its whole
+// life — letting an automatic update replace the binary under a live watch.
+func (s Store) reap(dead map[string]bool) error {
+	agents, err := s.Agents()
+	if err != nil {
+		return err
+	}
+	out := make([]Agent, 0, len(agents))
+	for _, a := range agents {
+		if !dead[agentKey(a)] {
+			out = append(out, a)
+		}
+	}
+	if len(out) == len(agents) {
+		return nil
+	}
+	return s.writeAgents(out)
+}
+
+// agentKey identifies one recorded entry. The pid is part of it because a root
+// that re-registered under a new pid is a different agent, and a live one.
+func agentKey(a Agent) string {
+	return fmt.Sprintf("%s\x00%d", normalizeRoot(a.Root), a.PID)
 }
 
 // RegisterAgent records a running agent, replacing any previous entry for the

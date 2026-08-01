@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"strings"
 )
 
@@ -44,18 +43,22 @@ func ExecutableName(p Platform) string {
 // these are the bytes that were published, not that the publishing pipeline
 // packed only what it meant to.
 //
-// Exactly one regular file named want is accepted. Directories, symlinks, hard
-// links, devices, a second copy of the executable, and any other member are all
-// refused rather than skipped, because an archive holding them is not the archive
-// the release process produces.
-func ExtractExecutable(archivePath, want, dst string) error {
+// Exactly one regular file, named as the release names the executable for p, is
+// accepted. Directories, symlinks, hard links, devices, a second copy of the
+// executable, and any other member are all refused rather than skipped, because
+// an archive holding them is not the archive the release process produces.
+//
+// The platform decides both the entry name and the packing; archivePath is a
+// temporary file whose own name says nothing about its contents.
+func ExtractExecutable(archivePath string, p Platform, dst string) error {
 	src, err := os.Open(archivePath)
 	if err != nil {
 		return err
 	}
 	defer src.Close()
 
-	if strings.HasSuffix(archivePath, ".zip") || strings.HasSuffix(want, ".exe") {
+	want := ExecutableName(p)
+	if archiveExt(p) == ".zip" {
 		info, err := src.Stat()
 		if err != nil {
 			return err
@@ -147,7 +150,7 @@ func checkEntryName(name, want string) error {
 	if strings.ContainsRune(name, '\\') {
 		return fmt.Errorf("%w: %q", ErrUnexpectedEntry, name)
 	}
-	if name != want || path.Clean(name) != want {
+	if name != want {
 		return fmt.Errorf("%w: %q, expected only %q", ErrUnexpectedEntry, name, want)
 	}
 	return nil

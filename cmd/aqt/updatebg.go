@@ -12,6 +12,13 @@ import (
 	"github.com/aquitano/aqt-sync/internal/update"
 )
 
+// backgroundApplyTimeout bounds an automatic install. It is a separate budget from
+// the check, and not derived from it: the check moves a few kilobytes of metadata
+// after every eligible command, while this moves tens of megabytes once per
+// release for a user who asked for it. Bounded all the same, because the command
+// that triggered it is holding the prompt until this returns.
+const backgroundApplyTimeout = 2 * time.Minute
+
 // backgroundSilent commands never trigger a background check. `watch` and `agent`
 // are long-lived or detached, `update` is already doing this on purpose, and `tui`
 // owns the screen, so a stray line would corrupt what it drew.
@@ -37,10 +44,14 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 	if err != nil || st.Policy == update.PolicyOff {
 		return
 	}
-	// A deferred install is work already decided on; it should finish at the first
-	// idle moment rather than wait out another full interval.
-	if !st.DueForCheck(time.Now()) && st.DeferredVersion == "" {
-		return
+	if !st.DueForCheck(time.Now()) {
+		// A deferred install is work already decided on; it should finish at the first
+		// idle moment rather than wait out another full interval. Until that moment
+		// arrives the answer needs no network: the agents that deferred it are still
+		// running, and asking again on every command is what the interval prevents.
+		if st.DeferredVersion == "" || len(liveWatchAgents(store)) > 0 {
+			return
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), update.BackgroundTimeout)
@@ -64,10 +75,9 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 		_ = store.Save(st)
 		return
 	}
-	st.LastSeenVersion = res.AvailableVersion
 
 	if st.Policy == update.PolicyAuto {
-		if applyInBackground(ctx, store, &st, res) {
+		if applyInBackground(store, &st, res) {
 			return
 		}
 	}
@@ -78,7 +88,7 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 // applyInBackground installs a release under the auto policy. It reports whether
 // it handled the situation, so the caller falls back to a plain notice when this
 // declines.
-func applyInBackground(ctx context.Context, store update.Store, st *update.State, res update.Result) bool {
+func applyInBackground(store update.Store, st *update.State, res update.Result) bool {
 	in, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
 	if err != nil || !in.Replaceable() || res.Artifact == nil {
 		return false // notify instead: nothing here is ours to replace
@@ -98,12 +108,17 @@ func applyInBackground(ctx context.Context, store update.Store, st *update.State
 		return true
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), backgroundApplyTimeout)
+	defer cancel()
+
 	applied, err := applyUpdate(ctx, in, res)
 	if err != nil {
 		// An automatic install that failed must not be silent — the user would
 		// otherwise never learn why they are still on the old version — but it also
-		// must not fail their command.
+		// must not fail their command. The deferral is dropped rather than kept: a
+		// failure that repeats would otherwise retry on every single command.
 		fmt.Fprintf(os.Stderr, "aqt: automatic update to %s failed: %v\n", res.AvailableVersion, err)
+		fmt.Fprintln(os.Stderr, "Run `aqt update` to install it.")
 		st.DeferredVersion = ""
 		_ = store.Save(*st)
 		return true

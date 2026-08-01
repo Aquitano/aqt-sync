@@ -92,7 +92,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	staged.Close() // ExtractExecutable owns the contents; this only reserved the name
 	defer os.Remove(stagedPath)
 
-	if err := ExtractExecutable(archive, ExecutableName(platform), stagedPath); err != nil {
+	if err := ExtractExecutable(archive, platform, stagedPath); err != nil {
 		return res, err
 	}
 	if err := os.Chmod(stagedPath, installMode(in.Path)); err != nil {
@@ -141,17 +141,17 @@ func restore(rollback, path string) {
 }
 
 // installMode derives the mode for the new binary from the one being replaced, so
-// a deliberately group-readable or restricted install keeps its permissions.
-// setuid, setgid, and the sticky bit are dropped rather than carried over: they
-// are never meaningful on this binary, and preserving them from an unexpected
-// source is how a replacement escalates. Owner-execute is forced on, since a
-// binary that cannot be run is not a successful install.
+// a deliberately group-readable or restricted install keeps its permissions. Only
+// the permission bits are carried over, which is what drops setuid, setgid, and
+// the sticky bit: they are never meaningful on this binary, and preserving them
+// from an unexpected source is how a replacement escalates. Owner-execute is
+// forced on, since a binary that cannot be run is not a successful install.
 func installMode(path string) os.FileMode {
 	mode := os.FileMode(0o755)
 	if fi, err := os.Stat(path); err == nil {
 		mode = fi.Mode().Perm()
 	}
-	return (mode &^ (os.ModeSetuid | os.ModeSetgid | os.ModeSticky)) | 0o100
+	return mode | 0o100
 }
 
 func verifyExec(ctx context.Context, opts ApplyOptions, path string) error {

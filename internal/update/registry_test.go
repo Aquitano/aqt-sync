@@ -118,6 +118,66 @@ func TestRegistryReapsDeadAgentsOnRead(t *testing.T) {
 	}
 }
 
+// Pids are probed outside the registry lock, so an agent can register between the
+// read and the reap. Writing back the probed set would erase it, and an agent
+// registers once at startup: it would stay invisible for its whole lifetime, which
+// is exactly the case the registry exists to prevent.
+func TestRegistryReapKeepsAnAgentThatRegisteredMeanwhile(t *testing.T) {
+	s := testStore(t)
+	joining := filepath.Join(t.TempDir(), "joining")
+	if err := s.RegisterAgent(filepath.Join(t.TempDir(), "crashed"), 999, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	agents, err := s.LiveAgents(func(int) bool {
+		if err := s.RegisterAgent(joining, 4242, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return false
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("the probed set reports a live agent: %+v", agents)
+	}
+
+	recorded, err := s.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 1 || recorded[0].PID != 4242 {
+		t.Fatalf("agents on disk = %+v, want only the one that registered meanwhile", recorded)
+	}
+}
+
+// A root that re-registered under a new pid is a live agent, not the dead entry
+// that was probed under the old one.
+func TestRegistryReapKeepsARootThatRestarted(t *testing.T) {
+	s := testStore(t)
+	root := filepath.Join(t.TempDir(), "restarting")
+	if err := s.RegisterAgent(root, 999, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.LiveAgents(func(int) bool {
+		if err := s.RegisterAgent(root, 1000, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		return false
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	recorded, err := s.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 1 || recorded[0].PID != 1000 {
+		t.Fatalf("agents on disk = %+v, want the restarted agent", recorded)
+	}
+}
+
 func TestRegistryIsEmptyBeforeAnyAgentRuns(t *testing.T) {
 	agents, err := testStore(t).LiveAgents(allAlive)
 	if err != nil {

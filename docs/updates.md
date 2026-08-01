@@ -164,6 +164,11 @@ The check is bounded to five seconds and its result never changes the exit statu
 output of the command that triggered it. A notice is printed once per version rather
 than on every check.
 
+An automatic install is bounded separately, to two minutes: it moves tens of
+megabytes rather than a few kilobytes of metadata, so the check's budget would leave
+it failing on any ordinary connection. One that fails says so and points at `aqt
+update`, and still does not change the exit status of the command that triggered it.
+
 `auto` additionally installs, and only when every one of these holds — otherwise it
 falls back to a notice:
 
@@ -190,7 +195,8 @@ on Windows, where stopping an agent terminates it rather than letting it clean u
 
 Stop the agents (`aqt agent stop` in each folder) and run `aqt update`, or wait: the
 deferred install is retried at the next idle invocation rather than after another
-full day.
+full day. Retrying is free while the agents are still running — the registry answers
+that locally, without fetching metadata again.
 
 ## Manifest
 
