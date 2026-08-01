@@ -68,6 +68,9 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Updated the landing site to patched Next.js, PostCSS, Sharp, and
+  `brace-expansion` releases, clearing the known high-severity dependency alerts
+  present when v0.4.0 was tagged.
 - Windows tests now isolate profiles, sessions, and contact pins through `AppData`,
   keep Go sources and digest-pinned embedded JavaScript on LF bytes, accept CRLF in
   the documented config example, and avoid asserting POSIX permissions or umask

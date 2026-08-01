@@ -2,10 +2,10 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 
-# next 16.2.10 pins postcss 8.4.31 among its own dependencies, which trips a
-# Dependabot advisory. It is not real exposure here — the advisory needs PostCSS to
-# process attacker-authored CSS, and this site compiles only first-party CSS at build
-# time — but the transitive pin cannot be raised from direct deps, so it is overridden
-# to the patched line the Tailwind path already resolves.
+# Keep transitive build dependencies above their patched security floors without
+# forcing dependants on the 1.x and 5.x brace-expansion APIs onto one major line.
 overrides:
-  postcss: ^8.5.17
+  'brace-expansion@<1.1.17': 1.1.17
+  'brace-expansion@>=4.0.0 <5.0.8': 5.0.8
+  'postcss@<=8.5.17': 8.5.18
+  'sharp@<0.35.0': 0.35.0
