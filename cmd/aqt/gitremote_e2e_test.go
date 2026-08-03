@@ -551,11 +551,16 @@ func configureGitTestEnv(t *testing.T) {
 	t.Helper()
 	// Prevent background auto-maintenance racing an immediate fsck over temporary
 	// pack names while this test deliberately creates dangling force-push objects.
-	t.Setenv("GIT_CONFIG_COUNT", "2")
+	t.Setenv("GIT_CONFIG_COUNT", "3")
 	t.Setenv("GIT_CONFIG_KEY_0", "gc.auto")
 	t.Setenv("GIT_CONFIG_VALUE_0", "0")
 	t.Setenv("GIT_CONFIG_KEY_1", "maintenance.auto")
 	t.Setenv("GIT_CONFIG_VALUE_1", "false")
+	// Git for Windows defaults core.autocrlf to true, which would rewrite the LF
+	// these tests write into CRLF on checkout and break byte comparisons against
+	// the working tree.
+	t.Setenv("GIT_CONFIG_KEY_2", "core.autocrlf")
+	t.Setenv("GIT_CONFIG_VALUE_2", "false")
 }
 
 func buildTestBinary(t *testing.T, output, pkg string) {
