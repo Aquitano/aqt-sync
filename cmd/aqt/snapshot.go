@@ -2,13 +2,9 @@ package main
 
 import (
 	"bytes"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -687,6 +683,9 @@ type snapshotDiffResult struct {
 	Removed  []string            `json:"removed"`
 	Modified []string            `json:"modified"`
 	Renamed  []syncengine.Rename `json:"renamed"`
+	// Changes classifies each path the three buckets above flatten: which are
+	// directories, and which "modified" entries are mode or type edits.
+	Changes []syncengine.Change `json:"changes"`
 }
 
 func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
@@ -752,17 +751,15 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 	if err != nil {
 		return zero, err
 	}
-	renamed := diff.Renamed
-	if renamed == nil {
-		renamed = []syncengine.Rename{}
-	}
+	s := newChangeSet(diff)
 	return snapshotDiffResult{
 		Left:     diffSide{Label: "snapshot " + leftID, Version: left.Snapshot.Version},
 		Right:    diffSide{Label: rightLabel, Version: rightVer},
-		Added:    nonNil(diff.Added),
-		Removed:  nonNil(diff.Removed),
-		Modified: nonNil(diff.Modified),
-		Renamed:  renamed,
+		Added:    nonNil(s.added),
+		Removed:  nonNil(s.deleted),
+		Modified: nonNil(s.modified),
+		Renamed:  nonNilRenames(s.renamed),
+		Changes:  nonNilChanges(s.changes),
 	}, nil
 }
 
@@ -772,9 +769,10 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 // which turns the old "download both trees, hash them on disk" diff into a
 // metadata-only walk of the changed spines. Anything else (single files,
 // pack-and-seal folders, a mixed pair) still materializes both sides to temp
-// dirs and compares them on disk.
-func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.TreeDiff, error) {
-	var zero syncengine.TreeDiff
+// dirs; that fallback scans each side back into a manifest so both routes report
+// the same classification rather than the old regular-files-only comparison.
+func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.Delta, error) {
+	var zero syncengine.Delta
 	leftRoot, leftOK, err := treeRootOf(left, mk)
 	if err != nil {
 		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
@@ -805,11 +803,7 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 	if _, err := materializeWithMaster(cl, mk, right, rightDir); err != nil {
 		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
 	}
-	added, removed, modified, err := diffTrees(leftDir, rightDir)
-	if err != nil {
-		return zero, err
-	}
-	return syncengine.TreeDiff{Added: added, Removed: removed, Modified: modified}, nil
+	return diffTrees(leftDir, rightDir)
 }
 
 // treeRootOf opens a resource's sealed TreeRoot when it is a chunked tree folder;
@@ -847,14 +841,8 @@ func printSnapshotDiff(r snapshotDiffResult) {
 	}
 	type line struct{ mark, path string }
 	lines := make([]line, 0, total)
-	for _, p := range r.Added {
-		lines = append(lines, line{"+", p})
-	}
-	for _, p := range r.Removed {
-		lines = append(lines, line{"-", p})
-	}
-	for _, p := range r.Modified {
-		lines = append(lines, line{"~", p})
+	for _, c := range r.Changes {
+		lines = append(lines, line{diffMark(c.Kind), changePath(c)})
 	}
 	for _, rn := range r.Renamed {
 		lines = append(lines, line{"renamed", renameArrow(rn)})
@@ -876,80 +864,21 @@ func renameArrow(r syncengine.Rename) string {
 	return r.From + " -> " + r.To
 }
 
-// diffTrees compares the file trees at oldDir and newDir by relative path and
-// content, returning the paths only in newDir (added), only in oldDir (removed), and
-// present in both with differing bytes (modified). The .aqt control dir is ignored.
-func diffTrees(oldDir, newDir string) (added, removed, modified []string, err error) {
-	oldFiles, err := hashTree(oldDir)
+// diffTrees compares two materialized trees by scanning each back into a manifest
+// and classifying the difference, so this fallback reports files, symlinks,
+// directories, modes, and type switches exactly as the Merkle-DAG path does. Scan
+// honors .aqtignore and skips the .aqt control dir, which a live tracked tree carries
+// but a reconstructed snapshot does not.
+func diffTrees(oldDir, newDir string) (syncengine.Delta, error) {
+	old, err := syncengine.Scan(oldDir)
 	if err != nil {
-		return nil, nil, nil, err
+		return syncengine.Delta{}, err
 	}
-	newFiles, err := hashTree(newDir)
+	cur, err := syncengine.Scan(newDir)
 	if err != nil {
-		return nil, nil, nil, err
+		return syncengine.Delta{}, err
 	}
-	for path, h := range newFiles {
-		oh, ok := oldFiles[path]
-		switch {
-		case !ok:
-			added = append(added, path)
-		case oh != h:
-			modified = append(modified, path)
-		}
-	}
-	for path := range oldFiles {
-		if _, ok := newFiles[path]; !ok {
-			removed = append(removed, path)
-		}
-	}
-	sort.Strings(added)
-	sort.Strings(removed)
-	sort.Strings(modified)
-	return added, removed, modified, nil
-}
-
-// hashTree maps each regular file under root (by slash-separated relative path) to
-// the hex sha256 of its contents, skipping the .aqt control dir.
-func hashTree(root string) (map[string]string, error) {
-	out := map[string]string{}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == syncengine.ControlDir {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, p)
-		if err != nil {
-			return err
-		}
-		sum, err := hashFile(p)
-		if err != nil {
-			return err
-		}
-		out[filepath.ToSlash(rel)] = sum
-		return nil
-	})
-	return out, err
-}
-
-func hashFile(path string) (string, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return syncengine.Diff(old, cur), nil
 }
 
 // nonNil returns an empty slice for a nil one, so the diff marshals "added": []

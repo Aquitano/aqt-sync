@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -135,4 +139,90 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// TestStatusReportsEveryTrackedKind covers the classification a file-only comparison
+// used to drop: a tracked directory (added and mode-edited) and a path that switched
+// kind must reach both the human view and the JSON contract.
+func TestStatusReportsEveryTrackedKind(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	h.init(dir)
+	writeTree(t, dir, "notes/todo.txt", "buy milk")
+	writeTree(t, dir, "swap", "was a file")
+	h.sync(dir)
+
+	if err := os.Mkdir(filepath.Join(dir, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	removeTree(t, dir, "swap")
+	writeTree(t, dir, "swap/inner.txt", "now a dir")
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(filepath.Join(dir, "notes"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out := captureStdout(t, func() {
+		if err := runStatus(dir, statusOptions{offline: true}); err != nil {
+			t.Fatalf("status: %v", err)
+		}
+	})
+	// Directories print with the trailing slash the plan printer uses, so `empty` and
+	// a file named `empty` are not confusable.
+	for _, want := range []string{"new       empty/", "type      swap/ (file -> dir)"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("status output missing %q:\n%s", want, out)
+		}
+	}
+	if runtime.GOOS != "windows" && !strings.Contains(out, "mode      notes/") {
+		t.Errorf("status output missing the directory mode edit:\n%s", out)
+	}
+
+	withJSON(t, func() {
+		out := captureStdout(t, func() {
+			if err := runStatus(dir, statusOptions{offline: true}); err != nil {
+				t.Fatalf("status --json: %v", err)
+			}
+		})
+		var st struct {
+			Clean    bool     `json:"clean"`
+			Added    []string `json:"added"`
+			Modified []string `json:"modified"`
+			Changes  []struct {
+				Path string `json:"path"`
+				Kind string `json:"kind"`
+				Type string `json:"type"`
+				Was  string `json:"was"`
+			} `json:"changes"`
+		}
+		if err := json.Unmarshal([]byte(out), &st); err != nil {
+			t.Fatalf("status --json is not valid JSON: %v\n%s", err, out)
+		}
+		if st.Clean {
+			t.Error("status --json reported clean")
+		}
+		// The legacy buckets keep their meaning: a type switch is a modification.
+		if !contains(st.Added, "empty") || !contains(st.Modified, "swap") {
+			t.Errorf("legacy buckets = added %v, modified %v", st.Added, st.Modified)
+		}
+		kinds := map[string]string{}
+		types := map[string]string{}
+		for _, c := range st.Changes {
+			kinds[c.Path] = c.Kind
+			types[c.Path] = c.Type
+			if c.Path == "swap" && c.Was != "file" {
+				t.Errorf("swap was = %q, want file", c.Was)
+			}
+		}
+		if kinds["empty"] != "added" || types["empty"] != "dir" {
+			t.Errorf("empty classified as %q/%q, want added/dir", kinds["empty"], types["empty"])
+		}
+		if kinds["swap"] != "type" || types["swap"] != "dir" {
+			t.Errorf("swap classified as %q/%q, want type/dir", kinds["swap"], types["swap"])
+		}
+		if runtime.GOOS != "windows" && kinds["notes"] != "mode" {
+			t.Errorf("notes classified as %q, want mode", kinds["notes"])
+		}
+	})
 }

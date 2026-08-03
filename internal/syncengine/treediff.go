@@ -8,20 +8,11 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// TreeDiff is the result of DiffTreeRoots: sorted path lists for one-sided and
-// changed files, plus delete+add pairs coalesced into renames by content
-// address.
-type TreeDiff struct {
-	Added    []string
-	Removed  []string
-	Modified []string
-	Renamed  []Rename
-}
-
-// diffEntry is one one-sided file or directory seen during the walk, kept with
-// its content address and mode so renames can be paired afterwards.
+// diffEntry is one one-sided file, symlink, or directory seen during the walk, kept
+// with its content address and mode so renames can be paired afterwards.
 type diffEntry struct {
 	path string
+	typ  ChildType
 	hash string
 	mode uint32
 }
@@ -29,19 +20,21 @@ type diffEntry struct {
 // DiffTreeRoots compares two Merkle-DAG folders by content address alone: a
 // directory child whose subtree hash matches on both sides is pruned without
 // fetching its node, so the cost is O(changed spines + one-sided subtrees) in
-// metadata objects and zero file-content chunks. Regular files are compared by
-// their recorded plaintext hash; symlinks and directory modes are not reported,
-// matching the on-disk diff this replaces (which hashed only regular files).
-// A removed and an added entry with the same content address are coalesced
-// into a rename (see coalesceTreeRenames). fetchBatch is called once per tree
-// depth with every node id that level needs across both sides, so a
+// metadata objects and zero file-content chunks.
+//
+// It reports the same classification Diff derives from two flat manifests — files,
+// symlinks, and directories across additions, removals, content, mode, and type
+// changes — so a caller cannot get a different answer depending on which side of the
+// wire it compared. A removed and an added entry with the same content address are
+// coalesced into a rename (see coalesceTreeRenames). fetchBatch is called once per
+// tree depth with every node id that level needs across both sides, so a
 // level-batching transport keeps its round-trip shape.
-func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[string][]byte, error)) (TreeDiff, error) {
-	var d TreeDiff
+func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[string][]byte, error)) (Delta, error) {
+	var d Delta
 	if left.Root.ID == right.Root.ID {
 		return d, nil
 	}
-	var addedFiles, removedFiles, addedDirs, removedDirs []diffEntry
+	var added, removed []diffEntry
 
 	// A pair is a directory present on both sides with differing subtree hashes:
 	// its two nodes are fetched and their children merged. An enum is a directory
@@ -69,7 +62,7 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 		}
 		cts, err := fetchBatch(ids)
 		if err != nil {
-			return TreeDiff{}, err
+			return Delta{}, err
 		}
 		open := func(node crypto.Chunk) ([]TreeChild, error) {
 			ct, ok := cts[node.ID]
@@ -88,37 +81,49 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 
 		var nextPairs []pair
 		var nextEnums []enum
+		descend := func(path string, c TreeChild, asAdded bool) error {
+			if c.Type != ChildDir {
+				return nil
+			}
+			if c.Node == nil {
+				return fmt.Errorf("directory child %q has no node reference", path)
+			}
+			nextEnums = append(nextEnums, enum{prefix: path, node: *c.Node, asAdded: asAdded})
+			return nil
+		}
 		oneSided := func(prefix string, c TreeChild, asAdded bool) error {
 			path := joinChild(prefix, c.Name)
-			entry := diffEntry{path: path, hash: c.Hash, mode: c.Mode}
 			switch c.Type {
-			case ChildFile:
-				if asAdded {
-					addedFiles = append(addedFiles, entry)
-				} else {
-					removedFiles = append(removedFiles, entry)
-				}
-			case ChildSymlink:
-				// Not reported, matching the on-disk diff.
-			case ChildDir:
-				if c.Node == nil {
-					return fmt.Errorf("directory child %q has no node reference", path)
-				}
-				if asAdded {
-					addedDirs = append(addedDirs, entry)
-				} else {
-					removedDirs = append(removedDirs, entry)
-				}
-				nextEnums = append(nextEnums, enum{prefix: path, node: *c.Node, asAdded: asAdded})
+			case ChildFile, ChildSymlink, ChildDir:
 			default:
 				return fmt.Errorf("unknown child type %q at %q", c.Type, path)
 			}
-			return nil
+			e := diffEntry{path: path, typ: c.Type, hash: c.Hash, mode: c.Mode}
+			if asAdded {
+				added = append(added, e)
+			} else {
+				removed = append(removed, e)
+			}
+			return descend(path, c, asAdded)
 		}
 		reconcileMatchedChildren := func(prefix string, l, r TreeChild) error {
 			path := joinChild(prefix, l.Name)
-			switch {
-			case l.Type == ChildDir && r.Type == ChildDir:
+			if l.Type != r.Type {
+				// The path itself is retyped; whatever hung below an old directory is
+				// gone and whatever hangs below a new one arrived, which is exactly how
+				// the flat-manifest diff reports the same edit.
+				d.Changes = append(d.Changes, Change{Path: path, Kind: ChangeType, Type: r.Type, Was: l.Type})
+				if err := descend(path, l, false); err != nil {
+					return err
+				}
+				return descend(path, r, true)
+			}
+			if l.Type == ChildDir {
+				// A directory's own mode is not folded into its subtree hash, so it must
+				// be compared before the identical-subtree prune, not after it.
+				if l.Mode != r.Mode {
+					d.Changes = append(d.Changes, Change{Path: path, Kind: ChangeMode, Type: ChildDir})
+				}
 				if l.Hash == r.Hash {
 					return nil // identical subtree: pruned, never fetched
 				}
@@ -126,18 +131,13 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 					return fmt.Errorf("directory child %q has no node reference", path)
 				}
 				nextPairs = append(nextPairs, pair{prefix: path, left: *l.Node, right: *r.Node})
-			case l.Type == r.Type:
-				if l.Type == ChildFile && l.Hash != r.Hash {
-					d.Modified = append(d.Modified, path)
-				}
-			default:
-				// Type changed: whatever was there is gone, the new thing appeared.
-				if err := oneSided(prefix, l, false); err != nil {
-					return err
-				}
-				if err := oneSided(prefix, r, true); err != nil {
-					return err
-				}
+				return nil
+			}
+			switch {
+			case l.Hash != r.Hash:
+				d.Changes = append(d.Changes, Change{Path: path, Kind: ChangeContent, Type: r.Type})
+			case modeTracked(r.Type) && l.Mode != r.Mode:
+				d.Changes = append(d.Changes, Change{Path: path, Kind: ChangeMode, Type: r.Type})
 			}
 			return nil
 		}
@@ -145,30 +145,30 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 		for _, p := range pairs {
 			lc, err := open(p.left)
 			if err != nil {
-				return TreeDiff{}, err
+				return Delta{}, err
 			}
 			rc, err := open(p.right)
 			if err != nil {
-				return TreeDiff{}, err
+				return Delta{}, err
 			}
 			i, j := 0, 0
 			for i < len(lc) || j < len(rc) {
 				switch {
 				case j >= len(rc) || (i < len(lc) && lc[i].Name < rc[j].Name):
 					if err := oneSided(p.prefix, lc[i], false); err != nil {
-						return TreeDiff{}, err
+						return Delta{}, err
 					}
 					i++
 				case i >= len(lc) || lc[i].Name > rc[j].Name:
 					if err := oneSided(p.prefix, rc[j], true); err != nil {
-						return TreeDiff{}, err
+						return Delta{}, err
 					}
 					j++
 				default:
 					l, r := lc[i], rc[j]
 					i, j = i+1, j+1
 					if err := reconcileMatchedChildren(p.prefix, l, r); err != nil {
-						return TreeDiff{}, err
+						return Delta{}, err
 					}
 				}
 			}
@@ -176,35 +176,53 @@ func DiffTreeRoots(left, right TreeRoot, fetchBatch func(ids []string) (map[stri
 		for _, e := range enums {
 			children, err := open(e.node)
 			if err != nil {
-				return TreeDiff{}, err
+				return Delta{}, err
 			}
 			for _, c := range children {
 				if err := oneSided(e.prefix, c, e.asAdded); err != nil {
-					return TreeDiff{}, err
+					return Delta{}, err
 				}
 			}
 		}
 		pairs, enums = nextPairs, nextEnums
 	}
-	d.Renamed, d.Added, d.Removed = coalesceTreeRenames(addedFiles, removedFiles, addedDirs, removedDirs)
-	sort.Strings(d.Added)
-	sort.Strings(d.Removed)
-	sort.Strings(d.Modified)
+
+	var keptAdded, keptRemoved []diffEntry
+	d.Renamed, keptAdded, keptRemoved = coalesceTreeRenames(added, removed)
+	for _, e := range keptAdded {
+		d.Changes = append(d.Changes, Change{Path: e.path, Kind: ChangeAdded, Type: e.typ})
+	}
+	for _, e := range keptRemoved {
+		d.Changes = append(d.Changes, Change{Path: e.path, Kind: ChangeRemoved, Type: e.typ})
+	}
+	sortChanges(d.Changes)
 	sort.Slice(d.Renamed, func(i, j int) bool { return d.Renamed[i].From < d.Renamed[j].From })
 	return d, nil
 }
 
-// coalesceTreeRenames pairs one-sided entries whose content address matches.
-// Directories pair by subtree Merkle hash — a moved directory keeps its node
-// id — and consume every file reported under them; files pair by plaintext
-// hash. A hash pairs only when it identifies exactly one entry on each side of
-// the diff and the modes match; duplicated content stays delete+add. Unchanged
-// subtrees were pruned before this runs, so uniqueness is judged within the
-// diff — the conservative choice available without walking both full trees. A
-// directory pair with no reported file under it (empty or symlink-only) is
-// skipped: such a subtree produces no diff output today, and all empty
-// directories share one node id, so a pairing would be a guess.
-func coalesceTreeRenames(addedFiles, removedFiles, addedDirs, removedDirs []diffEntry) (renames []Rename, added, removed []string) {
+// coalesceTreeRenames pairs one-sided entries whose content address matches and
+// returns the entries no rename explained. Directories pair by subtree Merkle hash —
+// a moved directory keeps its node id — and consume everything reported under them;
+// files and symlinks pair by content hash. A hash pairs only when it identifies
+// exactly one entry on each side of the diff and the modes match; duplicated content
+// stays delete+add. Unchanged subtrees were pruned before this runs, so uniqueness is
+// judged within the diff — the conservative choice available without walking both
+// full trees. A directory pair with no reported file under it (empty, or symlink-only)
+// is skipped: all empty directories share one node id, so a pairing would be a guess.
+func coalesceTreeRenames(added, removed []diffEntry) (renames []Rename, keptAdded, keptRemoved []diffEntry) {
+	split := func(es []diffEntry) (files, dirs []diffEntry) {
+		for _, e := range es {
+			if e.typ == ChildDir {
+				dirs = append(dirs, e)
+			} else {
+				files = append(files, e)
+			}
+		}
+		return files, dirs
+	}
+	addedFiles, addedDirs := split(added)
+	removedFiles, removedDirs := split(removed)
+
 	soleByHash := func(entries []diffEntry) map[string]diffEntry {
 		count := make(map[string]int, len(entries))
 		for _, e := range entries {
@@ -263,25 +281,29 @@ func coalesceTreeRenames(addedFiles, removedFiles, addedDirs, removedDirs []diff
 		}
 		dirRenames = append(dirRenames, Rename{From: c.from.path, To: c.to.path, Dir: true})
 	}
-	underAny := func(path string, side func(Rename) string) bool {
-		for _, r := range dirRenames {
-			if strings.HasPrefix(path, side(r)+"/") {
-				return true
+	atOrUnder := func(path, dir string) bool {
+		return path == dir || strings.HasPrefix(path, dir+"/")
+	}
+	survives := func(es []diffEntry, side func(Rename) string) []diffEntry {
+		var out []diffEntry
+		for _, e := range es {
+			covered := false
+			for _, r := range dirRenames {
+				if atOrUnder(e.path, side(r)) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				out = append(out, e)
 			}
 		}
-		return false
+		return out
 	}
-	var remainAdded, remainRemoved []diffEntry
-	for _, e := range addedFiles {
-		if !underAny(e.path, func(r Rename) string { return r.To }) {
-			remainAdded = append(remainAdded, e)
-		}
-	}
-	for _, e := range removedFiles {
-		if !underAny(e.path, func(r Rename) string { return r.From }) {
-			remainRemoved = append(remainRemoved, e)
-		}
-	}
+	toSide := func(r Rename) string { return r.To }
+	fromSide := func(r Rename) string { return r.From }
+	remainAdded := survives(addedFiles, toSide)
+	remainRemoved := survives(removedFiles, fromSide)
 
 	remFile, addFile := soleByHash(remainRemoved), soleByHash(remainAdded)
 	renames = dirRenames
@@ -290,7 +312,7 @@ func coalesceTreeRenames(addedFiles, removedFiles, addedDirs, removedDirs []diff
 		_, fok := remFile[e.hash]
 		to, tok := addFile[e.hash]
 		if !fok || !tok || e.mode != to.mode {
-			removed = append(removed, e.path)
+			keptRemoved = append(keptRemoved, e)
 			continue
 		}
 		renames = append(renames, Rename{From: e.path, To: to.path})
@@ -298,8 +320,10 @@ func coalesceTreeRenames(addedFiles, removedFiles, addedDirs, removedDirs []diff
 	}
 	for _, e := range remainAdded {
 		if !pairedTo[e.path] {
-			added = append(added, e.path)
+			keptAdded = append(keptAdded, e)
 		}
 	}
-	return renames, added, removed
+	keptAdded = append(keptAdded, survives(addedDirs, toSide)...)
+	keptRemoved = append(keptRemoved, survives(removedDirs, fromSide)...)
+	return renames, keptAdded, keptRemoved
 }

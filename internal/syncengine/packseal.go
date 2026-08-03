@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/compress"
@@ -158,7 +159,19 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 		manifest.Entries = append(manifest.Entries, e)
 		return nil
 	}, func(rel string, info fs.FileInfo) error {
-		manifest.Dirs = append(manifest.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
+		d := DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())}
+		// Directories go into the archive, not just the manifest: the extract side
+		// rebuilds its manifest from the tar alone, so a directory left out of the
+		// stream loses its mode and — if it is empty — the directory itself.
+		if err := tw.WriteHeader(&tar.Header{
+			Typeflag: tar.TypeDir,
+			Name:     rel,
+			Mode:     int64(d.Mode),
+			ModTime:  epoch,
+		}); err != nil {
+			return err
+		}
+		manifest.Dirs = append(manifest.Dirs, d)
 		return nil
 	})
 	if err != nil {
@@ -344,6 +357,7 @@ func ExtractToTree(dir string, root PackRoot, ck crypto.ContentKey, fetch func(i
 		return Manifest{}, err
 	}
 	sortEntries(m.Entries)
+	sortDirs(m.Dirs)
 	return m, nil
 }
 
@@ -362,6 +376,7 @@ func PackTreeManifest(root PackRoot, ck crypto.ContentKey, fetch func(id string)
 		return Manifest{}, err
 	}
 	sortEntries(m.Entries)
+	sortDirs(m.Dirs)
 	return m, nil
 }
 
@@ -380,6 +395,8 @@ func hashTar(r io.Reader) (Manifest, error) {
 			return Manifest{}, err
 		}
 		switch hdr.Typeflag {
+		case tar.TypeDir:
+			m.Dirs = append(m.Dirs, DirEntry{Path: tarDirPath(hdr.Name), Mode: uint32(fs.FileMode(hdr.Mode).Perm())})
 		case tar.TypeSymlink:
 			m.Entries = append(m.Entries, Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)})
 		case tar.TypeReg, tar.TypeRegA:
@@ -410,12 +427,20 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 			return Manifest{}, err
 		}
 		write := true
-		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA) {
+		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA || hdr.Typeflag == tar.TypeDir) {
 			if write, err = safe(hdr.Name); err != nil {
 				return Manifest{}, err
 			}
 		}
 		switch hdr.Typeflag {
+		case tar.TypeDir:
+			d := DirEntry{Path: tarDirPath(hdr.Name), Mode: uint32(fs.FileMode(hdr.Mode).Perm())}
+			if write {
+				if err := w.writeDir(d); err != nil {
+					return Manifest{}, err
+				}
+			}
+			m.Dirs = append(m.Dirs, d)
 		case tar.TypeSymlink:
 			e := Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)}
 			if write {
@@ -441,8 +466,11 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 			e.Hash = hex.EncodeToString(h.Sum(nil))
 			m.Entries = append(m.Entries, e)
 		default:
-			// Other types (dirs, hardlinks, ...) are not written; parent dirs come
-			// from the treeWriter.
+			// Other types (hardlinks, devices, ...) are not written.
 		}
 	}
 }
+
+// tarDirPath normalizes a directory header name to the manifest's path form. Archives
+// conventionally carry a trailing slash on directories; the manifest never does.
+func tarDirPath(name string) string { return strings.TrimSuffix(name, "/") }

@@ -31,8 +31,29 @@ All notable changes to this project are documented in this file.
   snapshot with the working tree without requiring `base.json`. Binary,
   oversized, and excessive-edit-distance changes use a one-line marker.
 
+### Fixed
+
+- Pack-and-seal sync missed changes that touched no file. Its local-change gate
+  consulted the file planner alone, so an empty directory appearing or
+  disappearing, or a directory's mode being edited, was reported as already
+  synced and never pushed. The pack archive now carries a header per tracked
+  directory (so an extract restores empty directories and directory modes rather
+  than inferring parents from file paths), and a pull prunes tracked directories
+  the remote dropped. A pack folder written by an older client re-ships once on
+  the first sync after upgrading, then converges.
+
 ### Changed
 
+- One manifest-delta module (`syncengine.Diff`) now defines a changed tree for
+  every tracked-folder caller: `status` (local and incoming), the TUI's files
+  panel, both sync adapters' local-change gates, and `snapshot diff`. It
+  classifies files, symlinks, and directories across additions, removals,
+  content, mode, and type changes. `status` gained `mode` and `type` rows and
+  prints directories with a trailing slash; `snapshot diff` gained `m` and `t`
+  gutter marks and now reports symlink retargets, directories, and directory
+  modes, which its Merkle-tree walk previously dropped. `status --json` and
+  `snapshot diff --json` keep their existing `added`/`modified`/`deleted`
+  buckets and add a `changes` array carrying the classification behind them.
 - Client capability 4 gates the sealed `gitremote` root format. Git remotes are
   private-only in this release; public visibility and grants are refused
   server-side. Upgrade every Git-remote reader before creating one.

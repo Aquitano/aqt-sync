@@ -40,17 +40,17 @@ type tuiUnlockResultMsg struct {
 // tuiLocalMsg is the offline half of the files panel: working tree vs base,
 // plus any conflict copies a previous `sync --conflicts=copy` left on disk.
 type tuiLocalMsg struct {
-	changes   localChanges
+	changes   changeSet
 	conflicts []string
 	err       error
 }
 
 // tuiRemoteMsg is the server half: version freshness plus, when the folder key
-// allows it, the file-level incoming diff.
+// allows it, the entry-level incoming diff.
 type tuiRemoteMsg struct {
 	note      string // one-line freshness verdict for the status panel
 	stale     bool   // server is behind our pin (restored from backup?)
-	incoming  incomingSummary
+	incoming  changeSet
 	fileLevel bool // incoming carries per-file paths, not just a version delta
 	err       error
 }
@@ -173,7 +173,7 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 		case st.RemoteVersion > 0 && res.Version == st.RemoteVersion:
 			return tuiRemoteMsg{note: "up to date with the server"}
 		}
-		// Server is ahead: file-level breakdown when the folder is chunked (a
+		// Server is ahead: entry-level breakdown when the folder is chunked (a
 		// pack-and-seal folder is one opaque blob with no per-file remote diff).
 		if cfg, cerr := syncengine.LoadConfig(ctx.root); cerr == nil && !cfg.Pack {
 			base, berr := loadBase(ctx.root)

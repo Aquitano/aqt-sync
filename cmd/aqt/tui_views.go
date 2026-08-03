@@ -14,8 +14,9 @@ import (
 
 // tuiFileItem is a files-panel row payload.
 type tuiFileItem struct {
-	kind string // new | modified | deleted | renamed | incoming | conflict
+	kind string // new | modified | mode | type | deleted | renamed | incoming | conflict
 	path string
+	dir  bool   // the path is a tracked directory, which has no size to report
 	desc string // one-line explanation shown in the detail view
 }
 
@@ -35,7 +36,7 @@ func tuiFileDetail(it tuiFileItem, root string) string {
 		b.WriteString(tuiField("direction", "local → server (on next sync)"))
 		// A single real path can be stat'd on demand; a deletion has nothing to
 		// stat and a rename's body is an arrow, not a path.
-		if it.kind == "new" || it.kind == "modified" {
+		if !it.dir && (it.kind == "new" || it.kind == "modified") {
 			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(it.path))); err == nil {
 				b.WriteString(tuiField("size", humanBytes(fi.Size())))
 				b.WriteString(tuiField("modified", fi.ModTime().Format("2006-01-02 15:04:05")))

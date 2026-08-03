@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 func TestDiffTrees(t *testing.T) {
@@ -21,18 +23,18 @@ func TestDiffTrees(t *testing.T) {
 	// added (new only)
 	writeTree(t, newDir, "sub/new.txt", "y")
 
-	added, removed, modified, err := diffTrees(oldDir, newDir)
+	d, err := diffTrees(oldDir, newDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"sub/new.txt"}; !reflect.DeepEqual(added, want) {
-		t.Errorf("added = %v, want %v", added, want)
+	if want := []string{"sub/new.txt"}; !reflect.DeepEqual(d.Paths(syncengine.ChangeAdded), want) {
+		t.Errorf("added = %v, want %v", d.Paths(syncengine.ChangeAdded), want)
 	}
-	if want := []string{"gone.txt"}; !reflect.DeepEqual(removed, want) {
-		t.Errorf("removed = %v, want %v", removed, want)
+	if want := []string{"gone.txt"}; !reflect.DeepEqual(d.Paths(syncengine.ChangeRemoved), want) {
+		t.Errorf("removed = %v, want %v", d.Paths(syncengine.ChangeRemoved), want)
 	}
-	if want := []string{"sub/mod.txt"}; !reflect.DeepEqual(modified, want) {
-		t.Errorf("modified = %v, want %v", modified, want)
+	if want := []string{"sub/mod.txt"}; !reflect.DeepEqual(d.Paths(syncengine.ChangeContent), want) {
+		t.Errorf("modified = %v, want %v", d.Paths(syncengine.ChangeContent), want)
 	}
 }
 
@@ -41,12 +43,12 @@ func TestDiffTreesIdentical(t *testing.T) {
 	b := t.TempDir()
 	writeTree(t, a, "x.txt", "hi")
 	writeTree(t, b, "x.txt", "hi")
-	added, removed, modified, err := diffTrees(a, b)
+	d, err := diffTrees(a, b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(added)+len(removed)+len(modified) != 0 {
-		t.Fatalf("identical trees diffed non-empty: +%v -%v ~%v", added, removed, modified)
+	if !d.Empty() {
+		t.Fatalf("identical trees diffed non-empty: %+v", d.Changes)
 	}
 }
 
@@ -58,12 +60,12 @@ func TestDiffTreesIgnoresControlDir(t *testing.T) {
 	writeTree(t, a, "x.txt", "hi")
 	writeTree(t, b, "x.txt", "hi")
 	writeTree(t, b, ".aqt/state.json", "{}")
-	added, removed, modified, err := diffTrees(a, b)
+	d, err := diffTrees(a, b)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(added)+len(removed)+len(modified) != 0 {
-		t.Fatalf("control dir leaked into diff: +%v -%v ~%v", added, removed, modified)
+	if !d.Empty() {
+		t.Fatalf("control dir leaked into diff: %+v", d.Changes)
 	}
 }
 

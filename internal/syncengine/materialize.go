@@ -241,6 +241,49 @@ func (w *treeWriter) writeSymlink(e Entry) error {
 	return nil
 }
 
+// writeDir creates a tracked directory during a whole-tree pass, using the same
+// stale-parent handling as the file and symlink writers rather than refusing outright.
+func (w *treeWriter) writeDir(d DirEntry) error {
+	full, err := safeJoin(w.dir, d.Path)
+	if err != nil {
+		return err
+	}
+	if err := w.prepareParents(full); err != nil {
+		return err
+	}
+	// prepareParents stops short of the leaf, which the file and symlink writers
+	// replace rather than follow. A directory has to do the same clearing itself, or
+	// MkdirAll fails on the stale file or symlink standing where the directory goes.
+	if err := w.clearStaleLeaf(full); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(full, 0o700); err != nil {
+		return err
+	}
+	return os.Chmod(full, dirMode(d))
+}
+
+// clearStaleLeaf removes a non-directory at full: a path the remote turned into a
+// directory. Replacing the entry is never a traversal — the escape prepareParents
+// guards against is descending *through* a symlink, not overwriting one.
+func (w *treeWriter) clearStaleLeaf(full string) error {
+	fi, err := os.Lstat(full)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		return nil
+	}
+	if err := os.Remove(full); err != nil {
+		return err
+	}
+	delete(w.created, w.relKey(full))
+	return nil
+}
+
 func (w *treeWriter) relKey(full string) string {
 	rel, _ := filepath.Rel(w.dir, full)
 	return filepath.ToSlash(rel)

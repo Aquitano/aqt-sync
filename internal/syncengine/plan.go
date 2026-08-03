@@ -70,9 +70,9 @@ func Plan(local, base, remote Manifest) []Action {
 			}
 		default: // both changed
 			// Mode is part of the comparison: hash-identical entries with divergent
-			// modes have not converged (changed() counts a mode edit as a change, and
-			// PlanDirs compares its whole attribute set the same way).
-			if lok && rok && l.Hash == r.Hash && l.Mode == r.Mode {
+			// modes have not converged (entryDiffers counts a mode edit as a change,
+			// and PlanDirs compares its whole attribute set the same way).
+			if lok && rok && !entryDiffers(l, r) {
 				break // converged to the same content independently; nothing to do
 			}
 			actions = append(actions, Action{p, Conflict})
@@ -103,7 +103,7 @@ func PlanReconcile(local, remote Manifest) []Action {
 	for p := range paths {
 		l, lok := lp[p]
 		r, rok := rp[p]
-		if lok && rok && l.Hash == r.Hash && l.Mode == r.Mode {
+		if lok && rok && !entryDiffers(l, r) {
 			continue // identical on both sides; nothing to reconcile
 		}
 		actions = append(actions, Action{p, Conflict})
@@ -113,8 +113,8 @@ func PlanReconcile(local, remote Manifest) []Action {
 }
 
 // changed reports whether an entry differs from its base (added, removed,
-// content-changed, or mode-changed). Mode is a synced attribute, so a
-// permission-only edit is a real change even when the content hash matches.
+// content-changed, or mode-changed), deferring to entryDiffers so the planner and
+// Diff share one definition of a changed entry.
 func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 	if curOK != baseOK {
 		return true
@@ -122,7 +122,7 @@ func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 	if !curOK {
 		return false
 	}
-	return cur.Hash != base.Hash || cur.Mode != base.Mode
+	return entryDiffers(base, cur)
 }
 
 // PlanDirs is the directory counterpart of Plan: a three-way reconcile of tracked
