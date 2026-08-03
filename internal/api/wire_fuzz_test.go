@@ -19,6 +19,7 @@ func seedEnvelopes(f *testing.F) {
 		EncryptedMeta: crypto.SealedBlob{Nonce: []byte("mn"), Ciphertext: []byte("mc")},
 		ChunkRefs:     []string{"aa", "bb"},
 		MinClient:     2,
+		CompactAt:     64,
 	})
 	if err != nil {
 		f.Fatal(err)
@@ -52,9 +53,9 @@ func FuzzDecodeResourceDownload(f *testing.F) {
 // envelope framing (length-prefixed JSON header, then the ciphertext read whole) can
 // never silently truncate or reorder a body's contents.
 func FuzzResourceUploadRoundTrip(f *testing.F) {
-	f.Add("id", "private", []byte("n"), []byte("c"), 3, 2)
-	f.Add("", "public", []byte{}, []byte{}, 0, 0)
-	f.Fuzz(func(t *testing.T, id, vis string, nonce, ct []byte, expectedVersion, minClient int) {
+	f.Add("id", "private", []byte("n"), []byte("c"), 3, 2, 64)
+	f.Add("", "public", []byte{}, []byte{}, 0, 0, 0)
+	f.Fuzz(func(t *testing.T, id, vis string, nonce, ct []byte, expectedVersion, minClient, compactAt int) {
 		// The header is JSON; a JSON string cannot carry invalid UTF-8 losslessly
 		// (encoding replaces it with U+FFFD). Production ids and the visibility enum
 		// are always valid UTF-8, so restricting the domain tests the real inputs.
@@ -67,6 +68,7 @@ func FuzzResourceUploadRoundTrip(f *testing.F) {
 			Blob:            crypto.SealedBlob{Nonce: nonce, Ciphertext: ct},
 			ExpectedVersion: expectedVersion,
 			MinClient:       minClient,
+			CompactAt:       compactAt,
 		}
 		encoded, err := EncodeResourceUpload(req)
 		if err != nil {
@@ -77,7 +79,7 @@ func FuzzResourceUploadRoundTrip(f *testing.F) {
 			t.Fatalf("decode: %v", err)
 		}
 		if got.ID != req.ID || got.Visibility != req.Visibility ||
-			got.ExpectedVersion != req.ExpectedVersion || got.MinClient != req.MinClient {
+			got.ExpectedVersion != req.ExpectedVersion || got.MinClient != req.MinClient || got.CompactAt != req.CompactAt {
 			t.Fatalf("scalar mismatch: got %+v want %+v", got, req)
 		}
 		if !bytes.Equal(got.Blob.Nonce, req.Blob.Nonce) || !bytes.Equal(got.Blob.Ciphertext, req.Blob.Ciphertext) {
@@ -88,9 +90,9 @@ func FuzzResourceUploadRoundTrip(f *testing.F) {
 
 // FuzzResourceDownloadRoundTrip mirrors the upload round-trip for the download body.
 func FuzzResourceDownloadRoundTrip(f *testing.F) {
-	f.Add("id", "private", []byte("n"), []byte("c"), 7, 2)
-	f.Add("", "public", []byte{}, []byte{}, 0, 0)
-	f.Fuzz(func(t *testing.T, id, vis string, nonce, ct []byte, version, minClient int) {
+	f.Add("id", "private", []byte("n"), []byte("c"), 7, 2, 64)
+	f.Add("", "public", []byte{}, []byte{}, 0, 0, 0)
+	f.Fuzz(func(t *testing.T, id, vis string, nonce, ct []byte, version, minClient, compactAt int) {
 		if !utf8.ValidString(id) || !utf8.ValidString(vis) {
 			return
 		}
@@ -100,6 +102,7 @@ func FuzzResourceDownloadRoundTrip(f *testing.F) {
 			Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ct},
 			Version:    version,
 			MinClient:  minClient,
+			CompactAt:  compactAt,
 			ExpiresAt:  123, MaxReads: 9, Reads: 4, CreatedAt: 100, UpdatedAt: 120,
 		}
 		encoded, err := EncodeResourceDownload(res)
@@ -111,7 +114,7 @@ func FuzzResourceDownloadRoundTrip(f *testing.F) {
 			t.Fatalf("decode: %v", err)
 		}
 		if got.ID != res.ID || got.Visibility != res.Visibility ||
-			got.Version != res.Version || got.MinClient != res.MinClient ||
+			got.Version != res.Version || got.MinClient != res.MinClient || got.CompactAt != res.CompactAt ||
 			got.ExpiresAt != res.ExpiresAt || got.MaxReads != res.MaxReads || got.Reads != res.Reads ||
 			got.CreatedAt != res.CreatedAt || got.UpdatedAt != res.UpdatedAt {
 			t.Fatalf("scalar mismatch: got %+v want %+v", got, res)

@@ -40,6 +40,27 @@ func testConv(t *testing.T) crypto.ConvergenceKey {
 	return crypto.DeriveConvergenceKey(mk)
 }
 
+func TestEntryFromBytesRoundTrip(t *testing.T) {
+	conv := testConv(t)
+	defer conv.Wipe()
+	data := bytes.Repeat([]byte("merged line with enough content\n"), 500)
+	sink := newCaptureSink()
+	e, err := EntryFromBytes("notes.md", data, 0o640, conv, DefaultChunkSelector(), sink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.Path != "notes.md" || e.Mode != 0o640 || e.Size != int64(len(data)) || len(e.Chunks) == 0 {
+		t.Fatalf("entry metadata = %+v", e)
+	}
+	got, err := FileBytes(e, func(id string) ([]byte, error) { return sink.bytes[id], nil })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("derived entry did not round-trip")
+	}
+}
+
 func writeFile(t *testing.T, dir, rel string, data []byte) {
 	t.Helper()
 	full := filepath.Join(dir, rel)

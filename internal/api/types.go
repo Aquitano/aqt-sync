@@ -19,8 +19,9 @@ const (
 // push from a tracked-folder manifest without decrypting the blob. An absent kind
 // (older resources) is treated as a file.
 const (
-	KindFile   = "file"
-	KindFolder = "folder"
+	KindFile      = "file"
+	KindFolder    = "folder"
+	KindGitRemote = "gitremote"
 )
 
 // Metadata is the plaintext resource description. The client seals it under the
@@ -258,9 +259,14 @@ type PutResourceRequest struct {
 	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 	MinClient       int                `json:"minClient,omitempty"`
-	ExpireSeconds   int64              `json:"expireSeconds,omitempty"`
-	MaxReads        int64              `json:"maxReads,omitempty"`
-	OnExpiry        OnExpiry           `json:"onExpiry,omitempty"`
+	// CompactAt is non-zero only for a git-remote resource. It is deliberately
+	// server-visible so the server can refuse grants/public links for this resource
+	// class and retain the per-repository compaction threshold without learning the
+	// sealed repository name, refs, or bundle structure.
+	CompactAt     int      `json:"compactAt,omitempty"`
+	ExpireSeconds int64    `json:"expireSeconds,omitempty"`
+	MaxReads      int64    `json:"maxReads,omitempty"`
+	OnExpiry      OnExpiry `json:"onExpiry,omitempty"`
 	// IdempotencyKey is carried in the HTTP Idempotency-Key header, not the body.
 	IdempotencyKey string `json:"-"`
 	// RevokeGrantee drops that grantee's grant in the same transaction as the write.
@@ -414,6 +420,7 @@ type GetResourceResponse struct {
 	// formats, so a current client can explain an incompatible remote instead of
 	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).
 	MinClient int   `json:"minClient,omitempty"`
+	CompactAt int   `json:"compactAt,omitempty"`
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
 	MaxReads  int64 `json:"maxReads,omitempty"`
 	Reads     int64 `json:"reads,omitempty"`
@@ -444,6 +451,7 @@ type ResourceListItem struct {
 	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	Version       int                `json:"version"`
+	CompactAt     int                `json:"compactAt,omitempty"`
 	// AutoSnapshot reports whether the server's scheduled snapshot job covers this
 	// resource, so `snapshot auto` can show coverage without a per-resource fetch.
 	AutoSnapshot bool `json:"autoSnapshot"`
@@ -522,6 +530,10 @@ type SnapshotInfo struct {
 	// key, and it leaks only "this snapshot is protected" — the same shape of leak as
 	// scheduled — while the name stays sealed in EncryptedLabel.
 	Anchored bool `json:"anchored,omitempty"`
+	// Automatic marks snapshots created by scheduled retention or a client-side
+	// maintenance operation such as git-remote compaction. Auto-retention may prune
+	// these; manual and anchored snapshots remain untouched.
+	Automatic bool `json:"automatic,omitempty"`
 }
 
 // CreateSnapshotRequest pins the current version of a resource the caller owns.
@@ -535,6 +547,7 @@ type CreateSnapshotRequest struct {
 	// Anchor pins the new snapshot against retention (see SnapshotInfo.Anchored). Set
 	// by `aqt checkpoint`; a plain `snapshot create` leaves it false.
 	Anchor         bool   `json:"anchor,omitempty"`
+	Automatic      bool   `json:"automatic,omitempty"`
 	IdempotencyKey string `json:"-"`
 }
 

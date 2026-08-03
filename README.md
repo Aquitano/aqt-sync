@@ -43,9 +43,13 @@ aqt ls -l --filter env --sort date
 aqt init ~/vault
 aqt sync ~/vault
 
-# On a two-sided change, keep local and save the remote version alongside as
-# <name>.conflict-<host>-<timestamp> instead of blocking on the conflict.
-aqt sync ~/vault --conflicts=copy
+# Merge non-overlapping text edits; overlaps/binary/delete-modify cases preserve
+# the remote version as <name>.conflict-<host>-<timestamp>.
+aqt sync ~/vault --conflicts=merge
+
+# Review local edits as a unified diff, or inspect incoming changes only.
+aqt diff ~/vault
+aqt diff --remote ~/vault
 
 # Restore a tracked folder on another machine after `aqt login` there.
 aqt clone <folder-id> ~/vault
@@ -53,6 +57,11 @@ aqt clone <folder-id> ~/vault
 # Bind an existing local directory to a remote folder, reusing matching files by
 # hash instead of re-downloading; one-sided differences surface as conflicts.
 aqt clone --adopt <folder-id> ~/vault
+
+# Store Git history as an encrypted remote instead of syncing live .git files.
+aqt repo create vault-history
+git remote add origin aqt::vault-history
+git push -u origin main
 ```
 
 `aqt <path>` with no subcommand is shorthand for `aqt push <path>`. Run `aqt --help`
@@ -131,17 +140,18 @@ in **[docs/updates.md](docs/updates.md)**.
 
 ## Backing up a git repository
 
-`.git` is ignored by default. Backing up a repository's local-only history has
-trade-offs (torn-write windows, the git-busy guard); see
+`.git` is ignored by folder sync. Back up repository history with an encrypted
+`aqt::` Git remote; see
 **[docs/git-repositories.md](docs/git-repositories.md)**.
 
 ## Proving restore works
 
-For a backup tool, a restore you have never run is not a backup. Two equivalent
-drills exercise the full cycle — realistic tree → cold backup of the server data dir
-→ fresh server from the copy → clean-machine recovery from email + passphrase →
-`clone` → byte/mode/symlink diff:
+For a backup tool, a restore you have never run is not a backup. The shell drill
+exercises the full cycle — realistic tree and encrypted Git remote → cold backup of
+the server data dir → fresh server from the copy → clean-machine recovery from email
+and passphrase → folder byte/mode/symlink diff plus Git clone, `git fsck`, and exact
+branch/tag ref comparison:
 
 - `make restore-drill` (or `scripts/restore-drill.sh`) — against real built binaries.
-- `go test ./cmd/aqt -run TestFullBackupRestoreDrill` — the in-process twin, run on
-  every CI build.
+- `go test ./cmd/aqt -run TestFullBackupRestoreDrill` — the in-process folder-restore
+  twin, run on every CI build.

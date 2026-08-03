@@ -38,6 +38,7 @@ type resourceUploadHeader struct {
 	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 	MinClient       int                `json:"minClient,omitempty"`
+	CompactAt       int                `json:"compactAt,omitempty"`
 	ExpireSeconds   int64              `json:"expireSeconds,omitempty"`
 	MaxReads        int64              `json:"maxReads,omitempty"`
 	OnExpiry        OnExpiry           `json:"onExpiry,omitempty"`
@@ -56,6 +57,7 @@ type resourceDownloadHeader struct {
 	Owner         string             `json:"owner,omitempty"`
 	Version       int                `json:"version"`
 	MinClient     int                `json:"minClient,omitempty"`
+	CompactAt     int                `json:"compactAt,omitempty"`
 	ExpiresAt     int64              `json:"expiresAt,omitempty"`
 	MaxReads      int64              `json:"maxReads,omitempty"`
 	Reads         int64              `json:"reads,omitempty"`
@@ -75,6 +77,7 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		ChunkRefs:       req.ChunkRefs,
 		ExpectedVersion: req.ExpectedVersion,
 		MinClient:       req.MinClient,
+		CompactAt:       req.CompactAt,
 		ExpireSeconds:   req.ExpireSeconds,
 		MaxReads:        req.MaxReads,
 		OnExpiry:        req.OnExpiry,
@@ -99,6 +102,7 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		ChunkRefs:       h.ChunkRefs,
 		ExpectedVersion: h.ExpectedVersion,
 		MinClient:       h.MinClient,
+		CompactAt:       h.CompactAt,
 		ExpireSeconds:   h.ExpireSeconds,
 		MaxReads:        h.MaxReads,
 		OnExpiry:        h.OnExpiry,
@@ -119,6 +123,7 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		Owner:         res.Owner,
 		Version:       res.Version,
 		MinClient:     res.MinClient,
+		CompactAt:     res.CompactAt,
 		ExpiresAt:     res.ExpiresAt,
 		MaxReads:      res.MaxReads,
 		Reads:         res.Reads,
@@ -144,6 +149,7 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		Owner:         h.Owner,
 		Version:       h.Version,
 		MinClient:     h.MinClient,
+		CompactAt:     h.CompactAt,
 		ExpiresAt:     h.ExpiresAt,
 		MaxReads:      h.MaxReads,
 		Reads:         h.Reads,

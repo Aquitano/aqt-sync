@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/aquitano/aqt-sync/internal/server"
+	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
 
 // TestMultiDeviceSim is a seeded, deterministic state-machine simulation: three
@@ -27,7 +29,9 @@ import (
 // startServer), so a seed and host mode fully determine the run and any failure is
 // replayable. Override the seed set with AQT_SIM_SEED=<n> to reproduce one failure.
 //
-// Each seed runs in two host modes: distinct-host, where every device stamps its own
+// Each seed runs in copy-mode host variants plus merge mode: distinct-host stamps each
+// device's own conflict-copy name, shared-host forces name collisions, and merge-text
+// also exercises clean line merges while retaining the same copy fallback.
 // conflict-copy hostname (the common case), and shared-host, where all devices share
 // one hostname and colliding copy names must be resolved by the suffix bump (see
 // hostModes).
@@ -53,13 +57,16 @@ func TestMultiDeviceSim(t *testing.T) {
 // edited path within the same second, exercising the copy-name collision avoidance in
 // conflictCopyPath (bumping past disk files, remote paths, and already-planned copies).
 type hostMode struct {
-	name string
-	host func(devID int) string
+	name      string
+	host      func(devID int) string
+	conflicts string
+	mergeText bool
 }
 
 var hostModes = []hostMode{
-	{name: "distinct-host", host: func(id int) string { return fmt.Sprintf("dev%d", id) }},
-	{name: "shared-host", host: func(int) string { return "samehost" }},
+	{name: "distinct-host", host: func(id int) string { return fmt.Sprintf("dev%d", id) }, conflicts: "copy"},
+	{name: "shared-host", host: func(int) string { return "samehost" }, conflicts: "copy"},
+	{name: "merge-text", host: func(id int) string { return fmt.Sprintf("dev%d", id) }, conflicts: "merge", mergeText: true},
 }
 
 const (
@@ -309,6 +316,9 @@ func (s *sim) use(d *simDevice) {
 
 func (s *sim) freshContent() string {
 	s.nextContent++
+	if s.mode.mergeText {
+		return fmt.Sprintf("v%d-a\nv%d-b\nv%d-c\n", s.nextContent, s.nextContent, s.nextContent)
+	}
 	return fmt.Sprintf("v%d", s.nextContent)
 }
 
@@ -337,7 +347,21 @@ func (s *sim) doWrite(step int, d *simDevice, targets []string, op opKind) {
 		return
 	}
 	p := targets[s.rng.Intn(len(targets))]
-	c := s.freshContent()
+	var c string
+	if op == opModify && s.mode.mergeText {
+		lines := strings.SplitAfter(d.tree[p], "\n")
+		if len(lines) > 0 && lines[len(lines)-1] == "" {
+			lines = lines[:len(lines)-1]
+		}
+		if len(lines) == 0 {
+			lines = []string{""}
+		}
+		s.nextContent++
+		lines[d.id%len(lines)] = fmt.Sprintf("v%d-dev%d\n", s.nextContent, d.id)
+		c = strings.Join(lines, "")
+	} else {
+		c = s.freshContent()
+	}
 	writeTree(s.t, d.dir, p, c)
 	d.tree[p] = c
 	s.tracef("step %2d dev %d %-10s %s = %s", step, d.id, op, p, c)
@@ -373,7 +397,7 @@ func (s *sim) doRename(step int, d *simDevice) {
 }
 
 func (s *sim) doSync(step int, d *simDevice) {
-	if err := runSync(d.dir, copyOpts()); err != nil {
+	if err := runSync(d.dir, s.syncOpts()); err != nil {
 		s.fatalf(step, "dev %d sync returned an unexpected error: %v", d.id, err)
 	}
 	s.applyMerge(step, d)
@@ -389,13 +413,13 @@ func (s *sim) doSync(step int, d *simDevice) {
 func (s *sim) doCrashSync(step int, d *simDevice) {
 	k := s.rng.Intn(simMaxCrashK) + 1
 	s.fault.arm(k)
-	crashErr := runSync(d.dir, copyOpts())
+	crashErr := runSync(d.dir, s.syncOpts())
 	s.fault.disarm()
 
 	recovered := crashErr == nil
 	var lastErr error
 	for attempt := 0; attempt < 4 && !recovered; attempt++ {
-		if err := runSync(d.dir, copyOpts()); err == nil {
+		if err := runSync(d.dir, s.syncOpts()); err == nil {
 			recovered = true
 		} else {
 			lastErr = err
@@ -453,6 +477,12 @@ func (s *sim) applyMerge(step int, d *simDevice) {
 				// Both made the same change: converged.
 				pushed[p] = lc
 			default:
+				if s.mode.mergeText && lok && sok && bok {
+					if merged, clean := textmerge.ThreeWay([]byte(bc), []byte(lc), []byte(sc)); clean {
+						pushed[p] = string(merged)
+						continue
+					}
+				}
 				// Genuine conflict. Copy mode keeps local at the primary path and, when
 				// the remote side has bytes, preserves them as a local-only conflict
 				// copy. A remote delete has nothing to copy.
@@ -516,7 +546,7 @@ func (s *sim) quiesce() {
 	for round := 0; round < simQuiesce; round++ {
 		for _, d := range s.devs {
 			s.use(d)
-			if err := runSync(d.dir, copyOpts()); err != nil {
+			if err := runSync(d.dir, s.syncOpts()); err != nil {
 				s.fatalf(-1, "quiesce round %d dev %d sync error: %v", round, d.id, err)
 			}
 			s.applyMerge(-1, d)
@@ -578,7 +608,7 @@ func (s *sim) verify() {
 
 // --- helpers ---
 
-func copyOpts() syncOptions { return syncOptions{conflicts: "copy"} }
+func (s *sim) syncOpts() syncOptions { return syncOptions{conflicts: s.mode.conflicts} }
 
 func (s *sim) presentPaths(d *simDevice) []string {
 	var out []string

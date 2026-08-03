@@ -1,8 +1,9 @@
 .PHONY: build build-server test test-short test-race vet fmt fuzz restore-drill docker clean
 
-# Build both binaries into ./bin.
+# Build the CLI, Git helper, and server into ./bin.
 build:
 	go build -o bin/aqt ./cmd/aqt
+	go build -o bin/git-remote-aqt ./cmd/git-remote-aqt
 	go build -o bin/aqt-server ./cmd/aqt-server
 
 build-server:
@@ -34,6 +35,9 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzParseRef$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzSplitRefPath$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzDecodeBase$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzMergeModeEditScripts$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzChangesReconstructsTarget$$' -fuzztime=10s ./internal/syncengine/merge
+	go test -run='^$$' -fuzz='^FuzzThreeWayCleanLinesComeFromInputs$$' -fuzztime=10s ./internal/syncengine/merge
 	go test -run='^$$' -fuzz='^FuzzDecodeFragment$$' -fuzztime=10s ./internal/crypto
 	go test -run='^$$' -fuzz='^FuzzFragmentRoundTrip$$' -fuzztime=10s ./internal/crypto
 

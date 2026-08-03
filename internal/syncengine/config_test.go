@@ -41,8 +41,12 @@ func TestLoadConfigConflicts(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(`{"conflicts": "merge"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := LoadConfig(dir); err == nil {
-		t.Fatal("expected an error for an unknown conflicts value")
+	cfg, err = LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Conflicts != "merge" {
+		t.Fatalf("conflicts = %q, want merge", cfg.Conflicts)
 	}
 }
 
@@ -185,7 +189,7 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 		body string
 	}{
 		{"future version", `{"version": 2}`},
-		{"bad conflicts", `{"conflicts": "merge"}`},
+		{"bad conflicts", `{"conflicts": "markers"}`},
 		{"bad chunk profile", `{"chunkProfile": "gigantic"}`},
 		{"bad chunk ordering", `{"chunk": {"min": 10, "normal": 5, "max": 20}}`},
 		{"bad watch interval", `{"watch": {"interval": "fast"}}`},
@@ -205,6 +209,7 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 		`{}`,
 		`{"version": 1, "pack": true}`,
 		`{"chunkProfile": "large", "watch": {"interval": "2s", "gitGuard": false}, "conflicts": "copy"}`,
+		`{"conflicts": "merge"}`,
 	}
 	for _, body := range good {
 		if _, err := ParseConfig([]byte(body)); err != nil {

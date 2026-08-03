@@ -131,6 +131,68 @@ func TestResourceMinClientDefaultsToBaseline(t *testing.T) {
 	}
 }
 
+func TestGitRemoteResourcePolicy(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "gitremote@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	defer ck.Wipe()
+	newReq := func() api.PutResourceRequest {
+		blob, _ := crypto.Seal([]byte(`{"version":1,"generation":0}`), ck, crypto.AADGitRefsRoot)
+		meta, _ := crypto.Seal([]byte(`{"name":"brain","kind":"gitremote"}`), ck, crypto.AADMeta)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+		return api.PutResourceRequest{
+			Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+			MinClient: api.CapabilityGitRemote, CompactAt: 64,
+		}
+	}
+
+	req := newReq()
+	id, version, err := s.PutResource(owner, api.ClientCapability, req)
+	if err != nil {
+		t.Fatalf("create git remote: %v", err)
+	}
+	got, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CompactAt != 64 || got.MinClient != api.CapabilityGitRemote {
+		t.Fatalf("stored policy = compactAt %d minClient %d", got.CompactAt, got.MinClient)
+	}
+	items, _, err := s.ListResources(owner, pageParams{})
+	if err != nil || len(items) != 1 || items[0].CompactAt != 64 {
+		t.Fatalf("list policy: items=%+v err=%v", items, err)
+	}
+
+	update := newReq()
+	update.ID, update.ExpectedVersion, update.CompactAt = id, version, 0 // omission preserves the server setting
+	if _, version, err = s.PutResource(owner, api.ClientCapability, update); err != nil || version != 2 {
+		t.Fatalf("update git remote: version=%d err=%v", version, err)
+	}
+	if err := s.PutGrant(owner, id, "grantee", []byte("wrap"), version); !errors.Is(err, ErrGitRemotePolicy) {
+		t.Fatalf("grant error = %v, want ErrGitRemotePolicy", err)
+	}
+	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, ExpectedVersion: version}); !errors.Is(err, ErrGitRemotePolicy) {
+		t.Fatalf("public visibility error = %v, want ErrGitRemotePolicy", err)
+	}
+
+	bad := newReq()
+	bad.MinClient = api.CapabilityRootKeyRotation
+	if _, _, err := s.PutResource(owner, api.ClientCapability, bad); !errors.Is(err, ErrGitRemotePolicy) {
+		t.Fatalf("under-gated create error = %v, want ErrGitRemotePolicy", err)
+	}
+	bad = newReq()
+	bad.Visibility = api.Public
+	if _, _, err := s.PutResource(owner, api.ClientCapability, bad); !errors.Is(err, ErrGitRemotePolicy) {
+		t.Fatalf("public create error = %v, want ErrGitRemotePolicy", err)
+	}
+
+	bad = newReq()
+	bad.CompactAt = -1
+	if _, _, err := s.PutResource(owner, api.ClientCapability, bad); !errors.Is(err, ErrGitRemotePolicy) {
+		t.Fatalf("negative compactAt create error = %v, want ErrGitRemotePolicy", err)
+	}
+}
+
 func TestPackStoreRoundTripAndGC(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "packs@example.com")

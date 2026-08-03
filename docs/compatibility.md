@@ -17,8 +17,12 @@ API layer, *before* any payload is served.
 | `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata |
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.3.0 | account root-key rotation and migrated identities |
+| `4` (Git remote) | unreleased | sealed `gitremote` RefsRoot resources and their private-only server policy |
 
-`api.ClientCapability` is `3` today. Capability 3 is required for the root-key recovery API because it changes the account signing and encryption identities.
+`api.ClientCapability` is `4` today. Capability 3 is required for root-key recovery;
+capability 4 is required for encrypted Git remote resources. `aqt repo create` declares
+`minClient: 4`, so older clients receive `426 Upgrade Required` before the server
+serves or overwrites a root they cannot interpret.
 
 ## Negotiation flow
 
@@ -107,7 +111,8 @@ When a new write format lands that older releases cannot read:
    `ClientCapability` to it.
 2. At each sealing site that writes the new format, declare
    `MinClient: api.Capability<New>` on the `PutResourceRequest` (see
-   `cmd/aqt/sync.go`, `cmd/aqt/pack.go`, `cmd/aqt/share.go`, `cmd/aqt/push.go`).
+   `cmd/aqt/sync.go`, `cmd/aqt/pack.go`, `cmd/aqt/share.go`, `cmd/aqt/push.go`,
+   and `cmd/aqt/repo.go`).
    Sites still writing an older format keep their lower declaration.
 3. Add a `### Breaking Changes` / `### Changed` note to `CHANGELOG.md` and extend the
    capability table above.

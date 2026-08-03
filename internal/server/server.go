@@ -789,6 +789,10 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
 		return
 	}
+	if req.CompactAt < 0 {
+		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
+		return
+	}
 	switch req.Visibility {
 	case api.Private:
 		if req.WrappedKey == nil {
@@ -846,6 +850,10 @@ func (s *Server) putResource(c *gin.Context) {
 	}
 	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
 		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
+		return
+	}
+	if errors.Is(err, ErrGitRemotePolicy) {
+		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
 		return
 	}
 	if errors.Is(err, ErrNotFound) {
@@ -1161,6 +1169,10 @@ func (s *Server) setVisibility(c *gin.Context) {
 	}
 	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
 		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
+		return
+	}
+	if errors.Is(err, ErrGitRemotePolicy) {
+		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
 		return
 	}
 	if errors.Is(err, ErrNotFound) {

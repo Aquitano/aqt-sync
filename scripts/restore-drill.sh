@@ -2,7 +2,7 @@
 #
 # restore-drill.sh — prove a full backup -> restore cycle end to end.
 #
-# It builds aqt + aqt-server, runs a real server, pushes a realistic tree
+# It builds aqt + git-remote-aqt + aqt-server, runs a real server, pushes a realistic tree
 # (nested dirs, a binary, an executable, a Unicode name, a tracked .git), takes a
 # cold backup of the server data dir, stands a fresh server up from that backup,
 # recovers the account on a clean client config from just the email + passphrase,
@@ -11,7 +11,7 @@
 # TestFullBackupRestoreDrill.
 #
 # Usage:  scripts/restore-drill.sh
-# Requires: go, and a POSIX shell with `diff`. Uses only loopback HTTP, so no TLS
+# Requires: go, git, and a POSIX shell with `diff`. Uses only loopback HTTP, so no TLS
 # or certificates are needed for the drill.
 set -euo pipefail
 
@@ -37,12 +37,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "building aqt and aqt-server"
+log "building aqt, git-remote-aqt, and aqt-server"
 mkdir -p "$WORK/bin"
 ( cd "$REPO" && go build -o "$WORK/bin/aqt" ./cmd/aqt )
+( cd "$REPO" && go build -o "$WORK/bin/git-remote-aqt" ./cmd/git-remote-aqt )
 ( cd "$REPO" && go build -o "$WORK/bin/aqt-server" ./cmd/aqt-server )
 AQT="$WORK/bin/aqt"
 SERVER="$WORK/bin/aqt-server"
+export PATH="$WORK/bin:$PATH"
 
 # start_server DATA_DIR LOG_FILE -> prints the base URL. Binds an ephemeral port
 # (AQT_ADDR=127.0.0.1:0) and reads the actual port back from the server's log, so no
@@ -104,7 +106,9 @@ build_tree() {
 # --- Phase 1: machine A creates the account and pushes. ---
 CONFIG_A="$WORK/config-a"
 DATA_A="$WORK/data-a"; mkdir -p "$DATA_A"
+export HOME="$CONFIG_A/home"
 export XDG_CONFIG_HOME="$CONFIG_A"
+mkdir -p "$HOME"
 
 URL_A="$(start_server "$DATA_A" "$WORK/server-a.log")"
 log "server A listening at $URL_A"
@@ -125,6 +129,22 @@ FOLDER_ID="$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ORIG
 [ -n "$FOLDER_ID" ] || fail "could not read the folder id from state.json"
 log "folder id: $FOLDER_ID"
 
+GIT_ORIGIN="$WORK/git-origin"
+mkdir -p "$GIT_ORIGIN"
+git -C "$GIT_ORIGIN" init -b main
+git -C "$GIT_ORIGIN" config user.email "$EMAIL"
+git -C "$GIT_ORIGIN" config user.name "AQT restore drill"
+printf 'git remote restore drill\n' > "$GIT_ORIGIN/README.md"
+mkdir -p "$GIT_ORIGIN/nested"
+printf 'sealed history\n' > "$GIT_ORIGIN/nested/history.txt"
+git -C "$GIT_ORIGIN" add README.md nested/history.txt
+git -C "$GIT_ORIGIN" commit -m 'restore drill: initial history'
+git -C "$GIT_ORIGIN" tag -a v1 -m 'restore drill tag'
+log "creating and pushing an encrypted Git remote"
+"$AQT" repo create restore-git
+git -C "$GIT_ORIGIN" remote add origin aqt::restore-git
+git -C "$GIT_ORIGIN" push -u origin main refs/tags/v1
+
 # --- Phase 2: cold backup of the server data dir. ---
 log "stopping server A and taking a cold backup of the data dir"
 kill "$LAST_SERVER_PID" 2>/dev/null || true
@@ -141,12 +161,17 @@ wait_health "$URL_B"
 
 # --- Phase 4: clean machine recovers from email + passphrase alone. ---
 CONFIG_B="$WORK/config-b"   # a fresh config dir == a clean machine
+export HOME="$CONFIG_B/home"
 export XDG_CONFIG_HOME="$CONFIG_B"
+mkdir -p "$HOME"
 log "recovering the account on a clean machine and cloning"
 printf '%s\n' "$PASS" | "$AQT" --server "$URL_B" login --email "$EMAIL"
 
 RESTORE="$WORK/restore"
 "$AQT" --server "$URL_B" clone "$FOLDER_ID" "$RESTORE"
+
+GIT_RESTORE="$WORK/git-restore"
+git clone aqt::restore-git "$GIT_RESTORE"
 
 # --- Phase 5: prove the restored tree matches the original. ---
 log "diffing the restored tree against the original"
@@ -162,4 +187,12 @@ if [ -L "$ORIGIN/link" ]; then
 	[ "$(readlink "$RESTORE/link")" = "$(readlink "$ORIGIN/link")" ] || fail "symlink target differs"
 fi
 
-log "PASS: full backup -> restore cycle reproduced the tree byte for byte"
+log "verifying the restored encrypted Git remote"
+git -C "$GIT_RESTORE" fsck --full
+git -C "$GIT_ORIGIN" for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags > "$WORK/git-origin.refs"
+git -C "$GIT_RESTORE" for-each-ref --format='%(refname) %(objectname)' refs/heads refs/tags > "$WORK/git-restore.refs"
+if ! diff -u "$WORK/git-origin.refs" "$WORK/git-restore.refs"; then
+	fail "restored Git refs differ from the source"
+fi
+
+log "PASS: backup restore reproduced the folder and encrypted Git remote"

@@ -80,6 +80,10 @@ var ErrPolicyOnPrivate = errors.New("lifecycle policy requires a public resource
 // Handlers map it to 400.
 var ErrBadPolicy = errors.New("lifecycle policy values must be non-negative")
 
+// ErrGitRemotePolicy is returned when an operation would expose or reclassify a
+// git-remote resource. Git remotes are private-only in v1 and cannot carry grants.
+var ErrGitRemotePolicy = errors.New("git remote resources are private and cannot be shared")
+
 // ErrDeviceLimit is returned when attaching a device would exceed an account's
 // configured device cap. Handlers map it to 403.
 var ErrDeviceLimit = errors.New("device limit reached")
@@ -102,6 +106,29 @@ func normalizeMinClient(declared int) int {
 		return api.CapabilityBaseline
 	}
 	return declared
+}
+
+func validateGitRemotePolicy(req api.PutResourceRequest, storedCompactAt int) (int, error) {
+	if req.CompactAt < 0 {
+		return 0, ErrGitRemotePolicy
+	}
+	compactAt := req.CompactAt
+	if storedCompactAt > 0 {
+		if compactAt == 0 {
+			compactAt = storedCompactAt
+		}
+		if compactAt != storedCompactAt || req.MinClient < api.CapabilityGitRemote || req.Visibility != api.Private {
+			return 0, ErrGitRemotePolicy
+		}
+		return compactAt, nil
+	}
+	if req.ID != "" && compactAt > 0 {
+		return 0, ErrGitRemotePolicy // resource kinds are immutable
+	}
+	if compactAt > 0 && (req.MinClient < api.CapabilityGitRemote || req.Visibility != api.Private) {
+		return 0, ErrGitRemotePolicy
+	}
+	return compactAt, nil
 }
 
 // resolvePolicy validates a lifecycle request and turns it into the stored columns.
@@ -447,6 +474,10 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// every blob at upgrade time.
 	`ALTER TABLE resources ADD COLUMN blob_size INTEGER NOT NULL DEFAULT -1;
 	 ALTER TABLE snapshots ADD COLUMN blob_size INTEGER NOT NULL DEFAULT -1;`,
+	// 17: a non-zero compact_at identifies a private git-remote resource and stores
+	// its per-repository bundle compaction threshold. Repository names, refs, and
+	// bundle topology remain inside the encrypted resource blob and metadata.
+	`ALTER TABLE resources ADD COLUMN compact_at INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
@@ -1345,6 +1376,10 @@ func (s *Store) PutResource(owner string, capability int, req api.PutResourceReq
 }
 
 func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSON string, wrappedJSON sql.NullString) (string, int, error) {
+	compactAt, err := validateGitRemotePolicy(req, 0)
+	if err != nil {
+		return "", 0, err
+	}
 	digest, err := idempotencyDigest(req)
 	if err != nil {
 		return "", 0, err
@@ -1395,9 +1430,9 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	}
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
-		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, blob_size, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now,
+		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, blob_size, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at, compact_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now, compactAt,
 	); err != nil {
 		tx.Rollback()
 		return "", 0, err
@@ -1424,13 +1459,14 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	}
 	defer s.resLocks.lock(req.ID)()
 	var (
-		current   int
-		storedMin int
-		reclaimed bool
+		current         int
+		storedMin       int
+		storedCompactAt int
+		reclaimed       bool
 	)
 	err = s.db.QueryRow(
-		`SELECT version, min_client, reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
-	).Scan(&current, &storedMin, &reclaimed)
+		`SELECT version, min_client, compact_at, reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
+	).Scan(&current, &storedMin, &storedCompactAt, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, ErrNotFound
 	}
@@ -1442,6 +1478,10 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// races no concurrent min_client change.
 	if capability < storedMin {
 		return "", 0, &UpgradeRequiredError{MinClient: storedMin}
+	}
+	compactAt, err := validateGitRemotePolicy(req, storedCompactAt)
+	if err != nil {
+		return "", 0, err
 	}
 	// Optimistic concurrency: a client that based its update on an older version
 	// is rejected so a concurrent write is never lost. (The per-resource lock above
@@ -1485,7 +1525,7 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// folder sync pushing a new manifest is not a re-share, and clearing the expiry —
 	// or restarting the read counter — behind the owner's back would quietly un-share
 	// the folder they shared.
-	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, blob_size=?, version=?, min_client=?, updated_at=unixepoch()`
+	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, blob_size=?, version=?, min_client=?, compact_at=?, updated_at=unixepoch()`
 	replacePolicy := req.Visibility != api.Public || req.ExpireSeconds > 0 || req.MaxReads > 0 || reclaimed
 
 	var res sql.Result
@@ -1494,14 +1534,14 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 			`UPDATE resources SET `+setContent+`,
 			   expires_at=?, max_reads=?, on_expiry=?, reads=0, exhausted_at=NULL, reclaimed=0
 			 WHERE id=? AND owner_handle=? AND version=?`,
-			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient),
+			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), compactAt,
 			expiresAt, maxReads, onExpiry, req.ID, owner, current,
 		)
 	} else {
 		res, err = tx.Exec(
 			`UPDATE resources SET `+setContent+`
 			 WHERE id=? AND owner_handle=? AND version=?`,
-			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient),
+			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), compactAt,
 			req.ID, owner, current,
 		)
 	}
@@ -1606,11 +1646,12 @@ func (s *Store) GetResourceUncounted(id, requireOwner string) (api.GetResourceRe
 		reclaimed   bool
 		createdAt   int64
 		updatedAt   int64
+		compactAt   int
 	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, reads, reclaimed, created_at, updated_at
+		`SELECT owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, version, min_client, expires_at, max_reads, reads, reclaimed, created_at, updated_at, compact_at
 		 FROM resources WHERE id = ?`, id,
-	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient, &expiresAt, &maxReads, &reads, &reclaimed, &createdAt, &updatedAt)
+	).Scan(&owner, &visibility, &metaJSON, &wrappedJSON, &nonce, &version, &minClient, &expiresAt, &maxReads, &reads, &reclaimed, &createdAt, &updatedAt, &compactAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return out, false, ErrNotFound
 	}
@@ -1670,6 +1711,7 @@ func (s *Store) GetResourceUncounted(id, requireOwner string) (api.GetResourceRe
 		Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext},
 		Version:    version,
 		MinClient:  minClient,
+		CompactAt:  compactAt,
 	}
 	// Lifecycle fields (expiry, read counts, create/update timestamps) are the owner's
 	// operational view of the link. A public-link recipient or grantee has no business
@@ -1836,13 +1878,16 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 		return 0, err
 	}
 	defer s.resLocks.lock(id)()
-	var current int
-	err = s.db.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current)
+	var current, compactAt int
+	err = s.db.QueryRow(`SELECT version, compact_at FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current, &compactAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, err
+	}
+	if compactAt > 0 && req.Visibility != api.Private {
+		return 0, ErrGitRemotePolicy
 	}
 	if req.ExpectedVersion > 0 && req.ExpectedVersion != current {
 		return 0, ErrVersionConflict
@@ -1926,7 +1971,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 	}
 	args = append(args, limit+1) // one extra row tells us whether a next page exists
 	rows, err := s.rdb.Query(
-		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot,
+		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot, compact_at,
 		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at
 		 FROM resources WHERE `+where+` ORDER BY id LIMIT ?`, args...,
 	)
@@ -1943,7 +1988,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 			metaJSON    string
 			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot,
+		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot, &item.CompactAt,
 			&item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, "", err
 		}
@@ -2113,7 +2158,7 @@ func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlo
 // snapshots are tagged so retention can prune them without touching manual ones.
 // anchored pins the snapshot against every retention path.
 func (s *Store) CreateSnapshotIdempotent(owner string, req api.CreateSnapshotRequest) (api.SnapshotInfo, error) {
-	return s.createSnapshot(owner, req.ResourceID, req.EncryptedLabel, false, req.Anchor, req.IdempotencyKey)
+	return s.createSnapshot(owner, req.ResourceID, req.EncryptedLabel, req.Automatic, req.Anchor, req.IdempotencyKey)
 }
 
 func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled, anchored bool, idempotencyKey string) (api.SnapshotInfo, error) {
@@ -2121,7 +2166,8 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		ResourceID string
 		Label      *crypto.SealedBlob
 		Anchored   bool
-	}{resourceID, label, anchored})
+		Automatic  bool
+	}{resourceID, label, anchored, scheduled})
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
@@ -2206,7 +2252,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		tx.Rollback()
 		return prior, nil
 	}
-	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored}
+	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored, Automatic: scheduled}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
 		tx.Rollback()
 		return api.SnapshotInfo{}, err
@@ -2250,7 +2296,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 // keyset seek uses that mixed-direction predicate.
 func (s *Store) ListSnapshots(owner, resourceID string, page pageParams) ([]api.SnapshotInfo, string, error) {
 	limit := page.effectiveLimit()
-	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored
+	query := `SELECT snapshot_id, resource_id, version_captured, created_at, encrypted_meta, encrypted_label, wrapped_key, anchored, scheduled
 	          FROM snapshots WHERE owner_handle = ?`
 	args := []any{owner}
 	if resourceID != "" {
@@ -2285,7 +2331,7 @@ func (s *Store) ListSnapshots(owner, resourceID string, page pageParams) ([]api.
 			labelJSON   sql.NullString
 			wrappedJSON sql.NullString
 		)
-		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored); err != nil {
+		if err := rows.Scan(&info.ID, &info.ResourceID, &info.Version, &info.CreatedAt, &metaJSON, &labelJSON, &wrappedJSON, &info.Anchored, &info.Automatic); err != nil {
 			return nil, "", err
 		}
 		if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
