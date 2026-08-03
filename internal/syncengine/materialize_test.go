@@ -3,8 +3,40 @@ package syncengine
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
+
+// TestMaterializeDirsAppliesModesLast pins the ordering a restrictive directory mode
+// forces: applying it on sight would leave nothing able to create the directories
+// underneath it, so every directory is created first and the modes come after.
+func TestMaterializeDirsAppliesModesLast(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Chmod carries only the write bit, so a non-writable directory is not representable")
+	}
+	root := t.TempDir()
+	dirs := []DirEntry{{Path: "locked", Mode: 0o500}, {Path: "locked/inner", Mode: 0o500}}
+	// RemoveAll cannot unlink out of a directory it cannot write, so restore the modes
+	// before the temp dir is torn down.
+	t.Cleanup(func() {
+		os.Chmod(filepath.Join(root, "locked", "inner"), 0o700)
+		os.Chmod(filepath.Join(root, "locked"), 0o700)
+	})
+
+	if err := MaterializeDirs(root, dirs); err != nil {
+		t.Fatalf("MaterializeDirs: %v", err)
+	}
+
+	for _, d := range dirs {
+		fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(d.Path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := uint32(fi.Mode().Perm()); got != d.Mode {
+			t.Errorf("%s mode = %#o, want %#o", d.Path, got, d.Mode)
+		}
+	}
+}
 
 // TestRemoveDirPathBecameFile covers the dir->file type change: when a tracked directory
 // was replaced on disk by a regular file earlier in the same apply (a remote type change),

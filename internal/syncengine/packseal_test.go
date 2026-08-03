@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/compress"
@@ -359,6 +360,57 @@ func TestExtractReplacesStaleParent(t *testing.T) {
 				t.Fatalf("inner.txt not extracted over stale %s: got=%q err=%v", stale, got, err)
 			}
 		})
+	}
+}
+
+// TestExtractAppliesDirModesAfterContents covers the ordering the archive forces: the
+// walk lists a directory ahead of everything under it, so a mode that denies write must
+// not land until the whole stream has been extracted, or the directory locks out its
+// own children.
+func TestExtractAppliesDirModesAfterContents(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Chmod carries only the write bit, so a non-writable directory is not representable")
+	}
+	src, dst := t.TempDir(), t.TempDir()
+	writeFile(t, src, "locked/inner.txt", []byte("body"))
+	if err := os.Mkdir(filepath.Join(src, "locked", "empty"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// RemoveAll cannot unlink out of a directory it cannot write, so restore the modes
+	// before the temp dirs are torn down.
+	for _, root := range []string{src, dst} {
+		t.Cleanup(func() {
+			os.Chmod(filepath.Join(root, "locked", "empty"), 0o700)
+			os.Chmod(filepath.Join(root, "locked"), 0o700)
+		})
+	}
+	for _, rel := range []string{"locked/empty", "locked"} {
+		if err := os.Chmod(filepath.Join(src, filepath.FromSlash(rel)), 0o500); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ck := testContentKey(t)
+	store := memObjects{}
+	root, _, err := TarAndSeal(src, ck, store)
+	if err != nil {
+		t.Fatalf("TarAndSeal: %v", err)
+	}
+	if _, err := ExtractToTree(dst, root, ck, store.get, nil); err != nil {
+		t.Fatalf("ExtractToTree: %v", err)
+	}
+
+	if got, err := os.ReadFile(filepath.Join(dst, "locked", "inner.txt")); err != nil || string(got) != "body" {
+		t.Fatalf("child of a non-writable directory: got=%q err=%v", got, err)
+	}
+	for _, rel := range []string{"locked", "locked/empty"} {
+		fi, err := os.Stat(filepath.Join(dst, filepath.FromSlash(rel)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := fi.Mode().Perm(); got != 0o500 {
+			t.Errorf("%s mode = %#o, want 0500", rel, got)
+		}
 	}
 }
 

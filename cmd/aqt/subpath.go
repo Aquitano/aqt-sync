@@ -226,7 +226,7 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		if dlErr != nil {
 			return dlErr
 		}
-		return materializeDirs(staging, m.Dirs)
+		return syncengine.MaterializeDirs(staging, m.Dirs)
 	}); err != nil {
 		return err
 	}

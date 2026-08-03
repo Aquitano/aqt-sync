@@ -1239,7 +1239,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 
 	// Directories last: create/chmod after files land (so a directory exists and gets
 	// its mode), and remove emptied directories after file deletes.
-	if err := materializeDirs(c.root, dirDownloads); err != nil {
+	if err := syncengine.MaterializeDirs(c.root, dirDownloads); err != nil {
 		return err
 	}
 	if err := removeDirs(c.root, dirRemovals); err != nil {
@@ -1503,7 +1503,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 		if dlErr != nil {
 			return dlErr
 		}
-		return materializeDirs(staging, manifest.Dirs)
+		return syncengine.MaterializeDirs(staging, manifest.Dirs)
 	}); err != nil {
 		return err
 	}
@@ -1614,7 +1614,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 	if dlErr != nil {
 		return syncengine.Manifest{}, dlErr
 	}
-	if err := materializeDirs(abs, manifest.Dirs); err != nil {
+	if err := syncengine.MaterializeDirs(abs, manifest.Dirs); err != nil {
 		return syncengine.Manifest{}, err
 	}
 	return manifest, nil
@@ -2323,20 +2323,6 @@ func dirsFrom(byPath map[string]syncengine.DirEntry) []syncengine.DirEntry {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
-}
-
-// materializeDirs creates each tracked directory under root with its recorded mode,
-// shallowest first so a parent exists before its children. It materializes empty
-// directories and applies directory permission changes during clone and pull.
-func materializeDirs(root string, dirs []syncengine.DirEntry) error {
-	sorted := append([]syncengine.DirEntry(nil), dirs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
-	for _, d := range sorted {
-		if err := syncengine.MaterializeDir(root, d); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // removeDirs removes tracked directories deepest first (a child before its parent),

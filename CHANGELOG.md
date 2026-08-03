@@ -41,6 +41,9 @@ All notable changes to this project are documented in this file.
   than inferring parents from file paths), and a pull prunes tracked directories
   the remote dropped. A pack folder written by an older client re-ships once on
   the first sync after upgrading, then converges.
+- Restoring a folder that tracks a non-writable directory no longer fails part
+  way through: directory modes are applied once the tree has landed, so a
+  directory cannot lock out the contents that belong inside it.
 
 ### Changed
 

@@ -414,13 +414,18 @@ func hashTar(r io.Reader) (Manifest, error) {
 // parent it created as a symlink this pass, so a hostile archive can't escape via a
 // symlink ordered ahead of a file written through it, while a stale local entry a
 // remote type change replaced with a directory is cleared rather than refused.
-// An entry safe rejects is hashed and recorded but never written.
+// An entry safe rejects is hashed and recorded but never written. Directory modes are
+// applied once the whole stream has landed, so a non-writable directory does not block
+// the children the archive lists after it.
 func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)) (Manifest, error) {
 	var m Manifest
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
+			if err := w.applyDirModes(); err != nil {
+				return Manifest{}, err
+			}
 			return m, nil
 		}
 		if err != nil {
