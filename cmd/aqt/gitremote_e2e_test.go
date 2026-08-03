@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -559,6 +560,11 @@ func configureGitTestEnv(t *testing.T) {
 
 func buildTestBinary(t *testing.T, output, pkg string) {
 	t.Helper()
+	// Git discovers the helper by PATH lookup, which on Windows only considers
+	// PATHEXT suffixes. An extensionless git-remote-aqt is invisible to it.
+	if runtime.GOOS == "windows" {
+		output += ".exe"
+	}
 	cmd := exec.Command("go", "build", "-o", output, pkg)
 	cmd.Dir = "."
 	if data, err := cmd.CombinedOutput(); err != nil {

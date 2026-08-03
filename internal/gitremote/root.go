@@ -87,14 +87,28 @@ func (r RefsRoot) Validate() error {
 	default:
 		return fmt.Errorf("unsupported git object format %q", r.ObjectFormat)
 	}
+	oidLen := oidHexLen(r.ObjectFormat)
 	for name, oid := range r.Refs {
-		if !strings.HasPrefix(name, "refs/") || oid == "" {
+		if !strings.HasPrefix(name, "refs/") {
 			return fmt.Errorf("invalid git ref %q", name)
+		}
+		if !validOID(oid, oidLen) {
+			return fmt.Errorf("invalid object id %q for git ref %q", oid, name)
 		}
 	}
 	for _, bundle := range r.Bundles {
 		if bundle.ID == "" || len(bundle.Segments) == 0 {
 			return errors.New("git bundle entry is missing its id or segments")
+		}
+		for _, oid := range bundle.Tips {
+			if !validOID(oid, oidLen) {
+				return fmt.Errorf("invalid tip object id %q in git bundle %q", oid, bundle.ID)
+			}
+		}
+		for _, oid := range bundle.Bases {
+			if !validOID(oid, oidLen) {
+				return fmt.Errorf("invalid base object id %q in git bundle %q", oid, bundle.ID)
+			}
 		}
 		for _, segment := range bundle.Segments {
 			if segment.ID == "" || segment.Len < 0 || segment.Size <= crypto.NonceSize {
@@ -103,6 +117,30 @@ func (r RefsRoot) Validate() error {
 		}
 	}
 	return nil
+}
+
+// oidHexLen gives the hex length every object id in the root must have. An empty
+// ObjectFormat is a root written before the first push negotiated one, so it can
+// only be sha1.
+func oidHexLen(objectFormat string) int {
+	if objectFormat == "sha256" {
+		return 64
+	}
+	return 40
+}
+
+// validOID keeps ids that git would parse as an option, or that belong to the
+// other hash algorithm, from reaching the helper's git subprocesses.
+func validOID(oid string, hexLen int) bool {
+	if len(oid) != hexLen {
+		return false
+	}
+	for _, c := range oid {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func SealRefsRoot(root RefsRoot, key crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {
