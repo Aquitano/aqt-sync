@@ -27,6 +27,7 @@ func TestDiffClassifies(t *testing.T) {
 		name     string
 		old, cur Manifest
 		want     []Change
+		wantRen  []Rename
 	}{
 		{
 			name: "identical manifests converge",
@@ -100,9 +101,10 @@ func TestDiffClassifies(t *testing.T) {
 			want: []Change{{Path: "d", Kind: ChangeMode, Type: ChildDir}},
 		},
 		{
-			name: "unique content moved is a rename, not delete+add",
-			old:  Manifest{Entries: []Entry{file("a.txt", "only")}},
-			cur:  Manifest{Entries: []Entry{file("b.txt", "only")}},
+			name:    "unique content moved is a rename, not delete+add",
+			old:     Manifest{Entries: []Entry{file("a.txt", "only")}},
+			cur:     Manifest{Entries: []Entry{file("b.txt", "only")}},
+			wantRen: []Rename{{From: "a.txt", To: "b.txt"}},
 		},
 		{
 			name: "duplicate content stays delete+add",
@@ -118,11 +120,11 @@ func TestDiffClassifies(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := Diff(tc.old, tc.cur)
-			if len(got.Changes) == 0 && len(tc.want) == 0 {
-				return
-			}
-			if !reflect.DeepEqual(got.Changes, tc.want) {
+			if len(got.Changes)+len(tc.want) > 0 && !reflect.DeepEqual(got.Changes, tc.want) {
 				t.Errorf("changes = %+v, want %+v", got.Changes, tc.want)
+			}
+			if len(got.Renamed)+len(tc.wantRen) > 0 && !reflect.DeepEqual(got.Renamed, tc.wantRen) {
+				t.Errorf("renamed = %+v, want %+v", got.Renamed, tc.wantRen)
 			}
 		})
 	}
@@ -292,7 +294,14 @@ func TestDiffTreeRootsMatchesManifestDiff(t *testing.T) {
 	writeFile(t, curDir, "elsewhere/unique.txt", []byte("unique content"))
 	writeFile(t, curDir, "retyped/inner.txt", []byte("now a dir"))
 	writeFile(t, curDir, "mod.txt", []byte("v2"))
-	if err := os.Chmod(filepath.Join(curDir, "perm.sh"), 0o755); err != nil {
+	// Windows maps a file's mode onto the read-only attribute alone, so an 0o755 edit
+	// reads back unchanged there; clearing write is the one file-mode change both
+	// platforms represent, and the fixture needs a real one to be worth asserting.
+	permEdit := os.FileMode(0o755)
+	if runtime.GOOS == "windows" {
+		permEdit = 0o444
+	}
+	if err := os.Chmod(filepath.Join(curDir, "perm.sh"), permEdit); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(curDir, "empty"), 0o755); err != nil {
