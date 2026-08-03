@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 )
 
 func main() {
@@ -18,7 +19,13 @@ func main() {
 	if err := cmd.Run(); err != nil {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
-			os.Exit(exit.ExitCode())
+			if code := exit.ExitCode(); code >= 0 {
+				os.Exit(code)
+			}
+			// A signal killed aqt: ExitCode is -1, which would surface as 255 and
+			// hide the cause from Git. Report the signal and exit with a real status.
+			fmt.Fprintln(os.Stderr, "git-remote-aqt: aqt terminated:", exit.ProcessState)
+			os.Exit(1)
 		}
 		fmt.Fprintln(os.Stderr, "git-remote-aqt:", err)
 		os.Exit(1)
@@ -26,8 +33,12 @@ func main() {
 }
 
 func siblingAQT() string {
+	name := "aqt"
+	if runtime.GOOS == "windows" {
+		name = "aqt.exe"
+	}
 	if exe, err := os.Executable(); err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "aqt")
+		candidate := filepath.Join(filepath.Dir(exe), name)
 		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
 			return candidate
 		}

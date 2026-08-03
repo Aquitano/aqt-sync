@@ -54,6 +54,9 @@ type openedGitRemote struct {
 	meta   api.Metadata
 	root   gitremote.RefsRoot
 	key    crypto.ContentKey
+	// snapshots holds the pre-compaction checkpoints created this run, newest
+	// first; releaseSnapshot unanchors all but the rollback candidate.
+	snapshots []api.SnapshotInfo
 }
 
 func (r *openedGitRemote) close() { r.key.Wipe() }
@@ -114,6 +117,9 @@ func (h *remoteHelper) run() error {
 			parts := strings.Fields(line)
 			if len(parts) != 3 {
 				return fmt.Errorf("invalid remote-helper fetch command %q", line)
+			}
+			if !validGitOID(parts[1]) {
+				return fmt.Errorf("invalid object id in remote-helper fetch command %q", line)
 			}
 			fetches = append(fetches, helperFetch{oid: parts[1], ref: parts[2]})
 			continue
@@ -350,7 +356,7 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 			ID: remote.res.ID, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
 			WrappedKey: remote.res.WrappedKey, ChunkRefs: next.SegmentIDs(),
 			ExpectedVersion: remote.res.Version, MinClient: api.CapabilityGitRemote,
-			CompactAt: remote.res.CompactAt,
+			CompactAt: compactAt,
 		})
 		remote.close()
 		if errors.Is(err, client.ErrConflict) {
@@ -403,7 +409,7 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 			return false, 0, 0, err
 		}
 		if !local.contains(remote.root.Refs) {
-			if !explicit && remote.res.CompactAt > 0 && len(remote.root.Bundles) == 2*remote.res.CompactAt {
+			if !explicit && remote.res.CompactAt > 0 && len(remote.root.Bundles) >= 2*remote.res.CompactAt {
 				fmt.Fprintf(h.errOut, "warning: aqt git remote has %d bundles because compaction needs every remote branch and tag locally; fetch all refs or run `aqt repo gc` from a complete clone\n", len(remote.root.Bundles))
 			}
 			remote.close()
@@ -426,10 +432,12 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 				remote.close()
 				return false, 0, 0, err
 			}
-			if _, err = remote.client.CreateAutoSnapshot(remote.res.ID); err != nil {
+			snap, err := remote.client.CreateAutoSnapshot(remote.res.ID)
+			if err != nil {
 				remote.close()
 				return false, 0, 0, fmt.Errorf("create pre-compaction snapshot: %w", err)
 			}
+			remote.snapshots = append(remote.snapshots, snap)
 			prepared.version, prepared.full, prepared.ok = remote.res.Version, full, true
 		}
 		next := remote.root
@@ -460,9 +468,26 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 		if err != nil {
 			return false, 0, 0, err
 		}
+		releaseSupersededCheckpoints(remote.client, remote.snapshots)
 		return true, before, generation, nil
 	}
 	return false, 0, 0, errors.New("remote busy, pull and retry")
+}
+
+// releaseSupersededCheckpoints unanchors every pre-compaction snapshot but the
+// newest once the compaction PUT commits: the newest is the rollback to the
+// pre-swap chain, and older ones repeat work that swap already finished. The
+// newest stays anchored so a user-initiated prune cannot drop it either; the next
+// successful compaction supersedes it. Failures degrade to retention pruning.
+func releaseSupersededCheckpoints(cl *client.Client, snaps []api.SnapshotInfo) {
+	if len(snaps) < 2 {
+		return
+	}
+	for _, old := range snaps[:len(snaps)-1] {
+		if _, err := cl.SetSnapshotAnchor(old.ID, false); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not release superseded pre-compaction snapshot %s: %v\n", old.ID, err)
+		}
+	}
 }
 
 type localRefSet struct {
@@ -865,8 +890,23 @@ func allObjectsPresent(oids []string) bool {
 	return true
 }
 
+// validGitOID gates every object id that reaches a git subprocess. Ids arrive
+// from Git's own protocol lines or a decrypted root, but a value git could parse
+// as an option (a leading dash) must never become an argv entry.
+func validGitOID(oid string) bool {
+	if len(oid) != 40 && len(oid) != 64 {
+		return false
+	}
+	for _, c := range oid {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 func gitObjectPresent(oid string) bool {
-	if oid == "" {
+	if !validGitOID(oid) {
 		return false
 	}
 	cmd := exec.Command("git", "cat-file", "-e", oid+"^{object}")

@@ -185,6 +185,12 @@ func TestGitRemoteResourcePolicy(t *testing.T) {
 	if _, _, err := s.PutResource(owner, api.ClientCapability, bad); !errors.Is(err, ErrGitRemotePolicy) {
 		t.Fatalf("public create error = %v, want ErrGitRemotePolicy", err)
 	}
+
+	bad = newReq()
+	bad.CompactAt = -1
+	if _, _, err := s.PutResource(owner, api.ClientCapability, bad); !errors.Is(err, ErrGitRemotePolicy) {
+		t.Fatalf("negative compactAt create error = %v, want ErrGitRemotePolicy", err)
+	}
 }
 
 func TestPackStoreRoundTripAndGC(t *testing.T) {

@@ -109,6 +109,9 @@ func normalizeMinClient(declared int) int {
 }
 
 func validateGitRemotePolicy(req api.PutResourceRequest, storedCompactAt int) (int, error) {
+	if req.CompactAt < 0 {
+		return 0, ErrGitRemotePolicy
+	}
 	compactAt := req.CompactAt
 	if storedCompactAt > 0 {
 		if compactAt == 0 {

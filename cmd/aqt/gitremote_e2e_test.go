@@ -26,8 +26,7 @@ func TestGitRemotePushAndClone(t *testing.T) {
 	bin := t.TempDir()
 	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
 	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
-	h := newE2E(t)
-	_ = h
+	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	if err := runRepoCreate("brain", 64); err != nil {

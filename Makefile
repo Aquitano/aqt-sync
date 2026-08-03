@@ -37,7 +37,7 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzDecodeBase$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzMergeModeEditScripts$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzChangesReconstructsTarget$$' -fuzztime=10s ./internal/syncengine/merge
-	go test -run='^$$' -fuzz='^FuzzThreeWayNeverInventsMarkers$$' -fuzztime=10s ./internal/syncengine/merge
+	go test -run='^$$' -fuzz='^FuzzThreeWayCleanLinesComeFromInputs$$' -fuzztime=10s ./internal/syncengine/merge
 	go test -run='^$$' -fuzz='^FuzzDecodeFragment$$' -fuzztime=10s ./internal/crypto
 	go test -run='^$$' -fuzz='^FuzzFragmentRoundTrip$$' -fuzztime=10s ./internal/crypto
 

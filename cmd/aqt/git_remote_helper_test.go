@@ -74,6 +74,24 @@ func TestApplyPushesInitializesHeadAndHandlesDeletion(t *testing.T) {
 	}
 }
 
+func TestValidGitOID(t *testing.T) {
+	sha1 := strings.Repeat("a", 40)
+	sha256 := strings.Repeat("0123456789abcdef", 4)
+	for _, ok := range []string{sha1, sha256} {
+		if !validGitOID(ok) {
+			t.Fatalf("valid oid %q rejected", ok)
+		}
+	}
+	for _, bad := range []string{
+		"", "-" + sha1[1:], strings.ToUpper(sha1), sha1[:39], sha1 + "a",
+		"refs/heads/main", "main", sha1[:20] + " " + sha1[21:],
+	} {
+		if validGitOID(bad) {
+			t.Fatalf("invalid oid %q accepted", bad)
+		}
+	}
+}
+
 func TestGitRemoteTarget(t *testing.T) {
 	if got, err := gitRemoteTarget("aqt::brain"); err != nil || got != "brain" {
 		t.Fatalf("target = %q err=%v", got, err)

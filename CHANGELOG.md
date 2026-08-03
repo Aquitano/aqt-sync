@@ -15,6 +15,10 @@ All notable changes to this project are documented in this file.
   SHA-1 and SHA-256 clone formats are negotiated through Git's remote-helper
   object-format extension. Already-full GC and same-version CAS retries reuse
   their bundle/snapshot work.
+- Pre-compaction and pre-restore snapshots are anchored at creation so scheduled
+  auto-retention cannot prune a rollback before its swap is validated; a
+  successful compaction releases every superseded checkpoint, keeping exactly one
+  rollback per remote.
 - `aqt sync --conflicts=merge` (and `.aqtconfig` `conflicts: "merge"`) performs
   bounded three-way text merges for non-overlapping edits and falls back to the
   collision-safe conflict-copy behavior for overlaps, binary/oversized files,

@@ -39,6 +39,22 @@ func TestUnifiedNoTrailingNewline(t *testing.T) {
 	}
 }
 
+// Changes more than twice the context apart must produce two hunks, exercising
+// the second range's start offsets from prefixPositions/rangeStart.
+func TestUnifiedTwoSeparatedHunks(t *testing.T) {
+	oldData := []byte("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n")
+	newData := []byte("L1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nL12\n")
+	got := string(Unified("a/f.txt", "b/f.txt", oldData, newData))
+	if n := strings.Count(got, "@@"); n != 4 { // two hunks, two markers each
+		t.Fatalf("hunk header count = %d, want 4:\n%s", n, got)
+	}
+	for _, want := range []string{"@@ -1,4 +1,4 @@\n", "@@ -9,4 +9,4 @@\n", "-l1\n+L1\n", "-l12\n+L12\n"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("two-hunk diff missing %q:\n%s", want, got)
+		}
+	}
+}
+
 func TestUnifiedEqualIsEmpty(t *testing.T) {
 	if got := Unified("a/f", "b/f", []byte("same\n"), []byte("same\n")); got != nil {
 		t.Fatalf("equal diff = %q, want nil", got)

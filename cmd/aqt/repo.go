@@ -63,7 +63,6 @@ func repoRemoveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
-	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -369,8 +368,9 @@ func runRepoGC(ref string, asJSON bool) error {
 	}
 	defer mk.Wipe()
 	h := &remoteHelper{
-		rawURL: ref,
-		errOut: os.Stderr,
+		remoteName: "origin",
+		rawURL:     ref,
+		errOut:     os.Stderr,
 	}
 	compacted, before, generation, err := h.compact(true)
 	if err != nil {

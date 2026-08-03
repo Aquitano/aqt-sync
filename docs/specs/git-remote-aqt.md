@@ -49,7 +49,7 @@ resources, the git wire protocol / shallow clones, submodule recursion.
 
 ### A1. UX surface
 
-```
+```console
 aqt repo create <name>            Create an empty encrypted git remote; prints aqt::<name>
 aqt repo ls                       List git-remote resources (id, name, bundles, size, version)
 aqt repo info <name-or-id>        Refs, chain length, last push, snapshot state
@@ -244,7 +244,7 @@ DESIGN.md as the final task of the track.
 
 ### B2. `aqt diff`
 
-```
+```console
 aqt diff [<path>...] [dir]     Unified diff of local changes vs base (default)
       --remote                 Diff incoming remote changes vs base instead
       --against <snapshot-id>  Reuse snapshot-diff content at line level

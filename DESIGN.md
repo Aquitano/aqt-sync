@@ -390,7 +390,7 @@ files: **docs/updates.md**.
 
 ### 3.9 Encrypted Git remotes
 
-```
+```console
 aqt repo create <name> [--compact-at N]  Create a private encrypted Git remote.
 aqt repo ls                              List remotes and bundle-chain state.
 aqt repo info <name-or-id>               Show refs, HEAD, format and snapshots.
@@ -414,7 +414,7 @@ Shallow clone, sharing/grants, and the Git wire protocol are not.
 
 ## 3a. Project layout & status
 
-```
+```text
 cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, repo, watch/agent, tui, update  [implemented]
 cmd/git-remote-aqt/ Git remote-helper shim                                     [implemented]
 cmd/aqt-server/     server entrypoint                                          [implemented]

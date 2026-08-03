@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -19,14 +20,16 @@ import (
 // produces. It is used for bounded derived content such as a clean text merge,
 // avoiding a whole-tree rescan merely to upload one resolved file.
 func EntryFromBytes(path string, data []byte, mode uint32, conv crypto.ConvergenceKey, selector ChunkSelector, sink ChunkSink) (Entry, error) {
-	if sink == nil {
-		sink = nopSink{}
-	}
 	e := Entry{Path: path, Mode: mode, Size: int64(len(data)), Hash: hashOf(data)}
 	chunker := selector.ChunkerFor(e.Size)
 	if e.Size <= int64(chunker.Min) {
 		e.Inline, e.InlineAlg = compress.Encode(data)
 		return e, nil
+	}
+	// Past the inline threshold every chunk's ciphertext goes only to the sink;
+	// discarding it would leave the returned entry pointing at chunks nobody stored.
+	if sink == nil {
+		return Entry{}, errors.New("syncengine: chunk sink is required for chunked content")
 	}
 	chunks, _, err := sealStream(bytes.NewReader(data), conv, chunker, sink)
 	if err != nil {

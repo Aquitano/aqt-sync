@@ -347,15 +347,20 @@ func (s *sim) doWrite(step int, d *simDevice, targets []string, op opKind) {
 		return
 	}
 	p := targets[s.rng.Intn(len(targets))]
-	c := s.freshContent()
+	var c string
 	if op == opModify && s.mode.mergeText {
 		lines := strings.SplitAfter(d.tree[p], "\n")
 		if len(lines) > 0 && lines[len(lines)-1] == "" {
 			lines = lines[:len(lines)-1]
 		}
+		if len(lines) == 0 {
+			lines = []string{""}
+		}
 		s.nextContent++
 		lines[d.id%len(lines)] = fmt.Sprintf("v%d-dev%d\n", s.nextContent, d.id)
 		c = strings.Join(lines, "")
+	} else {
+		c = s.freshContent()
 	}
 	writeTree(s.t, d.dir, p, c)
 	d.tree[p] = c
