@@ -399,7 +399,7 @@ func hashTar(r io.Reader) (Manifest, error) {
 			m.Dirs = append(m.Dirs, DirEntry{Path: tarDirPath(hdr.Name), Mode: uint32(fs.FileMode(hdr.Mode).Perm())})
 		case tar.TypeSymlink:
 			m.Entries = append(m.Entries, Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)})
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			h := sha256.New()
 			if _, err := io.Copy(h, tr); err != nil {
 				return Manifest{}, err
@@ -432,7 +432,7 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 			return Manifest{}, err
 		}
 		write := true
-		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeRegA || hdr.Typeflag == tar.TypeDir) {
+		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeDir) {
 			if write, err = safe(hdr.Name); err != nil {
 				return Manifest{}, err
 			}
@@ -454,7 +454,7 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 				}
 			}
 			m.Entries = append(m.Entries, e)
-		case tar.TypeReg, tar.TypeRegA:
+		case tar.TypeReg:
 			e := Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size}
 			h := sha256.New()
 			if write {
