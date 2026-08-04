@@ -12,6 +12,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 func key(s string) tea.KeyMsg {
@@ -57,7 +58,7 @@ func testModel(t *testing.T) *tuiModel {
 		{ID: "s1", ResourceID: "fold_1", Name: "vault", Label: "pre-release", Anchored: true, Version: 4, Created: "2026-07-10 12:00"},
 		{ID: "s2", ResourceID: "fold_1", Name: "vault", Version: 5, Created: "2026-07-11 09:00"},
 	}
-	m.local = localChanges{added: []string{"new.txt"}, modified: []string{"mod.txt"}}
+	m.local = testChanges([]string{"new.txt"}, []string{"mod.txt"})
 	m.conflicts = []string{"a.txt.conflict-host-1"}
 	m.rebuildAll()
 	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -286,7 +287,7 @@ func TestTUIBusyGuardsActions(t *testing.T) {
 // backwards through it must not walk past the end (regression: index panic).
 func TestTUIHeadersOnlyListNoPanic(t *testing.T) {
 	m := testModel(t)
-	m.local = localChanges{}
+	m.local = changeSet{}
 	m.conflicts = nil
 	m.rebuildFilesPanel()
 	m.setFocus(tuiPanelFiles)
@@ -618,7 +619,7 @@ func TestTUIStatusVerdict(t *testing.T) {
 	m := testModel(t)
 
 	// Conflicts outrank pending local changes.
-	m.local = localChanges{added: []string{"a"}}
+	m.local = testChanges([]string{"a"}, nil)
 	m.conflicts = []string{"x.conflict-h-1", "y.conflict-h-1"}
 	m.remoteOK = true
 	m.remote = tuiRemoteMsg{note: "up to date with the server"}
@@ -632,8 +633,8 @@ func TestTUIStatusVerdict(t *testing.T) {
 
 	// Local + file-level incoming reads as pending in both directions.
 	m.conflicts = nil
-	m.local = localChanges{added: []string{"a", "b"}}
-	m.remote = tuiRemoteMsg{fileLevel: true, incoming: incomingSummary{added: []string{"c"}}}
+	m.local = testChanges([]string{"a", "b"}, nil)
+	m.remote = tuiRemoteMsg{fileLevel: true, incoming: testChanges([]string{"c"}, nil)}
 	txt, style = m.statusVerdict()
 	if txt != "● needs sync — 2 up · 1 down" {
 		t.Fatalf("needs-sync verdict = %q", txt)
@@ -643,7 +644,7 @@ func TestTUIStatusVerdict(t *testing.T) {
 	}
 
 	// A pack folder only knows the server is ahead, not by which files.
-	m.local = localChanges{}
+	m.local = changeSet{}
 	m.remote = tuiRemoteMsg{note: "server is ahead by 2 version(s)"}
 	if txt, _ = m.statusVerdict(); txt != "● needs sync — server ahead" {
 		t.Fatalf("coarse-ahead verdict = %q", txt)
@@ -681,7 +682,7 @@ func TestTUIStatusVerdict(t *testing.T) {
 	}
 
 	// Before the reply but with local changes, the local-only verdict still shows.
-	m.local = localChanges{modified: []string{"z"}}
+	m.local = testChanges(nil, []string{"z"})
 	if txt, _ = m.statusVerdict(); txt != "● needs sync — 1 up" {
 		t.Fatalf("local-only verdict = %q", txt)
 	}
@@ -852,4 +853,17 @@ func TestTUIConflictCopies(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("conflict copies = %v, want 2 entries", got)
 	}
+}
+
+// testChanges builds a change set the way a real delta would, so the rows under test
+// come from the same classification the commands render.
+func testChanges(added, modified []string) changeSet {
+	var d syncengine.Delta
+	for _, p := range added {
+		d.Changes = append(d.Changes, syncengine.Change{Path: p, Kind: syncengine.ChangeAdded, Type: syncengine.ChildFile})
+	}
+	for _, p := range modified {
+		d.Changes = append(d.Changes, syncengine.Change{Path: p, Kind: syncengine.ChangeContent, Type: syncengine.ChildFile})
+	}
+	return newChangeSet(d)
 }

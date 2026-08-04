@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -215,6 +216,7 @@ func writeSymlinkAt(full, target string, prepare func() error) error {
 type treeWriter struct {
 	dir     string
 	created map[string]bool // relative slash paths this pass wrote as symlinks
+	dirs    []DirEntry      // tracked directories written this pass, for applyDirModes
 }
 
 func newTreeWriter(dir string) *treeWriter {
@@ -238,6 +240,56 @@ func (w *treeWriter) writeSymlink(e Entry) error {
 		return err
 	}
 	w.created[w.relKey(full)] = true
+	return nil
+}
+
+// writeDir creates a tracked directory during a whole-tree pass, using the same
+// stale-parent handling as the file and symlink writers rather than refusing outright.
+// The recorded mode is deliberately not applied here — the archive lists a directory
+// ahead of the entries under it, so a mode that denies write would block its own
+// children; applyDirModes sets it once the pass is done.
+func (w *treeWriter) writeDir(d DirEntry) error {
+	full, err := safeJoin(w.dir, d.Path)
+	if err != nil {
+		return err
+	}
+	if err := w.prepareParents(full); err != nil {
+		return err
+	}
+	// prepareParents stops short of the leaf, which the file and symlink writers
+	// replace rather than follow. A directory has to do the same clearing itself, or
+	// MkdirAll fails on the stale file or symlink standing where the directory goes.
+	if err := w.clearStaleLeaf(full); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(full, 0o700); err != nil {
+		return err
+	}
+	w.dirs = append(w.dirs, d)
+	return nil
+}
+
+// applyDirModes sets the recorded mode of every directory this pass created.
+func (w *treeWriter) applyDirModes() error { return applyDirModes(w.dir, w.dirs) }
+
+// clearStaleLeaf removes a non-directory at full: a path the remote turned into a
+// directory. Replacing the entry is never a traversal — the escape prepareParents
+// guards against is descending *through* a symlink, not overwriting one.
+func (w *treeWriter) clearStaleLeaf(full string) error {
+	fi, err := os.Lstat(full)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if fi.IsDir() {
+		return nil
+	}
+	if err := os.Remove(full); err != nil {
+		return err
+	}
+	delete(w.created, w.relKey(full))
 	return nil
 }
 
@@ -324,22 +376,48 @@ func HashOnDisk(dir, relPath string) (hash string, exists, isDir bool, err error
 	}
 }
 
-// MaterializeDir creates the directory for a tracked DirEntry under dir (parents
-// included) and sets its mode. It materializes an empty tracked directory and
-// applies a directory permission change; a directory that already exists (e.g.
-// created while writing a file into it) is just chmod'd to the recorded mode.
-func MaterializeDir(dir string, d DirEntry) error {
-	full, err := safeJoin(dir, d.Path)
-	if err != nil {
-		return err
+// MaterializeDirs creates every tracked directory under dir and then applies their
+// recorded modes. It materializes the empty tracked directories a file download does
+// not create on its own, and applies directory permission changes to the ones that
+// already exist.
+//
+// Creation runs shallowest first so a parent exists before its children; the modes
+// come after, because a directory whose recorded mode denies write cannot receive the
+// children created below it (see applyDirModes).
+func MaterializeDirs(dir string, dirs []DirEntry) error {
+	ordered := append([]DirEntry(nil), dirs...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+	for _, d := range ordered {
+		full, err := safeJoin(dir, d.Path)
+		if err != nil {
+			return err
+		}
+		if err := refuseSymlinkParents(dir, full); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(full, 0o700); err != nil {
+			return err
+		}
 	}
-	if err := refuseSymlinkParents(dir, full); err != nil {
-		return err
+	return applyDirModes(dir, ordered)
+}
+
+// applyDirModes sets each tracked directory's recorded mode, deepest first: a parent
+// whose mode denies write or traversal must not take effect while the tree below it is
+// still being built.
+func applyDirModes(dir string, dirs []DirEntry) error {
+	ordered := append([]DirEntry(nil), dirs...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path > ordered[j].Path })
+	for _, d := range ordered {
+		full, err := safeJoin(dir, d.Path)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(full, dirMode(d)); err != nil {
+			return err
+		}
 	}
-	if err := os.MkdirAll(full, 0o700); err != nil {
-		return err
-	}
-	return os.Chmod(full, dirMode(d))
+	return nil
 }
 
 func dirMode(d DirEntry) os.FileMode {

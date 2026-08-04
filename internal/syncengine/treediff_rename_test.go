@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func diffManifests(t *testing.T, left, right Manifest) (TreeDiff, *diffFetcher, TreeRoot, mapSink) {
+func diffManifests(t *testing.T, left, right Manifest) (Delta, *diffFetcher, TreeRoot, mapSink) {
 	t.Helper()
 	conv := testConv(t)
 	leftSink, rightSink := mapSink{}, mapSink{}
@@ -35,11 +35,11 @@ func TestDiffTreeRootsFileRename(t *testing.T) {
 	if !reflect.DeepEqual(d.Renamed, want) {
 		t.Errorf("renamed = %v, want %v", d.Renamed, want)
 	}
-	if len(d.Added) != 0 {
-		t.Errorf("added = %v, want empty", d.Added)
+	if len(d.Paths(ChangeAdded)) != 0 {
+		t.Errorf("added = %v, want empty", d.Paths(ChangeAdded))
 	}
-	if len(d.Removed) != 0 {
-		t.Errorf("removed = %v, want empty", d.Removed)
+	if len(d.Paths(ChangeRemoved)) != 0 {
+		t.Errorf("removed = %v, want empty", d.Paths(ChangeRemoved))
 	}
 }
 
@@ -59,11 +59,11 @@ func TestDiffTreeRootsDirectoryRenameCoalesces(t *testing.T) {
 	if !reflect.DeepEqual(d.Renamed, want) {
 		t.Errorf("renamed = %v, want %v", d.Renamed, want)
 	}
-	if len(d.Added) != 0 {
-		t.Errorf("added = %v, want empty", d.Added)
+	if len(d.Paths(ChangeAdded)) != 0 {
+		t.Errorf("added = %v, want empty", d.Paths(ChangeAdded))
 	}
-	if len(d.Removed) != 0 {
-		t.Errorf("removed = %v, want empty", d.Removed)
+	if len(d.Paths(ChangeRemoved)) != 0 {
+		t.Errorf("removed = %v, want empty", d.Paths(ChangeRemoved))
 	}
 }
 
@@ -79,11 +79,11 @@ func TestDiffTreeRootsDuplicateContentStaysDeleteAdd(t *testing.T) {
 	if len(d.Renamed) != 0 {
 		t.Errorf("renamed = %v, want none", d.Renamed)
 	}
-	if want := []string{"one.txt", "two.txt"}; !reflect.DeepEqual(d.Removed, want) {
-		t.Errorf("removed = %v, want %v", d.Removed, want)
+	if want := []string{"one.txt", "two.txt"}; !reflect.DeepEqual(d.Paths(ChangeRemoved), want) {
+		t.Errorf("removed = %v, want %v", d.Paths(ChangeRemoved), want)
 	}
-	if want := []string{"moved.txt"}; !reflect.DeepEqual(d.Added, want) {
-		t.Errorf("added = %v, want %v", d.Added, want)
+	if want := []string{"moved.txt"}; !reflect.DeepEqual(d.Paths(ChangeAdded), want) {
+		t.Errorf("added = %v, want %v", d.Paths(ChangeAdded), want)
 	}
 }
 
@@ -102,11 +102,11 @@ func TestDiffTreeRootsModifiedUntouchedByPairing(t *testing.T) {
 	if want := []Rename{{From: "dir/old.txt", To: "dir/new.txt"}}; !reflect.DeepEqual(d.Renamed, want) {
 		t.Errorf("renamed = %v, want %v", d.Renamed, want)
 	}
-	if want := []string{"mod.txt"}; !reflect.DeepEqual(d.Modified, want) {
-		t.Errorf("modified = %v, want %v", d.Modified, want)
+	if want := []string{"mod.txt"}; !reflect.DeepEqual(d.Paths(ChangeContent), want) {
+		t.Errorf("modified = %v, want %v", d.Paths(ChangeContent), want)
 	}
-	if len(d.Added) != 0 || len(d.Removed) != 0 {
-		t.Errorf("added/removed = %v/%v, want empty", d.Added, d.Removed)
+	if len(d.Paths(ChangeAdded)) != 0 || len(d.Paths(ChangeRemoved)) != 0 {
+		t.Errorf("added/removed = %v/%v, want empty", d.Paths(ChangeAdded), d.Paths(ChangeRemoved))
 	}
 }
 

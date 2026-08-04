@@ -594,6 +594,23 @@ handful of manifest objects, not the whole manifest — the 64 MiB blob ceiling 
 gone). Ownership, versioning, and the master-key-wrapped content key are inherited
 from the resource model unchanged.
 
+**One definition of a changed tree.** `syncengine.Diff` classifies two manifests into
+a `Delta`: every tracked file, symlink, and directory that differs, across additions,
+removals, content, mode, and type changes, plus delete+add pairs coalesced into
+renames. It is what `status` (both its local and incoming halves), the TUI's files
+panel, both sync adapters' local-change gates, and `snapshot diff` report from, so a
+directory-only or mode-only edit cannot be visible to one caller and invisible to
+another. `DiffTreeRoots` produces the same `Delta` from two Merkle-DAG roots without
+materializing either side, and `snapshot diff`'s materialize fallback scans both temp
+trees back into manifests, so all three routes classify identically.
+
+The three-way planners (`Plan`, `PlanDirs`) stay separate — they answer "what should
+this sync do", not "what differs" — but compare entries through the same
+`entryDiffers` rule, so the operational plan and the reported classification cannot
+disagree about what counts as a change. A symlink's own permission bits are excluded
+from that rule: a scan never records them and apply never sets them, so comparing them
+would manufacture a difference no side could resolve.
+
 **Chunking + dedup.** Files at or below an inline threshold (the FastCDC minimum)
 are stored inline in the manifest (which is itself sealed), so a tree of many
 tiny files never spawns tiny on-disk blobs. Larger files are split with **FastCDC**
@@ -694,8 +711,12 @@ whole folder, and `sync` reconciles it whole-folder last-writer-wins (a change o
 both sides is one conflict; `--force` resolves local-wins; `--conflicts=copy` and
 `--conflicts=merge` are chunked-only and are refused here, since there is no per-file conflict to resolve) rather
 than merging per
-file; `clone` untars it. The `watch` block lets a folder pin its daemon behavior
-in-tree, the same way `.aqtignore` pins its exclusions.
+file; `clone` untars it. The archive carries a header per tracked directory, not just
+per file and symlink: the extract side rebuilds its manifest from the tar alone, so a
+directory left out of the stream would lose its mode and — if empty — itself. An
+archive written before this carries no directory headers, so the first sync after
+upgrading re-ships such a folder once and then converges. The `watch` block lets a
+folder pin its daemon behavior in-tree, the same way `.aqtignore` pins its exclusions.
 
 **Chunked mode leaks a size-sequence fingerprint (choose pack-and-seal to avoid it).**
 FastCDC boundaries are content-derived and the pack index stores each object's

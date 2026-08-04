@@ -123,7 +123,11 @@ func reconcilePack(c packCtx) error {
 		return reconcilePackNoBase(c, res, ck)
 	}
 
-	localChanged := len(syncengine.Plan(c.local, c.base, c.base)) > 0
+	// Diff, not the file-only planner: a pack folder seals its tracked directories
+	// too, so an empty-directory add/remove or a directory-mode edit is a real local
+	// change. Gating on file actions alone reported those trees as already synced and
+	// never pushed them.
+	localChanged := !syncengine.Diff(c.base, c.local).Empty()
 	remoteChanged := res.Version != c.base.Version
 	action := decidePack(localChanged, remoteChanged, c.opts)
 
@@ -407,6 +411,19 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 			return err
 		}
 	}
+	// Tracked directories the remote dropped, pruned after their files so an emptied
+	// directory can go. RemoveDir removes only an empty one, so a directory still
+	// holding untracked content survives — the rule the chunked apply follows too.
+	remoteDirs := remote.DirsByPath()
+	var goneDirs []string
+	for _, d := range c.local.Dirs {
+		if _, ok := remoteDirs[d.Path]; !ok {
+			goneDirs = append(goneDirs, d.Path)
+		}
+	}
+	if err := removeDirs(c.root, goneDirs); err != nil {
+		return err
+	}
 	if err := savePackBase(c.root, remote, res.Version); err != nil {
 		return err
 	}
@@ -441,7 +458,7 @@ func remoteEqualsLocal(c packCtx, root syncengine.PackRoot, ck crypto.ContentKey
 	if err != nil {
 		return false, err
 	}
-	return len(syncengine.Plan(c.local, remote, remote)) == 0, nil
+	return syncengine.Diff(remote, c.local).Empty(), nil
 }
 
 func savePackBase(root string, m syncengine.Manifest, version int) error {

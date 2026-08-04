@@ -72,14 +72,17 @@ func TestDiffTreeRootsReportsChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"fresh/only-right.txt", "root-new.txt"}; !reflect.DeepEqual(d.Added, want) {
-		t.Errorf("added = %v, want %v", d.Added, want)
+	// The one-sided directories are reported alongside the files inside them: a
+	// tracked directory is a manifest entry, not an artifact of its children's paths.
+	if want := []string{"fresh", "fresh/only-right.txt", "root-new.txt"}; !reflect.DeepEqual(d.Paths(ChangeAdded), want) {
+		t.Errorf("added = %v, want %v", d.Paths(ChangeAdded), want)
 	}
-	if want := []string{"gone/only-left.txt", "root-gone.txt"}; !reflect.DeepEqual(d.Removed, want) {
-		t.Errorf("removed = %v, want %v", d.Removed, want)
+	if want := []string{"gone", "gone/only-left.txt", "root-gone.txt"}; !reflect.DeepEqual(d.Paths(ChangeRemoved), want) {
+		t.Errorf("removed = %v, want %v", d.Paths(ChangeRemoved), want)
 	}
-	if want := []string{"mod/changed.txt"}; !reflect.DeepEqual(d.Modified, want) {
-		t.Errorf("modified = %v, want %v", d.Modified, want)
+	// links/ln retargeted: a symlink's target is its content, so it is a content change.
+	if want := []string{"links/ln", "mod/changed.txt"}; !reflect.DeepEqual(d.Paths(ChangeContent), want) {
+		t.Errorf("content = %v, want %v", d.Paths(ChangeContent), want)
 	}
 	if len(d.Renamed) != 0 {
 		t.Errorf("renamed = %v, want none", d.Renamed)
@@ -98,15 +101,6 @@ func TestDiffTreeRootsReportsChanges(t *testing.T) {
 			}
 		}
 	}
-	// The symlink target changed but symlinks are not reported (parity with the
-	// on-disk diff) — the "links" dir differs by hash yet must yield no output.
-	for _, p := range [][]string{d.Added, d.Removed, d.Modified} {
-		for _, path := range p {
-			if path == "links/ln" {
-				t.Error("symlink change was reported")
-			}
-		}
-	}
 }
 
 func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
@@ -122,7 +116,7 @@ func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.Added)+len(d.Removed)+len(d.Modified)+len(d.Renamed) != 0 {
+	if !d.Empty() {
 		t.Fatalf("identical roots diffed non-empty: %+v", d)
 	}
 	if len(f.requested) != 0 {
@@ -153,13 +147,18 @@ func TestDiffTreeRootsTypeChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"x/deep/nested.txt", "x/inner.txt"}; !reflect.DeepEqual(d.Added, want) {
-		t.Errorf("added = %v, want %v", d.Added, want)
+	// x itself is one typed change, not an unrelated removal and addition; what hung
+	// below the new directory arrived.
+	want := []Change{
+		{Path: "x", Kind: ChangeType, Type: ChildDir, Was: ChildFile},
+		{Path: "x/deep", Kind: ChangeAdded, Type: ChildDir},
+		{Path: "x/deep/nested.txt", Kind: ChangeAdded, Type: ChildFile},
+		{Path: "x/inner.txt", Kind: ChangeAdded, Type: ChildFile},
 	}
-	if want := []string{"x"}; !reflect.DeepEqual(d.Removed, want) {
-		t.Errorf("removed = %v, want %v", d.Removed, want)
+	if !reflect.DeepEqual(d.Changes, want) {
+		t.Errorf("changes = %+v, want %+v", d.Changes, want)
 	}
-	if len(d.Modified) != 0 {
-		t.Errorf("modified = %v, want none", d.Modified)
+	if len(d.Paths(ChangeRemoved)) != 0 {
+		t.Errorf("removed = %v, want none", d.Paths(ChangeRemoved))
 	}
 }

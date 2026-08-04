@@ -279,16 +279,16 @@ func runStatus(dir string, opts statusOptions) error {
 	ch := computeLocalChanges(local, base)
 
 	if flagJSON {
-		renamed := ch.renamed
-		if renamed == nil {
-			renamed = []syncengine.Rename{}
-		}
 		out := map[string]any{
 			"clean":    ch.total() == 0,
 			"added":    nonNil(ch.added),
 			"modified": nonNil(ch.modified),
 			"deleted":  nonNil(ch.deleted),
-			"renamed":  renamed,
+			"renamed":  nonNilRenames(ch.renamed),
+			// The buckets above flatten directories, mode edits, and type switches into
+			// the three names they have always carried; changes reports each one as what
+			// it is, so a caller never has to guess why a path is "modified".
+			"changes": nonNilChanges(ch.changes),
 		}
 		if !opts.offline {
 			if rep := collectIncoming(root, base); rep != nil {
@@ -301,12 +301,7 @@ func runStatus(dir string, opts statusOptions) error {
 	if ch.total() == 0 {
 		fmt.Println("clean (no local changes since last sync)")
 	} else {
-		printPaths("new", ch.added)
-		printPaths("modified", ch.modified)
-		printPaths("deleted", ch.deleted)
-		for _, r := range ch.renamed {
-			fmt.Printf("%-9s %s\n", "renamed", renameArrow(r))
-		}
+		printChanges(ch, "")
 	}
 
 	if opts.offline {
@@ -316,64 +311,25 @@ func runStatus(dir string, opts statusOptions) error {
 	return nil
 }
 
-// localChanges classifies the working tree against the last-synced base manifest:
-// the offline half of `status`, shared with the TUI's files panel.
-type localChanges struct {
-	added    []string
-	modified []string
-	deleted  []string
-	renamed  []syncengine.Rename
-}
-
-func (c localChanges) total() int {
-	return len(c.added) + len(c.modified) + len(c.deleted) + len(c.renamed)
-}
-
-func computeLocalChanges(local, base syncengine.Manifest) localChanges {
-	baseByPath := base.ByPath()
-	var c localChanges
-	for _, a := range syncengine.Plan(local, base, base) {
-		switch a.Kind {
-		case syncengine.Upload:
-			if _, ok := baseByPath[a.Path]; ok {
-				c.modified = append(c.modified, a.Path)
-			} else {
-				c.added = append(c.added, a.Path)
-			}
-		case syncengine.DeleteRemote:
-			c.deleted = append(c.deleted, a.Path)
-		}
-	}
-	c.renamed, c.added, c.deleted = syncengine.DetectRenames(c.added, c.deleted, local, base)
-	return c
-}
-
-// incomingSummary is the file-level view of what the server holds that this machine
-// has not yet pulled: entries added or modified on the remote since the last sync,
-// and entries the remote dropped. Like the local status view it is files-only.
-type incomingSummary struct {
-	added    []string
-	modified []string
-	deleted  []string
-	renamed  []syncengine.Rename
-}
-
-func (s incomingSummary) total() int {
-	return len(s.added) + len(s.modified) + len(s.deleted) + len(s.renamed)
+// computeLocalChanges classifies the working tree against the last-synced base
+// manifest: the offline half of `status`, shared with the TUI's files panel.
+func computeLocalChanges(local, base syncengine.Manifest) changeSet {
+	return newChangeSet(syncengine.Diff(base, local))
 }
 
 // incomingReport is the server-side half of `status`: whether the server holds
-// changes this machine has not pulled, at file level when the folder key is at hand.
+// changes this machine has not pulled, at entry level when the folder key is at hand.
 type incomingReport struct {
 	State         string              `json:"state"` // "up-to-date" | "ahead" | "rollback"
 	AheadBy       int                 `json:"aheadBy,omitempty"`
 	ServerVersion int                 `json:"serverVersion,omitempty"` // set on rollback
 	SeenVersion   int                 `json:"seenVersion,omitempty"`   // set on rollback
-	Files         bool                `json:"-"`                       // the file-level lists below are populated
+	Files         bool                `json:"-"`                       // the entry-level lists below are populated
 	Added         []string            `json:"added,omitempty"`
 	Modified      []string            `json:"modified,omitempty"`
 	Deleted       []string            `json:"deleted,omitempty"`
 	Renamed       []syncengine.Rename `json:"renamed,omitempty"`
+	Changes       []syncengine.Change `json:"changes,omitempty"`
 }
 
 // collectIncoming reports whether the server holds changes this machine has not
@@ -413,7 +369,7 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	}
 
 	// The server is ahead (or RemoteVersion predates version tracking). Try for a
-	// file-level breakdown; it needs the folder key, available without a prompt only
+	// entry-level breakdown; it needs the folder key, available without a prompt only
 	// when a session is already unlocked, and only for a chunked folder — a pack-and-seal
 	// folder is one opaque blob with no per-file remote diff, so it stays version-level.
 	if cfg, cerr := syncengine.LoadConfig(root); cerr == nil && !cfg.Pack {
@@ -426,7 +382,8 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 				}
 				return &incomingReport{
 					State: state, Files: true,
-					Added: inc.added, Modified: inc.modified, Deleted: inc.deleted, Renamed: inc.renamed,
+					Added: inc.added, Modified: inc.modified, Deleted: inc.deleted,
+					Renamed: inc.renamed, Changes: inc.changes,
 				}
 			}
 		}
@@ -451,7 +408,10 @@ func printIncomingReport(rep *incomingReport) {
 	case rep.State == "up-to-date":
 		fmt.Println("up to date with the server")
 	case rep.Files:
-		printIncoming(incomingSummary{added: rep.Added, modified: rep.Modified, deleted: rep.Deleted, renamed: rep.Renamed})
+		printIncoming(changeSet{
+			changes: rep.Changes, renamed: rep.Renamed,
+			added: rep.Added, modified: rep.Modified, deleted: rep.Deleted,
+		})
 	case rep.AheadBy > 0:
 		fmt.Printf("incoming: the server is ahead by %d version(s); run `aqt sync` to pull\n", rep.AheadBy)
 	default:
@@ -463,25 +423,25 @@ func printIncomingReport(rep *incomingReport) {
 // base, yielding the files this machine would pull. It reuses the base tree's node
 // ciphertexts so an unchanged remote subtree costs no fetch, exactly like a sync's
 // remote read.
-func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengine.Manifest, mk crypto.MasterKey) (incomingSummary, error) {
+func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengine.Manifest, mk crypto.MasterKey) (changeSet, error) {
 	if res.WrappedKey == nil {
-		return incomingSummary{}, errors.New("folder resource has no owner key")
+		return changeSet{}, errors.New("folder resource has no owner key")
 	}
 	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
 	if err != nil {
-		return incomingSummary{}, err
+		return changeSet{}, err
 	}
 	defer ck.Wipe()
 	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
-		return incomingSummary{}, err
+		return changeSet{}, err
 	}
 	if !meta.Tree {
-		return incomingSummary{}, errors.New("unsupported remote folder format")
+		return changeSet{}, errors.New("unsupported remote folder format")
 	}
 	remote, err := readRemoteManifest(cl, res, ck, base, mk)
 	if err != nil {
-		return incomingSummary{}, err
+		return changeSet{}, err
 	}
 	return diffIncoming(base, remote), nil
 }
@@ -502,56 +462,24 @@ func readRemoteManifest(cl *client.Client, res api.GetResourceResponse, ck crypt
 	return openRemoteTreeReusingBase(cl, res.Blob, ck, res.ID, baseCT)
 }
 
-// diffIncoming reports the file-level changes the server holds relative to the last
-// synced base. It mirrors the planner's notion of "changed" (content or mode), and
-// like the local status view it considers files only, not tracked directories.
-func diffIncoming(base, remote syncengine.Manifest) incomingSummary {
-	baseByPath := base.ByPath()
-	remoteByPath := remote.ByPath()
-	var s incomingSummary
-	for path, re := range remoteByPath {
-		switch be, ok := baseByPath[path]; {
-		case !ok:
-			s.added = append(s.added, path)
-		case be.Hash != re.Hash || be.Mode != re.Mode:
-			s.modified = append(s.modified, path)
-		}
-	}
-	for path := range baseByPath {
-		if _, ok := remoteByPath[path]; !ok {
-			s.deleted = append(s.deleted, path)
-		}
-	}
-	sort.Strings(s.added)
-	sort.Strings(s.modified)
-	sort.Strings(s.deleted)
-	s.renamed, s.added, s.deleted = syncengine.DetectRenames(s.added, s.deleted, remote, base)
-	return s
+// diffIncoming reports the changes the server holds relative to the last synced
+// base, under the same classification the local half of status uses.
+func diffIncoming(base, remote syncengine.Manifest) changeSet {
+	return newChangeSet(syncengine.Diff(base, remote))
 }
 
-func printIncoming(s incomingSummary) {
+// printIncoming lists incoming changes indented under the "incoming:" summary, so
+// they read as a group and never look like the top-level local changes above them.
+func printIncoming(s changeSet) {
 	if s.total() == 0 {
 		fmt.Println("up to date with the server")
 		return
 	}
 	fmt.Printf("incoming: %d to pull (%s); run `aqt sync`\n", s.total(), incomingBreakdown(s))
-	printIncomingPaths("new", s.added)
-	printIncomingPaths("modified", s.modified)
-	printIncomingPaths("deleted", s.deleted)
-	for _, r := range s.renamed {
-		fmt.Printf("  %-9s %s\n", "renamed", renameArrow(r))
-	}
+	printChanges(s, "  ")
 }
 
-// printIncomingPaths lists incoming paths indented under the "incoming:" summary, so
-// they read as a group and never look like the top-level local changes above them.
-func printIncomingPaths(label string, paths []string) {
-	for _, p := range paths {
-		fmt.Printf("  %-9s %s\n", label, p)
-	}
-}
-
-func incomingBreakdown(s incomingSummary) string {
+func incomingBreakdown(s changeSet) string {
 	var parts []string
 	if n := len(s.added); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d new", n))
@@ -1311,7 +1239,7 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 
 	// Directories last: create/chmod after files land (so a directory exists and gets
 	// its mode), and remove emptied directories after file deletes.
-	if err := materializeDirs(c.root, dirDownloads); err != nil {
+	if err := syncengine.MaterializeDirs(c.root, dirDownloads); err != nil {
 		return err
 	}
 	if err := removeDirs(c.root, dirRemovals); err != nil {
@@ -1575,7 +1503,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 		if dlErr != nil {
 			return dlErr
 		}
-		return materializeDirs(staging, manifest.Dirs)
+		return syncengine.MaterializeDirs(staging, manifest.Dirs)
 	}); err != nil {
 		return err
 	}
@@ -1686,7 +1614,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 	if dlErr != nil {
 		return syncengine.Manifest{}, dlErr
 	}
-	if err := materializeDirs(abs, manifest.Dirs); err != nil {
+	if err := syncengine.MaterializeDirs(abs, manifest.Dirs); err != nil {
 		return syncengine.Manifest{}, err
 	}
 	return manifest, nil
@@ -2395,20 +2323,6 @@ func dirsFrom(byPath map[string]syncengine.DirEntry) []syncengine.DirEntry {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Path < out[j].Path })
 	return out
-}
-
-// materializeDirs creates each tracked directory under root with its recorded mode,
-// shallowest first so a parent exists before its children. It materializes empty
-// directories and applies directory permission changes during clone and pull.
-func materializeDirs(root string, dirs []syncengine.DirEntry) error {
-	sorted := append([]syncengine.DirEntry(nil), dirs...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Path < sorted[j].Path })
-	for _, d := range sorted {
-		if err := syncengine.MaterializeDir(root, d); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // removeDirs removes tracked directories deepest first (a child before its parent),

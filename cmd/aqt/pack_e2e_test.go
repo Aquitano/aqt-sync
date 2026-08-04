@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -378,5 +379,85 @@ func writePackConfig(t *testing.T, root string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(root, ".aqtconfig"), []byte(`{"pack": true}`), 0o644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestPackSyncDirectoryOnlyChanges is the regression for the pack-and-seal local-change
+// gate: it consulted the file planner alone, so a change that touches no file — an
+// empty directory appearing or disappearing, or a directory's mode being edited — was
+// reported as already synced and never pushed.
+func TestPackSyncDirectoryOnlyChanges(t *testing.T) {
+	h := newE2E(t)
+
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "alpha")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	// An empty directory is the whole change: no file differs on either side.
+	if err := os.Mkdir(filepath.Join(origin, "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	h.sync(replica)
+	assertDir(t, replica, "empty")
+
+	// Removing it is equally invisible to a file-level comparison.
+	if err := os.Remove(filepath.Join(origin, "empty")); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	h.sync(replica)
+	assertAbsent(t, replica, "empty")
+}
+
+// A directory-mode-only edit propagates on platforms where directory permission bits
+// round-trip. Windows Chmod carries only the write bit, so a mode-only edit is not
+// representable there and the sync would have nothing to observe.
+func TestPackSyncDirectoryModeOnlyChange(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory permission bits do not round-trip on Windows")
+	}
+	h := newE2E(t)
+
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "notes/todo.txt", "buy milk")
+	if err := os.Chmod(filepath.Join(origin, "notes"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	if err := os.Chmod(filepath.Join(origin, "notes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	h.sync(replica)
+
+	fi, err := os.Stat(filepath.Join(replica, "notes"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("directory mode did not propagate: got %o, want 0700", got)
+	}
+}
+
+func assertDir(t *testing.T, root, rel string) {
+	t.Helper()
+	fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(rel)))
+	if err != nil {
+		t.Fatalf("stat %s: %v", rel, err)
+	}
+	if !fi.IsDir() {
+		t.Fatalf("%s is not a directory", rel)
 	}
 }

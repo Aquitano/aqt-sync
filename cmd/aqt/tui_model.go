@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 type tuiPanelID int
@@ -65,7 +66,7 @@ type tuiModel struct {
 
 	// loaded data (panels render from these)
 	folderID  string
-	local     localChanges
+	local     changeSet
 	conflicts []string
 	remote    tuiRemoteMsg
 	remoteOK  bool
@@ -1205,13 +1206,19 @@ func (m *tuiModel) rebuildFilesPanel() {
 	section := func(title string, n int) tuiRow {
 		return tuiRow{body: fmt.Sprintf("%s (%d)", title, n), bodyStyle: tuiStyleTitle, header: true}
 	}
-	addPaths := func(kind, mark string, style lipgloss.Style, paths []string) {
-		for _, p := range paths {
+	// incoming rows carry the "incoming" detail kind regardless of what changed;
+	// local rows carry the change's own label so mode and type edits are named.
+	addChanges := func(prefix, kindOverride string, changes []syncengine.Change) {
+		for _, c := range orderedChanges(changes) {
+			kind := kindOverride
+			if kind == "" {
+				kind = changeLabel(c.Kind)
+			}
 			rows = append(rows, tuiRow{
-				mark:      mark,
-				markStyle: style,
-				body:      p,
-				tag:       tuiFileItem{kind: kind, path: p},
+				mark:      prefix + changeMark(c.Kind),
+				markStyle: tuiChangeStyle(c.Kind),
+				body:      changePath(c),
+				tag:       tuiFileItem{kind: kind, path: c.Path, dir: c.IsDir()},
 			})
 		}
 	}
@@ -1220,9 +1227,7 @@ func (m *tuiModel) rebuildFilesPanel() {
 	if m.local.total() == 0 {
 		rows = append(rows, tuiRow{body: "clean", bodyStyle: tuiStyleDim, header: true})
 	}
-	addPaths("new", "A", tuiStyleAdd, m.local.added)
-	addPaths("modified", "M", tuiStyleMod, m.local.modified)
-	addPaths("deleted", "D", tuiStyleDel, m.local.deleted)
+	addChanges("", "", m.local.changes)
 	for _, r := range m.local.renamed {
 		rows = append(rows, tuiRow{
 			mark:      "R",
@@ -1235,19 +1240,7 @@ func (m *tuiModel) rebuildFilesPanel() {
 	if m.remoteOK && m.remote.fileLevel {
 		inc := m.remote.incoming
 		rows = append(rows, section("Incoming", inc.total()))
-		addIncoming := func(mark string, style lipgloss.Style, paths []string) {
-			for _, p := range paths {
-				rows = append(rows, tuiRow{
-					mark:      "↓" + mark,
-					markStyle: style,
-					body:      p,
-					tag:       tuiFileItem{kind: "incoming", path: p},
-				})
-			}
-		}
-		addIncoming("A", tuiStyleAdd, inc.added)
-		addIncoming("M", tuiStyleMod, inc.modified)
-		addIncoming("D", tuiStyleDel, inc.deleted)
+		addChanges("↓", "incoming", inc.changes)
 		for _, r := range inc.renamed {
 			rows = append(rows, tuiRow{
 				mark:      "↓R",
