@@ -95,6 +95,25 @@ func tuiChangeStyle(k syncengine.ChangeKind) lipgloss.Style {
 	}
 }
 
+// nameStatusMark is `aqt diff --name-status`'s one-letter column: git's vocabulary
+// extended with the two kinds the shared classification made visible — P for a
+// permission-only edit and T for a path that changed between file, symlink, and
+// directory.
+func nameStatusMark(k syncengine.ChangeKind) string {
+	switch k {
+	case syncengine.ChangeAdded:
+		return "A"
+	case syncengine.ChangeRemoved:
+		return "D"
+	case syncengine.ChangeMode:
+		return "P"
+	case syncengine.ChangeType:
+		return "T"
+	default:
+		return "M"
+	}
+}
+
 // diffMark is snapshot diff's one-character gutter: the familiar +/-/~ for the three
 // buckets, with mode and type edits marked apart from a content edit.
 func diffMark(k syncengine.ChangeKind) string {

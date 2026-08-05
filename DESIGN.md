@@ -216,8 +216,41 @@ aqt clone  <id|url> [<dir>]  Materialize a tracked folder on a new machine.
                           reconcile differences as conflicts.
 aqt diff [<path>...] [dir]   Unified diff of local changes against the sync base.
       --remote            Diff incoming remote changes against the base instead.
-      --against <snapshot-id>  Diff the working tree against a snapshot.
+      --against <snapshot-id|remote>  Compare the working tree against a snapshot,
+                          or against the folder's current remote state.
+      --name-status       List classified paths instead of file content
+                          (A added, M modified, P permissions, T type, D deleted,
+                          R renamed). Implied by --json.
 ```
+
+**Four questions, four commands.** They are easy to confuse, so each one names what it
+compares:
+
+| command | left | right | answers |
+| --- | --- | --- | --- |
+| `aqt status` | last-synced base | working tree, *and* current remote | what changed here, and what is waiting there |
+| `aqt sync --dry-run` | base + both sides | — | what a reconcile would do (three-way plan) |
+| `aqt diff --against=remote` | current remote | working tree | how these two states differ, right now |
+| `aqt snapshot diff <id>` | a snapshot | live resource, or a second snapshot | how a past state differs from another |
+
+`status` is base-relative and reports two independent halves, so a path can appear in
+both when each side moved; `--against=remote` has no base at all, so two sides that
+converged on the same content report *no differences* even while `status` still shows
+work pending on each. Neither replaces the other.
+
+Every `diff` mode is read-only: nothing is uploaded, nothing lands in the working
+tree, and neither `.aqt/base.json` nor the recorded remote version is touched, so a
+comparison can never change what a later `sync` decides to do.
+
+`--against=remote` needs the folder key. It prompts for the passphrase on a terminal
+and never otherwise: under `--json` or a non-terminal stdin a locked session reports
+`"complete": false` with `"reason": "session-locked"` (both sides and the remote
+version still named) rather than blocking on a prompt that nobody would answer. The
+same completeness fields appear in the human output as an explicit sentence, so an
+incomplete comparison is never mistaken for a clean one. A chunked folder answers
+from directory-node metadata alone; a pack-and-seal folder has no per-file remote
+metadata, so its whole tree is streamed back and hashed in memory — a truthful
+per-entry answer that costs the folder's full download but writes nothing to disk.
 
 `.aqtignore` uses gitignore syntax. The starter file seeds common build-artifact
 and cache excludes (`node_modules/`, `.next/`, `target/`, `__pycache__/`, `dist/`,
@@ -598,11 +631,21 @@ from the resource model unchanged.
 a `Delta`: every tracked file, symlink, and directory that differs, across additions,
 removals, content, mode, and type changes, plus delete+add pairs coalesced into
 renames. It is what `status` (both its local and incoming halves), the TUI's files
-panel, both sync adapters' local-change gates, and `snapshot diff` report from, so a
-directory-only or mode-only edit cannot be visible to one caller and invisible to
-another. `DiffTreeRoots` produces the same `Delta` from two Merkle-DAG roots without
-materializing either side, and `snapshot diff`'s materialize fallback scans both temp
-trees back into manifests, so all three routes classify identically.
+panel, both sync adapters' local-change gates, `snapshot diff`, and
+`diff --name-status` report from, so a directory-only or mode-only edit cannot be
+visible to one caller and invisible to another. `DiffTreeRoots` produces the same
+`Delta` from two Merkle-DAG roots without materializing either side, and `snapshot
+diff`'s materialize fallback scans both temp trees back into manifests, so all three
+routes classify identically.
+
+**One result shape for a two-sided comparison.** Every command that compares two named
+states — `diff --name-status` (against the base, a snapshot, or the current remote),
+`snapshot diff`, and the TUI's compare view — returns the same `comparison`: the two
+labelled sides, a `complete` flag with a stable `reason` when file-level comparison was
+unavailable, and the `Delta` behind the familiar added/removed/modified buckets. A new
+side or a new caller extends that type rather than forking a parallel one, which is why
+the TUI can render a snapshot diff and a working-tree-versus-remote comparison through
+the same code.
 
 The three-way planners (`Plan`, `PlanDirs`) stay separate — they answer "what should
 this sync do", not "what differs" — but compare entries through the same

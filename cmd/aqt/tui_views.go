@@ -14,7 +14,7 @@ import (
 
 // tuiFileItem is a files-panel row payload.
 type tuiFileItem struct {
-	kind string // new | modified | mode | type | deleted | renamed | incoming | conflict
+	kind string // new | modified | mode | type | deleted | renamed | incoming | conflict | compared
 	path string
 	dir  bool   // the path is a tracked directory, which has no size to report
 	desc string // one-line explanation shown in the detail view
@@ -32,6 +32,8 @@ func tuiFileDetail(it tuiFileItem, root string) string {
 		b.WriteString(tuiField("copy", it.path))
 	case "incoming":
 		b.WriteString(tuiField("direction", "server → local (on next sync)"))
+	case "compared":
+		b.WriteString(tuiField("direction", "differs from the server's current state"))
 	default:
 		b.WriteString(tuiField("direction", "local → server (on next sync)"))
 		// A single real path can be stat'd on demand; a deletion has nothing to
@@ -54,6 +56,11 @@ func tuiFileDetail(it tuiFileItem, root string) string {
 				"pushes the result."))
 	case "incoming":
 		b.WriteString("\n" + tuiStyleDim.Render("On the server, not yet pulled — press s to sync."))
+	case "compared":
+		b.WriteString("\n" + tuiStyleDim.Render(
+			"The working tree and the server's current state disagree here.\n"+
+				"Which side a sync keeps depends on the last-synced base — see the\n"+
+				"local and incoming sections above, or run `aqt sync --dry-run`."))
 	default:
 		b.WriteString("\n" + tuiStyleDim.Render("Local change since the last sync — press s to sync."))
 	}
@@ -69,7 +76,7 @@ func tuiConflictOriginal(copyPath string) string {
 	return copyPath
 }
 
-func tuiSnapshotDetail(r snapshotRow, diff *snapshotDiffResult, diffErr error, diffing bool) string {
+func tuiSnapshotDetail(r snapshotRow, diff *comparison, diffErr error, diffing bool) string {
 	var b strings.Builder
 	title := r.Name
 	if r.Label != "" {
@@ -99,7 +106,7 @@ func tuiSnapshotDetail(r snapshotRow, diff *snapshotDiffResult, diffErr error, d
 	return b.String()
 }
 
-func tuiDiffBody(d snapshotDiffResult) string {
+func tuiDiffBody(d comparison) string {
 	var b strings.Builder
 	b.WriteString(tuiStyleTitle.Render(fmt.Sprintf("%s (v%d) → %s (v%d)", d.Left.Label, d.Left.Version, d.Right.Label, d.Right.Version)) + "\n")
 	if len(d.Added)+len(d.Removed)+len(d.Modified)+len(d.Renamed) == 0 {

@@ -78,9 +78,14 @@ type tuiModel struct {
 
 	// on-demand snapshot diff, keyed by snapshot id
 	diffFor string
-	diff    *snapshotDiffResult
+	diff    *comparison
 	diffErr error
 	diffing bool
+
+	// on-demand working-tree-versus-remote comparison
+	compared   *comparison
+	compareErr error
+	comparing  bool
 
 	vp viewport.Model
 
@@ -303,6 +308,26 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.diff = &msg.result
 		}
+		m.refreshMain()
+		return m, nil
+
+	case tuiStartCompareMsg:
+		// A held key must not stack tree walks: one comparison at a time.
+		if m.ctx.root == "" || m.comparing {
+			return m, nil
+		}
+		m.comparing, m.compareErr = true, nil
+		m.rebuildFilesPanel()
+		m.refreshMain()
+		return m, tea.Batch(m.ctx.compareCmd(), m.spin.Tick)
+
+	case tuiCompareMsg:
+		m.comparing = false
+		m.compareErr = msg.err
+		if msg.err == nil {
+			m.compared = &msg.result
+		}
+		m.rebuildFilesPanel()
 		m.refreshMain()
 		return m, nil
 
@@ -671,6 +696,12 @@ func tuiStartDiff(id string) tea.Cmd {
 	return func() tea.Msg { return tuiStartDiffMsg{snapshotID: id} }
 }
 
+type tuiStartCompareMsg struct{}
+
+func tuiStartCompare() tea.Cmd {
+	return func() tea.Msg { return tuiStartCompareMsg{} }
+}
+
 // tuiOpenDialog defers opening a dialog to the next Update, for the menu path
 // where the resolving option cannot set m.dialog itself.
 func tuiOpenDialog(d tuiDialog) tea.Cmd {
@@ -726,6 +757,8 @@ func (m *tuiModel) filesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "c":
 		m.dialog = m.checkpointDialog()
 		return m, textinput.Blink
+	case "C":
+		return m, tuiStartCompare()
 	}
 	return m, nil
 }
@@ -738,6 +771,7 @@ func (m *tuiModel) filesActions() []tuiMenuOption {
 		{key: "s", label: "sync (two-way)", cmd: m.syncCmd()},
 		{key: "u", label: "push local changes only", cmd: tuiRequestExec("sync", m.ctx.root, "--push-only")},
 		{key: "d", label: "pull remote changes only", cmd: tuiRequestExec("sync", m.ctx.root, "--pull-only")},
+		{key: "C", label: "compare working tree with remote (read-only)", cmd: tuiStartCompare()},
 		{key: "S", label: "sync options…", cmd: tuiOpenDialog(m.syncOptionsDialog())},
 		{key: "c", label: "checkpoint (named, never pruned)", cmd: tuiOpenDialog(m.checkpointDialog())},
 		{key: "w", label: m.agentToggleLabel(), cmd: m.agentToggleCmd()},
@@ -1251,6 +1285,39 @@ func (m *tuiModel) rebuildFilesPanel() {
 		}
 	}
 
+	// The on-demand comparison against the current remote. Unlike the two sections
+	// above it is not base-relative: it reports how the working tree and the server's
+	// current state differ outright, which is why it renders as its own section
+	// rather than being folded into either of them.
+	switch {
+	case m.comparing:
+		rows = append(rows,
+			tuiRow{body: "Compared with remote", bodyStyle: tuiStyleTitle, header: true},
+			tuiRow{body: "comparing…", bodyStyle: tuiStyleDim, header: true})
+	case m.compareErr != nil:
+		rows = append(rows,
+			tuiRow{body: "Compared with remote", bodyStyle: tuiStyleTitle, header: true},
+			tuiRow{body: "comparison failed: " + m.compareErr.Error(), bodyStyle: tuiStyleErr, header: true})
+	case m.compared != nil:
+		cmp := *m.compared
+		rows = append(rows, section("Compared with "+cmp.Left.String(), cmp.total()))
+		switch {
+		case !cmp.Complete:
+			rows = append(rows, tuiRow{body: comparisonUnavailable(cmp.Reason), bodyStyle: tuiStyleDim, header: true})
+		case cmp.total() == 0:
+			rows = append(rows, tuiRow{body: "identical", bodyStyle: tuiStyleDim, header: true})
+		}
+		addChanges("≠", "compared", cmp.Changes)
+		for _, r := range cmp.Renamed {
+			rows = append(rows, tuiRow{
+				mark:      "≠R",
+				markStyle: tuiStyleMod,
+				body:      renameArrow(r),
+				tag:       tuiFileItem{kind: "compared", path: renameArrow(r)},
+			})
+		}
+	}
+
 	if len(m.conflicts) > 0 {
 		rows = append(rows, section("Conflict copies", len(m.conflicts)))
 		for _, p := range m.conflicts {
@@ -1379,7 +1446,7 @@ func (m *tuiModel) mainContent() string {
 	case tuiPanelSnapshots:
 		if row := p.list.current(); row != nil {
 			if s, ok := row.tag.(snapshotRow); ok {
-				var diff *snapshotDiffResult
+				var diff *comparison
 				var diffErr error
 				diffing := false
 				if s.ID == m.diffFor {
@@ -1736,7 +1803,7 @@ func (m *tuiModel) bottomBar() string {
 			hints = []string{tuiKeyHint("u", "push file"), tuiKeyHint("d", "devices")}
 		case tuiPanelFiles:
 			if m.ctx.root != "" {
-				hints = []string{tuiKeyHint("s", "sync"), tuiKeyHint("u/d", "push/pull"), tuiKeyHint("S", "sync…"), tuiKeyHint("w", "agent")}
+				hints = []string{tuiKeyHint("s", "sync"), tuiKeyHint("u/d", "push/pull"), tuiKeyHint("S", "sync…"), tuiKeyHint("C", "compare"), tuiKeyHint("w", "agent")}
 			}
 		case tuiPanelSnapshots:
 			if m.ctx.root != "" {

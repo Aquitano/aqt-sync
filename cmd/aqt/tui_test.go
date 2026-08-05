@@ -814,7 +814,7 @@ func TestTUISpaceMenuActions(t *testing.T) {
 	m.setFocus(tuiPanelFiles)
 	m.handleKey(key(" "))
 	filesMenu := m.dialog.(*tuiMenu)
-	if ks := menuKeys(filesMenu); ks != "s,u,d,S,c,w" {
+	if ks := menuKeys(filesMenu); ks != "s,u,d,C,S,c,w" {
 		t.Fatalf("files menu keys = %q, want expanded folder actions", ks)
 	}
 	cmd, done := filesMenu.Update(key("s"))
