@@ -91,6 +91,20 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 	if strings.Contains(out, "a.txt") {
 		t.Fatalf("path filter leaked an unrelated path:\n%s", out)
 	}
+
+	// A move reports as one rename, not the delete and add it executes as.
+	writeTree(t, replica, "a.txt", "alpha from origin\n") // converge, so only the move differs
+	if err := os.Rename(filepath.Join(replica, "notes", "todo.txt"),
+		filepath.Join(replica, "notes", "renamed.txt")); err != nil {
+		t.Fatal(err)
+	}
+	out = mustCompare(t, replica, nil)
+	if !strings.Contains(out, "R  notes/todo.txt -> notes/renamed.txt") {
+		t.Fatalf("move not coalesced into a rename:\n%s", out)
+	}
+	if strings.Contains(out, "D  notes/todo.txt") || strings.Contains(out, "A  notes/renamed.txt") {
+		t.Fatalf("rename also reported as its delete+add pair:\n%s", out)
+	}
 }
 
 // TestCompareRemoteReportsDirsModesAndTypes pins that the comparison inherits the
