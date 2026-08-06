@@ -77,6 +77,13 @@ All notable changes to this project are documented in this file.
 - Client capability 4 gates the sealed `gitremote` root format. Git remotes are
   private-only in this release; public visibility and grants are refused
   server-side. Upgrade every Git-remote reader before creating one.
+- Both sync adapters now share one prologue (`syncSession`): state and base
+  loading, the missing-base refusal, session acquisition, resource fetch, key
+  unwrap, metadata decode, format check, and rollback classification are defined
+  once instead of mirrored per adapter. A rolled-back server is now reported ahead
+  of a cross-mode `.aqtconfig` mismatch on the pack-and-seal path, which
+  previously masked it behind the format error; every message and exit code is
+  otherwise unchanged.
 
 ## [v0.4.1] - 2026-08-01
 
