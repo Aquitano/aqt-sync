@@ -50,6 +50,12 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Git bundles are built inside a private (0700) temporary directory instead of at
+  a reserved-then-deleted path in the shared one. `git bundle create` requires a
+  path that does not exist, and the old dance left a window in which another local
+  user could plant a symlink on the freed name and capture the bundle — the
+  repository in plaintext. Bundles written for `git bundle unbundle` to read moved
+  with them.
 - Pack-and-seal sync missed changes that touched no file. Its local-change gate
   consulted the file planner alone, so an empty directory appearing or
   disappearing, or a directory's mode being edited, was reported as already
