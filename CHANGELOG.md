@@ -68,6 +68,13 @@ All notable changes to this project are documented in this file.
   user could plant a symlink on the freed name and capture the bundle — the
   repository in plaintext. Bundles written for `git bundle unbundle` to read moved
   with them.
+- A Git-remote push no longer costs one `git` process per (pushed ref, remote ref)
+  pair. Deciding whether the remote already had a tip ran `git merge-base` against
+  every remote ref in turn, so push time grew with the product of the two ref
+  counts: pushing 80 unrelated branches to a remote holding 60 took 10s, and a CAS
+  retry paid it again. Reachability is now one `git rev-list` per pushed tip
+  against the whole remote frontier, and object presence one `git cat-file
+  --batch-check` for the whole chain (fetch included). The same push takes 0.9s.
 - Pack-and-seal sync missed changes that touched no file. Its local-change gate
   consulted the file planner alone, so an empty directory appearing or
   disappearing, or a directory's mode being edited, was reported as already

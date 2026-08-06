@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -147,5 +148,77 @@ func TestNewBundlePathIsPrivate(t *testing.T) {
 	cleanup()
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Errorf("cleanup left %s behind: %v", dir, err)
+	}
+}
+
+// presentObjects and remoteReaches replace one git process per (id) and per (tip, ref)
+// pair. They have to keep answering exactly what the per-process checks answered,
+// including for an annotated tag, whose peeled object id is not the id asked about.
+func TestPresentObjectsAndRemoteReaches(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	repo := t.TempDir()
+	gitRun(t, repo, "init", "-b", "main")
+	gitRun(t, repo, "config", "user.email", "unit@example.com")
+	gitRun(t, repo, "config", "user.name", "AQT Unit")
+	write := func(body string) {
+		if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, repo, "add", "f.txt")
+		gitRun(t, repo, "commit", "-m", body)
+	}
+	write("first")
+	first := gitOutput(t, repo, "rev-parse", "HEAD")
+	write("second")
+	second := gitOutput(t, repo, "rev-parse", "HEAD")
+	gitRun(t, repo, "tag", "-a", "v0", "-m", "zero")
+	tagObject := gitOutput(t, repo, "rev-parse", "refs/tags/v0")
+	gitRun(t, repo, "checkout", "--orphan", "unrelated")
+	write("unrelated")
+	unrelated := gitOutput(t, repo, "rev-parse", "HEAD")
+	t.Chdir(repo)
+
+	absent := strings.Repeat("0", len(second))
+	present, err := presentObjects([]string{first, second, tagObject, unrelated, absent, "not-an-oid"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, oid := range []string{first, second, tagObject, unrelated} {
+		if !present[oid] {
+			t.Errorf("presentObjects missed %s", oid)
+		}
+	}
+	if present[absent] || present["not-an-oid"] {
+		t.Error("presentObjects reported an object this repository does not have")
+	}
+
+	refs := map[string]string{"refs/heads/main": second}
+	frontier := []string{second}
+	reached, err := remoteReaches([]string{first, second, unrelated}, refs, frontier)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reached[first] {
+		t.Error("an ancestor of a remote ref should be reachable from it")
+	}
+	if !reached[second] {
+		t.Error("a remote ref should reach itself")
+	}
+	if reached[unrelated] {
+		t.Error("an unrelated history must not read as already on the remote")
+	}
+
+	// A ref the remote advertises but this clone never fetched still settles by
+	// identity, with nothing to walk — the pairwise check compared ids first too.
+	remoteOnly := map[string]string{"refs/heads/theirs": absent}
+	reached, err = remoteReaches([]string{absent}, remoteOnly, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reached[absent] {
+		t.Error("an exact remote ref match must hold without a local object")
 	}
 }
