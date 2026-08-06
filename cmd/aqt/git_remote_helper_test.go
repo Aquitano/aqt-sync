@@ -3,6 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -103,5 +106,46 @@ func TestGitRemoteTarget(t *testing.T) {
 		if _, err := gitRemoteTarget(raw); err == nil {
 			t.Fatalf("gitRemoteTarget(%q) succeeded", raw)
 		}
+	}
+}
+
+// `git bundle create` refuses to overwrite, so the path handed to it must not exist.
+// It must still be unreachable to other local users: the bundle is the repository in
+// plaintext, and a name reserved and released in the shared temp directory can be
+// claimed by a symlink before Git creates the file.
+func TestNewBundlePathIsPrivate(t *testing.T) {
+	path, cleanup, err := newBundlePath("aqt-test-bundle-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+
+	if _, err := os.Lstat(path); !os.IsNotExist(err) {
+		t.Fatalf("bundle path already exists (git bundle create would refuse it): %v", err)
+	}
+	dir := filepath.Dir(path)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !info.IsDir() {
+		t.Fatalf("%s is not a directory", dir)
+	}
+	if runtime.GOOS != "windows" {
+		if perm := info.Mode().Perm(); perm&0o077 != 0 {
+			t.Errorf("bundle directory mode = %#o, want no group or other access", perm)
+		}
+	}
+	if dir == os.TempDir() {
+		t.Error("bundle was placed directly in the shared temp directory")
+	}
+
+	// Git creates the file itself; cleanup has to take the directory with it.
+	if err := os.WriteFile(path, []byte("bundle"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cleanup()
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Errorf("cleanup left %s behind: %v", dir, err)
 	}
 }

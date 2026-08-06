@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
@@ -577,18 +578,11 @@ func gitRemoteMatches(name, hintedName string, targets []string) bool {
 }
 
 func buildAndUploadFullBundle(cl *client.Client, key crypto.ContentKey, root gitremote.RefsRoot, refs []string) (gitremote.BundleRef, error) {
-	tmp, err := os.CreateTemp("", "aqt-full-*.bundle")
+	path, cleanup, err := newBundlePath("aqt-full-bundle-")
 	if err != nil {
 		return gitremote.BundleRef{}, err
 	}
-	path := tmp.Name()
-	defer os.Remove(path)
-	if err := tmp.Close(); err != nil {
-		return gitremote.BundleRef{}, err
-	}
-	if err := os.Remove(path); err != nil {
-		return gitremote.BundleRef{}, err
-	}
+	defer cleanup()
 	args := []string{"bundle", "create", "--version=3", path}
 	args = append(args, refs...)
 	cmd := exec.Command("git", args...)
@@ -725,19 +719,11 @@ func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root git
 	}
 	sort.Strings(bases)
 
-	tmp, err := os.CreateTemp("", "aqt-push-*.bundle")
+	path, cleanup, err := newBundlePath("aqt-push-bundle-")
 	if err != nil {
 		return nil, err
 	}
-	path := tmp.Name()
-	if err := tmp.Close(); err != nil {
-		os.Remove(path)
-		return nil, err
-	}
-	if err := os.Remove(path); err != nil {
-		return nil, err
-	}
-	defer os.Remove(path)
+	defer cleanup()
 	args := []string{"bundle", "create", "--version=3", path}
 	for _, base := range bases {
 		args = append(args, "^"+base)
@@ -927,13 +913,33 @@ func gitObjectPresent(oid string) bool {
 	return cmd.Run() == nil
 }
 
+// newBundlePath returns a path for a plaintext Git bundle, inside a directory only
+// this process can enter, plus its cleanup.
+//
+// `git bundle create` insists on creating the file itself, so the path handed to it
+// must not exist. Reserving a name in the shared temp directory and deleting it again
+// leaves a window in which a local attacker — the name is disclosed the moment it is
+// created — can plant a symlink there and capture the bundle, which is the repository
+// in plaintext. A 0700 directory nobody else can traverse closes the window instead of
+// racing it. Bundles this process writes for Git to read go here for the same reason.
+func newBundlePath(prefix string) (path string, cleanup func(), err error) {
+	dir, err := os.MkdirTemp("", prefix)
+	if err != nil {
+		return "", nil, err
+	}
+	return filepath.Join(dir, "git.bundle"), func() { os.RemoveAll(dir) }, nil
+}
+
 func applyBundle(bundle gitremote.BundleRef, key crypto.ContentKey, get func(string) ([]byte, error)) error {
-	f, err := os.CreateTemp("", "aqt-git-bundle-*.bundle")
+	name, cleanup, err := newBundlePath("aqt-apply-bundle-")
 	if err != nil {
 		return err
 	}
-	name := f.Name()
-	defer os.Remove(name)
+	defer cleanup()
+	f, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
 	if err := gitremote.OpenBundle(bundle, key, get, f); err != nil {
 		f.Close()
 		return err
