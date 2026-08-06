@@ -865,10 +865,18 @@ func mergeConflictBytes(base, local, remote []byte) (primary, copy []byte, merge
 	return local, remote, false
 }
 
+// maxMergedBytesHeld bounds the merged content resolveTextMerges keeps live. Each
+// result has to survive until the post-CAS write, so the peak is the sum over every
+// conflict in the sync, not the per-file MaxTextSize cap. Conflicts past the budget
+// take the conflict-copy path, which streams to disk and holds nothing. A var so a
+// test can reach the boundary without allocating its way there.
+var maxMergedBytesHeld = 128 << 20
+
 // resolveTextMerges materializes the three versions of each regular-file conflict,
 // combines clean non-overlapping edits, and seals the result for the pending PUT.
-// A missing base object, binary/oversized content, delete/modify pair, or overlapping
-// edit is returned in fallback so normal copy semantics preserve both sides.
+// A missing base object, binary/oversized content, delete/modify pair, overlapping
+// edit, or exhausted merge budget is returned in fallback so normal copy semantics
+// preserve both sides.
 func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, remoteByPath map[string]syncengine.Entry) ([]cleanMerge, map[string]bool, error) {
 	fallback := map[string]bool{}
 	baseByPath := c.base.ByPath()
@@ -898,6 +906,8 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 	}
 	uploader := newPackUploader(c.cl, nil)
 	var clean []cleanMerge
+	var held int
+	var deferred []string
 	for _, path := range candidates {
 		le := localByPath[path]
 		be := baseByPath[path]
@@ -929,15 +939,29 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			fallback[path] = true
 			continue
 		}
+		if held+len(data) > maxMergedBytesHeld {
+			fallback[path] = true
+			deferred = append(deferred, path)
+			continue
+		}
 		entry, err := syncengine.EntryFromBytes(path, data, le.Mode, c.conv, c.selector, uploader)
 		if err != nil {
 			uploader.Wait()
 			return nil, nil, err
 		}
+		held += len(data)
 		clean = append(clean, cleanMerge{path: path, data: data, entry: entry, original: le})
 	}
 	if err := uploader.Flush(); err != nil {
 		return nil, nil, err
+	}
+	// Say what the budget cost. A silently copied conflict looks like an overlap the
+	// merge could not resolve, which sends the user hunting for a conflict that is not
+	// there; re-running after resolving some of these merges the rest.
+	if len(deferred) > 0 {
+		fmt.Fprintf(os.Stderr,
+			"note: merged %s of conflicting text, the per-sync limit; %d further conflict(s) kept both versions instead. Re-run `aqt sync` to merge them.\n",
+			humanBytes(int64(held)), len(deferred))
 	}
 	return clean, fallback, nil
 }
