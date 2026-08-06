@@ -30,6 +30,23 @@ All notable changes to this project are documented in this file.
   `--remote` shows incoming changes and `--against <snapshot-id>` compares a
   snapshot with the working tree without requiring `base.json`. Binary,
   oversized, and excessive-edit-distance changes use a one-line marker.
+- `aqt diff --against=remote` compares the working tree with the folder's current
+  remote state directly, the one question `status` (base-relative, two independent
+  halves) and `sync --dry-run` (a three-way plan) could not answer: two sides that
+  converged on the same content report no differences even while both are ahead of
+  the base. `--name-status` (implied by `--json`) lists classified paths instead of
+  file content — `A` added, `M` modified, `P` permissions, `T` type, `D` deleted,
+  `R` renamed — and works for every `diff` mode. Every mode is read-only: nothing is
+  uploaded, nothing lands in the working tree, and neither `base.json` nor the
+  recorded remote version is touched. JSON output always carries `complete` and, when
+  file-level comparison was unavailable, a stable `reason`, so a caller never reads
+  an empty change list as a clean tree; the human rendering says the same in prose.
+  A locked session prompts on a terminal and never under `--json` or a non-terminal
+  stdin, where it reports `reason: "session-locked"` with both sides still named.
+  Pack-and-seal folders are streamed back and hashed in memory for a truthful
+  per-entry answer; their unified text diff reconstructs the remote into a
+  temporary directory instead. The TUI exposes the same comparison (`C` on the
+  files panel) through the same result type.
 
 ### Fixed
 

@@ -670,24 +670,6 @@ func snapshotDiffCmd() *cobra.Command {
 	return cmd
 }
 
-// diffSide labels one side of a diff for the header and the JSON output.
-type diffSide struct {
-	Label   string `json:"label"`
-	Version int    `json:"version"`
-}
-
-type snapshotDiffResult struct {
-	Left     diffSide            `json:"left"`
-	Right    diffSide            `json:"right"`
-	Added    []string            `json:"added"`
-	Removed  []string            `json:"removed"`
-	Modified []string            `json:"modified"`
-	Renamed  []syncengine.Rename `json:"renamed"`
-	// Changes classifies each path the three buckets above flatten: which are
-	// directories, and which "modified" entries are mode or type edits.
-	Changes []syncengine.Change `json:"changes"`
-}
-
 func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
 	mk, err := unlockMaster(prof)
 	if err != nil {
@@ -707,8 +689,8 @@ func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against 
 
 // computeSnapshotDiff needs the already-unlocked master key: it must never
 // prompt, because the TUI calls it from inside a raw-mode terminal session.
-func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against string) (snapshotDiffResult, error) {
-	var zero snapshotDiffResult
+func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against string) (comparison, error) {
+	var zero comparison
 	left, err := cl.GetSnapshot(leftID)
 	if errors.Is(err, client.ErrNotFound) {
 		return zero, fmt.Errorf("snapshot %s not found (or not yours)", leftID)
@@ -751,16 +733,11 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 	if err != nil {
 		return zero, err
 	}
-	s := newChangeSet(diff)
-	return snapshotDiffResult{
-		Left:     diffSide{Label: "snapshot " + leftID, Version: left.Snapshot.Version},
-		Right:    diffSide{Label: rightLabel, Version: rightVer},
-		Added:    nonNil(s.added),
-		Removed:  nonNil(s.deleted),
-		Modified: nonNil(s.modified),
-		Renamed:  nonNilRenames(s.renamed),
-		Changes:  nonNilChanges(s.changes),
-	}, nil
+	return newComparison(
+		diffSide{Label: "snapshot " + leftID, Version: left.Snapshot.Version},
+		diffSide{Label: rightLabel, Version: rightVer},
+		diff,
+	), nil
 }
 
 // diffResources compares two resource states. When both sides are chunked tree
@@ -832,7 +809,7 @@ func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.Tr
 	return root, true, nil
 }
 
-func printSnapshotDiff(r snapshotDiffResult) {
+func printSnapshotDiff(r comparison) {
 	fmt.Printf("%s (v%d)  ->  %s (v%d)\n", r.Left.Label, r.Left.Version, r.Right.Label, r.Right.Version)
 	total := len(r.Added) + len(r.Removed) + len(r.Modified) + len(r.Renamed)
 	if total == 0 {

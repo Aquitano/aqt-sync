@@ -77,8 +77,15 @@ type tuiAgentMsg struct {
 
 type tuiDiffMsg struct {
 	snapshotID string
-	result     snapshotDiffResult
+	result     comparison
 	err        error
+}
+
+// tuiCompareMsg carries the working-tree-versus-current-remote comparison, the same
+// result `aqt diff --against=remote` reports.
+type tuiCompareMsg struct {
+	result comparison
+	err    error
 }
 
 type tuiCopiedMsg struct {
@@ -262,6 +269,21 @@ func (c *tuiCtx) diffCmd(snapshotID string) tea.Cmd {
 	return func() tea.Msg {
 		result, err := computeSnapshotDiff(ctx.cl, ctx.mk, snapshotID, "")
 		return tuiDiffMsg{snapshotID: snapshotID, result: result, err: err}
+	}
+}
+
+// compareCmd compares the working tree with the current remote, the read-only
+// comparison `aqt diff --against=remote` reports. It runs in process on the
+// already-unlocked key, so it never prompts while the renderer owns the tty.
+func (c *tuiCtx) compareCmd() tea.Cmd {
+	ctx := *c
+	return func() tea.Msg {
+		res, err := folderResource(ctx.cl, ctx.root)
+		if err != nil {
+			return tuiCompareMsg{err: err}
+		}
+		result, err := computeRemoteComparison(ctx.cl, ctx.mk, ctx.root, res)
+		return tuiCompareMsg{result: result, err: err}
 	}
 }
 

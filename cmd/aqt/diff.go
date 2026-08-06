@@ -13,28 +13,56 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
 
+// diffAgainstRemote is the reserved --against value naming the folder's current
+// remote state, the one comparison that goes through neither the base nor a snapshot.
+// Snapshot ids are server-assigned and prefixed, so the word cannot collide with one.
+const diffAgainstRemote = "remote"
+
 type diffOptions struct {
-	remote  bool
-	against string
+	remote     bool
+	against    string
+	nameStatus bool
 }
+
+// pathLevel reports whether to render classified paths rather than a unified text
+// diff. --json implies it: a line diff has no JSON form, so the structured output is
+// always the path-level comparison.
+func (o diffOptions) pathLevel() bool { return o.nameStatus || flagJSON }
 
 func diffCmd() *cobra.Command {
 	var opts diffOptions
 	cmd := &cobra.Command{
 		Use:   "diff [path...] [dir]",
-		Short: "Show line-level local, incoming, or snapshot changes",
-		Args:  cobra.ArbitraryArgs,
+		Short: "Compare the working tree with the base, a snapshot, or the current remote",
+		Long: "Compares two states of a tracked folder and prints the difference. By default " +
+			"the working tree is compared with the last-synced base as a unified text diff; " +
+			"--remote compares the base with the current remote instead, and --against names " +
+			"a snapshot or the literal `remote` as the left-hand side.\n\n" +
+			"--name-status (implied by --json) reports classified paths instead of file " +
+			"content: added, modified, permission-only, type change, deleted, and renamed.\n\n" +
+			"Every mode is read-only. Nothing is uploaded, nothing lands in the working tree, " +
+			"and neither the last-synced base nor the recorded remote version is touched, so a " +
+			"comparison never changes what a later `aqt sync` would do.\n\n" +
+			"This is not `aqt status` (local and incoming, each measured against the base) or " +
+			"`aqt sync --dry-run` (the three-way plan a reconcile would execute): a comparison " +
+			"names two states and reports only how they differ.",
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir, paths := diffInvocation(args)
 			return runDiff(dir, paths, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.remote, "remote", false, "diff incoming remote changes against the last-synced base")
-	cmd.Flags().StringVar(&opts.against, "against", "", "diff the working tree against this snapshot id")
+	cmd.Flags().StringVar(&opts.against, "against", "",
+		"compare the working tree against a `snapshot-id|remote` — a snapshot, or the folder's current remote state")
+	cmd.Flags().BoolVar(&opts.nameStatus, "name-status", false,
+		"list changed paths and their kind (A/M/P/T/D/R) instead of file content")
+	markJSONSupported(cmd)
 	return cmd
 }
 
@@ -63,16 +91,25 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	if err := bindTrackedRoot(root); err != nil {
 		return err
 	}
+	filters, err := normalizeDiffPaths(root, dir, paths)
+	if err != nil {
+		return err
+	}
+	cl, prof, err := authedClient()
+	if err != nil {
+		return err
+	}
+	if opts.against == diffAgainstRemote {
+		return runDiffRemote(cl, prof, root, filters, opts)
+	}
+
 	cfg, err := syncengine.LoadConfig(root)
 	if err != nil {
 		return err
 	}
 	if cfg.Pack && opts.against == "" {
-		return errors.New("aqt diff against the last-synced base requires a chunked folder; use --against with a snapshot for pack-and-seal content")
-	}
-	filters, err := normalizeDiffPaths(root, dir, paths)
-	if err != nil {
-		return err
+		return errors.New("aqt diff against the last-synced base requires a chunked folder; " +
+			"use --against with a snapshot id, or --against=remote, for pack-and-seal content")
 	}
 	var base, local syncengine.Manifest
 	if opts.against != "" {
@@ -91,10 +128,6 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 		return err
 	}
 
-	cl, prof, err := authedClient()
-	if err != nil {
-		return err
-	}
 	mk, err := unlockMaster(prof)
 	if err != nil {
 		return err
@@ -102,49 +135,119 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	defer mk.Wipe()
 
 	if opts.against != "" {
-		return diffAgainstSnapshot(cl, mk, root, local, filters, opts.against)
+		return diffAgainstSnapshot(cl, mk, root, local, filters, opts.against, opts)
 	}
+	baseSide := diffSide{Label: "last-synced base", Version: base.Version}
 	if opts.remote {
-		st, err := loadState(root)
+		res, err := folderResource(cl, root)
 		if err != nil {
 			return err
 		}
-		remote, err := currentRemoteManifest(cl, mk, st.ID)
+		remote, err := remoteManifest(cl, res, mk, base)
 		if err != nil {
 			return err
 		}
-		return renderManifestDiff(base, remote, filters, manifestEntryReader(cl), manifestEntryReader(cl))
+		return renderDiff(opts, filters, base, remote,
+			baseSide, diffSide{Label: "remote", Version: res.Version},
+			manifestEntryReader(cl), manifestEntryReader(cl))
 	}
-	return renderManifestDiff(base, local, filters, manifestEntryReader(cl), diskEntryReader(root))
+	return renderDiff(opts, filters, base, local,
+		baseSide, diffSide{Label: "working tree"},
+		manifestEntryReader(cl), diskEntryReader(root))
 }
 
-func currentRemoteManifest(cl *client.Client, mk crypto.MasterKey, id string) (syncengine.Manifest, error) {
-	res, err := cl.GetResource(id)
+// runDiffRemote compares the working tree with the folder's current remote state.
+// The path-level rendering answers from metadata alone, so a chunked folder costs a
+// few directory-node fetches; a unified text diff needs both sides' bytes, which for
+// a pack-and-seal folder means reconstructing it — the one mode that cannot stay in
+// memory, and the reason it lands in a temp dir rather than the working tree.
+func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filters []string, opts diffOptions) error {
+	if opts.pathLevel() {
+		c, err := compareWorkingTreeToRemote(cl, prof, root)
+		if err != nil {
+			return err
+		}
+		return emitComparison(c.filter(filters))
+	}
+	res, err := folderResource(cl, root)
+	if err != nil {
+		return err
+	}
+	mk, unlocked, err := unlockForComparison(prof)
+	if err != nil {
+		return err
+	}
+	if !unlocked {
+		printComparison(unavailableComparison(remoteSide(res), workingTreeSide, reasonSessionLocked))
+		return nil
+	}
+	defer mk.Wipe()
+
+	cfg, err := syncengine.LoadConfig(root)
+	if err != nil {
+		return err
+	}
+	local, err := syncengine.Scan(root)
+	if err != nil {
+		return err
+	}
+	if cfg.Pack {
+		tmp, err := os.MkdirTemp("", "aqt-line-diff-remote-*")
+		if err != nil {
+			return err
+		}
+		defer os.RemoveAll(tmp)
+		if _, err := materializeWithMaster(cl, mk, res, tmp); err != nil {
+			return fmt.Errorf("reconstruct remote %s: %w", res.ID, err)
+		}
+		remote, err := syncengine.Scan(tmp)
+		if err != nil {
+			return err
+		}
+		return renderManifestDiff(remote, local, filters, diskEntryReader(tmp), diskEntryReader(root))
+	}
+	base, err := loadBase(root)
+	if err != nil {
+		return err
+	}
+	remote, err := remoteManifest(cl, res, mk, base)
+	if err != nil {
+		return err
+	}
+	return renderManifestDiff(remote, local, filters, manifestEntryReader(cl), diskEntryReader(root))
+}
+
+// folderResource fetches the resource a tracked root points at.
+func folderResource(cl *client.Client, root string) (api.GetResourceResponse, error) {
+	st, err := loadState(root)
+	if err != nil {
+		return api.GetResourceResponse{}, err
+	}
+	res, err := cl.GetResource(st.ID)
 	if errors.Is(err, client.ErrNotFound) {
-		return syncengine.Manifest{}, fmt.Errorf("folder resource %s not found on the server", id)
+		return api.GetResourceResponse{}, fmt.Errorf("folder resource %s not found on the server", st.ID)
 	}
-	if err != nil {
-		return syncengine.Manifest{}, err
-	}
-	if res.WrappedKey == nil {
-		return syncengine.Manifest{}, errors.New("folder resource has no owner key; cannot diff")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return syncengine.Manifest{}, fmt.Errorf("unwrap folder key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
-	if err != nil {
-		return syncengine.Manifest{}, err
-	}
-	if meta.Kind != api.KindFolder || meta.Packed || !meta.Tree {
-		return syncengine.Manifest{}, errors.New("aqt diff currently requires a chunked folder")
-	}
-	return openRemoteTree(cl, res.Blob, ck, id)
+	return res, err
 }
 
-func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, local syncengine.Manifest, filters []string, snapshotID string) error {
+// renderDiff prints one comparison in the shape the flags asked for: classified paths,
+// or a unified text diff of the entries' bytes.
+func renderDiff(opts diffOptions, filters []string, oldManifest, newManifest syncengine.Manifest, oldSide, newSide diffSide, readOld, readNew entryReader) error {
+	if !opts.pathLevel() {
+		return renderManifestDiff(oldManifest, newManifest, filters, readOld, readNew)
+	}
+	return emitComparison(newComparison(oldSide, newSide, syncengine.Diff(oldManifest, newManifest)).filter(filters))
+}
+
+func emitComparison(c comparison) error {
+	if flagJSON {
+		return printJSON(c)
+	}
+	printComparison(c)
+	return nil
+}
+
+func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, local syncengine.Manifest, filters []string, snapshotID string, opts diffOptions) error {
 	snap, err := cl.GetSnapshot(snapshotID)
 	if errors.Is(err, client.ErrNotFound) {
 		return fmt.Errorf("snapshot %s not found (or not yours)", snapshotID)
@@ -171,7 +274,10 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 	if err != nil {
 		return err
 	}
-	return renderManifestDiff(snapshotManifest, local, filters, diskEntryReader(tmp), diskEntryReader(root))
+	return renderDiff(opts, filters, snapshotManifest, local,
+		diffSide{Label: "snapshot " + snapshotID, Version: snap.Snapshot.Version},
+		diffSide{Label: "working tree"},
+		diskEntryReader(tmp), diskEntryReader(root))
 }
 
 type entryReader func(syncengine.Entry) ([]byte, error)
