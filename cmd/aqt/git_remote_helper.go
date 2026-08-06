@@ -54,9 +54,6 @@ type openedGitRemote struct {
 	meta   api.Metadata
 	root   gitremote.RefsRoot
 	key    crypto.ContentKey
-	// snapshots holds the pre-compaction checkpoints created this run, newest
-	// first; releaseSnapshot unanchors all but the rollback candidate.
-	snapshots []api.SnapshotInfo
 }
 
 func (r *openedGitRemote) close() { r.key.Wipe() }
@@ -389,9 +386,10 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 // whether a not-even local clone is an error (`aqt repo gc`) or a silent auto-skip.
 func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generation int, err error) {
 	var prepared struct {
-		version int
-		full    gitremote.BundleRef
-		ok      bool
+		version  int
+		full     gitremote.BundleRef
+		snapshot string
+		ok       bool
 	}
 	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
 		remote, err := h.openRemote()
@@ -437,8 +435,7 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 				remote.close()
 				return false, 0, 0, fmt.Errorf("create pre-compaction snapshot: %w", err)
 			}
-			remote.snapshots = append(remote.snapshots, snap)
-			prepared.version, prepared.full, prepared.ok = remote.res.Version, full, true
+			prepared.version, prepared.full, prepared.snapshot, prepared.ok = remote.res.Version, full, snap.ID, true
 		}
 		next := remote.root
 		next.Bundles = []gitremote.BundleRef{prepared.full}
@@ -461,6 +458,7 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 		})
 		before = len(remote.root.Bundles)
 		generation = next.Generation
+		cl, resourceID := remote.client, remote.res.ID
 		remote.close()
 		if errors.Is(err, client.ErrConflict) {
 			continue
@@ -468,24 +466,39 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 		if err != nil {
 			return false, 0, 0, err
 		}
-		releaseSupersededCheckpoints(remote.client, remote.snapshots)
+		releaseSupersededCheckpoints(cl, resourceID, prepared.snapshot)
 		return true, before, generation, nil
 	}
 	return false, 0, 0, errors.New("remote busy, pull and retry")
 }
 
-// releaseSupersededCheckpoints unanchors every pre-compaction snapshot but the
-// newest once the compaction PUT commits: the newest is the rollback to the
-// pre-swap chain, and older ones repeat work that swap already finished. The
-// newest stays anchored so a user-initiated prune cannot drop it either; the next
-// successful compaction supersedes it. Failures degrade to retention pruning.
-func releaseSupersededCheckpoints(cl *client.Client, snaps []api.SnapshotInfo) {
-	if len(snaps) < 2 {
+// releaseSupersededCheckpoints unanchors every automatic checkpoint on a remote but
+// the one this compaction created, once its PUT commits. Keeping is by id rather than
+// by recency: a CAS retry that rebuilt against a newer version leaves the abandoned
+// attempt's checkpoint behind, and snapshot timestamps are whole seconds, so "newest"
+// is not always decidable.
+//
+// The sweep has to look the checkpoints up server-side. They outlive the process that
+// made them — one compaction cannot see an earlier one's — and an anchor is exempt
+// from every retention path, so a checkpoint nothing releases pins a full copy of the
+// repository forever. Anchors are only released here, never deleted: retention decides
+// when the snapshot itself goes. A failure leaves the anchor in place, which costs
+// storage but never loses a rollback.
+func releaseSupersededCheckpoints(cl *client.Client, resourceID, keep string) {
+	snaps, err := cl.ListSnapshots(resourceID)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: could not list pre-compaction checkpoints to release: %v\n", err)
 		return
 	}
-	for _, old := range snaps[:len(snaps)-1] {
-		if _, err := cl.SetSnapshotAnchor(old.ID, false); err != nil {
-			fmt.Fprintf(os.Stderr, "warning: could not release superseded pre-compaction snapshot %s: %v\n", old.ID, err)
+	for _, snap := range snaps {
+		// Automatic and anchored is exactly the checkpoint shape CreateAutoSnapshot
+		// makes. A user's `aqt checkpoint` is anchored but not automatic, and a
+		// scheduled snapshot is automatic but not anchored; neither is ours to release.
+		if snap.ID == keep || !snap.Automatic || !snap.Anchored {
+			continue
+		}
+		if _, err := cl.SetSnapshotAnchor(snap.ID, false); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not release superseded pre-compaction snapshot %s: %v\n", snap.ID, err)
 		}
 	}
 }

@@ -603,3 +603,96 @@ func gitMustFail(t *testing.T, dir string, args ...string) string {
 	}
 	return strings.TrimSpace(string(data))
 }
+
+// Each compaction anchors a pre-compaction checkpoint, and an anchor is exempt from
+// every retention path — so a checkpoint the next compaction does not release pins a
+// full copy of the repository forever. Successive compactions must converge on one.
+func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
+	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runRepoCreate("repeat", 2); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+	source := t.TempDir()
+	gitRun(t, source, "init", "-b", "main")
+	gitRun(t, source, "config", "user.email", "e2e@example.com")
+	gitRun(t, source, "config", "user.name", "AQT E2E")
+	gitRun(t, source, "remote", "add", "origin", "aqt::repeat")
+
+	// A user checkpoint is anchored too. Releasing one would hand a snapshot the user
+	// explicitly pinned back to retention, so the sweep must leave it alone.
+	commit := func(body string) {
+		if err := os.WriteFile(filepath.Join(source, "f.txt"), []byte(body+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		gitRun(t, source, "add", "f.txt")
+		gitRun(t, source, "commit", "-m", body)
+		gitRun(t, source, "push", "origin", "main")
+	}
+	commit("one")
+
+	remote := openRemoteForTest(t, "repeat")
+	resourceID, cl := remote.res.ID, remote.client
+	remote.close()
+	manual, err := cl.CreateSnapshot(resourceID, nil, true)
+	if err != nil {
+		t.Fatalf("create manual checkpoint: %v", err)
+	}
+
+	// compactAt is 2, so every push after the first compacts the chain again.
+	for _, body := range []string{"two", "three", "four", "five"} {
+		commit(body)
+	}
+
+	snaps, err := cl.ListSnapshots(resourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var automatic, manualAnchored int
+	for _, snap := range snaps {
+		switch {
+		case snap.ID == manual.ID:
+			if !snap.Anchored {
+				t.Errorf("compaction released the user's checkpoint %s", snap.ID)
+			}
+			manualAnchored++
+		case snap.Automatic && snap.Anchored:
+			automatic++
+		}
+	}
+	if automatic != 1 {
+		t.Errorf("anchored pre-compaction checkpoints = %d, want 1 (of %d snapshots)", automatic, len(snaps))
+	}
+	if manualAnchored != 1 {
+		t.Errorf("user checkpoint survived = %d, want 1", manualAnchored)
+	}
+
+	// The surviving checkpoint must still be a usable rollback.
+	remote = openRemoteForTest(t, "repeat")
+	generation := remote.root.Generation
+	remote.close()
+	for _, snap := range snaps {
+		if snap.Automatic && snap.Anchored {
+			if err := runRepoRestore(snap.ID, true, false); err != nil {
+				t.Fatalf("restore from surviving checkpoint: %v", err)
+			}
+		}
+	}
+	remote = openRemoteForTest(t, "repeat")
+	restored := remote.root.Generation
+	remote.close()
+	if restored >= generation {
+		t.Errorf("restore did not roll the chain back: generation %d, was %d", restored, generation)
+	}
+}
