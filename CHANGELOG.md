@@ -25,7 +25,11 @@ All notable changes to this project are documented in this file.
   delete/modify conflicts, or unavailable base chunks. It never writes conflict
   markers, and a post-CAS drift check preserves edits made while a merge PUT is
   in flight. Clean results are also checked line-by-line against all three inputs,
-  so adjacent unterminated hunks cannot synthesize content by concatenation.
+  so adjacent unterminated hunks cannot synthesize content by concatenation. A
+  merged result stays in memory until the post-CAS write, so a per-sync budget
+  (128 MiB) bounds what a sync with many conflicting text files holds at once;
+  conflicts past it take the streaming copy path and are reported on stderr, and
+  a re-run merges them.
 - `aqt diff [path...] [dir]` renders unified local-versus-base diffs;
   `--remote` shows incoming changes and `--against <snapshot-id>` compares a
   snapshot with the working tree without requiring `base.json`. Binary,

@@ -344,6 +344,68 @@ func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
+// Merged bytes stay live until the post-CAS write, so the peak is the sum over every
+// conflict in the sync, not the per-file cap. Past the budget a conflict has to take
+// the copy path — and has to say so, or a copy nobody asked for reads as an overlap
+// the merge could not resolve.
+func TestSyncConflictMergeBudgetFallsBackToCopy(t *testing.T) {
+	original := maxMergedBytesHeld
+	t.Cleanup(func() { maxMergedBytesHeld = original })
+
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	body := func(first, last string) string {
+		return first + "\ntwo\nthree\n" + last + "\n"
+	}
+	for _, name := range []string{"a.md", "b.md"} {
+		writeTree(t, origin, name, body("one", "four"))
+	}
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	// Both files gain a non-overlapping edit on each side: both would merge cleanly.
+	for _, name := range []string{"a.md", "b.md"} {
+		writeTree(t, origin, name, body("ONE", "four"))
+	}
+	h.sync(origin)
+	for _, name := range []string{"a.md", "b.md"} {
+		writeTree(t, replica, name, body("one", "FOUR"))
+	}
+
+	// Room for the first merge only. Candidates are visited in action order, so a.md
+	// merges and b.md is pushed to the copy path.
+	maxMergedBytesHeld = len(body("ONE", "FOUR"))
+
+	var stderr string
+	stderr = captureStderr(t, func() {
+		h.syncOpts(replica, syncOptions{conflicts: "merge"})
+	})
+	if got, want := readTree(t, replica, "a.md"), body("ONE", "FOUR"); got != want {
+		t.Fatalf("first conflict did not merge within budget: %q, want %q", got, want)
+	}
+	if got, want := readTree(t, replica, "b.md"), body("one", "FOUR"); got != want {
+		t.Fatalf("over-budget conflict did not keep local primary: %q, want %q", got, want)
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 {
+		t.Fatalf("over-budget conflict copies = %v, want exactly one", copies)
+	}
+	if got, want := readTree(t, replica, copies[0]), body("ONE", "four"); got != want {
+		t.Fatalf("over-budget copy lost remote bytes: %q, want %q", got, want)
+	}
+	if !strings.Contains(stderr, "1 further conflict(s) kept both versions") {
+		t.Fatalf("budget fallback was silent:\n%s", stderr)
+	}
+
+	// The deferred conflict merges on the next run, once the budget is not the limit.
+	maxMergedBytesHeld = original
+	h.sync(replica)
+	h.sync(origin)
+	assertTreeEqual(t, origin, replica)
+}
+
 func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
 	var armed, blocked atomic.Bool
 	putStarted := make(chan struct{})
