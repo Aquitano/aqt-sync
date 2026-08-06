@@ -664,9 +664,11 @@ unlocked master key. Each reconcile attempt then runs the session's `openRemote`
 fetches the resource, classifies a server rollback, unwraps the content key, decodes the
 sealed metadata, and checks the folder's format. Every one of those is a safety guard,
 and a fix applied to one adapter's copy did not reach the other, so they are defined
-once. Two details are load-bearing: a rollback is classified *before* the metadata is
-decoded, so a server whose version regressed reports that rather than a cross-mode
-config typo; and the format guard is parameterized by the mode the caller expects,
+once. Two details are load-bearing: a rollback is classified *before* the content key
+is unwrapped and the metadata decoded, so a server whose version regressed reports that
+rather than a cross-mode config typo or a keyless resource — a version regression is a
+statement about the server's integrity and outranks anything read out of the record it
+served; and the format guard is parameterized by the mode the caller expects,
 because a pack folder carries `packed` and never the chunked path's `tree` flag, so one
 shared check would reject either every pack folder or none. What stays per-adapter is
 what each does with the verdict — `openRemote` reports whether the base can be trusted,
