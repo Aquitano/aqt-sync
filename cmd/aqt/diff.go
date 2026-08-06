@@ -262,6 +262,26 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 	if snap.Snapshot.ResourceID != st.ID {
 		return fmt.Errorf("snapshot %s belongs to resource %s, not this folder (%s)", snapshotID, snap.Snapshot.ResourceID, st.ID)
 	}
+	snapshotSide := diffSide{Label: "snapshot " + snapshotID, Version: snap.Snapshot.Version}
+	if opts.pathLevel() {
+		// Which paths differ is a question about metadata, and the snapshot's manifest
+		// already answers it — read it the way --against=remote reads the remote's
+		// rather than reconstructing the whole tree on disk to hash back what the
+		// manifest records. base.json is only a node-reuse hint here; an absent one
+		// loads empty, which is why this mode never required it.
+		base, err := loadBase(root)
+		if err != nil {
+			return err
+		}
+		snapshotManifest, err := remoteManifest(cl, snapshotAsResource(snap), mk, base)
+		if err != nil {
+			return fmt.Errorf("read snapshot %s: %w", snapshotID, err)
+		}
+		return emitComparison(newComparison(snapshotSide, workingTreeSide,
+			syncengine.Diff(snapshotManifest, local)).filter(filters))
+	}
+	// A unified text diff needs both sides' bytes, which is the one thing the manifest
+	// cannot supply, so this mode still reconstructs the snapshot.
 	tmp, err := os.MkdirTemp("", "aqt-line-diff-snapshot-*")
 	if err != nil {
 		return err
@@ -274,10 +294,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 	if err != nil {
 		return err
 	}
-	return renderDiff(opts, filters, snapshotManifest, local,
-		diffSide{Label: "snapshot " + snapshotID, Version: snap.Snapshot.Version},
-		diffSide{Label: "working tree"},
-		diskEntryReader(tmp), diskEntryReader(root))
+	return renderManifestDiff(snapshotManifest, local, filters, diskEntryReader(tmp), diskEntryReader(root))
 }
 
 type entryReader func(syncengine.Entry) ([]byte, error)

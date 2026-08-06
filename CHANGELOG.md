@@ -33,6 +33,11 @@ All notable changes to this project are documented in this file.
   `--remote` shows incoming changes and `--against <snapshot-id>` compares a
   snapshot with the working tree without requiring `base.json`. Binary,
   oversized, and excessive-edit-distance changes use a one-line marker.
+  `--against <snapshot-id>` reads the snapshot's manifest for a path-level
+  answer (`--name-status`, `--json`) instead of reconstructing its tree, so
+  classifying a 4 MB folder moves 736 bytes rather than the whole folder, and
+  nothing lands in the temp directory. Only the unified text diff, which needs
+  both sides' bytes, still reconstructs.
 - `aqt diff --against=remote` compares the working tree with the folder's current
   remote state directly, the one question `status` (base-relative, two independent
   halves) and `sync --dry-run` (a three-way plan) could not answer: two sides that

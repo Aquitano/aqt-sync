@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -120,5 +123,79 @@ func TestNormalizeDiffPathsRejectsEscape(t *testing.T) {
 	root := t.TempDir()
 	if _, err := normalizeDiffPaths(root, root, []string{"../outside"}); err == nil {
 		t.Fatal("expected escaping path to be rejected")
+	}
+}
+
+// countingWriter tallies the response bytes a proxied request serves.
+type countingWriter struct {
+	http.ResponseWriter
+	n *atomic.Int64
+}
+
+func (w *countingWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	w.n.Add(int64(n))
+	return n, err
+}
+
+// A classified path list is a metadata question. Answering it must not stream the
+// snapshot's file content back, let alone reconstruct the tree on disk — a folder is
+// arbitrarily larger than the answer, and the reconstruction lands in the shared temp
+// directory in plaintext.
+func TestDiffAgainstSnapshotPathLevelSkipsContent(t *testing.T) {
+	var counting atomic.Bool
+	var served atomic.Int64
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if counting.Load() {
+			pass(&countingWriter{ResponseWriter: w, n: &served}, r)
+			return
+		}
+		pass(w, r)
+	})
+	origin := t.TempDir()
+	h.init(origin)
+
+	// Incompressible, so the transfer cost of the content is not optimized away and
+	// the assertion below measures what it means to measure.
+	rng := rand.New(rand.NewSource(1))
+	bulk := make([]byte, 4<<20)
+	if _, err := rng.Read(bulk); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(origin, "bulk.bin"), bulk, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "notes.txt", "one\n")
+	h.sync(origin)
+
+	cl, _, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := cl.CreateSnapshot(h.folderID(origin), nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Only the small file moves. The bulk file is identical on both sides, so nothing
+	// about it needs to travel to classify the difference.
+	writeTree(t, origin, "notes.txt", "two\n")
+
+	counting.Store(true)
+	var runErr error
+	out := captureStdout(t, func() {
+		runErr = runDiff(origin, nil, diffOptions{against: snapshot.ID, nameStatus: true})
+	})
+	counting.Store(false)
+	if runErr != nil {
+		t.Fatal(runErr)
+	}
+	if !strings.Contains(out, "M  notes.txt") {
+		t.Fatalf("path-level snapshot comparison did not report the edit:\n%s", out)
+	}
+	if strings.Contains(out, "bulk.bin") {
+		t.Fatalf("unchanged file reported as differing:\n%s", out)
+	}
+	if got := served.Load(); got > int64(len(bulk))/4 {
+		t.Errorf("path-level comparison served %d bytes for a %d-byte folder; it is still transferring content", got, len(bulk))
 	}
 }
