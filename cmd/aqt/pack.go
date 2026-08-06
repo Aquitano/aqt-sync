@@ -19,53 +19,34 @@ import (
 // last-writer-wins. Whichever side changed is pushed or pulled in full; a change on
 // both is a folder-level conflict that --force resolves local-wins.
 func runPackSync(root string, opts syncOptions) error {
-	st, err := loadState(root)
+	sess, err := openSyncSession(root, opts)
 	if err != nil {
 		return err
 	}
-	base, baseExists, err := loadBaseForSync(root)
-	if err != nil {
-		return err
-	}
-	if !baseExists && !opts.reconcile {
-		return errSyncNoBase
-	}
-	cl, prof, err := authedClient()
-	if err != nil {
-		return err
-	}
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		return err
-	}
-	defer mk.Wipe()
+	defer sess.Wipe()
 
 	// A metadata+hash scan is all the local side needs to tell whether the tree
 	// changed since the last sync; pack-and-seal never chunks per file.
 	var scanBase *syncengine.Manifest
-	if baseExists {
-		scanBase = &base
+	if sess.baseExists {
+		scanBase = &sess.base
 	}
 	local, err := syncengine.ScanReusing(root, scanBase, opts.rehash)
 	if err != nil {
 		return err
 	}
 
-	c := packCtx{root: root, cl: cl, opts: opts, st: st, base: base, baseExists: baseExists, local: local, mk: mk, push: &packPushArtifacts{}}
-	// c.mk is a by-value copy the deferred mk.Wipe above does not reach.
-	defer c.mk.Wipe()
+	c := packCtx{syncSession: sess, opts: opts, local: local, push: &packPushArtifacts{}}
+	// c's session holds a by-value copy of the master key that the deferred sess.Wipe
+	// above does not reach.
+	defer c.Wipe()
 	return reconcileWithRetry(func() error { return reconcilePack(c) })
 }
 
 type packCtx struct {
-	root       string
-	cl         *client.Client
-	opts       syncOptions
-	st         folderState
-	base       syncengine.Manifest
-	baseExists bool
-	local      syncengine.Manifest
-	mk         crypto.MasterKey
+	syncSession
+	opts  syncOptions
+	local syncengine.Manifest
 	// push caches the tar+seal+upload across conflict retries (pointer so it persists
 	// when packCtx is copied per reconcile pass).
 	push *packPushArtifacts
@@ -82,45 +63,18 @@ type packPushArtifacts struct {
 }
 
 func reconcilePack(c packCtx) error {
-	res, err := c.cl.GetResource(c.st.ID)
-	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("folder resource %s not found on the server", c.st.ID)
-	}
+	rs, err := c.openRemote(c.opts, formatPacked)
 	if err != nil {
 		return err
 	}
-	if res.WrappedKey == nil {
-		return errors.New("folder resource has no owner key; cannot sync")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(c.mk))
-	if err != nil {
-		return fmt.Errorf("unwrap folder key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, c.st.ID)
-	if err != nil {
-		return err
-	}
-	if !meta.Packed {
-		return errors.New(".aqtconfig sets pack=true but this folder was created chunked; " +
-			"remove pack=true, or re-init a fresh folder to use pack-and-seal")
-	}
+	defer rs.ck.Wipe()
 
-	// Freshness guard, mirroring the chunked path: a rolled-back server must not be
-	// read as "remote changed" (decidePack would pull the old tree over newer local
-	// files). An accepted rollback discards the base for this pass — the baseless
-	// reconcile compares the actual trees and conflicts instead of clobbering.
-	if c.st.RemoteVersion > 0 && res.Version < c.st.RemoteVersion {
-		if !c.opts.acceptRollback {
-			return rollbackErr(res.Version, c.st.RemoteVersion)
-		}
-		fmt.Fprintf(os.Stderr, "accepting server rollback (version %d, previously %d); reconciling from scratch\n",
-			res.Version, c.st.RemoteVersion)
-		return reconcilePackNoBase(c, res, ck)
-	}
-
-	if !c.baseExists {
-		return reconcilePackNoBase(c, res, ck)
+	// No base to trust — either none was recorded (--reconcile) or an accepted
+	// rollback invalidated it. Compare the actual trees instead: a rolled-back server
+	// read as "remote changed" would have decidePack pull the old tree over newer
+	// local files.
+	if !rs.trustBase {
+		return reconcilePackNoBase(c, rs.res, rs.ck)
 	}
 
 	// Diff, not the file-only planner: a pack folder seals its tracked directories
@@ -128,7 +82,7 @@ func reconcilePack(c packCtx) error {
 	// change. Gating on file actions alone reported those trees as already synced and
 	// never pushed them.
 	localChanged := !syncengine.Diff(c.base, c.local).Empty()
-	remoteChanged := res.Version != c.base.Version
+	remoteChanged := rs.res.Version != c.base.Version
 	action := decidePack(localChanged, remoteChanged, c.opts)
 
 	if c.opts.dryRun {
@@ -137,14 +91,14 @@ func reconcilePack(c packCtx) error {
 	}
 	switch action {
 	case packPush:
-		return pushPack(c, res, ck)
+		return pushPack(c, rs.res, rs.ck)
 	case packPull:
-		return pullPack(c, res, ck)
+		return pullPack(c, rs.res, rs.ck)
 	case packConflict:
 		fmt.Fprintln(os.Stderr, "conflict: the folder changed on both sides since the last sync")
 		return errConflictsRemain
 	default:
-		recordRemoteVersion(c.root, res.Version)
+		recordRemoteVersion(c.root, rs.res.Version)
 		if flagJSON {
 			return printJSON(map[string]any{"uploaded": 0, "downloaded": 0})
 		}

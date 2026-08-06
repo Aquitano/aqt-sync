@@ -372,7 +372,8 @@ func replicaPullCtx(t *testing.T, dir string, local syncengine.Manifest) (packCt
 	if err != nil {
 		t.Fatal(err)
 	}
-	return packCtx{root: dir, cl: cl, st: st, local: local, mk: mk, push: &packPushArtifacts{}}, res, ck
+	sess := syncSession{root: dir, st: st, cl: cl, mk: mk}
+	return packCtx{syncSession: sess, local: local, push: &packPushArtifacts{}}, res, ck
 }
 
 func writePackConfig(t *testing.T, root string) {

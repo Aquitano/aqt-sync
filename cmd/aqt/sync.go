@@ -658,27 +658,15 @@ func runSync(dir string, opts syncOptions) error {
 	if err != nil {
 		return err
 	}
-	st, err := loadState(root)
+	sess, err := openSyncSession(root, opts)
 	if err != nil {
 		return err
 	}
-	base, baseExists, err := loadBaseForSync(root)
-	if err != nil {
-		return err
-	}
-	if !baseExists && !opts.reconcile {
-		return errSyncNoBase
-	}
-	cl, prof, err := authedClient()
-	if err != nil {
-		return err
-	}
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		return err
-	}
-	defer mk.Wipe()
-	conv := crypto.DeriveConvergenceKey(mk)
+	defer sess.Wipe()
+	// The master key is read through the session rather than copied out; a local copy
+	// would outlive the deferred wipe.
+	base, baseExists, cl := sess.base, sess.baseExists, sess.cl
+	conv := crypto.DeriveConvergenceKey(sess.mk)
 	defer conv.Wipe()
 
 	// Snapshot the working tree once; it does not change between retries. When this
@@ -754,53 +742,14 @@ func runSync(dir string, opts syncOptions) error {
 	// client.ErrConflict if another sync committed first; the loop below then
 	// re-plans against the new remote, so a concurrent write is never lost.
 	reconcile := func() error {
-		res, err := cl.GetResource(st.ID)
-		if errors.Is(err, client.ErrNotFound) {
-			return fmt.Errorf("folder resource %s not found on the server", st.ID)
-		}
+		rs, err := sess.openRemote(opts, formatChunked)
 		if err != nil {
 			return err
 		}
-		// Freshness guard: a version below the recorded pin means the server rolled
-		// back. Accepting it discards the base for this pass — the old remote state
-		// must not be reconciled against a base that post-dates it, or one-sided
-		// regressions read as remote edits/deletes and clobber local files. The
-		// baseless reconcile turns them into conflicts to review instead.
-		trustBase := baseExists
-		if st.RemoteVersion > 0 && res.Version < st.RemoteVersion {
-			if !opts.acceptRollback {
-				return rollbackErr(res.Version, st.RemoteVersion)
-			}
-			fmt.Fprintf(os.Stderr, "accepting server rollback (version %d, previously %d); reconciling from scratch\n",
-				res.Version, st.RemoteVersion)
-			trustBase = false
-		}
+		defer rs.ck.Wipe()
 		planBase := base
-		if !trustBase {
+		if !rs.trustBase {
 			planBase = syncengine.Manifest{}
-		}
-		if res.WrappedKey == nil {
-			return errors.New("folder resource has no owner key; cannot sync")
-		}
-		ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-		if err != nil {
-			return fmt.Errorf("unwrap folder key: %w", err)
-		}
-		defer ck.Wipe()
-		// Route by the server's truth, not just local .aqtconfig: a pack-and-seal folder
-		// reconciled as chunked would read an empty manifest and delete the whole tree.
-		// Refuse it instead. (AAD domain separation also makes the manifest read below
-		// fail, but this gives the actionable message.)
-		meta, err := decodeMeta(res.EncryptedMeta, ck, st.ID)
-		if err != nil {
-			return err
-		}
-		if meta.Packed {
-			return errors.New("this folder is pack-and-seal on the server but is being synced as chunked; " +
-				"set pack=true in .aqtconfig, or re-clone it")
-		}
-		if !meta.Tree {
-			return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 		}
 		// Read the remote tree. With a base, reuse it: any directory node whose id the
 		// base tree already contains is byte-identical (nodes are content-addressed), so
@@ -808,13 +757,13 @@ func runSync(dir string, opts syncOptions) error {
 		// unchanged remote does zero node round-trips. Without a base (reconcile mode,
 		// or an accepted rollback) there is nothing to reuse, so fall back to the full walk.
 		var remote syncengine.Manifest
-		if trustBase {
-			remote, err = openRemoteTreeReusingBase(cl, res.Blob, ck, st.ID, baseCT)
+		if rs.trustBase {
+			remote, err = openRemoteTreeReusingBase(cl, rs.res.Blob, rs.ck, sess.st.ID, baseCT)
 		} else {
-			remote, err = openRemoteTree(cl, res.Blob, ck, st.ID)
+			remote, err = openRemoteTree(cl, rs.res.Blob, rs.ck, sess.st.ID)
 		}
 		if errors.Is(err, client.ErrNotFound) {
-			// We read version res.Version's root, but a concurrent sync superseded it
+			// We read the root of the version this attempt fetched, but a concurrent sync superseded it
 			// and GC reaped its now-unreferenced tree objects before we fetched them.
 			// Re-reconcile against the current version (same path the server's own
 			// version conflict takes), rather than hard-failing the sync.
@@ -827,7 +776,7 @@ func runSync(dir string, opts syncOptions) error {
 		// ambiguous and become conflicts to review rather than silent adds/deletes.
 		var actions []syncengine.Action
 		var dirActions []syncengine.DirAction
-		if trustBase {
+		if rs.trustBase {
 			actions = syncengine.Plan(local, base, remote)
 			dirActions = syncengine.PlanDirs(local, base, remote)
 		} else {
@@ -849,8 +798,8 @@ func runSync(dir string, opts syncOptions) error {
 		return applySync(applyCtx{
 			root: root, cl: cl, opts: opts,
 			base: planBase, local: local, remote: remote,
-			conv: conv, ck: ck, mk: mk, meta: res.EncryptedMeta,
-			visibility: res.Visibility, version: res.Version, id: st.ID,
+			conv: conv, ck: rs.ck, mk: sess.mk, meta: rs.res.EncryptedMeta,
+			visibility: rs.res.Visibility, version: rs.res.Version, id: sess.st.ID,
 			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo, selector: selector,
 		}, actions, dirActions)
 	}

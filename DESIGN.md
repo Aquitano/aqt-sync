@@ -657,6 +657,25 @@ disagree about what counts as a change. A symlink's own permission bits are excl
 from that rule: a scan never records them and apply never sets them, so comparing them
 would manufacture a difference no side could resolve.
 
+**One sync prologue, two adapters.** Both sync adapters — chunked and pack-and-seal —
+enter through the same `syncSession`: it loads `state.json` and the last-synced base,
+refuses a missing base unless `--reconcile`, and acquires the authenticated client and
+unlocked master key. Each reconcile attempt then runs the session's `openRemote`, which
+fetches the resource, classifies a server rollback, unwraps the content key, decodes the
+sealed metadata, and checks the folder's format. Every one of those is a safety guard,
+and a fix applied to one adapter's copy did not reach the other, so they are defined
+once. Two details are load-bearing: a rollback is classified *before* the content key
+is unwrapped and the metadata decoded, so a server whose version regressed reports that
+rather than a cross-mode config typo or a keyless resource — a version regression is a
+statement about the server's integrity and outranks anything read out of the record it
+served; and the format guard is parameterized by the mode the caller expects,
+because a pack folder carries `packed` and never the chunked path's `tree` flag, so one
+shared check would reject either every pack folder or none. What stays per-adapter is
+what each does with the verdict — `openRemote` reports whether the base can be trusted,
+and the chunked path plans against an empty base while pack-and-seal drops into its
+baseless whole-folder reconcile — along with all planning, transfer, apply, and conflict
+behavior.
+
 **Chunking + dedup.** Files at or below an inline threshold (the FastCDC minimum)
 are stored inline in the manifest (which is itself sealed), so a tree of many
 tiny files never spawns tiny on-disk blobs. Larger files are split with **FastCDC**
