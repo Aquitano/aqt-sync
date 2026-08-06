@@ -109,6 +109,12 @@ func tuiSnapshotDetail(r snapshotRow, diff *comparison, diffErr error, diffing b
 func tuiDiffBody(d comparison) string {
 	var b strings.Builder
 	b.WriteString(tuiStyleTitle.Render(fmt.Sprintf("%s (v%d) → %s (v%d)", d.Left.Label, d.Left.Version, d.Right.Label, d.Right.Version)) + "\n")
+	// An incomplete comparison carries empty buckets, so it has to be answered before
+	// the zero-difference branch would render it as "no differences".
+	if !d.Complete {
+		b.WriteString("\n" + tuiStyleDim.Render(comparisonUnavailable(d.Reason)))
+		return b.String()
+	}
 	if len(d.Added)+len(d.Removed)+len(d.Modified)+len(d.Renamed) == 0 {
 		b.WriteString("\n" + tuiStyleDim.Render("no differences"))
 		return b.String()

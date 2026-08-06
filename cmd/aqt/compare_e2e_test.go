@@ -86,14 +86,20 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 		t.Fatalf("conflicting edit not reported:\n%s", out)
 	}
 
-	// Path filters narrow the comparison without changing its classification.
+	// Path filters narrow the comparison without changing its classification: the
+	// matching path keeps its mark, the one outside the filter disappears.
+	writeTree(t, replica, "notes/todo.txt", "buy milk, eggs and bread\n")
 	out = mustCompare(t, replica, []string{"notes"})
+	if !strings.Contains(out, "M  notes/todo.txt") {
+		t.Fatalf("path filter dropped a matching path:\n%s", out)
+	}
 	if strings.Contains(out, "a.txt") {
 		t.Fatalf("path filter leaked an unrelated path:\n%s", out)
 	}
 
 	// A move reports as one rename, not the delete and add it executes as.
-	writeTree(t, replica, "a.txt", "alpha from origin\n") // converge, so only the move differs
+	writeTree(t, replica, "a.txt", "alpha from origin\n")          // converge, so only the move differs
+	writeTree(t, replica, "notes/todo.txt", "buy milk and eggs\n") // ditto, so the move keeps its content
 	if err := os.Rename(filepath.Join(replica, "notes", "todo.txt"),
 		filepath.Join(replica, "notes", "renamed.txt")); err != nil {
 		t.Fatal(err)
@@ -388,7 +394,10 @@ func TestComparisonFilterKeepsRenamesAndRebuildsBuckets(t *testing.T) {
 				{Path: "notes/new.md", Kind: syncengine.ChangeAdded, Type: syncengine.ChildFile},
 				{Path: "src/main.go", Kind: syncengine.ChangeContent, Type: syncengine.ChildFile},
 			},
-			Renamed: []syncengine.Rename{{From: "notes/old.md", To: "docs/moved.md"}},
+			Renamed: []syncengine.Rename{
+				{From: "notes/old.md", To: "docs/moved.md"},
+				{From: "src/a.go", To: "src/b.go"},
+			},
 		},
 	)
 
@@ -399,9 +408,17 @@ func TestComparisonFilterKeepsRenamesAndRebuildsBuckets(t *testing.T) {
 	if len(got.Modified) != 0 {
 		t.Fatalf("filter kept an unmatched path: %v", got.Modified)
 	}
-	// The rename's source is inside the filter, so the move stays visible as a move.
+	// Changes is what --json exposes beside the buckets, so it has to narrow with them.
+	if len(got.Changes) != 1 || got.Changes[0].Path != "notes/new.md" {
+		t.Fatalf("classified changes not filtered with the buckets: %+v", got.Changes)
+	}
+	// The rename's source is inside the filter, so the move stays visible as a move —
+	// with both of its sides intact, including the target outside the filter.
 	if len(got.Renamed) != 1 {
-		t.Fatalf("filter dropped a rename with a matching side: %v", got.Renamed)
+		t.Fatalf("filter dropped a rename with a matching side, or kept an unmatched one: %v", got.Renamed)
+	}
+	if got.Renamed[0].From != "notes/old.md" || got.Renamed[0].To != "docs/moved.md" {
+		t.Fatalf("rename lost a side in the filter: %+v", got.Renamed[0])
 	}
 	if !got.Complete || got.Left.Version != 3 {
 		t.Fatalf("filter lost the comparison's identity: %+v", got)

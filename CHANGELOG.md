@@ -44,8 +44,9 @@ All notable changes to this project are documented in this file.
   A locked session prompts on a terminal and never under `--json` or a non-terminal
   stdin, where it reports `reason: "session-locked"` with both sides still named.
   Pack-and-seal folders are streamed back and hashed in memory for a truthful
-  per-entry answer. The TUI exposes the same comparison (`C` on the files panel)
-  through the same result type.
+  per-entry answer; their unified text diff reconstructs the remote into a
+  temporary directory instead. The TUI exposes the same comparison (`C` on the
+  files panel) through the same result type.
 
 ### Fixed
 

@@ -251,6 +251,9 @@ incomplete comparison is never mistaken for a clean one. A chunked folder answer
 from directory-node metadata alone; a pack-and-seal folder has no per-file remote
 metadata, so its whole tree is streamed back and hashed in memory — a truthful
 per-entry answer that costs the folder's full download but writes nothing to disk.
+That holds for the classified rendering. A unified text diff needs both sides'
+bytes, so a pack-and-seal folder is reconstructed into a temporary directory and
+removed again on exit; the working tree is still never written.
 
 `.aqtignore` uses gitignore syntax. The starter file seeds common build-artifact
 and cache excludes (`node_modules/`, `.next/`, `target/`, `__pycache__/`, `dist/`,
