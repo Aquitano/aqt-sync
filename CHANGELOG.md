@@ -18,8 +18,9 @@ All notable changes to this project are documented in this file.
 - Pre-compaction and pre-restore snapshots are anchored at creation so scheduled
   auto-retention cannot prune a rollback before its swap is validated. Once its
   swap commits, a compaction lists the remote's checkpoints server-side and
-  releases every one but its own, so exactly one rollback per remote stays
-  anchored no matter how many compactions, CAS retries, or restores preceded it.
+  releases every one but its own, so after each successful compaction exactly one
+  rollback per remote stays anchored, no matter how many compactions, CAS retries,
+  or restores preceded it.
   A user's `aqt checkpoint` is anchored but not automatic and is never released.
 - `aqt sync --conflicts=merge` (and `.aqtconfig` `conflicts: "merge"`) performs
   bounded three-way text merges for non-overlapping edits and falls back to the
