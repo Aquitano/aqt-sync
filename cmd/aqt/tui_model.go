@@ -198,7 +198,7 @@ func (m *tuiModel) reloadPanels() tea.Cmd {
 }
 
 func (m *tuiModel) busy() bool {
-	if m.execBusy || m.diffing || m.unlocking {
+	if m.execBusy || m.diffing || m.comparing || m.unlocking {
 		return true
 	}
 	for i := range m.panels {
@@ -251,6 +251,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.local, m.conflicts = msg.changes, msg.conflicts
 		}
+		m.retireComparison()
 		m.rebuildFilesPanel()
 		m.rebuildStatusPanel()
 		m.refreshMain()
@@ -1106,6 +1107,17 @@ func (m *tuiModel) toggleTab() {
 	m.refreshMain()
 }
 
+// retireComparison drops a finished working-tree-versus-remote comparison when the
+// local tree has been rescanned. The comparison is a point-in-time answer against a
+// specific remote version, so once a sync, an action, or an edit has moved either
+// side, keeping it would leave the panel showing two sections that contradict each
+// other. A comparison still in flight is left to land and replace it.
+func (m *tuiModel) retireComparison() {
+	if !m.comparing {
+		m.compared, m.compareErr = nil, nil
+	}
+}
+
 func (m *tuiModel) refreshFocused() tea.Cmd {
 	switch m.focus {
 	case tuiPanelStatus:
@@ -1288,7 +1300,8 @@ func (m *tuiModel) rebuildFilesPanel() {
 	// The on-demand comparison against the current remote. Unlike the two sections
 	// above it is not base-relative: it reports how the working tree and the server's
 	// current state differ outright, which is why it renders as its own section
-	// rather than being folded into either of them.
+	// rather than being folded into either of them, and why retireComparison drops it
+	// once the sections beside it have been rescanned.
 	switch {
 	case m.comparing:
 		rows = append(rows,

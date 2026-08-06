@@ -283,6 +283,55 @@ func TestTUIBusyGuardsActions(t *testing.T) {
 	}
 }
 
+// The working-tree-versus-remote comparison is a point-in-time answer, so it renders
+// as its own section and must not outlive a rescan of the sections beside it: a
+// comparison left standing after a sync would report differences that sync resolved.
+func TestTUICompareSectionRetiresOnRescan(t *testing.T) {
+	m := testModel(t)
+	m.Update(tuiStartCompareMsg{}) // the returned command is not run: no network here
+	if !m.comparing {
+		t.Fatal("start message did not mark a comparison in flight")
+	}
+	if !m.busy() {
+		t.Fatal("an in-flight comparison must count as busy, or its spinner tick dies")
+	}
+
+	m.Update(tuiCompareMsg{result: newComparison(
+		diffSide{Label: "remote", Version: 7}, workingTreeSide,
+		syncengine.Delta{Changes: []syncengine.Change{
+			{Path: "drifted.txt", Kind: syncengine.ChangeContent, Type: syncengine.ChildFile},
+		}},
+	)})
+	if m.comparing || !filesPanelHas(m, "Compared with remote (v7)") || !filesPanelHas(m, "drifted.txt") {
+		t.Fatalf("comparison result not rendered as its own section:\n%s", filesPanelText(m))
+	}
+
+	// A sync (or any action, or an edit) ends in a local rescan, which retires it.
+	m.Update(tuiLocalMsg{changes: testChanges(nil, []string{"mod.txt"})})
+	if filesPanelHas(m, "Compared with remote") {
+		t.Fatalf("stale comparison survived a rescan:\n%s", filesPanelText(m))
+	}
+
+	// A comparison still in flight is left alone: its result replaces the stale one.
+	m.Update(tuiStartCompareMsg{})
+	m.Update(tuiLocalMsg{changes: testChanges(nil, []string{"mod.txt"})})
+	if !m.comparing {
+		t.Fatal("rescan canceled a comparison the user had just requested")
+	}
+}
+
+func filesPanelText(m *tuiModel) string {
+	var b strings.Builder
+	for _, r := range m.panels[tuiPanelFiles].list.rows {
+		b.WriteString(r.text() + "\n")
+	}
+	return b.String()
+}
+
+func filesPanelHas(m *tuiModel, want string) bool {
+	return strings.Contains(filesPanelText(m), want)
+}
+
 // A clean tracked folder renders a headers-only files list; moving the cursor
 // backwards through it must not walk past the end (regression: index panic).
 func TestTUIHeadersOnlyListNoPanic(t *testing.T) {
