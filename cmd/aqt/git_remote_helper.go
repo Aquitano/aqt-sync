@@ -238,9 +238,20 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 		return fmt.Errorf("git object format mismatch: remote is %s, local repository is %s; use a matching repository format", remote.root.ObjectFormat, localFormat)
 	}
 
+	// One presence pass for the whole chain. Applying a bundle can only add objects,
+	// and a bundle whose tips are already here is skipped either way, so answering up
+	// front costs nothing in accuracy and saves a process per tip.
+	var chainTips []string
+	for _, bundle := range remote.root.Bundles {
+		chainTips = append(chainTips, bundle.Tips...)
+	}
+	presentTips, err := presentObjects(chainTips)
+	if err != nil {
+		return err
+	}
 	var needed []gitremote.BundleRef
 	for _, bundle := range remote.root.Bundles {
-		if !allObjectsPresent(bundle.Tips) {
+		if !allObjectsPresent(bundle.Tips, presentTips) {
 			needed = append(needed, bundle)
 		}
 	}
@@ -688,19 +699,40 @@ func firstBranch(refs map[string]string) string {
 }
 
 func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root gitremote.RefsRoot, pushes []helperPush) (*gitremote.BundleRef, error) {
-	var positives, tips []string
-	seenPositive := make(map[string]bool)
+	// The remote frontier is needed twice — as the bundle's exclusion set, and as the
+	// set a pushed tip is tested against — so establish it once, in one git call.
+	present, err := presentObjects(distinctRefOIDs(root.Refs))
+	if err != nil {
+		return nil, err
+	}
+	bases := make([]string, 0, len(present))
+	for oid := range present {
+		bases = append(bases, oid)
+	}
+	sort.Strings(bases)
+
+	var tips []string
 	seenTip := make(map[string]bool)
+	for _, push := range pushes {
+		if push.delete || seenTip[push.localOID] {
+			continue
+		}
+		tips = append(tips, push.localOID)
+		seenTip[push.localOID] = true
+	}
+	contained, err := remoteReaches(tips, root.Refs, bases)
+	if err != nil {
+		return nil, err
+	}
+
+	var positives []string
+	seenPositive := make(map[string]bool)
 	for _, push := range pushes {
 		if push.delete {
 			continue
 		}
-		if !seenTip[push.localOID] {
-			tips = append(tips, push.localOID)
-			seenTip[push.localOID] = true
-		}
 		needsObject := push.annotatedTag && !remoteContainsObject(root.Refs, push.localOID)
-		if (needsObject || !remoteContainsCommit(root.Refs, push.localOID)) && !seenPositive[push.src] {
+		if (needsObject || !contained[push.localOID]) && !seenPositive[push.src] {
 			positives = append(positives, push.src)
 			seenPositive[push.src] = true
 		}
@@ -708,16 +740,6 @@ func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root git
 	if len(positives) == 0 {
 		return nil, nil
 	}
-
-	var bases []string
-	seenBase := make(map[string]bool)
-	for _, oid := range root.Refs {
-		if !seenBase[oid] && gitObjectPresent(oid) {
-			bases = append(bases, oid)
-			seenBase[oid] = true
-		}
-	}
-	sort.Strings(bases)
 
 	path, cleanup, err := newBundlePath("aqt-push-bundle-")
 	if err != nil {
@@ -753,18 +775,102 @@ func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root git
 	return &bundle, nil
 }
 
-func remoteContainsCommit(refs map[string]string, oid string) bool {
-	for _, remoteOID := range refs {
-		if remoteOID == oid {
-			return true
-		}
-		cmd := exec.Command("git", "merge-base", "--is-ancestor", oid, remoteOID)
-		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-		if cmd.Run() == nil {
-			return true
+func distinctRefOIDs(refs map[string]string) []string {
+	seen := make(map[string]bool, len(refs))
+	oids := make([]string, 0, len(refs))
+	for _, oid := range refs {
+		if !seen[oid] {
+			oids = append(oids, oid)
+			seen[oid] = true
 		}
 	}
-	return false
+	sort.Strings(oids)
+	return oids
+}
+
+// remoteReaches reports, per tip, whether the remote's refs already reach it — the
+// question that decides whether a push has to ship the tip's history at all.
+//
+// frontier is the subset of the remote's refs this repository actually has; a tip is
+// answered against that whole set at once. Asking it pairwise (one `git merge-base
+// --is-ancestor` per tip and remote ref) made a push cost O(pushed x remote)
+// subprocesses: pushing 80 unrelated branches to a remote holding 60 took 10s, against
+// 121ms for 20 to an empty one.
+func remoteReaches(tips []string, refs map[string]string, frontier []string) (map[string]bool, error) {
+	reached := make(map[string]bool, len(tips))
+	for _, tip := range tips {
+		// An exact ref match settles it without a walk, and settles it even when the
+		// object is missing locally — which is what the pairwise check did first too.
+		if remoteContainsObject(refs, tip) {
+			reached[tip] = true
+			continue
+		}
+		if len(frontier) == 0 {
+			continue
+		}
+		ok, err := reachableFrom(tip, frontier)
+		if err != nil {
+			return nil, err
+		}
+		reached[tip] = ok
+	}
+	return reached, nil
+}
+
+// reachableFrom reports whether oid is reachable from any of frontier. `rev-list oid
+// --not frontier...` emits the commits reachable from oid and from nothing in
+// frontier, so no output means the remote already has it; --max-count=1 stops at the
+// first counterexample. A tip git cannot walk (a non-commit-ish ref) counts as not
+// reached, exactly as a failing merge-base did.
+func reachableFrom(oid string, frontier []string) (bool, error) {
+	args := append([]string{"rev-list", "--max-count=1", oid, "--not"}, frontier...)
+	cmd := exec.Command("git", args...)
+	cmd.Stderr = io.Discard
+	out, err := cmd.Output()
+	if err != nil {
+		return false, nil
+	}
+	return len(strings.TrimSpace(string(out))) == 0, nil
+}
+
+// presentObjects returns the subset of oids this repository holds, in one
+// `git cat-file --batch-check` pass rather than a process per id. Ids that are not
+// well-formed never reach git (see validGitOID) and are reported absent.
+func presentObjects(oids []string) (map[string]bool, error) {
+	present := make(map[string]bool, len(oids))
+	var query []string
+	var stdin strings.Builder
+	for _, oid := range oids {
+		if !validGitOID(oid) {
+			continue
+		}
+		query = append(query, oid)
+		stdin.WriteString(oid + "^{object}\n")
+	}
+	if len(query) == 0 {
+		return present, nil
+	}
+	cmd := exec.Command("git", "cat-file", "--batch-check")
+	cmd.Stdin = strings.NewReader(stdin.String())
+	cmd.Stderr = io.Discard
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("check local git objects: %w", err)
+	}
+	records := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(records) != len(query) {
+		return nil, fmt.Errorf("git cat-file returned %d records for %d objects", len(records), len(query))
+	}
+	for i, record := range records {
+		// git answers a resolvable id with "<objectname> <type> <size>" and an
+		// unresolvable one by echoing the query and a reason ("missing", "ambiguous").
+		// Matching on the shape rather than on the echo matters for an annotated tag,
+		// whose peeled objectname is not the id that was asked about.
+		if fields := strings.Fields(record); len(fields) == 3 && validGitOID(fields[0]) {
+			present[query[i]] = true
+		}
+	}
+	return present, nil
 }
 
 func remoteContainsObject(refs map[string]string, oid string) bool {
@@ -877,12 +983,14 @@ func gitRemoteTarget(rawURL string) (string, error) {
 	return target, nil
 }
 
-func allObjectsPresent(oids []string) bool {
+// allObjectsPresent reports whether every tip is in present. A bundle with no tips
+// predates tip recording, so it is never assumed applied.
+func allObjectsPresent(oids []string, present map[string]bool) bool {
 	if len(oids) == 0 {
 		return false
 	}
 	for _, oid := range oids {
-		if !gitObjectPresent(oid) {
+		if !present[oid] {
 			return false
 		}
 	}
