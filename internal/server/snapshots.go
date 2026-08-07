@@ -60,13 +60,16 @@ func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	return s.createSnapshot(owner, resourceID, label, false, anchor, "")
 }
 
-// createSnapshot is CreateSnapshot plus the scheduled marker: the scheduled job's
-// snapshots are tagged so retention can prune them without touching manual ones.
-// anchored pins the snapshot against every retention path.
+// CreateSnapshotIdempotent is CreateSnapshot driven by the request shape, so a
+// caller can carry the scheduled marker, the anchor flag, and an idempotency key
+// that replays the original response instead of taking a second snapshot.
 func (s *Store) CreateSnapshotIdempotent(owner string, req api.CreateSnapshotRequest) (api.SnapshotInfo, error) {
 	return s.createSnapshot(owner, req.ResourceID, req.EncryptedLabel, req.Automatic, req.Anchor, req.IdempotencyKey)
 }
 
+// createSnapshot is CreateSnapshot plus the scheduled marker: the scheduled job's
+// snapshots are tagged so retention can prune them without touching manual ones.
+// anchored pins the snapshot against every retention path.
 func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlob, scheduled, anchored bool, idempotencyKey string) (api.SnapshotInfo, error) {
 	digest, err := idempotencyDigest(struct {
 		ResourceID string
