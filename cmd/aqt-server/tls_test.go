@@ -79,7 +79,7 @@ func TestLoadTLSSettings(t *testing.T) {
 
 // TestServeTLSRoundTrip proves the static-cert path actually terminates TLS: a
 // client that trusts the generated cert completes an HTTPS request against a
-// server started through serveListener, and a context cancel shuts it down cleanly.
+// server started through serveListenerLifecycle, and a context cancel shuts it down cleanly.
 func TestServeTLSRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	certPEM, keyPEM := selfSignedCert(t)
@@ -111,7 +111,7 @@ func TestServeTLSRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serveListener(ctx, srv, ln, cfg) }()
+	go func() { done <- serveListenerLifecycle(ctx, srv, ln, cfg, shutdownGrace, nil, nil) }()
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(certPEM) {
@@ -144,15 +144,15 @@ func TestServeTLSRoundTrip(t *testing.T) {
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("serveListener returned %v on graceful shutdown, want nil", err)
+			t.Fatalf("serveListenerLifecycle returned %v on graceful shutdown, want nil", err)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveListener did not return after context cancel")
+		t.Fatal("serveListenerLifecycle did not return after context cancel")
 	}
 }
 
 // TestServeListenerReportsServeError checks the non-signal exit: if the underlying
-// server fails, serveListener surfaces the error instead of hanging.
+// server fails, serveListenerLifecycle surfaces the error instead of hanging.
 func TestServeListenerReportsServeError(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -162,14 +162,14 @@ func TestServeListenerReportsServeError(t *testing.T) {
 
 	srv := &http.Server{Handler: http.NewServeMux()}
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveListener(context.Background(), srv, ln, nil) }()
+	go func() { errCh <- serveListenerLifecycle(context.Background(), srv, ln, nil, shutdownGrace, nil, nil) }()
 	select {
 	case err := <-errCh:
 		if err == nil {
 			t.Fatal("expected a serve error from a closed listener")
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("serveListener hung on a serve error")
+		t.Fatal("serveListenerLifecycle hung on a serve error")
 	}
 }
 

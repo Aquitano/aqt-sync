@@ -112,20 +112,10 @@ func validateListenAddress(addr string, tlsEnabled, allowInsecure bool) error {
 // mid-write.
 const shutdownGrace = 20 * time.Second
 
-// serve binds srv.Addr and runs the server until a termination signal arrives.
-// It binds the listener up front (so a port-in-use failure is reported before the
-// "listening" log) and returns cleanly on shutdown, so the caller's deferred
+// serveWithShutdown binds srv.Addr and runs the server until a termination signal
+// arrives. It binds the listener up front (so a port-in-use failure is reported before
+// the "listening" log) and returns cleanly on shutdown, so the caller's deferred
 // store.Close() actually runs — log.Fatal on the raw ListenAndServe would skip it.
-func serve(srv *http.Server, tlsCfg *tls.Config) error {
-	ln, err := net.Listen("tcp", srv.Addr)
-	if err != nil {
-		return err
-	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return serveListener(ctx, srv, ln, tlsCfg)
-}
-
 func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration, begin func(), drain func(context.Context) error) error {
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
@@ -136,9 +126,9 @@ func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration
 	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, grace, begin, drain)
 }
 
-// serveListener serves ln until it errors or ctx is cancelled, then drains
-// in-flight requests within shutdownGrace. Splitting the listener and cancellation
-// out of serve lets a test drive shutdown without an OS signal, and exercise the
+// serveListenerLifecycle serves ln until it errors or ctx is cancelled, then drains
+// in-flight requests within grace. Splitting the listener and cancellation out of
+// serveWithShutdown lets a test drive shutdown without an OS signal, and exercise the
 // real TLS handshake over a listener whose ephemeral port it can read back.
 //
 // The TLS path uses ServeTLS rather than Serve over a hand-wrapped tls.Listener so
@@ -146,10 +136,6 @@ func serveWithShutdown(srv *http.Server, tlsCfg *tls.Config, grace time.Duration
 // autocert's TLSConfig advertises "h2" via ALPN; a client that negotiated h2 against
 // a server that only speaks HTTP/1.1 would break. ServeTLS also preserves the
 // acme-tls/1 challenge protocol needed for autocert issuance.
-func serveListener(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config) error {
-	return serveListenerLifecycle(ctx, srv, ln, tlsCfg, shutdownGrace, nil, nil)
-}
-
 func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listener, tlsCfg *tls.Config, grace time.Duration, begin func(), drain func(context.Context) error) error {
 	serve := srv.Serve
 	scheme := "http"

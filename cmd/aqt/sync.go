@@ -2551,26 +2551,11 @@ func dirArg(args []string) string {
 	return "."
 }
 
-func ensureEmptyDir(path string) error {
-	entries, err := os.ReadDir(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return os.MkdirAll(path, 0o755)
-	}
-	if err != nil {
-		return err
-	}
-	if len(entries) != 0 {
-		return fmt.Errorf("%s already exists and is not empty", path)
-	}
-	return nil
-}
-
 // materializeStaged fills dest by letting fn write into a staging directory that
 // is renamed to dest only after fn succeeds, so a failed or interrupted
 // materialization leaves dest exactly as it was (usually: absent) instead of
-// half-populated. dest must not exist, or be an empty directory (the same
-// contract ensureEmptyDir enforced); staging shares dest's parent so the commit
-// rename never crosses filesystems.
+// half-populated. dest must not exist, or be an empty directory; staging shares
+// dest's parent so the commit rename never crosses filesystems.
 func materializeStaged(dest string, fn func(staging string) error) error {
 	parent := filepath.Dir(dest)
 	if err := os.MkdirAll(parent, 0o755); err != nil {
