@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v0.5.0] - 2026-08-07
+
 ### Added
 
 - Encrypted Git remotes: `aqt repo create|ls|info|gc|restore|rm` and the

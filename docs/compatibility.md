@@ -17,7 +17,7 @@ API layer, *before* any payload is served.
 | `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata |
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.3.0 | account root-key rotation and migrated identities |
-| `4` (Git remote) | unreleased | sealed `gitremote` RefsRoot resources and their private-only server policy |
+| `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
 
 `api.ClientCapability` is `4` today. Capability 3 is required for root-key recovery;
 capability 4 is required for encrypted Git remote resources. `aqt repo create` declares
