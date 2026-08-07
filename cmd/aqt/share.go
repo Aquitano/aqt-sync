@@ -290,31 +290,19 @@ func runShareWith(idArg, email string) error {
 		return err
 	}
 
-	res, err := cl.GetResource(id)
-	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("resource %s not found", id)
-	}
+	res, err := fetchResource(cl, id)
 	if err != nil {
 		return err
 	}
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource; only resources you own can be granted")
 	}
-	mk, err := unlockMaster(prof)
+	keys, err := openResourceKeys(prof, res, id)
 	if err != nil {
 		return err
 	}
-	defer mk.Wipe()
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
-	if err != nil {
-		return err
-	}
-	if err := checkShareableFolder(meta); err != nil {
+	defer keys.close()
+	if err := checkShareableFolder(keys.meta); err != nil {
 		return err
 	}
 	contact, err := lookupGrantee(cl, prof, email)
@@ -324,7 +312,7 @@ func runShareWith(idArg, email string) error {
 	if contact.Handle == prof.OwnerHandle {
 		return errors.New("cannot grant a resource to your own account")
 	}
-	wrap, err := crypto.WrapGrant(ck, contact.EncPublicKey, id, prof.OwnerHandle, contact.Handle)
+	wrap, err := crypto.WrapGrant(keys.ck, contact.EncPublicKey, id, prof.OwnerHandle, contact.Handle)
 	if err != nil {
 		return err
 	}
@@ -420,21 +408,12 @@ func runShareRevoke(idArg, email string) error {
 		fmt.Printf("revoked %s from aqt://%s (no owner key; content key not rotated)\n", email, id)
 		return nil
 	}
-	mk, err := unlockMaster(prof)
+	keys, err := openResourceKeys(prof, res, id)
 	if err != nil {
 		return err
 	}
-	defer mk.Wipe()
-	oldCK, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap key: %w", err)
-	}
-	defer oldCK.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, oldCK, id)
-	if err != nil {
-		return err
-	}
-	newCK, err := rotateResourceKey(cl, id, res, oldCK, mk, meta, handle)
+	defer keys.close()
+	newCK, err := rotateResourceKey(cl, id, res, keys.ck, keys.mk, keys.meta, handle)
 	if errors.Is(err, errTreeRootDrift) {
 		// The grant delete must still land; it is what actually cuts this grantee off
 		// on a private resource.
@@ -481,10 +460,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		return err
 	}
 
-	res, err := cl.GetResource(id)
-	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("resource %s not found", id)
-	}
+	res, err := fetchResource(cl, id)
 	if err != nil {
 		return err
 	}
@@ -493,26 +469,16 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource (it was pushed --public); use the share link from that push")
 	}
-
-	mk, err := unlockMaster(prof)
+	// Opening the keys sanity-checks the unwrapped key before flipping visibility.
+	keys, err := openResourceKeys(prof, res, id)
 	if err != nil {
 		return err
 	}
-	defer mk.Wipe()
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap key: %w", err)
-	}
-	defer ck.Wipe()
-	// Sanity-check the unwrapped key before flipping visibility.
-	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
-	if err != nil {
-		return err
-	}
+	defer keys.close()
 	// A chunked folder shares like a streamed file: its nodes and chunks are already
 	// the resource's referenced object set, so the public endpoint serves them and
 	// the fragment key opens the tree root.
-	if err := checkShareableFolder(meta); err != nil {
+	if err := checkShareableFolder(keys.meta); err != nil {
 		return err
 	}
 	// Always call SetVisibility when a policy is requested, even if the resource is
@@ -549,7 +515,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 			return err
 		}
 	}
-	ref, err := buildRef(prof.Server, id, api.Public, ck, password)
+	ref, err := buildRef(prof.Server, id, api.Public, keys.ck, password)
 	if err != nil {
 		return err
 	}
@@ -587,35 +553,22 @@ func runPrivate(idArg string) error {
 		return err
 	}
 
-	res, err := cl.GetResource(id)
-	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("resource %s not found", id)
-	}
+	res, err := fetchResource(cl, id)
 	if err != nil {
 		return err
 	}
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource; cannot rotate it")
 	}
-
-	mk, err := unlockMaster(prof)
+	keys, err := openResourceKeys(prof, res, id)
 	if err != nil {
 		return err
 	}
-	defer mk.Wipe()
-	oldCK, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap key: %w", err)
-	}
-	defer oldCK.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, oldCK, id)
-	if err != nil {
+	defer keys.close()
+	if err := checkShareableFolder(keys.meta); err != nil {
 		return err
 	}
-	if err := checkShareableFolder(meta); err != nil {
-		return err
-	}
-	newCK, err := rotateResourceKey(cl, id, res, oldCK, mk, meta, "")
+	newCK, err := rotateResourceKey(cl, id, res, keys.ck, keys.mk, keys.meta, "")
 	if errors.Is(err, errTreeRootDrift) {
 		// Killing the link must not depend on being able to re-seal the tree.
 		if visErr := revokeWithoutRotation(cl, id, res.Version, ""); visErr != nil {
@@ -672,6 +625,62 @@ func revokeWithoutRotation(cl *client.Client, id string, version int, revoke str
 		return nil
 	}
 	return cl.RevokeGrant(id, revoke)
+}
+
+// fetchResource gets a resource by id, reporting a miss in terms of the id the caller
+// resolved rather than as a bare transport error.
+func fetchResource(cl *client.Client, id string) (api.GetResourceResponse, error) {
+	res, err := cl.GetResource(id)
+	if errors.Is(err, client.ErrNotFound) {
+		return res, fmt.Errorf("resource %s not found", id)
+	}
+	return res, err
+}
+
+// resourceKeys holds the unlocked keys and the metadata they open for one resource.
+// close wipes both keys; callers defer it.
+type resourceKeys struct {
+	mk   crypto.MasterKey
+	ck   crypto.ContentKey
+	meta api.Metadata
+}
+
+func (k *resourceKeys) close() {
+	k.ck.Wipe()
+	k.mk.Wipe()
+}
+
+// openResourceKeys unlocks the profile's master key, unwraps the resource's content key
+// with it, and decodes the metadata that key opens — the prologue every owner-side share
+// operation runs. Decoding the metadata doubles as a check that the unwrapped key is the
+// right one, before a caller acts on it.
+//
+// res.WrappedKey must be non-nil. Callers report its absence themselves: what a missing
+// owner key means differs per command, and for a revoke it is not an error at all.
+//
+// Both keys are wiped if any step fails, so a caller only ever receives keys it owns.
+func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse, id string) (_ *resourceKeys, err error) {
+	if res.WrappedKey == nil {
+		// Unreachable from the current callers, which all report the absence in their
+		// own words first. A backstop so a later one gets an error, not a nil deref.
+		return nil, errors.New("no owner key stored for this resource")
+	}
+	k := &resourceKeys{}
+	defer func() {
+		if err != nil {
+			k.close()
+		}
+	}()
+	if k.mk, err = unlockMaster(prof); err != nil {
+		return nil, err
+	}
+	if k.ck, err = crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(k.mk)); err != nil {
+		return nil, fmt.Errorf("unwrap key: %w", err)
+	}
+	if k.meta, err = decodeMeta(res.EncryptedMeta, k.ck, id); err != nil {
+		return nil, err
+	}
+	return k, nil
 }
 
 // rotateResourceKey re-seals a resource's root (and, inline, its body) under a
@@ -750,57 +759,118 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 	}
 }
 
-// rotateInline rotates a small (inline) resource by re-encrypting body and
-// metadata under a fresh content key.
-func rotateInline(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, revoke string) (crypto.ContentKey, error) {
-	plaintext, err := crypto.OpenBound(res.Blob, oldCK, crypto.AADBlob, id)
+// resealed is a resource's root re-sealed under a fresh content key, plus the GC
+// roots that must accompany it on the re-PUT. refs is nil for an inline resource,
+// which references no objects.
+type resealed struct {
+	blob crypto.SealedBlob
+	refs []string
+}
+
+// rotateResource re-seals a resource under a fresh content key and flips it private,
+// returning the new key for the caller to wipe. reseal supplies the format-specific
+// part — the new root blob and GC roots; the metadata re-seal, the key wrap and the
+// version-pinned PUT that follow are the same for every format.
+//
+// The new key is wiped on every failure path, so a caller only ever receives a key it
+// owns. Optimistic concurrency: the rotate is a read-modify-write, so it pins the
+// version fetched by the caller. A concurrent sync committing between that GET and
+// this PUT would otherwise be silently overwritten with stale content.
+func rotateResource(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, revoke string, reseal func(newCK crypto.ContentKey) (resealed, error)) (_ crypto.ContentKey, err error) {
+	newCK, err := crypto.GenerateContentKey()
 	if err != nil {
-		return crypto.ContentKey{}, fmt.Errorf("decrypt: %w", err)
+		return crypto.ContentKey{}, err
+	}
+	defer func() {
+		if err != nil {
+			newCK.Wipe()
+		}
+	}()
+
+	sealed, err := reseal(newCK)
+	if err != nil {
+		return crypto.ContentKey{}, err
 	}
 	metaPlain, err := crypto.OpenBound(res.EncryptedMeta, oldCK, crypto.AADMeta, id)
 	if err != nil {
 		return crypto.ContentKey{}, fmt.Errorf("decrypt metadata: %w", err)
 	}
-
-	newCK, err := crypto.GenerateContentKey()
-	if err != nil {
-		return crypto.ContentKey{}, err
-	}
-	blob, err := crypto.SealBound(plaintext, newCK, crypto.AADBlob, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
 	metaBlob, err := crypto.SealBound(metaPlain, newCK, crypto.AADMeta, id)
 	if err != nil {
-		newCK.Wipe()
 		return crypto.ContentKey{}, err
 	}
 	wrapped, err := crypto.WrapKey(newCK, [crypto.KeySize]byte(mk))
 	if err != nil {
-		newCK.Wipe()
 		return crypto.ContentKey{}, err
 	}
-	// Optimistic concurrency: the rotate is a read-modify-write, so pin it to the
-	// version we just fetched. A concurrent sync committing between the GET and this
-	// PUT would otherwise be silently overwritten with stale content.
-	if _, err := cl.PutResource(api.PutResourceRequest{
+	if _, err = cl.PutResource(api.PutResourceRequest{
 		ID:              id,
 		Visibility:      api.Private,
-		Blob:            blob,
+		Blob:            sealed.blob,
 		EncryptedMeta:   metaBlob,
 		WrappedKey:      &wrapped,
+		ChunkRefs:       sealed.refs,
 		ExpectedVersion: res.Version,
 		RevokeGrantee:   revoke,
-		MinClient:       api.CapabilityIDBinding, // rotate re-seals blob and meta id-bound (v2)
+		MinClient:       api.CapabilityIDBinding, // the reseal binds root and meta to the id (v2)
 	}); err != nil {
-		newCK.Wipe()
 		if errors.Is(err, client.ErrConflict) {
-			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt unshare`")
+			err = errors.New("resource changed while rotating its key; re-run `aqt unshare`")
 		}
 		return crypto.ContentKey{}, err
 	}
 	return newCK, nil
+}
+
+// rotateInline rotates a small (inline) resource by re-encrypting body and
+// metadata under a fresh content key.
+func rotateInline(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, revoke string) (crypto.ContentKey, error) {
+	return rotateResource(cl, id, res, oldCK, mk, revoke, func(newCK crypto.ContentKey) (resealed, error) {
+		plaintext, err := crypto.OpenBound(res.Blob, oldCK, crypto.AADBlob, id)
+		if err != nil {
+			return resealed{}, fmt.Errorf("decrypt: %w", err)
+		}
+		blob, err := crypto.SealBound(plaintext, newCK, crypto.AADBlob, id)
+		if err != nil {
+			return resealed{}, err
+		}
+		return resealed{blob: blob}, nil
+	})
+}
+
+// rotateTree rotates a chunked folder's key the way rotateStreamed rotates a file's:
+// only the TreeRoot blob and metadata are re-sealed under a fresh content key. The
+// convergent directory nodes and chunk objects stay — their per-object keys derive
+// from the account convergence key, which a link never carried — so the visibility
+// flip plus a root the old key cannot open is what kills the link. The re-PUT must
+// carry the resource's full GC roots; they are recomputed by re-sealing the tree in
+// memory, which is deterministic under the convergence key.
+func rotateTree(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, revoke string) (crypto.ContentKey, error) {
+	return rotateResource(cl, id, res, oldCK, mk, revoke, func(newCK crypto.ContentKey) (resealed, error) {
+		root, err := syncengine.OpenTreeRoot(res.Blob, oldCK, id)
+		if err != nil {
+			return resealed{}, fmt.Errorf("decrypt folder root: %w", err)
+		}
+		manifest, err := syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, nil))
+		if err != nil {
+			return resealed{}, err
+		}
+		sealedTree, refs, err := syncengine.SealTree(manifest, crypto.DeriveConvergenceKey(mk), nil)
+		if err != nil {
+			return resealed{}, err
+		}
+		// The recomputed root must reproduce the stored one: a mismatch means the walk
+		// and the sealer disagree, and PUTting the recomputed refs could orphan live
+		// objects. Refuse rather than risk the folder's object graph.
+		if sealedTree.Root.ID != root.Root.ID {
+			return resealed{}, fmt.Errorf("%w: recomputed tree root %s does not match stored root %s", errTreeRootDrift, sealedTree.Root.ID, root.Root.ID)
+		}
+		blob, err := syncengine.SealTreeRoot(root, newCK, id)
+		if err != nil {
+			return resealed{}, err
+		}
+		return resealed{blob: blob, refs: refs}, nil
+	})
 }
 
 // rotateStreamed rotates a streamed file's key by re-wrapping the ROOT under a fresh
@@ -810,139 +880,31 @@ func rotateInline(cl *client.Client, id string, res api.GetResourceResponse, old
 // anyway. Access revocation is enforced server-side by the visibility flip. The re-PUT
 // must carry the resource's full ChunkRefs, since the server refuses a re-PUT that
 // drops the GC roots of an object-backed resource.
-// rotateTree rotates a chunked folder's key the way rotateStreamed rotates a file's:
-// only the TreeRoot blob and metadata are re-sealed under a fresh content key. The
-// convergent directory nodes and chunk objects stay — their per-object keys derive
-// from the account convergence key, which a link never carried — so the visibility
-// flip plus a root the old key cannot open is what kills the link. The re-PUT must
-// carry the resource's full GC roots; they are recomputed by re-sealing the tree in
-// memory, which is deterministic under the convergence key.
-func rotateTree(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, revoke string) (crypto.ContentKey, error) {
-	root, err := syncengine.OpenTreeRoot(res.Blob, oldCK, id)
-	if err != nil {
-		return crypto.ContentKey{}, fmt.Errorf("decrypt folder root: %w", err)
-	}
-	manifest, err := syncengine.OpenTreeBatched(root, newBatchNodeFetcher(cl, nil))
-	if err != nil {
-		return crypto.ContentKey{}, err
-	}
-	sealed, refs, err := syncengine.SealTree(manifest, crypto.DeriveConvergenceKey(mk), nil)
-	if err != nil {
-		return crypto.ContentKey{}, err
-	}
-	// The recomputed root must reproduce the stored one: a mismatch means the walk
-	// and the sealer disagree, and PUTting the recomputed refs could orphan live
-	// objects. Refuse rather than risk the folder's object graph.
-	if sealed.Root.ID != root.Root.ID {
-		return crypto.ContentKey{}, fmt.Errorf("%w: recomputed tree root %s does not match stored root %s", errTreeRootDrift, sealed.Root.ID, root.Root.ID)
-	}
-
-	newCK, err := crypto.GenerateContentKey()
-	if err != nil {
-		return crypto.ContentKey{}, err
-	}
-	blob, err := syncengine.SealTreeRoot(root, newCK, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
-	metaPlain, err := crypto.OpenBound(res.EncryptedMeta, oldCK, crypto.AADMeta, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, fmt.Errorf("decrypt metadata: %w", err)
-	}
-	metaBlob, err := crypto.SealBound(metaPlain, newCK, crypto.AADMeta, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
-	wrapped, err := crypto.WrapKey(newCK, [crypto.KeySize]byte(mk))
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
-	if _, err := cl.PutResource(api.PutResourceRequest{
-		ID:              id,
-		Visibility:      api.Private,
-		Blob:            blob,
-		EncryptedMeta:   metaBlob,
-		WrappedKey:      &wrapped,
-		ChunkRefs:       refs,
-		ExpectedVersion: res.Version,
-		RevokeGrantee:   revoke,
-		MinClient:       api.CapabilityIDBinding, // SealTreeRoot re-seals the root id-bound (v2)
-	}); err != nil {
-		newCK.Wipe()
-		if errors.Is(err, client.ErrConflict) {
-			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt unshare`")
-		}
-		return crypto.ContentKey{}, err
-	}
-	return newCK, nil
-}
-
 func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, revoke string) (crypto.ContentKey, error) {
-	root, err := syncengine.OpenFileRoot(res.Blob, oldCK, id)
-	if err != nil {
-		return crypto.ContentKey{}, fmt.Errorf("decrypt: %w", err)
-	}
-	// Recover the full content chunk records so ChunkRefs mirrors what BuildFileRoot
-	// produced at push time; an indirect root's list segments sit behind their own
-	// locate, so fetch them through the authed path first.
-	chunks := root.Chunks
-	if root.Indirect() {
-		segSrc, err := newPackSource(cl, root.ChunkIDs())
+	return rotateResource(cl, id, res, oldCK, mk, revoke, func(newCK crypto.ContentKey) (resealed, error) {
+		root, err := syncengine.OpenFileRoot(res.Blob, oldCK, id)
 		if err != nil {
-			return crypto.ContentKey{}, err
+			return resealed{}, fmt.Errorf("decrypt: %w", err)
 		}
-		chunks, err = root.Resolve(segSrc.get)
+		// Recover the full content chunk records so ChunkRefs mirrors what BuildFileRoot
+		// produced at push time; an indirect root's list segments sit behind their own
+		// locate, so fetch them through the authed path first.
+		chunks := root.Chunks
+		if root.Indirect() {
+			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			if err != nil {
+				return resealed{}, err
+			}
+			chunks, err = root.Resolve(segSrc.get)
+			if err != nil {
+				return resealed{}, err
+			}
+		}
+		// SealFileRoot binds the root to the id even if the original create was unbound.
+		blob, err := syncengine.SealFileRoot(root, newCK, id)
 		if err != nil {
-			return crypto.ContentKey{}, err
+			return resealed{}, err
 		}
-	}
-	refs := root.Refs(chunks)
-
-	newCK, err := crypto.GenerateContentKey()
-	if err != nil {
-		return crypto.ContentKey{}, err
-	}
-	// SealFileRoot binds the root to the id even if the original create was unbound.
-	blob, err := syncengine.SealFileRoot(root, newCK, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
-	metaPlain, err := crypto.OpenBound(res.EncryptedMeta, oldCK, crypto.AADMeta, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, fmt.Errorf("decrypt metadata: %w", err)
-	}
-	metaBlob, err := crypto.SealBound(metaPlain, newCK, crypto.AADMeta, id)
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
-	wrapped, err := crypto.WrapKey(newCK, [crypto.KeySize]byte(mk))
-	if err != nil {
-		newCK.Wipe()
-		return crypto.ContentKey{}, err
-	}
-	if _, err := cl.PutResource(api.PutResourceRequest{
-		ID:              id,
-		Visibility:      api.Private,
-		Blob:            blob,
-		EncryptedMeta:   metaBlob,
-		WrappedKey:      &wrapped,
-		ChunkRefs:       refs,
-		ExpectedVersion: res.Version,
-		RevokeGrantee:   revoke,
-		MinClient:       api.CapabilityIDBinding, // SealFileRoot re-seals the root id-bound (v2)
-	}); err != nil {
-		newCK.Wipe()
-		if errors.Is(err, client.ErrConflict) {
-			return crypto.ContentKey{}, errors.New("resource changed while rotating its key; re-run `aqt unshare`")
-		}
-		return crypto.ContentKey{}, err
-	}
-	return newCK, nil
+		return resealed{blob: blob, refs: root.Refs(chunks)}, nil
+	})
 }
