@@ -40,7 +40,29 @@ var gitInProgressMarkers = []string{
 // would otherwise be read by the caller as "nothing busy" and bypass the guard).
 func gitBusy(root string) (busy bool, repoDir string, err error) {
 	ig, _ := syncengine.LoadIgnore(root) // root .aqtignore rules; nested files are not consulted here
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+	walkErr := walkGitRepos(root, ig, func(gitPath string) bool {
+		gitDir, ok := resolveGitDir(gitPath)
+		if !ok || !gitDirBusy(gitDir) {
+			return false
+		}
+		repoDir = filepath.Dir(gitPath)
+		return true
+	})
+	if errors.Is(walkErr, errStopWalk) {
+		return true, repoDir, nil
+	}
+	return false, "", walkErr
+}
+
+// walkGitRepos calls visit for every .git entry under root — a git directory, or the
+// pointer file a submodule or linked worktree leaves — and stops at the first one visit
+// accepts. The control directory is skipped and git internals are never descended into;
+// when ig is non-nil, the subtrees it ignores are skipped too.
+//
+// Best-effort: a subtree that cannot be read is skipped rather than aborting the scan,
+// since an aborted scan would be read by a caller as "nothing found" and bypass its guard.
+func walkGitRepos(root string, ig *syncengine.Ignore, visit func(gitPath string) bool) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if d != nil && d.IsDir() {
 				return filepath.SkipDir
@@ -52,44 +74,40 @@ func gitBusy(root string) (busy bool, repoDir string, err error) {
 			case syncengine.ControlDir:
 				return filepath.SkipDir
 			case ".git":
-				if gitDirBusy(path) {
-					repoDir = filepath.Dir(path)
+				if visit(path) {
 					return errStopWalk
 				}
-				return filepath.SkipDir
+				return filepath.SkipDir // never descend into git internals
 			}
 			// Skip subtrees the sync ignores (node_modules, build output, …): those
 			// files are never pushed, so a git op inside one cannot produce the
 			// half-written push the guard exists to prevent. .git is handled above, so
 			// the default ignore's .git rule does not hide a real busy repo here.
-			if rel, relErr := filepath.Rel(root, path); relErr == nil {
-				if rel = filepath.ToSlash(rel); rel != "." && ig.Match(rel, true) {
-					return filepath.SkipDir
+			if ig != nil {
+				if rel, relErr := filepath.Rel(root, path); relErr == nil {
+					if rel = filepath.ToSlash(rel); rel != "." && ig.Match(rel, true) {
+						return filepath.SkipDir
+					}
 				}
 			}
 			return nil
 		}
 		// A .git entry that is not a directory is either a symlink to the real git
 		// dir or a pointer file ("gitdir: <path>") for submodules/worktrees.
-		if d.Name() == ".git" {
-			if info, statErr := os.Stat(path); statErr == nil && info.IsDir() {
-				if gitDirBusy(path) {
-					repoDir = filepath.Dir(path)
-					return errStopWalk
-				}
-				return nil
-			}
-			if gitDir, ok := resolveGitFile(path); ok && gitDirBusy(gitDir) {
-				repoDir = filepath.Dir(path)
-				return errStopWalk
-			}
+		if d.Name() == ".git" && visit(path) {
+			return errStopWalk
 		}
 		return nil
 	})
-	if errors.Is(walkErr, errStopWalk) {
-		return true, repoDir, nil
+}
+
+// resolveGitDir names the git directory a .git entry points at: the entry itself when it
+// is a directory (or a symlink to one), else the target of its "gitdir: <path>" pointer.
+func resolveGitDir(gitPath string) (string, bool) {
+	if info, err := os.Stat(gitPath); err == nil && info.IsDir() {
+		return gitPath, true
 	}
-	return false, "", walkErr
+	return resolveGitFile(gitPath)
 }
 
 // trackedGitBusy reports whether any git repository whose .git is *tracked* (synced
@@ -109,50 +127,16 @@ func trackedGitBusy(root string) (busy bool, repoDir string) {
 	if err != nil {
 		return false, ""
 	}
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
+	walkErr := walkGitRepos(root, ig, func(gitPath string) bool {
+		if !gitTracked(ig, root, gitPath) {
+			return false
 		}
-		if d.IsDir() {
-			switch d.Name() {
-			case syncengine.ControlDir:
-				return filepath.SkipDir
-			case ".git":
-				if gitTracked(ig, root, path) && gitDirBusy(path) {
-					repoDir = filepath.Dir(path)
-					return errStopWalk
-				}
-				return filepath.SkipDir // never descend into git internals
-			}
-			// Skip subtrees the sync ignores (node_modules, build output, …): their
-			// files — and any repo inside — are never pushed, so a git op there cannot
-			// torn-write the backup.
-			if rel, relErr := filepath.Rel(root, path); relErr == nil {
-				if rel = filepath.ToSlash(rel); rel != "." && ig.Match(rel, true) {
-					return filepath.SkipDir
-				}
-			}
-			return nil
+		gitDir, ok := resolveGitDir(gitPath)
+		if !ok || !gitDirBusy(gitDir) {
+			return false
 		}
-		// A non-directory .git is a submodule/worktree pointer or a symlink.
-		if d.Name() == ".git" {
-			gitDir := path
-			if info, statErr := os.Stat(path); statErr != nil || !info.IsDir() {
-				resolved, ok := resolveGitFile(path)
-				if !ok {
-					return nil
-				}
-				gitDir = resolved
-			}
-			if gitTracked(ig, root, path) && gitDirBusy(gitDir) {
-				repoDir = filepath.Dir(path)
-				return errStopWalk
-			}
-		}
-		return nil
+		repoDir = filepath.Dir(gitPath)
+		return true
 	})
 	return errors.Is(walkErr, errStopWalk), repoDir
 }
@@ -173,29 +157,11 @@ func gitTracked(ig *syncengine.Ignore, root, gitPath string) bool {
 // linked worktrees use, skips the control directory, and never descends into a
 // git directory's internals. Best-effort: an unreadable subtree is skipped.
 func firstGitRepo(root string) (rel string, found bool) {
-	walkErr := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			if d != nil && d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			switch d.Name() {
-			case syncengine.ControlDir:
-				return filepath.SkipDir
-			case ".git":
-				rel = repoRel(root, path)
-				return errStopWalk
-			}
-			return nil
-		}
-		// A non-directory .git is a submodule/worktree pointer or a symlink.
-		if d.Name() == ".git" {
-			rel = repoRel(root, path)
-			return errStopWalk
-		}
-		return nil
+	// nil ignore: this reports what exists on disk, not what the sync would push, so an
+	// ignored subtree still counts.
+	walkErr := walkGitRepos(root, nil, func(gitPath string) bool {
+		rel = repoRel(root, gitPath)
+		return true
 	})
 	return rel, errors.Is(walkErr, errStopWalk)
 }

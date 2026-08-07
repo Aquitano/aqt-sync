@@ -43,22 +43,11 @@ func (c *Client) CreateGrant(resourceID string, req api.CreateGrantRequest) erro
 // transparently.
 func (c *Client) ListGrants(resourceID string) ([]api.GrantEntry, error) {
 	base := "/v1/resources/" + url.PathEscape(resourceID) + "/grants"
-	var all []api.GrantEntry
-	cursor, pages := "", 0
-	for {
+	return listAll(base, func(path string) ([]api.GrantEntry, string, error) {
 		var out api.ListGrantsResponse
-		if err := c.do(http.MethodGet, withCursor(base, cursor), nil, &out); err != nil {
-			return nil, err
-		}
-		all = append(all, out.Grants...)
-		more, err := nextPage(&cursor, out.NextCursor, &pages)
-		if err != nil {
-			return nil, err
-		}
-		if !more {
-			return all, nil
-		}
-	}
+		err := c.do(http.MethodGet, path, nil, &out)
+		return out.Grants, out.NextCursor, err
+	})
 }
 
 // RevokeGrant deletes one grant from a resource the caller owns.
@@ -79,22 +68,11 @@ func (c *Client) RevokeGrant(resourceID, granteeHandle string) error {
 
 // ListShares lists the caller's incoming grants, following pagination transparently.
 func (c *Client) ListShares() ([]api.ShareItem, error) {
-	var all []api.ShareItem
-	cursor, pages := "", 0
-	for {
+	return listAll("/v1/shares", func(path string) ([]api.ShareItem, string, error) {
 		var out api.ListSharesResponse
-		if err := c.do(http.MethodGet, withCursor("/v1/shares", cursor), nil, &out); err != nil {
-			return nil, err
-		}
-		all = append(all, out.Shares...)
-		more, err := nextPage(&cursor, out.NextCursor, &pages)
-		if err != nil {
-			return nil, err
-		}
-		if !more {
-			return all, nil
-		}
-	}
+		err := c.do(http.MethodGet, path, nil, &out)
+		return out.Shares, out.NextCursor, err
+	})
 }
 
 // ResourceObjects is the authenticated counterpart of PublicObjects: exact object

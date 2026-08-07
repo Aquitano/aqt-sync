@@ -229,22 +229,11 @@ func (c *Client) AttachDevice(req api.AttachDeviceRequest) (api.AuthResponse, er
 // ListDevices returns the devices attached to the authenticated account, following
 // pagination transparently.
 func (c *Client) ListDevices() ([]api.Device, error) {
-	var all []api.Device
-	cursor, pages := "", 0
-	for {
+	return listAll("/v1/devices", func(path string) ([]api.Device, string, error) {
 		var r api.ListDevicesResponse
-		if err := c.do(http.MethodGet, withCursor("/v1/devices", cursor), nil, &r); err != nil {
-			return nil, err
-		}
-		all = append(all, r.Devices...)
-		more, err := nextPage(&cursor, r.NextCursor, &pages)
-		if err != nil {
-			return nil, err
-		}
-		if !more {
-			return all, nil
-		}
-	}
+		err := c.do(http.MethodGet, path, nil, &r)
+		return r.Devices, r.NextCursor, err
+	})
 }
 
 // DeleteDevice revokes a device by id. Revoking the current device invalidates
@@ -365,22 +354,11 @@ func (c *Client) UpdateResourceMetadata(id string, req api.UpdateResourceMetadat
 // ListResources returns all of the owner's resources, following the endpoint's
 // pagination transparently so a CLI caller still gets the whole slice in one call.
 func (c *Client) ListResources() ([]api.ResourceListItem, error) {
-	var all []api.ResourceListItem
-	cursor, pages := "", 0
-	for {
+	return listAll("/v1/resources", func(path string) ([]api.ResourceListItem, string, error) {
 		var r api.ListResourcesResponse
-		if err := c.do(http.MethodGet, withCursor("/v1/resources", cursor), nil, &r); err != nil {
-			return nil, err
-		}
-		all = append(all, r.Resources...)
-		more, err := nextPage(&cursor, r.NextCursor, &pages)
-		if err != nil {
-			return nil, err
-		}
-		if !more {
-			return all, nil
-		}
-	}
+		err := c.do(http.MethodGet, path, nil, &r)
+		return r.Resources, r.NextCursor, err
+	})
 }
 
 // maxListPages bounds every paginated listing. The cursor loops trust the server to
@@ -392,6 +370,29 @@ const maxListPages = 10_000
 
 // errTooManyPages is what a listing returns when the server will not end it.
 var errTooManyPages = errors.New("server did not end the listing (cursor never terminated)")
+
+// listAll follows a paginated endpoint to its end, accumulating every page's items.
+// fetch requests the one page at path — already carrying the cursor — and returns its
+// items with the cursor for the next one. A fetch that fails aborts the whole listing,
+// so a caller never sees a silently truncated slice.
+func listAll[T any](base string, fetch func(path string) ([]T, string, error)) ([]T, error) {
+	var all []T
+	cursor, pages := "", 0
+	for {
+		items, next, err := fetch(withCursor(base, cursor))
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, items...)
+		more, err := nextPage(&cursor, next, &pages)
+		if err != nil {
+			return nil, err
+		}
+		if !more {
+			return all, nil
+		}
+	}
+}
 
 // nextPage advances a cursor loop, returning false once the listing is done. It
 // refuses a cursor that did not move and a page count past maxListPages, so a
@@ -628,31 +629,22 @@ func (c *Client) ListSnapshots(resourceID string) ([]api.SnapshotInfo, error) {
 	if resourceID != "" {
 		base += "?resource=" + url.QueryEscape(resourceID)
 	}
-	var all []api.SnapshotInfo
-	cursor, pages := "", 0
-	for {
+	return listAll(base, func(path string) ([]api.SnapshotInfo, string, error) {
 		var r api.ListSnapshotsResponse
-		if err := c.do(http.MethodGet, withCursor(base, cursor), nil, &r); err != nil {
-			return nil, err
+		if err := c.do(http.MethodGet, path, nil, &r); err != nil {
+			return nil, "", err
 		}
 		// Pin a filtered listing to the requested resource: the ResourceID field is
 		// server-supplied, and downstream id-bound AAD checks verify against it.
 		if resourceID != "" {
 			for _, s := range r.Snapshots {
 				if s.ResourceID != resourceID {
-					return nil, fmt.Errorf("server returned a snapshot of resource %q in a listing for %q", s.ResourceID, resourceID)
+					return nil, "", fmt.Errorf("server returned a snapshot of resource %q in a listing for %q", s.ResourceID, resourceID)
 				}
 			}
 		}
-		all = append(all, r.Snapshots...)
-		more, err := nextPage(&cursor, r.NextCursor, &pages)
-		if err != nil {
-			return nil, err
-		}
-		if !more {
-			return all, nil
-		}
-	}
+		return r.Snapshots, r.NextCursor, nil
+	})
 }
 
 // GetSnapshot fetches a snapshot's sealed root blob plus the copied meta and
