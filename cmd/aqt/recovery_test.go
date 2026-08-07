@@ -127,10 +127,34 @@ func TestExplainErrorExpandsWrappedUpgradeError(t *testing.T) {
 // CLI, so a user who never leaves the dashboard still learns what to run.
 func TestTUIUpgradeNoteNamesTheUpdateCommand(t *testing.T) {
 	got := tuiExitNote(6)
-	if !strings.Contains(got, "aqt update") {
-		t.Errorf("tuiExitNote(6) = %q, want it to name `aqt update`", got)
+	if !strings.Contains(got, upgradeAction(detectedInstall())) {
+		t.Errorf("tuiExitNote(6) = %q, want the CLI's recovery action", got)
 	}
 	if !strings.Contains(got, strconv.Itoa(api.ClientCapability)) {
 		t.Errorf("tuiExitNote(6) = %q, want this build's capability", got)
+	}
+}
+
+// Both the CLI message and the TUI note read the action from one place, so a
+// package-managed or source install is never pointed at a command that would refuse.
+func TestUpgradeActionRoutesByInstallOwner(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		install update.Install
+		want    string
+	}{
+		{"standalone", update.Install{Owner: update.OwnerStandalone}, "aqt update"},
+		{"homebrew", update.Install{Owner: update.OwnerHomebrew, Package: "aqt", UpgradeCommand: "brew upgrade aqt"}, "brew upgrade aqt"},
+		{"source", update.Install{Owner: update.OwnerSource}, "make build"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := upgradeAction(tc.install)
+			if !strings.Contains(got, tc.want) {
+				t.Errorf("upgradeAction = %q, want it to name %q", got, tc.want)
+			}
+			if tc.name != "standalone" && strings.Contains(got, "run `aqt update`") {
+				t.Errorf("upgradeAction = %q points a %s install at `aqt update`", got, tc.name)
+			}
+		})
 	}
 }

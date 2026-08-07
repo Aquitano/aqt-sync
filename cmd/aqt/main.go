@@ -163,31 +163,45 @@ func explainError(err error) error {
 		// Detection failing is not worth failing the message over: fall back to the
 		// standalone route, whose action is `aqt update` — and that command explains
 		// the package-manager routing itself when it runs.
-		install, derr := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
-		if derr != nil {
-			install = update.Install{Owner: update.OwnerStandalone}
-		}
-		return errors.New(upgradeGuidance(upgrade, install))
+		return errors.New(upgradeGuidance(upgrade, detectedInstall()))
 	}
 	return err
 }
 
-// upgradeGuidance states the 426 mismatch in terms of this build — its version and
-// the capability it declares — and names the command that upgrades *this*
-// installation. Only a standalone copy is `aqt update`'s to replace; anything else
-// was put there by a tool that keeps its own records, so the message routes to that
-// tool rather than to a command which would refuse.
-func upgradeGuidance(e *client.UpgradeRequiredError, install update.Install) string {
-	action := "run `aqt update`"
-	if !install.Replaceable() {
-		if install.UpgradeCommand != "" {
-			action = fmt.Sprintf("upgrade with `%s` (%s installed this copy)", install.UpgradeCommand, install.Owner)
-		} else if why := install.Why(); why != "" {
-			action = why
-		}
+// detectedInstall classifies this binary for messaging. Detection failing is not
+// worth failing a message over: fall back to the standalone route, whose action is
+// `aqt update` — and that command explains the package-manager routing itself when
+// it runs.
+func detectedInstall() update.Install {
+	install, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
+	if err != nil {
+		return update.Install{Owner: update.OwnerStandalone}
 	}
+	return install
+}
+
+// upgradeAction names the command that upgrades *this* installation. Only a
+// standalone copy is `aqt update`'s to replace; anything else was put there by a
+// tool that keeps its own records, so the action routes to that tool rather than to
+// a command which would refuse.
+func upgradeAction(install update.Install) string {
+	if install.Replaceable() {
+		return "run `aqt update`"
+	}
+	if install.UpgradeCommand != "" {
+		return fmt.Sprintf("upgrade with `%s` (%s installed this copy)", install.UpgradeCommand, install.Owner)
+	}
+	if why := install.Why(); why != "" {
+		return why
+	}
+	return "run `aqt update`"
+}
+
+// upgradeGuidance states the 426 mismatch in terms of this build — its version and
+// the capability it declares — and names the action that upgrades it.
+func upgradeGuidance(e *client.UpgradeRequiredError, install update.Install) string {
 	msg := fmt.Sprintf("aqt %s reads capability %d formats; that resource needs capability %d or newer — %s",
-		version, e.Capability, e.MinClient, action)
+		version, e.Capability, e.MinClient, upgradeAction(install))
 	// Detail is already sanitized by the client; quoting it keeps the server's voice
 	// clearly separate from ours.
 	if e.Detail != "" {

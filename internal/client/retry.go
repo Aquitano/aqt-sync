@@ -100,24 +100,26 @@ func (c *cooldown) deadline() time.Time {
 }
 
 // wait blocks until the shared cooldown has elapsed, plus this waiter's own
-// jitter. It returns the context's error if the caller is cancelled first, so a
+// jitter. The deadline is re-read after every sleep: a concurrent request can
+// extend it while this one is parked, and waking on the stale deadline would send
+// into the burst the shared cooldown exists to prevent. alive, when set, is
+// called on each wake so a deliberate park is not mistaken for a stalled
+// transfer. It returns the context's error if the caller is cancelled first, so a
 // ^C during a rate-limit wait aborts immediately.
-func (c *cooldown) wait(ctx context.Context) error {
-	remaining := c.deadline().Sub(c.now())
-	if remaining <= 0 {
-		return nil
+func (c *cooldown) wait(ctx context.Context, alive func()) error {
+	jitter := c.jitter(retryJitter)
+	for {
+		remaining := c.deadline().Sub(c.now())
+		if remaining <= 0 {
+			return nil
+		}
+		if err := c.sleep(ctx, remaining+jitter); err != nil {
+			return err
+		}
+		if alive != nil {
+			alive()
+		}
 	}
-	return c.sleep(ctx, remaining+c.jitter(retryJitter))
-}
-
-// waitUntil blocks until deadline plus jitter, for the request that just observed
-// the 429 and already knows its own deadline.
-func (c *cooldown) waitUntil(ctx context.Context, deadline time.Time) error {
-	remaining := deadline.Sub(c.now())
-	if remaining <= 0 {
-		remaining = 0
-	}
-	return c.sleep(ctx, remaining+c.jitter(retryJitter))
 }
 
 func (c *cooldown) sleep(ctx context.Context, d time.Duration) error {
@@ -138,7 +140,7 @@ func retryAfterFrom(resp *http.Response, body []byte, now time.Time) time.Durati
 		return d
 	}
 	if secs := decodedRetryAfterSeconds(body); secs > 0 {
-		return clampRetryAfter(time.Duration(secs) * time.Second)
+		return retryAfterSeconds(secs)
 	}
 	return minRetryAfter
 }
@@ -165,7 +167,7 @@ func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
 		if secs < 0 {
 			return 0, false
 		}
-		return clampRetryAfter(time.Duration(secs) * time.Second), true
+		return retryAfterSeconds(secs), true
 	}
 	when, err := http.ParseTime(raw)
 	if err != nil {
@@ -174,6 +176,17 @@ func parseRetryAfter(raw string, now time.Time) (time.Duration, bool) {
 	// A date in the past means "retry now"; the floor still applies, so a server
 	// with a skewed clock cannot turn the gate off entirely.
 	return clampRetryAfter(when.Sub(now)), true
+}
+
+// retryAfterSeconds converts an advertised delay-seconds count. The cap is applied
+// before the multiplication because a large count overflows time.Duration and wraps
+// to an arbitrary value — a negative wrap would then floor to one second, the exact
+// opposite of the cap it should have hit.
+func retryAfterSeconds(secs int) time.Duration {
+	if secs > int(maxRetryAfter/time.Second) {
+		return maxRetryAfter
+	}
+	return clampRetryAfter(time.Duration(secs) * time.Second)
 }
 
 func clampRetryAfter(d time.Duration) time.Duration {

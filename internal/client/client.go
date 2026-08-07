@@ -776,8 +776,9 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 	for attempt := 0; ; attempt++ {
 		// Observe any cooldown a *concurrent* request established before sending, so
 		// one 429 throttles the whole client rather than only the request that saw it.
+		// This is also where a retry serves its own wait.
 		guard.touch()
-		if err := c.cooldown.wait(ctx); err != nil {
+		if err := c.cooldown.wait(ctx, guard.touch); err != nil {
 			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, err)
 		}
 
@@ -795,15 +796,14 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 			// to finish.
 			wait := retryAfterFrom(resp, data, time.Now())
 			deadline := c.cooldown.enter(wait)
-			replay, rewound := rewindBody(req)
-			if rewound && attempt < maxRateLimitRetries && spent+wait <= maxRetryTotal {
-				req = replay
-				spent += wait
-				guard.touch()
-				if err := c.cooldown.waitUntil(ctx, deadline); err != nil {
-					return resp.StatusCode, data, fmt.Errorf("request %s %s: %w", req.Method, path, err)
+			if attempt < maxRateLimitRetries && spent+wait <= maxRetryTotal {
+				// The next pass observes the deadline just published, along with any
+				// later one a concurrent request establishes while this one waits.
+				if replay, rewound := rewindBody(req); rewound {
+					req = replay
+					spent += wait
+					continue
 				}
-				continue
 			}
 			return resp.StatusCode, data, &RateLimitedError{
 				Attempts:    attempt + 1,

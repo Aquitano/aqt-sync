@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -93,7 +94,7 @@ func TestCooldownGatesConcurrentWaitersOnOneDeadline(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if err := cd.wait(context.Background()); err != nil {
+			if err := cd.wait(context.Background(), nil); err != nil {
 				t.Errorf("wait: %v", err)
 				return
 			}
@@ -142,7 +143,7 @@ func TestCooldownWaitAddsPositiveJitter(t *testing.T) {
 	cd.enter(2 * time.Second)
 
 	done := make(chan struct{})
-	go func() { defer close(done); cd.wait(context.Background()) }()
+	go func() { defer close(done); cd.wait(context.Background(), nil) }()
 	waitFor(t, func() bool { return len(clk.recorded()) == 1 })
 
 	got := clk.recorded()[0]
@@ -152,6 +153,53 @@ func TestCooldownWaitAddsPositiveJitter(t *testing.T) {
 	clk.advance(got)
 	clk.releaseAll(1)
 	<-done
+}
+
+// A waiter parked on one deadline must observe an extension published while it
+// sleeps. Waking on the stale deadline would send into the burst the shared
+// cooldown exists to prevent.
+func TestCooldownWaitObservesADeadlineExtendedWhileParked(t *testing.T) {
+	clk := newFakeClock()
+	cd := testCooldown(clk, 0)
+	cd.enter(5 * time.Second)
+
+	done := make(chan error, 1)
+	go func() { done <- cd.wait(context.Background(), nil) }()
+	waitFor(t, func() bool { return len(clk.recorded()) == 1 })
+
+	// A concurrent 429 pushes the floor out while this waiter is asleep.
+	cd.enter(12 * time.Second)
+	clk.advance(5 * time.Second)
+	clk.releaseAll(1)
+
+	waitFor(t, func() bool { return len(clk.recorded()) == 2 })
+	select {
+	case err := <-done:
+		t.Fatalf("wait returned %v on the stale deadline instead of re-parking", err)
+	default:
+	}
+	if got := clk.recorded()[1]; got != 7*time.Second {
+		t.Fatalf("re-parked for %s, want the remaining 7s of the extended deadline", got)
+	}
+
+	clk.advance(7 * time.Second)
+	clk.releaseAll(1)
+	if err := <-done; err != nil {
+		t.Fatalf("wait: %v", err)
+	}
+}
+
+// A Retry-After large enough to overflow time.Duration must clamp to the maximum,
+// not wrap to something arbitrary that then floors to a second.
+func TestRetryAfterSecondsClampsBeforeOverflow(t *testing.T) {
+	for _, secs := range []int{31, 86400, math.MaxInt32, math.MaxInt} {
+		if got := retryAfterSeconds(secs); got != maxRetryAfter {
+			t.Errorf("retryAfterSeconds(%d) = %s, want %s", secs, got, maxRetryAfter)
+		}
+	}
+	if got := retryAfterSeconds(5); got != 5*time.Second {
+		t.Errorf("retryAfterSeconds(5) = %s, want 5s", got)
+	}
 }
 
 func TestCooldownJitterStaysInBounds(t *testing.T) {
@@ -171,7 +219,7 @@ func TestCooldownWaitIsCancellable(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
-	go func() { errCh <- cd.wait(ctx) }()
+	go func() { errCh <- cd.wait(ctx, nil) }()
 	waitFor(t, func() bool { return len(clk.recorded()) == 1 })
 
 	cancel()
@@ -183,7 +231,7 @@ func TestCooldownWaitIsCancellable(t *testing.T) {
 func TestCooldownWaitReturnsImmediatelyWhenClear(t *testing.T) {
 	clk := newFakeClock()
 	cd := testCooldown(clk, 500*time.Millisecond)
-	if err := cd.wait(context.Background()); err != nil {
+	if err := cd.wait(context.Background(), nil); err != nil {
 		t.Fatalf("wait: %v", err)
 	}
 	if got := clk.recorded(); len(got) != 0 {
@@ -257,7 +305,7 @@ func TestSanitizeServerText(t *testing.T) {
 		{"newlines cannot forge a line", "line one\nerror: fake", "line oneerror: fake"},
 		{"carriage return is dropped", "real\rfake", "realfake"},
 		{"nul is dropped", "a\x00b", "ab"},
-		{"c1 controls are dropped", "ab", "ab"},
+		{"c1 controls are dropped", "a\u009bb", "ab"},
 		{"tabs become spaces", "a\tb", "a b"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -303,7 +351,7 @@ func TestSendRidesOutRateLimitsThenGivesUp(t *testing.T) {
 
 	c := newTestClient(t, srv.URL)
 	// Keep the test quick: the retry budget is what is under test, not the wait.
-	c.cooldown.after = func(time.Duration) <-chan time.Time { return closedTimeChan() }
+	skipCooldownWaits(c)
 
 	err := c.do(http.MethodGet, "/v1/resources", nil, nil)
 	var limited *RateLimitedError
@@ -340,7 +388,7 @@ func TestSendRecoversWhenTheLimitClears(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv.URL)
-	c.cooldown.after = func(time.Duration) <-chan time.Time { return closedTimeChan() }
+	skipCooldownWaits(c)
 
 	if err := c.do(http.MethodGet, "/v1/resources", nil, nil); err != nil {
 		t.Fatalf("do: %v", err)
@@ -410,7 +458,7 @@ func TestNonReplayableBodyIsNotRetried(t *testing.T) {
 	defer srv.Close()
 
 	c := newTestClient(t, srv.URL)
-	c.cooldown.after = func(time.Duration) <-chan time.Time { return closedTimeChan() }
+	skipCooldownWaits(c)
 
 	// A bare io.Reader (not a *bytes.Reader) leaves GetBody nil, so the body is
 	// consumed and unreplayable.
@@ -436,6 +484,26 @@ func newTestClient(t *testing.T, baseURL string) *Client {
 		t.Fatalf("New: %v", err)
 	}
 	return c
+}
+
+// skipCooldownWaits serves every cooldown sleep instantly, moving a private clock
+// forward by the requested duration so the wait loop sees the deadline as elapsed.
+// Tests that exercise the retry budget rather than the waiting use this to run in
+// no time at all.
+func skipCooldownWaits(c *Client) {
+	var mu sync.Mutex
+	now := time.Now()
+	c.cooldown.now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return now
+	}
+	c.cooldown.after = func(d time.Duration) <-chan time.Time {
+		mu.Lock()
+		now = now.Add(d)
+		mu.Unlock()
+		return closedTimeChan()
+	}
 }
 
 func closedTimeChan() <-chan time.Time {
