@@ -106,30 +106,26 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	var resOwner string
 	var version, compactAt int
 	if err := tx.QueryRow(`SELECT owner_handle, version, compact_at FROM resources WHERE id = ?`, resourceID).Scan(&resOwner, &version, &compactAt); err != nil {
-		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		return err
 	}
 	if resOwner != owner {
-		tx.Rollback()
 		return ErrNotFound
 	}
 	if compactAt > 0 {
-		tx.Rollback()
 		return ErrGitRemotePolicy
 	}
 	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
-		tx.Rollback()
 		return ErrVersionConflict
 	}
 	var count int
 	if err := tx.QueryRow(`SELECT count(*) FROM grants WHERE resource_id = ?`, resourceID).Scan(&count); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if count >= maxGrantsPerResource {
@@ -138,11 +134,9 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 		if err := tx.QueryRow(
 			`SELECT count(*) FROM grants WHERE resource_id = ? AND grantee_handle = ?`, resourceID, grantee,
 		).Scan(&exists); err != nil {
-			tx.Rollback()
 			return err
 		}
 		if exists == 0 {
-			tx.Rollback()
 			return ErrGrantLimit
 		}
 	}
@@ -152,11 +146,9 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 		 ON CONFLICT(resource_id, grantee_handle) DO UPDATE SET wrapped_key = excluded.wrapped_key`,
 		resourceID, owner, grantee, wrapped, time.Now().Unix(),
 	); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE resources SET version = version + 1, updated_at = unixepoch() WHERE id = ? AND version = ?`, resourceID, version); err != nil {
-		tx.Rollback()
 		return err
 	}
 	return tx.Commit()
@@ -226,18 +218,16 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions 
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	var version int
 	err = tx.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
-		tx.Rollback()
 		return ErrNotFound
 	}
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
-		tx.Rollback()
 		return ErrVersionConflict
 	}
 	res, err := tx.Exec(
@@ -245,15 +235,12 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions 
 		resourceID, owner, grantee,
 	)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		tx.Rollback()
 		return ErrNotFound
 	}
 	if _, err := tx.Exec(`UPDATE resources SET version = version + 1, updated_at = unixepoch() WHERE id = ? AND version = ?`, resourceID, version); err != nil {
-		tx.Rollback()
 		return err
 	}
 	return tx.Commit()

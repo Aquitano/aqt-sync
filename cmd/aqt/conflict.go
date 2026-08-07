@@ -40,15 +40,12 @@ func effectiveConflictMode(opts syncOptions, cfg syncengine.Config) (conflictMod
 	}
 }
 
-// validateCopyMode rejects flag combinations for which copy resolution is undefined.
-// Copy keeps local and preserves remote, so --force (remote discarded) contradicts it;
-// a baseless reconcile already treats every one-sided diff as a conflict, so there is
-// no three-way both-sides change to copy; and a copy needs both a disk write and a
-// remote mutation, which a one-directional sync cannot do coherently.
-func validateCopyMode(opts syncOptions) error {
-	return validateResolvingMode(opts, conflictCopy)
-}
-
+// validateResolvingMode rejects flag combinations for which a resolving conflict mode
+// (copy or merge) is undefined. Both keep local and preserve remote, so --force (remote
+// discarded) contradicts them; a baseless reconcile already treats every one-sided diff
+// as a conflict, so there is no three-way both-sides change to resolve; and resolving
+// needs both a disk write and a remote mutation, which a one-directional sync cannot do
+// coherently.
 func validateResolvingMode(opts syncOptions, mode conflictMode) error {
 	switch {
 	case opts.force:
