@@ -96,6 +96,9 @@
     opacity: 0.65;
   }
 
+  /* In the masthead, not the footnote: the decrypted layout hides the footnote. */
+  .masthead-source { color: inherit; text-underline-offset: 0.25em; }
+
   .hatch {
     height: 8px;
     background-image: repeating-linear-gradient(115deg, currentColor 0 1px, transparent 1px 4px);
@@ -587,7 +590,10 @@
         <span class="pixel-mark" aria-hidden="true"></span>
         <span>aqt</span>
       </a>
-      <span class="masthead-label">Encrypted resource</span>
+      <span class="masthead-label">
+        Encrypted resource ·
+        <a class="masthead-source" href="{{.SourceURL}}" rel="noopener">Source</a>
+      </span>
     </header>
 
     <h1 id="headline">This file is sealed.</h1>

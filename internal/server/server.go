@@ -15,6 +15,7 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -72,6 +73,19 @@ type Config struct {
 	// authenticated routes. Zero values pick the package defaults.
 	AuthedRatePerSec float64
 	AuthedBurst      float64
+	// SourceURL is where the share page points for this server's source. The
+	// upstream default is only accurate while the deployment runs unmodified code.
+	SourceURL string
+}
+
+// DefaultSourceURL is the upstream repository, used when SourceURL is unset.
+const DefaultSourceURL = "https://github.com/aquitano/aqt-sync"
+
+func (c Config) sourceURL() string {
+	if c.SourceURL == "" {
+		return DefaultSourceURL
+	}
+	return c.SourceURL
 }
 
 func (c Config) Validate() error {
@@ -97,6 +111,14 @@ func (c Config) Validate() error {
 		}
 		if _, _, err := net.ParseCIDR(proxy); err != nil {
 			return fmt.Errorf("trusted proxy %q is not an IP address or CIDR", proxy)
+		}
+	}
+	if c.SourceURL != "" {
+		// Caught here because html/template swaps an unusable scheme for a
+		// placeholder at render time, leaving a dead link and no error.
+		u, err := url.Parse(c.SourceURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("source URL %q must be an absolute http(s) URL", c.SourceURL)
 		}
 	}
 	return nil

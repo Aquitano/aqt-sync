@@ -95,7 +95,8 @@ func (s *Server) shareView(c *gin.Context) {
 	}
 
 	var buf bytes.Buffer
-	if err := shareTmpl.Execute(&buf, sharePage{ID: id, PullURL: shareURL(c, id)}); err != nil {
+	page := sharePage{ID: id, PullURL: shareURL(c, id), SourceURL: s.cfg.sourceURL()}
+	if err := shareTmpl.Execute(&buf, page); err != nil {
 		c.Data(http.StatusInternalServerError, htmlContentType, internalErrorPage)
 		return
 	}
@@ -105,8 +106,9 @@ func (s *Server) shareView(c *gin.Context) {
 }
 
 type sharePage struct {
-	ID      string
-	PullURL string // absolute /x/<id> URL, for the no-JS fallback command
+	ID        string
+	PullURL   string // absolute /x/<id> URL, for the no-JS fallback command
+	SourceURL string // source link this deployment offers
 }
 
 // shareURL rebuilds the absolute link to this resource for the no-JS fallback.
