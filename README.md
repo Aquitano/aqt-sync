@@ -155,3 +155,19 @@ branch/tag ref comparison:
 - `make restore-drill` (or `scripts/restore-drill.sh`) — against real built binaries.
 - `go test ./cmd/aqt -run TestFullBackupRestoreDrill` — the in-process folder-restore
   twin, run on every CI build.
+
+## License
+
+Copyright (C) 2026 Thomas Breindl.
+
+AGPL-3.0-or-later, across the whole repository: the `aqt` client, the
+`git-remote-aqt` helper, `aqt-server`, and the landing site. Full text in
+[LICENSE](LICENSE).
+
+Self-hosting a **modified** server entitles its users to your source.
+`AQT_SOURCE_URL=https://…` replaces the upstream link the share page offers.
+Unmodified releases need nothing.
+
+The browser decrypt page bundles libsodium, hash-wasm, and fzstd under their own
+MIT and ISC terms; those texts sit next to the assets in
+`internal/server/webassets/`.

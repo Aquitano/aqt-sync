@@ -61,6 +61,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_GC_INTERVAL` | `6h` | Scheduled garbage-collection cadence. `0` disables. |
 | `AQT_SHUTDOWN_GRACE` | `20s` | Shared deadline for HTTP, metrics, snapshot, and GC draining. Must be positive. |
 | `AQT_METRICS_ADDR` | unset | Prometheus `/metrics` listen address (e.g. `127.0.0.1:9091`). Unset disables. See [Monitoring](#monitoring). |
+| `AQT_SOURCE_URL` | upstream repo | Source link the share page offers. Must be absolute `http(s)`. See [Source offer](#source-offer). |
 
 Notes:
 
@@ -75,6 +76,11 @@ Notes:
 - **Trusted proxies.** Behind a reverse proxy, set `AQT_TRUSTED_PROXIES` to the
   proxy's address/CIDR so the share-page URL honors `X-Forwarded-Proto`. The
   rate-limit bucket keys on the real TCP peer regardless, so this is display-only.
+- <a id="source-offer"></a>**Source offer.** aqt is AGPL-3.0-or-later. The share page
+  links to the upstream repository, which is accurate for a stock release. If you run
+  a patched build that anyone else can reach, publish that build's source and point
+  `AQT_SOURCE_URL` at it. The server refuses to start on a value that is not an
+  absolute `http(s)` URL.
 - **Quotas** are the main abuse control on a shared server; combine `AQT_QUOTA_BYTES`
   and the resource, snapshot, object, and device count caps with `invite` registration.
 - **Rate limiting.** A throttled request gets `429` with the wait in both the

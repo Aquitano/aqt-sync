@@ -44,6 +44,10 @@ All notable changes to this project are documented in this file.
   header stays authoritative whenever it survives and parses. No encrypted format
   changes, so the client capability is not bumped and old clients and servers
   interoperate unchanged.
+- The project is licensed under AGPL-3.0-or-later: client, `git-remote-aqt`
+  helper, server, and landing site. `AQT_SOURCE_URL` overrides the source link the
+  share page offers, for operators running a modified server. The value must be an
+  absolute `http(s)` URL or the server refuses to start.
 
 ## [v0.5.0] - 2026-08-07
 

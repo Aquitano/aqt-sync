@@ -171,6 +171,8 @@ func main() {
 //	AQT_AUTH_BURST       per-token authed burst; 0 = package default
 //	AQT_TRUSTED_PROXIES  comma-separated proxy CIDRs/hosts whose X-Forwarded-* is
 //	                     trusted; unset = loopback only; "none" = trust none
+//	AQT_SOURCE_URL       source link the share page offers; set it when running
+//	                     modified code
 func loadServerConfig() (server.Config, error) {
 	quota, err := envInt64Value("AQT_QUOTA_BYTES")
 	if err != nil {
@@ -205,6 +207,7 @@ func loadServerConfig() (server.Config, error) {
 		InviteTokens: splitCSV(os.Getenv("AQT_INVITE_TOKENS")), QuotaBytes: quota,
 		MaxDevices: maxDevices, MaxResources: maxResources, MaxSnapshots: maxSnapshots, MaxObjects: maxObjects,
 		AuthedRatePerSec: rate, AuthedBurst: burst,
+		SourceURL: os.Getenv("AQT_SOURCE_URL"),
 	}
 	switch raw := os.Getenv("AQT_TRUSTED_PROXIES"); {
 	case raw == "":

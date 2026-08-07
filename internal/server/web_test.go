@@ -111,6 +111,40 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	}
 }
 
+// The share page is the only aqt surface a stranger reaches over the network, so it
+// carries the source link. An operator running patched code overrides the upstream
+// default; a bad override is a startup error, not a dead link on a served page.
+func TestShareViewOffersSourceLink(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		want string
+	}{
+		{"default is upstream", Config{}, DefaultSourceURL},
+		{"operator override", Config{SourceURL: "https://git.example.com/aqt-fork"}, "https://git.example.com/aqt-fork"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarnessCfg(t, tc.cfg)
+			token, mk := h.signup("source@example.com", "a passphrase for the source link")
+			put := h.putPublicViaAPI(token, mk, 0, 0)
+
+			rec := h.get("/x/" + put.ID)
+			if rec.Code != http.StatusOK {
+				t.Fatalf("share view: got %d, want 200", rec.Code)
+			}
+			if want := `href="` + tc.want + `"`; !strings.Contains(rec.Body.String(), want) {
+				t.Errorf("share page missing source link %s", want)
+			}
+		})
+	}
+
+	for _, bad := range []string{"javascript:alert(1)", "git.example.com/aqt", "https://"} {
+		if err := (Config{SourceURL: bad}).Validate(); err == nil {
+			t.Errorf("Validate accepted source URL %q", bad)
+		}
+	}
+}
+
 func TestShareCryptoAssetsAreSelfHostedAndAllowlisted(t *testing.T) {
 	h := newHarness(t)
 	for _, name := range []string{
