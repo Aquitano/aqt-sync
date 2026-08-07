@@ -65,19 +65,24 @@ func (s *Server) putPack(c *gin.Context) {
 		return
 	}
 	defer s.accountLimits.lock(owner)()
-	packQuota := s.cfg.QuotaBytes
-	if s.cfg.QuotaBytes > 0 {
+	quota, err := s.effectiveQuota(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	packQuota := quota
+	if quota > 0 {
 		u, usageErr := s.store.AccountUsage(owner)
 		packBytes, packErr := s.store.OwnerPackBytes(owner)
 		if usageErr != nil || packErr != nil {
 			abort(c, http.StatusInternalServerError, "usage lookup failed")
 			return
 		}
-		if u.StorageBytes+int64(len(data)) > s.cfg.QuotaBytes {
-			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: s.cfg.QuotaBytes})
+		if u.StorageBytes+int64(len(data)) > quota {
+			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota})
 			return
 		}
-		packQuota = s.cfg.QuotaBytes - (u.StorageBytes - packBytes)
+		packQuota = quota - (u.StorageBytes - packBytes)
 	}
 	stored, err := s.store.PutPackWithLimits(owner, packID, data, packQuota, s.cfg.MaxObjects)
 	if errors.Is(err, ErrBadPack) {

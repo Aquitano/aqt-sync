@@ -48,6 +48,37 @@ All notable changes to this project are documented in this file.
   helper, server, and landing site. `AQT_SOURCE_URL` overrides the source link the
   share page offers, for operators running a modified server. The value must be an
   absolute `http(s)` URL or the server refuses to start.
+- `aqt-server admin accounts list|show|quota|disable|enable|delete` gives an
+  operator the account lifecycle the server previously had no answer for: every
+  policy was a global environment variable, so a single account could not be
+  inspected, capped, suspended, or removed without editing the database by hand.
+  The verbs act on the data directory directly — filesystem access to it is
+  already the trust boundary, so an admin HTTP API would add remotely reachable
+  privileged surface without adding capability — and are safe to run against a
+  live server. Accounts are addressed by email, owner handle, or an unambiguous
+  handle prefix; an ambiguous prefix is refused rather than resolved.
+- Per-account storage quotas (`admin accounts quota`). `AQT_QUOTA_BYTES` becomes
+  the default rather than the only setting, and three states stay distinct: an
+  explicit byte cap, `unlimited` (which stays exempt when the server default
+  changes), and `default` (inherit again). `aqt usage` now reports the cap that
+  actually applies instead of the server-wide one.
+- Account suspension (`admin accounts disable`/`enable`). A suspended account's
+  devices receive `403` with code `account_disabled` — deliberately not `401`,
+  which would loop the user through a re-login that cannot succeed. Nothing is
+  deleted and no key is destroyed, so restoring is immediate and the existing
+  device tokens keep working. A running server observes a suspension written by
+  the admin process within 10 seconds.
+- Account deletion (`admin accounts delete`). Erases the account, its devices,
+  resources, snapshots, grants, objects, packs, and every ciphertext file behind
+  them, including grants *to* the account from other owners (its published key is
+  going away, so those wraps could never be opened again) and superseded blob
+  files a reseal left on disk. Rows commit as one transaction so the account never
+  half-exists; files are removed afterwards, and any that could not be are reported
+  by path. `--dry-run` reports the scope without touching anything, and without a
+  terminal the command refuses rather than let a prompt read EOF as consent.
+
+`aqt-server` with no arguments, and every existing environment variable, behave
+exactly as before, so systemd units and container commands are unaffected.
 
 ### Fixed
 

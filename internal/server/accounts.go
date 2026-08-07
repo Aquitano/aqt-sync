@@ -42,9 +42,9 @@ func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []by
 		encPub, encSig = encPublicKey, encKeySig
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO accounts(owner_handle, email, kdf, public_key, wrapped_root, auth_verifier, auth_epoch, enc_public_key, enc_key_sig)
-		 VALUES(?,?,?,?,?,?,1,?,?)`,
-		handle, email, string(kdfJSON), publicKey, string(rootJSON), vh[:], encPub, encSig,
+		`INSERT INTO accounts(owner_handle, email, kdf, public_key, wrapped_root, auth_verifier, auth_epoch, enc_public_key, enc_key_sig, created_at)
+		 VALUES(?,?,?,?,?,?,1,?,?,?)`,
+		handle, email, string(kdfJSON), publicKey, string(rootJSON), vh[:], encPub, encSig, time.Now().Unix(),
 	)
 	if err != nil {
 		if isUnique(err) {
@@ -633,24 +633,51 @@ func (s *Store) OwnerByToken(token string) (string, error) {
 // ChangePassphrase and DeleteDevice invalidate the affected entries, and the TTL
 // bounds the staleness of any path that misses; only positive results are cached, so
 // unauthenticated garbage cannot grow the map.
+// Suspension is checked separately from the memoized resolution: an operator
+// suspends through `aqt-server admin`, a different process, so this server's token
+// cache cannot be invalidated from there. See suspensionTTL.
 func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 	h := sha256.Sum256([]byte(token))
-	if owner, deviceID, ok := s.auth.get(h); ok {
-		return owner, deviceID, nil
+	owner, deviceID, ok := s.auth.get(h)
+	if !ok {
+		err = s.rdb.QueryRow(
+			`SELECT d.owner_handle, d.device_id FROM devices d
+			   JOIN accounts a ON a.owner_handle = d.owner_handle
+			 WHERE d.token_hash = ? AND d.auth_epoch = a.auth_epoch`, h[:],
+		).Scan(&owner, &deviceID)
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", ErrNotFound
+		}
+		if err != nil {
+			return "", "", err
+		}
+		s.auth.put(h, owner, deviceID)
 	}
-	err = s.rdb.QueryRow(
-		`SELECT d.owner_handle, d.device_id FROM devices d
-		   JOIN accounts a ON a.owner_handle = d.owner_handle
-		 WHERE d.token_hash = ? AND d.auth_epoch = a.auth_epoch`, h[:],
-	).Scan(&owner, &deviceID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", ErrNotFound
-	}
+	disabled, err := s.accountSuspended(owner)
 	if err != nil {
+		// A cached resolution can outlive the account an operator just erased.
+		// ErrNotFound maps to 401, which is the truth: the credential is gone.
 		return "", "", err
 	}
-	s.auth.put(h, owner, deviceID)
+	if disabled {
+		return "", "", ErrAccountDisabled
+	}
 	return owner, deviceID, nil
+}
+
+// accountSuspended answers from a short-lived cache so a sync's request burst does
+// not pay a database round trip per request, while an operator's suspension still
+// lands within suspensionTTL.
+func (s *Store) accountSuspended(owner string) (bool, error) {
+	if disabled, ok := s.suspended.get(owner); ok {
+		return disabled, nil
+	}
+	disabled, err := s.AccountDisabled(owner)
+	if err != nil {
+		return false, err
+	}
+	s.suspended.put(owner, disabled)
+	return disabled, nil
 }
 
 // ListDevices returns the owner's attached devices (id + name). Token hashes never

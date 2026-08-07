@@ -385,6 +385,12 @@ func (s *Server) authMiddleware(c *gin.Context) {
 		abort(c, http.StatusUnauthorized, "invalid or expired token")
 		return
 	}
+	if errors.Is(err, ErrAccountDisabled) {
+		// 403, not 401: the credential is valid and re-authenticating would send the
+		// user in a circle. Only the operator can lift this.
+		abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "auth lookup failed")
 		return
@@ -704,9 +710,16 @@ func (s *Server) accountUsage(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "usage lookup failed")
 		return
 	}
+	// Report the cap that actually applies, so `aqt usage` on an account with an
+	// operator-set override does not show the server-wide default it is exempt from.
+	quota, err := s.effectiveQuota(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
 	c.JSON(http.StatusOK, api.UsageResponse{
 		StorageBytes: u.StorageBytes,
-		QuotaBytes:   s.cfg.QuotaBytes,
+		QuotaBytes:   quota,
 		Packs:        u.Packs,
 		Objects:      u.Objects,
 		Resources:    u.Resources,
@@ -717,6 +730,21 @@ func (s *Server) accountUsage(c *gin.Context) {
 	})
 }
 
+// effectiveQuota resolves the byte cap for one account: its operator-set override
+// when present, otherwise the server-wide default. 0 means unlimited. A missing
+// override is the common case, so this is one indexed read on an already-locked
+// path, not a second usage walk.
+func (s *Server) effectiveQuota(owner string) (int64, error) {
+	override, err := s.store.AccountQuota(owner)
+	if err != nil {
+		return 0, err
+	}
+	if override.Valid {
+		return override.Int64, nil
+	}
+	return s.cfg.QuotaBytes, nil
+}
+
 // checkAccountLimit refuses a write that would push the account past its byte quota
 // or past the row cap for kind ("resources", "snapshots", "objects"). An empty kind
 // checks bytes only, for a write that replaces an existing row rather than adding one.
@@ -725,8 +753,12 @@ func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	if err != nil {
 		return err
 	}
-	if s.cfg.QuotaBytes > 0 && u.StorageBytes+addedBytes > s.cfg.QuotaBytes {
-		return &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: s.cfg.QuotaBytes}
+	quota, err := s.effectiveQuota(owner)
+	if err != nil {
+		return err
+	}
+	if quota > 0 && u.StorageBytes+addedBytes > quota {
+		return &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota}
 	}
 	var current, limit int64
 	switch kind {
