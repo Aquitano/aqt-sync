@@ -146,14 +146,29 @@ func (l *ipRateLimiter) middleware(c *gin.Context) {
 func (l *ipRateLimiter) middlewareKeyed(key func(*gin.Context) string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if ok, wait := l.reserve(key(c)); !ok {
-			// Retry-After in whole seconds, computed from the bucket's own refill rate,
-			// so a client backs off exactly long enough rather than guessing.
-			c.Header("Retry-After", strconv.Itoa(int(wait.Seconds())))
-			abortCode(c, http.StatusTooManyRequests, "rate limit exceeded; slow down", api.ErrCodeRateLimited)
+			abortRateLimited(c, wait)
 			return
 		}
 		c.Next()
 	}
+}
+
+// abortRateLimited answers 429 with the wait advertised twice from one limiter
+// result: the standards-compatible Retry-After header, and the same number in the
+// body for a client behind an intermediary that strips unknown headers. retryAfter
+// already rounds up to whole seconds and floors at one, which is exactly the
+// Retry-After delay-seconds form.
+func abortRateLimited(c *gin.Context, wait time.Duration) {
+	secs := int(wait.Seconds())
+	if secs < 1 {
+		secs = 1
+	}
+	c.Header("Retry-After", strconv.Itoa(secs))
+	c.AbortWithStatusJSON(http.StatusTooManyRequests, api.ErrorResponse{
+		Error:             "rate limit exceeded; slow down",
+		Code:              api.ErrCodeRateLimited,
+		RetryAfterSeconds: secs,
+	})
 }
 
 func deviceKey(c *gin.Context) string { return c.GetString(deviceContextKey) }

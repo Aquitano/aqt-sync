@@ -50,7 +50,9 @@ func mutationOutcome(operation string, err error) error {
 	if err == nil {
 		return nil
 	}
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) {
+	// ErrRateLimited belongs here: the limiter middleware aborts before the handler
+	// runs, so a 429 means the mutation definitively did not happen.
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) || errors.Is(err, ErrRateLimited) {
 		return err
 	}
 	var upgrade *UpgradeRequiredError
@@ -85,14 +87,29 @@ var ErrBadPack = errors.New("uploaded pack is malformed or fails verification")
 // UpgradeRequiredError carries the server-declared min_client for messaging.
 var ErrUpgradeRequired = errors.New("client upgrade required to read this resource")
 
-// UpgradeRequiredError is the 426 mapping. Message is the server's human-actionable
-// text (printed verbatim); MinClient is the capability the resource needs.
+// UpgradeRequiredError is the 426 mapping. Its message is composed from facts this
+// build knows first-hand — the capability it declares, and the capability the server
+// says the resource needs — rather than echoing the server's prose, which is
+// attacker-controlled on a hostile or compromised server. Detail carries that prose
+// sanitized, for the cases where it explains something the numbers do not.
 type UpgradeRequiredError struct {
+	// MinClient is the capability the resource requires, per the server.
 	MinClient int
-	Message   string
+	// Capability is what this build declared in X-Aqt-Capability.
+	Capability int
+	// Detail is the server's message, control characters stripped and length
+	// bounded. Empty when the server sent none.
+	Detail string
 }
 
-func (e *UpgradeRequiredError) Error() string { return e.Message }
+func (e *UpgradeRequiredError) Error() string {
+	msg := fmt.Sprintf("this build reads capability %d formats; that resource needs capability %d or newer — run `aqt update`",
+		e.Capability, e.MinClient)
+	if e.Detail != "" {
+		msg += fmt.Sprintf(" (server said: %s)", e.Detail)
+	}
+	return msg
+}
 
 // Is lets errors.Is(err, ErrUpgradeRequired) match any UpgradeRequiredError.
 func (e *UpgradeRequiredError) Is(target error) bool { return target == ErrUpgradeRequired }
@@ -114,6 +131,9 @@ type Client struct {
 	baseURL string
 	token   string
 	http    *http.Client
+	// cooldown is shared by every request this client makes, so a 429 observed by
+	// one of a sync's concurrent transfers backs all of them off together.
+	cooldown *cooldown
 }
 
 // ErrInsecureScheme is returned by New when a bearer token would be sent over a
@@ -137,8 +157,9 @@ func New(baseURL, token string) (*Client, error) {
 		return nil, ErrInsecureScheme
 	}
 	return &Client{
-		baseURL: strings.TrimRight(baseURL, "/"),
-		token:   token,
+		baseURL:  strings.TrimRight(baseURL, "/"),
+		token:    token,
+		cooldown: newCooldown(),
 		http: &http.Client{
 			// No Client.Timeout: it caps the whole exchange including body
 			// transfer, so a 16 MiB pack upload failed permanently on links
@@ -751,7 +772,16 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 	// a boundary it cannot cross with a 426 rather than serving bytes that fail to open.
 	req.Header.Set(api.CapabilityHeader, strconv.Itoa(api.ClientCapability))
 
+	var spent time.Duration
 	for attempt := 0; ; attempt++ {
+		// Observe any cooldown a *concurrent* request established before sending, so
+		// one 429 throttles the whole client rather than only the request that saw it.
+		// This is also where a retry serves its own wait.
+		guard.touch()
+		if err := c.cooldown.wait(ctx, guard.touch); err != nil {
+			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, err)
+		}
+
 		resp, err := c.http.Do(req.WithContext(ctx))
 		if err != nil {
 			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
@@ -759,22 +789,29 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 		data, readErr := io.ReadAll(&progressBody{rc: resp.Body, touch: guard.touch})
 		resp.Body.Close()
 
-		// The server computes Retry-After from the bucket's own refill rate, so waiting
-		// it out is exactly long enough. Retrying here rather than failing the command
-		// keeps a large sync from dying on a burst it will be allowed to finish.
-		if wait, ok := retryAfterDelay(resp, attempt); ok {
-			replay, rewound := rewindBody(req)
-			if rewound {
-				req = replay
-				guard.touch()
-				select {
-				case <-time.After(wait):
+		if resp.StatusCode == http.StatusTooManyRequests {
+			// The server computes its wait from the bucket's own refill rate, so
+			// observing it is exactly long enough. Retrying here rather than failing
+			// the command keeps a large sync from dying on a burst it will be allowed
+			// to finish.
+			wait := retryAfterFrom(resp, data, time.Now())
+			deadline := c.cooldown.enter(wait)
+			if attempt < maxRateLimitRetries && spent+wait <= maxRetryTotal {
+				// The next pass observes the deadline just published, along with any
+				// later one a concurrent request establishes while this one waits.
+				if replay, rewound := rewindBody(req); rewound {
+					req = replay
+					spent += wait
 					continue
-				case <-ctx.Done():
-					return resp.StatusCode, data, ctx.Err()
 				}
 			}
+			return resp.StatusCode, data, &RateLimitedError{
+				Attempts:    attempt + 1,
+				LastDelay:   wait,
+				NextRetryAt: deadline,
+			}
 		}
+
 		if err := statusError(resp.StatusCode, path, data); err != nil {
 			return resp.StatusCode, data, err
 		}
@@ -783,32 +820,6 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 		}
 		return resp.StatusCode, data, nil
 	}
-}
-
-// maxRateLimitRetries bounds how many 429s one request rides out. The server's
-// Retry-After is authoritative for how long to wait; this bounds how often, so a
-// server answering 429 indefinitely fails the command instead of hanging it.
-const maxRateLimitRetries = 3
-
-// maxRetryAfter caps the advertised wait. A hostile or misconfigured server must not
-// be able to park a client for an arbitrary length of time.
-const maxRetryAfter = 30 * time.Second
-
-// retryAfterDelay reports how long to wait before retrying a 429, and whether it is
-// worth retrying at all.
-func retryAfterDelay(resp *http.Response, attempt int) (time.Duration, bool) {
-	if resp.StatusCode != http.StatusTooManyRequests || attempt >= maxRateLimitRetries {
-		return 0, false
-	}
-	secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
-	if err != nil || secs < 0 {
-		return 0, false
-	}
-	wait := time.Duration(secs) * time.Second
-	if wait < time.Second {
-		wait = time.Second
-	}
-	return min(wait, maxRetryAfter), true
 }
 
 // rewindBody returns a replayable copy of req. A bodyless request always replays; a
@@ -991,7 +1002,7 @@ func statusError(status int, path string, body []byte) error {
 	case api.ErrCodeSnapshotAnchored:
 		return &SnapshotAnchoredError{Message: e.Error}
 	case api.ErrCodeUpgradeRequired:
-		return &UpgradeRequiredError{MinClient: e.MinClient, Message: upgradeMessage(e, status, path)}
+		return upgradeRequired(e)
 	case api.ErrCodeGone:
 		return ErrGone
 	case api.ErrCodeQuotaExceeded:
@@ -1024,7 +1035,7 @@ func statusError(status int, path string, body []byte) error {
 	case http.StatusInsufficientStorage:
 		return ErrQuotaExceeded
 	case http.StatusUpgradeRequired:
-		return &UpgradeRequiredError{MinClient: e.MinClient, Message: upgradeMessage(e, status, path)}
+		return upgradeRequired(e)
 	}
 	if e.Error != "" {
 		return fmt.Errorf("server: %s (%d)", e.Error, status)
@@ -1032,13 +1043,20 @@ func statusError(status int, path string, body []byte) error {
 	return fmt.Errorf("server returned %d for %s", status, path)
 }
 
-// upgradeMessage prefers the server's actionable 426 text, falling back to a generic
-// status line when the body carried none.
-func upgradeMessage(e api.ErrorResponse, status int, path string) string {
-	if e.Error != "" {
-		return e.Error
+// upgradeRequired builds the 426 mapping. A server that declares a min_client at or
+// below what this build supports is contradicting itself; report the next capability
+// up rather than a message saying the running client needs to reach a bar it already
+// clears.
+func upgradeRequired(e api.ErrorResponse) *UpgradeRequiredError {
+	need := e.MinClient
+	if need <= api.ClientCapability {
+		need = api.ClientCapability + 1
 	}
-	return fmt.Sprintf("server returned %d for %s", status, path)
+	return &UpgradeRequiredError{
+		MinClient:  need,
+		Capability: api.ClientCapability,
+		Detail:     sanitizeServerText(e.Error, 200),
+	}
 }
 
 func (c *Client) do(method, path string, body, out any) error {

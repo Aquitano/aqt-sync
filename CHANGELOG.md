@@ -4,6 +4,47 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- A `426 Upgrade Required` now ends in the command that upgrades *this* install
+  instead of generic prose. The client composes the message from facts it knows
+  first-hand — the running version, the capability this build declares, and the
+  `minClient` the server reported — and routes the action by install ownership:
+  `aqt update` for a standalone copy, the owning package manager's command for a
+  Homebrew/WinGet/Scoop copy, `make build` for a source build. The server's text is
+  still shown but quoted and sanitized (C0/C1 controls and DEL stripped, length
+  bounded), so a hostile server cannot emit escape sequences, rewrite the line, or
+  forge what looks like a second line of aqt's own output. A server reporting a
+  `minClient` the running build already satisfies is contradicting itself; the client
+  reports the next capability up rather than naming a bar the user already clears.
+  `errors.Is(..., ErrUpgradeRequired)` and exit code `6` are unchanged, and the TUI
+  carries the same routing condensed to one line.
+- `429` retries are now coordinated across the whole client. A sync fires many chunk,
+  pack, and object requests concurrently against one limiter bucket; each used to ride
+  out its own `Retry-After` and they all woke together, reproducing the burst that
+  tripped the limit. Any 429 now publishes its deadline to a client-wide cooldown that
+  every other in-flight request observes before sending, a later deadline always wins
+  over a shorter overlapping one, and each waiter adds bounded positive jitter (up to
+  750ms) so they do not resume on the same instant. `Retry-After` is accepted in both
+  RFC 9110 forms (delay-seconds and HTTP-date); past or malformed values fall back
+  safely and excessive ones are clamped, so a hostile server cannot park a client.
+  Three budgets bound the retrying — 3 retries per request, 30s per wait, 60s summed —
+  and waits are context-cancellable. Only replayable requests are ever retried.
+- Exhausted rate limiting now returns a typed `*client.RateLimitedError` carrying the
+  attempt count, last delay, and next safe retry time, and maps to **exit code 5**
+  (retryable network) instead of a generic exit 1, so cron and `watch --once` treat
+  throttling as "try again later" rather than a permanent failure. It still satisfies
+  `errors.Is(..., ErrRateLimited)`.
+
+### Added
+
+- A `429` response carries `retryAfterSeconds` in its structured body alongside the
+  `Retry-After` header, both derived from the same limiter result, so a client behind
+  an intermediary that strips unknown headers still learns the real refill time. The
+  header stays authoritative whenever it survives and parses. No encrypted format
+  changes, so the client capability is not bumped and old clients and servers
+  interoperate unchanged.
+
 ## [v0.5.0] - 2026-08-07
 
 ### Added

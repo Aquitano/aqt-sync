@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/aquitano/aqt-sync/internal/api"
 )
 
 // The TUI mutates through the CLI itself: every action re-executes this binary
@@ -187,9 +189,13 @@ func tuiExitNote(exit int) string {
 	case 4:
 		return "conflicts remain — resolve them or sync with conflicts=copy"
 	case 5:
-		return "network error — server unreachable"
+		return "network error or rate limit — server unreachable, retry shortly"
 	case 6:
-		return "upgrade required — this client is too old for the remote resource"
+		// The subprocess already printed the full 426 explanation into the log; this
+		// line repeats only the action, which has to route the same way the CLI's does
+		// or the two contradict each other on a package-managed copy.
+		return fmt.Sprintf("upgrade required — this build reads capability %d; %s",
+			api.ClientCapability, upgradeAction(detectedInstall()))
 	case 7:
 		return "link gone — expired or read limit reached"
 	default:

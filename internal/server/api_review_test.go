@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -196,5 +197,19 @@ func TestRateLimitSetsRetryAfter(t *testing.T) {
 	secs, err := strconv.Atoi(ra)
 	if err != nil || secs < 1 {
 		t.Fatalf("Retry-After = %q, want a positive integer of seconds", ra)
+	}
+
+	// The same limiter result must also ride in the body, so a client behind an
+	// intermediary that strips unknown headers still learns how long to wait.
+	var body api.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode 429 body: %v", err)
+	}
+	if body.Code != api.ErrCodeRateLimited {
+		t.Fatalf("429 code = %q, want %q", body.Code, api.ErrCodeRateLimited)
+	}
+	if body.RetryAfterSeconds != secs {
+		t.Fatalf("retryAfterSeconds = %d, Retry-After = %d; both must come from one limiter result",
+			body.RetryAfterSeconds, secs)
 	}
 }
