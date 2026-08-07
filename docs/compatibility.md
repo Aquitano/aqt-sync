@@ -38,13 +38,45 @@ serves or overwrites a root they cannot interpret.
   capability to the resource's stored `min_client`. If the requester is below it, the
   server answers `426 Upgrade Required` with
   `{ "error": "...", "code": "upgrade_required", "minClient": <n> }` and no payload.
-  The client maps this to `client.ErrUpgradeRequired` (exit code `6`) and prints the
-  server's message verbatim.
+  The client maps this to `client.ErrUpgradeRequired` (exit code `6`). See
+  [Recovering from a 426](#recovering-from-a-426) for what it prints.
 - Write-side validation: a declared `minClient` above the writer's own capability is
   `400` (a client cannot write content it could never read back); an omitted
   declaration stores `1` (a legacy writer never over-restricts a resource). An update
   *may* lower `min_client` — a capable client legitimately rewrites a resource in an
   older format, making it readable by older clients again.
+
+### Recovering from a 426
+
+The message a user sees is composed by the client from facts it knows first-hand —
+the running version, the capability this build declares, and the `minClient` the
+server reported — not by echoing the server's prose. A compromised or hostile server
+controls that prose, so treating it as the instruction would let it tell a user to
+run anything. The server's text is still shown, but quoted as `(server said: …)` and
+sanitized first: C0/C1 control bytes and DEL are stripped and the length is bounded,
+so it cannot emit escape sequences, rewrite the line, or forge what looks like a
+second line of aqt's own output.
+
+The recovery action names the command that upgrades *this* installation:
+
+| Install | Action in the message |
+| ------- | --------------------- |
+| standalone | ``run `aqt update` `` |
+| Homebrew / WinGet / Scoop | ``upgrade with `<manager command>` `` |
+| build from source | ``rebuild it with `make build` or install a release`` |
+
+`aqt update` only replaces a standalone copy, so pointing a package-managed install
+at it would name a command that refuses. The TUI shows the same routing condensed to
+one line on exit `6`.
+
+A server reporting a `minClient` at or below the running capability is contradicting
+itself — it refused a client that clears the bar it named. The client reports the
+next capability up rather than rendering a message that tells the user to reach a
+level they already have.
+
+`errors.Is(err, client.ErrUpgradeRequired)` and exit code `6` are unchanged;
+`*client.UpgradeRequiredError` additionally carries `Capability` (what this build
+declared) and `Detail` (the sanitized server text).
 
 ### The missing-header rule
 
@@ -134,3 +166,44 @@ Resource representations are explicit, versioned contracts:
 The resource envelope is a four-byte unsigned big-endian JSON-header length, a lower-camel JSON header of at most 32 MiB, then the sealed blob ciphertext as the remainder. The request header carries visibility, sealed metadata, wrapped key, blob nonce, chunk roots, expected version, minimum client capability, and lifecycle policy. The response header also carries the resource id and accepted version. Object-frame responses repeat a four-byte unsigned big-endian length followed by exactly that object ciphertext, in request order. Object requests are capped at 10,000 ids and every decoded length is bounds-checked before allocation or slicing.
 
 Clients send `X-Aqt-Capability`; the server returns `426` before serving or overwriting a resource whose sealed format the client cannot read. Resource and snapshot creates may send an `Idempotency-Key` of at most 128 bytes. Keys are scoped to the account and operation, recorded atomically with the create, and replay the original stable response. Reusing a key for another payload returns `409 idempotency_conflict`. The official client retries only these key-backed creates. Replacements use `expectedVersion`; visibility changes include the same field, and deletes use an `If-Match` resource version. Stale mutations return `409 version_conflict`. Creates return `201`; replacements and in-place mutations return `200` (or `204` when no response body is defined).
+
+## Rate limiting (429)
+
+A throttled request is answered with `429 Too Many Requests` carrying the wait twice,
+both derived from one limiter result:
+
+- `Retry-After`, in the delay-seconds form, computed from the bucket's own refill
+  rate — so observing it is exactly long enough, not a guess.
+- `retryAfterSeconds` in the structured body, alongside `"code": "rate_limited"`.
+
+The **header is authoritative** whenever it survives and parses. The body value
+exists only as a fallback for an intermediary that strips unknown headers; a client
+that sees both must prefer the header.
+
+Client behavior:
+
+- Both forms RFC 9110 defines are accepted: delay-seconds and an HTTP-date. A
+  negative or unparseable value is rejected in favor of the next fallback; a value in
+  the past, or below the floor, is raised to 1s; an excessive one is clamped to 30s,
+  so a hostile server cannot park a client indefinitely.
+- **One cooldown is shared across every request the client makes.** A sync fires many
+  chunk, pack, and object requests concurrently against one bucket; without a shared
+  floor each would ride out its own `Retry-After` and they would all wake together,
+  reproducing the burst that tripped the limit. Any 429 publishes its deadline and
+  every other in-flight request observes it before sending. A later deadline always
+  wins over a shorter overlapping one.
+- Each waiter adds its own bounded positive jitter (up to 750ms) above the shared
+  deadline, so they do not resume on the same instant.
+- Three budgets bound the retrying: at most 3 retries per request, at most 30s per
+  wait, and at most 60s summed across one request's waits. Waits are cancellable, so
+  `^C` during a backoff returns immediately.
+- Only bodyless or replayable requests are retried. A request whose body cannot be
+  rewound is never sent twice, whatever the server answers.
+- Exhaustion returns `*client.RateLimitedError` (carrying `Attempts`, `LastDelay`,
+  and `NextRetryAt`), which still satisfies `errors.Is(err, client.ErrRateLimited)`.
+  It maps to **exit code 5**, the retryable network code, so cron and `watch --once`
+  treat throttling as "try again later" rather than a permanent failure.
+
+Neither signal changes an encrypted format, so `api.ClientCapability` is not bumped.
+An older server that sends only `Retry-After` interoperates unchanged; an older
+client that ignores `retryAfterSeconds` reads the header as it always did.

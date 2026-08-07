@@ -591,8 +591,12 @@ type ErrorResponse struct {
 	Code string `json:"code,omitempty"`
 	// MinClient accompanies an upgrade-required (426) error: the capability the
 	// resource needs, so the client can report exactly how far it is behind.
-	MinClient int    `json:"minClient,omitempty"`
-	LimitKind string `json:"limitKind,omitempty"`
-	Current   int64  `json:"current,omitempty"`
-	Limit     int64  `json:"limit,omitempty"`
+	MinClient int `json:"minClient,omitempty"`
+	// RetryAfterSeconds accompanies a rate-limited (429) error, mirroring the
+	// Retry-After header for clients behind an intermediary that strips it. The
+	// header stays authoritative whenever it survives and parses.
+	RetryAfterSeconds int    `json:"retryAfterSeconds,omitempty"`
+	LimitKind         string `json:"limitKind,omitempty"`
+	Current           int64  `json:"current,omitempty"`
+	Limit             int64  `json:"limit,omitempty"`
 }

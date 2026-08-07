@@ -77,6 +77,13 @@ Notes:
   rate-limit bucket keys on the real TCP peer regardless, so this is display-only.
 - **Quotas** are the main abuse control on a shared server; combine `AQT_QUOTA_BYTES`
   and the resource, snapshot, object, and device count caps with `invite` registration.
+- **Rate limiting.** A throttled request gets `429` with the wait in both the
+  `Retry-After` header and a `retryAfterSeconds` body field, derived from one limiter
+  result. If a proxy in front of the server strips or rewrites `Retry-After`, clients
+  fall back to the body value and still back off correctly — but prefer configuring
+  the proxy to pass the header through, since it is the authoritative one. Do not add
+  a second rate limiter at the proxy that answers `429` without a `Retry-After`:
+  clients then guess a floor of one second instead of the real refill time.
 
 ## TLS
 

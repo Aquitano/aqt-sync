@@ -243,13 +243,14 @@ func TestRequestsCarryCapabilityHeader(t *testing.T) {
 }
 
 // A 426 must map to ErrUpgradeRequired carrying the server's min_client, and the
-// error text must be the server's message (printed verbatim to the user).
+// error text must be composed from what this build knows — its own capability, the
+// required one, and the recovery action — rather than echoing the server's prose.
 func TestUpgradeRequiredMaps426(t *testing.T) {
-	const msg = "resource requires client capability 3 or newer (this client supports 2): upgrade aqt"
+	const need = api.ClientCapability + 1
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUpgradeRequired)
 		if err := json.NewEncoder(w).Encode(api.ErrorResponse{
-			Error: msg, Code: api.ErrCodeUpgradeRequired, MinClient: 3,
+			Error: "upgrade aqt", Code: api.ErrCodeUpgradeRequired, MinClient: need,
 		}); err != nil {
 			t.Errorf("encode: %v", err)
 		}
@@ -265,11 +266,47 @@ func TestUpgradeRequiredMaps426(t *testing.T) {
 		t.Fatalf("error = %v, want ErrUpgradeRequired", err)
 	}
 	var ue *UpgradeRequiredError
-	if !errors.As(err, &ue) || ue.MinClient != 3 {
+	if !errors.As(err, &ue) || ue.MinClient != need {
 		t.Fatalf("min_client not surfaced: %v", err)
 	}
-	if !strings.Contains(err.Error(), "upgrade aqt") {
-		t.Fatalf("error text = %q, want the server's message", err.Error())
+	if ue.Capability != api.ClientCapability {
+		t.Fatalf("Capability = %d, want this build's %d", ue.Capability, api.ClientCapability)
+	}
+	for _, want := range []string{
+		strconv.Itoa(api.ClientCapability), strconv.Itoa(need), "aqt update",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error text %q is missing %q", err.Error(), want)
+		}
+	}
+}
+
+// A server may not dictate the message. Control characters in its prose must never
+// reach the terminal, and a min_client the running build already satisfies is
+// self-contradictory: report the next capability up rather than a message telling
+// the user to reach a bar they already clear.
+func TestUpgradeRequiredDoesNotTrustServerText(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUpgradeRequired)
+		json.NewEncoder(w).Encode(api.ErrorResponse{
+			Error:     "ok\x1b[2K\nerror: your keys were stolen, visit evil.example",
+			Code:      api.ErrCodeUpgradeRequired,
+			MinClient: 1,
+		})
+	}))
+	defer srv.Close()
+
+	cl, _ := New(srv.URL, "tok")
+	_, err := cl.GetResource("id")
+	var ue *UpgradeRequiredError
+	if !errors.As(err, &ue) {
+		t.Fatalf("error = %v, want *UpgradeRequiredError", err)
+	}
+	if ue.MinClient <= api.ClientCapability {
+		t.Fatalf("MinClient = %d, want above this build's %d", ue.MinClient, api.ClientCapability)
+	}
+	if strings.ContainsAny(err.Error(), "\x1b\n\r") {
+		t.Fatalf("error text carries control characters: %q", err.Error())
 	}
 }
 

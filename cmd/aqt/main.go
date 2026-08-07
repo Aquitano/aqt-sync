@@ -22,6 +22,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/update"
 )
 
 const defaultServer = "http://localhost:8080"
@@ -64,7 +65,7 @@ func main() {
 	root.SetArgs(escapeLeadingDashIDs(root, os.Args[1:]))
 	cmd, err := root.ExecuteC()
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, "error:", explainError(err))
 		os.Exit(exitCode(err))
 	}
 	// Only after the command succeeded and printed what it was asked for: the
@@ -154,6 +155,47 @@ func escapeLeadingDashIDs(root *cobra.Command, args []string) []string {
 	return out
 }
 
+// explainError renders an error for the terminal, expanding the conditions whose
+// recovery depends on facts only the binary knows. Everything else passes through.
+func explainError(err error) error {
+	var upgrade *client.UpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		// Detection failing is not worth failing the message over: fall back to the
+		// standalone route, whose action is `aqt update` — and that command explains
+		// the package-manager routing itself when it runs.
+		install, derr := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
+		if derr != nil {
+			install = update.Install{Owner: update.OwnerStandalone}
+		}
+		return errors.New(upgradeGuidance(upgrade, install))
+	}
+	return err
+}
+
+// upgradeGuidance states the 426 mismatch in terms of this build — its version and
+// the capability it declares — and names the command that upgrades *this*
+// installation. Only a standalone copy is `aqt update`'s to replace; anything else
+// was put there by a tool that keeps its own records, so the message routes to that
+// tool rather than to a command which would refuse.
+func upgradeGuidance(e *client.UpgradeRequiredError, install update.Install) string {
+	action := "run `aqt update`"
+	if !install.Replaceable() {
+		if install.UpgradeCommand != "" {
+			action = fmt.Sprintf("upgrade with `%s` (%s installed this copy)", install.UpgradeCommand, install.Owner)
+		} else if why := install.Why(); why != "" {
+			action = why
+		}
+	}
+	msg := fmt.Sprintf("aqt %s reads capability %d formats; that resource needs capability %d or newer — %s",
+		version, e.Capability, e.MinClient, action)
+	// Detail is already sanitized by the client; quoting it keeps the server's voice
+	// clearly separate from ours.
+	if e.Detail != "" {
+		msg += fmt.Sprintf(" (server said: %s)", e.Detail)
+	}
+	return msg
+}
+
 // exitCode maps an error to the documented CLI contract (DESIGN.md §3):
 // 0 ok · 1 generic · 3 auth/locked · 4 sync conflict · 5 network · 6 upgrade
 // required · 7 link gone (expired/exhausted). Scripts and cron (`--once`) use it to
@@ -168,7 +210,10 @@ func exitCode(err error) int {
 	case errors.Is(err, errConflictsRemain), errors.Is(err, errSyncRace), errors.Is(err, client.ErrConflict),
 		errors.Is(err, errRollback):
 		return 4
-	case isNetworkError(err):
+	// Exhausted rate limiting is temporary by definition, so it maps to the
+	// retryable network code: cron and `watch --once` must treat a throttled run as
+	// "try again later", not as a permanent failure.
+	case isNetworkError(err), errors.Is(err, client.ErrRateLimited):
 		return 5
 	case errors.Is(err, client.ErrUpgradeRequired):
 		return 6

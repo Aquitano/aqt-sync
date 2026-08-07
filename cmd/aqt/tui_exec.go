@@ -9,6 +9,8 @@ import (
 	"sync"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/aquitano/aqt-sync/internal/api"
 )
 
 // The TUI mutates through the CLI itself: every action re-executes this binary
@@ -187,9 +189,9 @@ func tuiExitNote(exit int) string {
 	case 4:
 		return "conflicts remain — resolve them or sync with conflicts=copy"
 	case 5:
-		return "network error — server unreachable"
+		return "network error or rate limit — server unreachable, retry shortly"
 	case 6:
-		return "upgrade required — this client is too old for the remote resource"
+		return fmt.Sprintf("upgrade required — this build reads capability %d; run `aqt update`", api.ClientCapability)
 	case 7:
 		return "link gone — expired or read limit reached"
 	default:

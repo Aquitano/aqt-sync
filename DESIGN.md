@@ -80,10 +80,12 @@ Global flags (all commands): `--server <url>` (default `http://localhost:8080`; 
 `--profile <name>`, `--json`, `-q/--quiet`, `--progress` (live transfer bar on a
 terminal, for sync/clone), `-h/--help`, `-v/--version`.
 
-Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network ·
-`6` upgrade required (the remote resource is sealed in a newer format than this build
-reads) · `7` link gone (the public link has expired or reached its read limit) · `75`
-deferred (`watch --once` skipped because git was busy; retry later).
+Exit codes: `0` ok · `1` generic · `3` auth/locked · `4` sync conflict · `5` network
+(including a rate limit that outlasted the client's retry budget — both are temporary,
+so cron retries rather than giving up) · `6` upgrade required (the remote resource is
+sealed in a newer format than this build reads; the message names the command that
+upgrades this install) · `7` link gone (the public link has expired or reached its read
+limit) · `75` deferred (`watch --once` skipped because git was busy; retry later).
 
 ### 3.1 Push — the hero command
 
