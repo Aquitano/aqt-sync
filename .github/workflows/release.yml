@@ -232,5 +232,8 @@ jobs:
           test -s "$notes" || { echo "no release notes found for $GITHUB_REF_NAME or Unreleased" >&2; exit 1; }
           prerelease=""
           case "$GITHUB_REF_NAME" in *-*) prerelease=--prerelease ;; esac
-          gh release create "$GITHUB_REF_NAME" dist/* \
+          # LICENSE rides beside the archives rather than inside them: AGPL-3.0
+          # requires the license text to accompany the binaries, and the updater
+          # refuses any release archive holding an entry other than the executable.
+          gh release create "$GITHUB_REF_NAME" dist/* LICENSE \
             --title "$GITHUB_REF_NAME" --notes-file "$notes" --generate-notes $prerelease
