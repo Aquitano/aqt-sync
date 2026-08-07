@@ -660,6 +660,11 @@ func (k *resourceKeys) close() {
 //
 // Both keys are wiped if any step fails, so a caller only ever receives keys it owns.
 func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse, id string) (_ *resourceKeys, err error) {
+	if res.WrappedKey == nil {
+		// Unreachable from the current callers, which all report the absence in their
+		// own words first. A backstop so a later one gets an error, not a nil deref.
+		return nil, errors.New("no owner key stored for this resource")
+	}
 	k := &resourceKeys{}
 	defer func() {
 		if err != nil {
