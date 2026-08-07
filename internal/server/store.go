@@ -695,6 +695,7 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	if err != nil {
 		return 0, err
 	}
+	defer tx.Rollback()
 	var (
 		curEpoch    int
 		curVerifier []byte
@@ -702,7 +703,6 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	if err := tx.QueryRow(
 		`SELECT auth_epoch, auth_verifier FROM accounts WHERE owner_handle = ?`, owner,
 	).Scan(&curEpoch, &curVerifier); err != nil {
-		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrNotFound
 		}
@@ -710,11 +710,9 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	}
 	oldHash := sha256.Sum256(oldVerifier)
 	if subtle.ConstantTimeCompare(oldHash[:], curVerifier) != 1 {
-		tx.Rollback()
 		return 0, ErrNotFound // wrong current passphrase
 	}
 	if expectedEpoch != curEpoch {
-		tx.Rollback()
 		return 0, ErrVersionConflict
 	}
 	newEpoch := curEpoch + 1
@@ -723,7 +721,6 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 		`UPDATE accounts SET kdf = ?, wrapped_root = ?, auth_verifier = ?, auth_epoch = ? WHERE owner_handle = ?`,
 		string(kdfJSON), string(rootJSON), newHash[:], newEpoch, owner,
 	); err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	// Keep the initiating device usable; every other device stays on the old epoch
@@ -732,7 +729,6 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 		`UPDATE devices SET auth_epoch = ? WHERE owner_handle = ? AND device_id = ?`,
 		newEpoch, owner, deviceID,
 	); err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -761,7 +757,8 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 	if err != nil {
 		return "", 0, err
 	}
-	fail := func(e error) (string, int, error) { _ = tx.Rollback(); return "", 0, e }
+	defer tx.Rollback()
+	fail := func(e error) (string, int, error) { return "", 0, e }
 	var epoch int
 	var verifier []byte
 	if err := tx.QueryRow(`SELECT auth_epoch, auth_verifier FROM accounts WHERE owner_handle = ?`, owner).Scan(&epoch, &verifier); err != nil {
@@ -959,14 +956,13 @@ func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (d
 	if err != nil {
 		return "", "", err
 	}
+	defer tx.Rollback()
 	if maxDevices > 0 {
 		var count int
 		if err := tx.QueryRow(`SELECT count(*) FROM devices WHERE owner_handle = ?`, ownerHandle).Scan(&count); err != nil {
-			tx.Rollback()
 			return "", "", err
 		}
 		if count >= maxDevices {
-			tx.Rollback()
 			return "", "", ErrDeviceLimit
 		}
 	}
@@ -974,7 +970,6 @@ func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (d
 		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
 		deviceID, ownerHandle, name, h[:], epoch,
 	); err != nil {
-		tx.Rollback()
 		return "", "", err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1418,14 +1413,13 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
+	defer tx.Rollback()
 	// Authoritative duplicate check: the pre-tx lookup on the read pool may see a
 	// stale WAL snapshot; only this re-check on the single writer connection is
 	// race-free. Do not remove it as redundant.
 	if found, err := lookupIdempotency(tx, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
-		tx.Rollback()
 		return "", 0, err
 	} else if found {
-		tx.Rollback()
 		return prior.ID, prior.Version, nil
 	}
 	now := time.Now().Unix()
@@ -1434,15 +1428,12 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now, compactAt,
 	); err != nil {
-		tx.Rollback()
 		return "", 0, err
 	}
 	if err := replaceResourceChunks(tx, id, owner, req.ChunkRefs); err != nil {
-		tx.Rollback()
 		return "", 0, err
 	}
 	if err := recordIdempotency(tx, owner, "resource.create", req.IdempotencyKey, digest, api.PutResourceResponse{ID: id, Version: version}); err != nil {
-		tx.Rollback()
 		return "", 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1513,6 +1504,7 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	if err != nil {
 		return "", 0, err
 	}
+	defer tx.Rollback()
 	// An update may lower min_client: a capable client legitimately rewrites a
 	// resource in an older (baseline) format, and that state is then readable by
 	// older clients again.
@@ -1546,11 +1538,9 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 		)
 	}
 	if err != nil {
-		tx.Rollback()
 		return "", 0, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		tx.Rollback()
 		return "", 0, ErrVersionConflict
 	}
 	// Defense-in-depth against a client re-PUTting an object-backed resource without
@@ -1564,18 +1554,15 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 		if err := tx.QueryRow(
 			`SELECT count(*) FROM resource_chunks WHERE resource_id = ?`, req.ID,
 		).Scan(&existing); err != nil {
-			tx.Rollback()
 			return "", 0, err
 		}
 		if existing > 0 {
-			tx.Rollback()
 			return "", 0, ErrDropsRoots
 		}
 	}
 	// Replace the GC roots to match the new manifest; chunks only this version
 	// referenced become unreferenced and eligible for a later sweep.
 	if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
-		tx.Rollback()
 		return "", 0, err
 	}
 	// A revocation is a key rotation and a grant delete, and this is what makes them one
@@ -1588,7 +1575,6 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 			`DELETE FROM grants WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
 			req.ID, owner, req.RevokeGrantee,
 		); err != nil {
-			tx.Rollback()
 			return "", 0, err
 		}
 	}
@@ -1758,6 +1744,7 @@ func (s *Store) countPublicRead(id string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	defer tx.Rollback()
 	var (
 		reads     int64
 		maxReads  sql.NullInt64
@@ -1766,22 +1753,18 @@ func (s *Store) countPublicRead(id string) (int64, error) {
 	if err := tx.QueryRow(
 		`SELECT reads, max_reads, reclaimed FROM resources WHERE id = ?`, id,
 	).Scan(&reads, &maxReads, &reclaimed); err != nil {
-		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, ErrNotFound
 		}
 		return 0, err
 	}
 	if reclaimed {
-		tx.Rollback()
 		return 0, ErrGone
 	}
 	if !maxReads.Valid {
-		tx.Rollback()
 		return reads, nil
 	}
 	if reads >= maxReads.Int64 {
-		tx.Rollback()
 		return 0, ErrGone
 	}
 	reads++
@@ -1793,7 +1776,6 @@ func (s *Store) countPublicRead(id string) (int64, error) {
 		`UPDATE resources SET reads = ?, exhausted_at = COALESCE(exhausted_at, ?) WHERE id = ?`,
 		reads, exhaustedAt, id,
 	); err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2029,29 +2011,25 @@ func (s *Store) DeleteResourceVersion(owner, id string, expectedVersion int) err
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	if expectedVersion > 0 {
 		var current int
 		err := tx.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current)
 		if errors.Is(err, sql.ErrNoRows) {
-			tx.Rollback()
 			return ErrNotFound
 		}
 		if err != nil {
-			tx.Rollback()
 			return err
 		}
 		if current != expectedVersion {
-			tx.Rollback()
 			return ErrVersionConflict
 		}
 	}
 	res, err := tx.Exec(`DELETE FROM resources WHERE id = ? AND owner_handle = ?`, id, owner)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		tx.Rollback()
 		return ErrNotFound
 	}
 	// Drop the GC roots; the chunks themselves are reclaimed by a later sweep
@@ -2060,15 +2038,12 @@ func (s *Store) DeleteResourceVersion(owner, id string, expectedVersion int) err
 	// counters can be recomputed for exactly the packs this unrooting touches.
 	dropped, err := resourceChunkIDs(tx, id)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2244,17 +2219,15 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
+	defer tx.Rollback()
 	// Authoritative duplicate check; see the matching re-check in createResource.
 	if found, err := lookupIdempotency(tx, owner, "snapshot.create", idempotencyKey, digest, &prior); err != nil {
-		tx.Rollback()
 		return api.SnapshotInfo{}, err
 	} else if found {
-		tx.Rollback()
 		return prior, nil
 	}
 	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored, Automatic: scheduled}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
-		tx.Rollback()
 		return api.SnapshotInfo{}, err
 	}
 	if _, err := tx.Exec(
@@ -2262,7 +2235,6 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, blobSize, version, createdAt, sched, minClient, anchor,
 	); err != nil {
-		tx.Rollback()
 		return api.SnapshotInfo{}, err
 	}
 	// Pin every object the live resource references now. The FK to objects holds
@@ -2275,11 +2247,9 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		 SELECT ?, owner_handle, chunk_id FROM resource_chunks WHERE resource_id = ?`,
 		snapID, resourceID,
 	); err != nil {
-		tx.Rollback()
 		return api.SnapshotInfo{}, err
 	}
 	if err := recordIdempotency(tx, owner, "snapshot.create", idempotencyKey, digest, info); err != nil {
-		tx.Rollback()
 		return api.SnapshotInfo{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2420,23 +2390,20 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	// Unpinning can flip objects dead (if no resource or other snapshot still roots
 	// them), so the affected packs' counters are recomputed in the same transaction.
 	dropped, err := snapshotChunkIDs(tx, snapshotID)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -3019,6 +2986,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	if err != nil {
 		return 0, err
 	}
+	defer tx.Rollback()
 	now := time.Now().Unix()
 	// DO NOTHING (not DO UPDATE) so RowsAffected distinguishes a first store from a
 	// re-PUT: only a first store counts against the quota and re-arms nothing here.
@@ -3028,7 +2996,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		owner, packID, len(data), now,
 	)
 	if err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	inserted, _ := res.RowsAffected()
@@ -3038,40 +3005,33 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		if _, err := tx.Exec(
 			`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`, now, owner, packID,
 		); err != nil {
-			tx.Rollback()
 			return 0, err
 		}
 	} else {
 		if quotaBytes > 0 {
 			var used int64
 			if err := tx.QueryRow(`SELECT pack_bytes FROM accounts WHERE owner_handle = ?`, owner).Scan(&used); err != nil {
-				tx.Rollback()
 				return 0, err
 			}
 			if used+int64(len(data)) > quotaBytes {
-				tx.Rollback()
 				_ = os.Remove(s.packPath(owner, packID))
 				return 0, ErrQuotaExceeded
 			}
 		}
 		if err := addOwnerPackBytes(tx, owner, int64(len(data))); err != nil {
-			tx.Rollback()
 			return 0, err
 		}
 	}
 	stored, err := insertObjects(tx, owner, packID, index)
 	if err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	if maxObjects > 0 {
 		var count int64
 		if err := tx.QueryRow(`SELECT count(*) FROM objects WHERE owner_handle = ?`, owner).Scan(&count); err != nil {
-			tx.Rollback()
 			return 0, err
 		}
 		if count > int64(maxObjects) {
-			tx.Rollback()
 			if inserted > 0 {
 				_ = os.Remove(s.packPath(owner, packID))
 			}
@@ -3082,7 +3042,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	// FK requires a pre-existing object row, so a just-inserted object is unrooted
 	// until a later manifest PUT — but recounting keeps one code path.
 	if err := recountPacks(tx, owner, []string{packID}); err != nil {
-		tx.Rollback()
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -3489,6 +3448,7 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 	if err != nil {
 		return err
 	}
+	defer tx.Rollback()
 	// A concurrent SetVisibility or version-pinned re-PUT can resurrect the link between
 	// the unlocked scan and this lock — resetting expires_at/reads/exhausted_at while
 	// leaving reclaimed = 0 — so re-testing reclaimed alone would still tombstone a
@@ -3506,14 +3466,12 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 		 FROM resources WHERE id = ? AND owner_handle = ?`,
 		now, graceCutoff, id, owner,
 	).Scan(&stillExpired, &action); err != nil {
-		tx.Rollback()
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
 		return err
 	}
 	if !stillExpired {
-		tx.Rollback()
 		return nil
 	}
 	if api.OnExpiry(action) == api.ExpiryRetire {
@@ -3523,28 +3481,23 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 			 WHERE id = ?`,
 			string(api.Private), id,
 		); err != nil {
-			tx.Rollback()
 			return err
 		}
 		return tx.Commit()
 	}
 	dropped, err := resourceChunkIDs(tx, id)
 	if err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if _, err := tx.Exec(
 		`UPDATE resources SET reclaimed = 1, wrapped_key = NULL, blob_size = 0, version = version + 1 WHERE id = ?`, id,
 	); err != nil {
-		tx.Rollback()
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -3637,6 +3590,7 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 	if err != nil {
 		return 0, 0, err
 	}
+	defer tx.Rollback()
 	// A pack is dead only if none of its objects are rooted by a live resource OR a
 	// snapshot. live_count folds both root tables in and is maintained inside every
 	// transaction that moves objects or roots (see recountPacks), so selection reads
@@ -3647,7 +3601,6 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		owner, cutoff,
 	)
 	if err != nil {
-		tx.Rollback()
 		return 0, 0, err
 	}
 	type deadPack struct {
@@ -3659,14 +3612,12 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		var d deadPack
 		if err := rows.Scan(&d.id, &d.length); err != nil {
 			rows.Close()
-			tx.Rollback()
 			return 0, 0, err
 		}
 		dead = append(dead, d)
 	}
 	if err := rows.Err(); err != nil {
 		rows.Close()
-		tx.Rollback()
 		return 0, 0, err
 	}
 	rows.Close()
@@ -3677,18 +3628,15 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		// by definition unreferenced by resource_chunks, so removing them cannot
 		// violate that backstop.
 		if _, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
-			tx.Rollback()
 			return 0, 0, err
 		}
 		if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
-			tx.Rollback()
 			return 0, 0, err
 		}
 		freed += d.length
 	}
 	if freed > 0 {
 		if err := addOwnerPackBytes(tx, owner, -freed); err != nil {
-			tx.Rollback()
 			return 0, 0, err
 		}
 	}
@@ -3897,18 +3845,16 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	if err != nil {
 		return false, 0, err
 	}
+	defer tx.Rollback()
 	var curCreated, curLen int64
 	err = tx.QueryRow(`SELECT created_at, length FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID).Scan(&curCreated, &curLen)
 	if errors.Is(err, sql.ErrNoRows) {
-		tx.Rollback()
 		return false, 0, nil
 	}
 	if err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	if curCreated >= cutoff {
-		tx.Rollback()
 		return false, 0, nil // re-armed age guard: an in-flight read may still use this pack
 	}
 	liveNow := map[string]bool{}
@@ -3918,21 +3864,18 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 		owner, cand.packID,
 	)
 	if err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	for lrows.Next() {
 		var id string
 		if err := lrows.Scan(&id); err != nil {
 			lrows.Close()
-			tx.Rollback()
 			return false, 0, err
 		}
 		liveNow[id] = true
 	}
 	if err := lrows.Err(); err != nil {
 		lrows.Close()
-		tx.Rollback()
 		return false, 0, err
 	}
 	lrows.Close()
@@ -3940,12 +3883,10 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	// The new pack was built from the planned live set; if the rooted set changed,
 	// the new pack no longer matches the objects to move, so abandon this pack.
 	if len(liveNow) != len(newIndex) {
-		tx.Rollback()
 		return false, 0, nil
 	}
 	for _, e := range newIndex {
 		if !liveNow[e.ID] {
-			tx.Rollback()
 			return false, 0, nil
 		}
 	}
@@ -3956,7 +3897,6 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 		 ON CONFLICT(owner_handle, pack_id) DO UPDATE SET created_at = excluded.created_at`,
 		owner, newID, newLen, now,
 	); err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	// Re-point each live object onto the new pack before deleting the old one, so the
@@ -3966,30 +3906,25 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 			`UPDATE objects SET pack_id = ?, "offset" = ?, length = ? WHERE owner_handle = ? AND chunk_id = ?`,
 			newID, e.Off, e.Len, owner, e.ID,
 		); err != nil {
-			tx.Rollback()
 			return false, 0, err
 		}
 	}
 	// The old pack now holds only dead objects (the live ones moved); remove them and
 	// the pack row.
 	if _, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	// The moved objects now count against the new pack (which may pre-exist with
 	// other objects, via the ON CONFLICT above), so recount it in the same tx.
 	if err := recountPacks(tx, owner, []string{newID}); err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	// The swap added newLen and dropped curLen; keep the byte counter in step within
 	// the same transaction.
 	if err := addOwnerPackBytes(tx, owner, int64(newLen)-curLen); err != nil {
-		tx.Rollback()
 		return false, 0, err
 	}
 	if err := tx.Commit(); err != nil {
