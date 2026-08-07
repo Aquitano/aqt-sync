@@ -202,6 +202,24 @@ func TestFirstGitRepoSubmodulePointer(t *testing.T) {
 	}
 }
 
+// firstGitRepo is the one walker that passes a nil ignore: it answers "is there a repo
+// here?" for the track-.git prompt, which is about what is on disk rather than what the
+// sync would push. The busy checks deliberately do the opposite (see
+// TestTrackedGitBusyIgnoresNestedIgnoredRepo), and the difference is a single argument,
+// so pin it.
+func TestFirstGitRepoFindsRepoInIgnoredSubtree(t *testing.T) {
+	root := t.TempDir()
+	mkGitDir(t, filepath.Join(root, "vendored"), "HEAD")
+	writeFile(t, filepath.Join(root, ".aqtignore"), "vendored/\n")
+	rel, ok := firstGitRepo(root)
+	if !ok {
+		t.Fatal("a repo inside an ignored subtree must still be reported")
+	}
+	if rel != "vendored" {
+		t.Fatalf("rel = %q, want \"vendored\"", rel)
+	}
+}
+
 func TestFirstGitRepoNoneAndControlDirSkipped(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "a.txt"), nil, 0o644); err != nil {
