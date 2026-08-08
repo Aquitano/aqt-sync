@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -123,10 +124,11 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 		storedMin       int
 		storedCompactAt int
 		reclaimed       bool
+		storedNonce     []byte
 	)
 	err = s.db.QueryRow(
-		`SELECT version, min_client, compact_at, reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
-	).Scan(&current, &storedMin, &storedCompactAt, &reclaimed)
+		`SELECT version, min_client, compact_at, reclaimed, blob_nonce FROM resources WHERE id = ? AND owner_handle = ?`, req.ID, owner,
+	).Scan(&current, &storedMin, &storedCompactAt, &reclaimed, &storedNonce)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", 0, ErrNotFound
 	}
@@ -149,6 +151,15 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	// is a second line of defense.)
 	if req.ExpectedVersion > 0 && current != req.ExpectedVersion {
 		return "", 0, ErrVersionConflict
+	}
+	// The immutable-per-nonce blob layout is what makes the write below safe, and it
+	// rests entirely on the nonce being new. A request repeating the live nonce
+	// addresses the live file: writeBlob would truncate it, and any failure exit before
+	// the commit would then delete a file the committed row still names, leaving the
+	// resource undecryptable. Every reseal draws a fresh nonce, so no correct client
+	// trips this.
+	if bytes.Equal(storedNonce, req.Blob.Nonce) {
+		return "", 0, ErrNonceReuse
 	}
 	version := current + 1
 

@@ -381,6 +381,72 @@ func TestRepackHonorsAgeGuard(t *testing.T) {
 	}
 }
 
+// A compacted pack is content-addressed, so its id can land on a pack the owner
+// already stores (here: a client uploaded exactly the live subset earlier). Those
+// bytes are already on the owner's counter, so the swap must not add them a second
+// time — the counter has no ceiling, so any drift is permanent and only inflates the
+// quota the owner is charged.
+func TestRepackDoesNotDoubleCountExistingPack(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "collide@example.com")
+	packID, data, ids := packOf("live-object-keep", strings.Repeat("dead", 64))
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	s.rootResource(t, owner, []string{ids[0]})
+
+	// Store the pack the repack is about to build, so its id already has a row.
+	live, _, err := s.packLiveObjects(owner, packID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	newID, newPack, _ := buildLivePack(data, live)
+	if _, err := s.PutPack(owner, newID, newPack, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	before := s.mustPackBytes(t, owner)
+	repacked, reclaimed, err := s.RepackOwner(owner, forceGC)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repacked != 1 {
+		t.Fatalf("repacked = %d, want 1", repacked)
+	}
+	after := s.mustPackBytes(t, owner)
+	if want := s.mustPackRowBytes(t, owner); after != want {
+		t.Fatalf("pack_bytes = %d, want %d (sum of the surviving pack rows)", after, want)
+	}
+	if before-after != reclaimed {
+		t.Fatalf("counter dropped by %d but repack reported %d reclaimed", before-after, reclaimed)
+	}
+	// The live object still resolves through the surviving pack.
+	if got := s.readLocated(t, owner, ids[0]); string(got) != "live-object-keep" {
+		t.Fatalf("live object after repack = %q", got)
+	}
+}
+
+// mustPackBytes returns the owner's maintained pack-bytes counter.
+func (s *Store) mustPackBytes(t *testing.T, owner string) int64 {
+	t.Helper()
+	n, err := s.OwnerPackBytes(owner)
+	if err != nil {
+		t.Fatalf("owner pack bytes: %v", err)
+	}
+	return n
+}
+
+// mustPackRowBytes returns what the counter should hold: the total length of the
+// owner's actual pack rows.
+func (s *Store) mustPackRowBytes(t *testing.T, owner string) int64 {
+	t.Helper()
+	var total sql.NullInt64
+	if err := s.db.QueryRow(`SELECT sum(length) FROM packs WHERE owner_handle = ?`, owner).Scan(&total); err != nil {
+		t.Fatalf("sum pack lengths: %v", err)
+	}
+	return total.Int64
+}
+
 func TestUpdateResourceVersionConflict(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "occ@example.com")
@@ -926,6 +992,86 @@ func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
 	// A replace that keeps the roots is unaffected (no false positive).
 	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", ids)); err != nil || v != 2 {
 		t.Fatalf("replace keeping roots = v%d err=%v, want v2 nil", v, err)
+	}
+}
+
+// Blobs are addressed by id+nonce and immutable per nonce, so an update repeating the
+// stored nonce would target the live file: the write truncates it, and any failure
+// exit before the commit deletes it while the committed row still names that nonce.
+// The store rejects the reuse instead, leaving the live blob untouched.
+func TestUpdateRejectsReusedBlobNonce(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "nonce@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	packID, data, ids := packOf("obj-one", "obj-two")
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	blob, _ := crypto.Seal([]byte("v1"), ck, crypto.AADBlob)
+	mkReq := func(id string, b crypto.SealedBlob, refs []string) api.PutResourceRequest {
+		return api.PutResourceRequest{
+			ID: id, Visibility: api.Private, Blob: b, EncryptedMeta: meta,
+			WrappedKey: &wrapped, ChunkRefs: refs,
+		}
+	}
+
+	id, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq("", blob, ids))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The replay carries no ExpectedVersion, so nothing else rejects it first.
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, blob, ids)); !errors.Is(err, ErrNonceReuse) {
+		t.Fatalf("replace reusing the stored nonce = %v, want ErrNonceReuse", err)
+	}
+	// A rejected reuse whose other fields would have failed later must not have
+	// touched the blob either: this one drops the roots, an exit past the blob write.
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, blob, nil)); !errors.Is(err, ErrNonceReuse) {
+		t.Fatalf("root-dropping reuse = %v, want ErrNonceReuse", err)
+	}
+	got, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatalf("resource must stay readable after a rejected reuse: %v", err)
+	}
+	if got.Version != 1 {
+		t.Fatalf("version = %d after rejected replaces, want 1", got.Version)
+	}
+	plain, err := crypto.Open(got.Blob, ck, crypto.AADBlob)
+	if err != nil || string(plain) != "v1" {
+		t.Fatalf("blob = %q err=%v, want v1", plain, err)
+	}
+
+	// A fresh nonce (what every reseal draws) replaces as before.
+	next, _ := crypto.Seal([]byte("v2"), ck, crypto.AADBlob)
+	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, next, ids)); err != nil || v != 2 {
+		t.Fatalf("replace with a fresh nonce = v%d err=%v, want v2 nil", v, err)
+	}
+}
+
+// isUnique feeds CreateAccount's ErrConflict ("email already registered"), so it must
+// match only UNIQUE violations. A NOT NULL or CHECK failure is a server bug and must
+// not be reported to the caller as a duplicate.
+func TestIsUniqueMatchesOnlyUniqueViolations(t *testing.T) {
+	s := newStore(t)
+	if _, err := s.db.Exec(`CREATE TABLE probe(a TEXT UNIQUE, b TEXT NOT NULL, c INT CHECK (c > 0))`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO probe(a,b,c) VALUES('x','y',1)`); err != nil {
+		t.Fatal(err)
+	}
+	_, dup := s.db.Exec(`INSERT INTO probe(a,b,c) VALUES('x','y',1)`)
+	_, notNull := s.db.Exec(`INSERT INTO probe(a,b,c) VALUES('z',NULL,1)`)
+	_, check := s.db.Exec(`INSERT INTO probe(a,b,c) VALUES('w','y',0)`)
+	if !isUnique(dup) {
+		t.Fatalf("UNIQUE violation not matched: %v", dup)
+	}
+	if isUnique(notNull) {
+		t.Fatalf("NOT NULL violation matched as unique: %v", notNull)
+	}
+	if isUnique(check) {
+		t.Fatalf("CHECK violation matched as unique: %v", check)
 	}
 }
 

@@ -1202,7 +1202,9 @@ func buildLivePack(oldBytes []byte, live []liveObj) (id string, pack []byte, ind
 // transaction, re-checking the old pack's age and live set first. It returns ok=false
 // (and makes no change) when the plan has gone stale: the pack vanished, its age guard
 // was re-armed by an in-flight read, or its set of rooted objects changed since
-// planning. freed is the bytes the swap reclaimed (old pack size minus new).
+// planning. freed is the bytes the swap reclaimed: the old pack's size, less the new
+// pack's when the swap actually added it (a content address can land on a pack that
+// already exists, whose bytes are already counted).
 func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID string, newLen int, newIndex []api.PackIndexEntry) (ok bool, freed int64, err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -1255,12 +1257,25 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	}
 
 	now := time.Now().Unix()
-	if _, err := tx.Exec(
+	// DO NOTHING (not DO UPDATE) so RowsAffected distinguishes a first store from a
+	// collision with a pack that already exists, exactly as PutPack does: only a new
+	// row adds bytes to the owner's counter.
+	ins, err := tx.Exec(
 		`INSERT INTO packs(owner_handle, pack_id, length, created_at) VALUES(?,?,?,?)
-		 ON CONFLICT(owner_handle, pack_id) DO UPDATE SET created_at = excluded.created_at`,
+		 ON CONFLICT(owner_handle, pack_id) DO NOTHING`,
 		owner, newID, newLen, now,
-	); err != nil {
+	)
+	if err != nil {
 		return false, 0, err
+	}
+	inserted, _ := ins.RowsAffected()
+	if inserted == 0 {
+		// Re-arm the existing pack's GC age guard, which the prior DO UPDATE did.
+		if _, err := tx.Exec(
+			`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`, now, owner, newID,
+		); err != nil {
+			return false, 0, err
+		}
 	}
 	// Re-point each live object onto the new pack before deleting the old one, so the
 	// objects FK never dangles. chunk_id is unchanged, so resource_chunks stays valid.
@@ -1285,13 +1300,18 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	if err := recountPacks(tx, owner, []string{newID}); err != nil {
 		return false, 0, err
 	}
-	// The swap added newLen and dropped curLen; keep the byte counter in step within
-	// the same transaction.
-	if err := addOwnerPackBytes(tx, owner, int64(newLen)-curLen); err != nil {
+	// The swap dropped curLen, and added newLen only if it minted the new pack row: a
+	// pre-existing row's length is already on the owner's counter, so adding it again
+	// would over-charge the quota permanently (addOwnerPackBytes has no ceiling).
+	var added int64
+	if inserted > 0 {
+		added = int64(newLen)
+	}
+	if err := addOwnerPackBytes(tx, owner, added-curLen); err != nil {
 		return false, 0, err
 	}
 	if err := tx.Commit(); err != nil {
 		return false, 0, err
 	}
-	return true, curLen - int64(newLen), nil
+	return true, curLen - added, nil
 }

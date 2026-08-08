@@ -33,6 +33,11 @@ var ErrIdempotencyConflict = errors.New("idempotency key reused with a different
 // GC, so the store refuses it rather than lose data.
 var ErrDropsRoots = errors.New("replace drops all chunk roots")
 
+// ErrNonceReuse is returned when a replace carries the blob nonce the resource already
+// stores. Blobs are addressed by id+nonce and treated as immutable per nonce, so a
+// repeated nonce would make the new write target the live file. Handlers map it to 400.
+var ErrNonceReuse = errors.New("replace reuses the stored blob nonce")
+
 // ErrQuotaExceeded is returned when storing a pack would push an owner's stored bytes
 // past the configured quota. Handlers map it to 507; the client surfaces it clearly.
 var ErrQuotaExceeded = errors.New("storage quota exceeded")

@@ -49,6 +49,25 @@ All notable changes to this project are documented in this file.
   share page offers, for operators running a modified server. The value must be an
   absolute `http(s)` URL or the server refuses to start.
 
+### Fixed
+
+- A resource update that repeats the blob nonce already stored is refused with a
+  `400`. Blobs are addressed by id+nonce and treated as immutable per nonce, so a
+  repeated nonce made the write target the *live* file: it was truncated before the
+  transaction opened, and any failure after that point (dropped chunk roots, a
+  version conflict, a failed commit) ran the cleanup that deletes the new file —
+  deleting the blob the committed row still named and leaving the resource
+  undecryptable. Every reseal draws a fresh nonce, so no correct client is affected.
+- A failed signup no longer reports an unrelated server error as "email already
+  registered". The SQLite constraint match behind that mapping tested for
+  `constraint failed`, which the driver also emits for `NOT NULL` and `CHECK`
+  violations; it now matches `UNIQUE constraint failed`.
+- Pack compaction no longer over-charges an owner's storage quota when the compacted
+  pack's content address collides with a pack the owner already stores. The swap
+  added the new pack's bytes unconditionally, but a pre-existing row's bytes were
+  already counted, so the counter drifted upward permanently — it has no ceiling and
+  feeds the quota check on every upload.
+
 ## [v0.5.0] - 2026-08-07
 
 ### Added
