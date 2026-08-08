@@ -54,8 +54,8 @@ All notable changes to this project are documented in this file.
 - A resource update that repeats the blob nonce already stored is refused with a
   `400`. Blobs are addressed by id+nonce and treated as immutable per nonce, so a
   repeated nonce made the write target the *live* file: it was truncated before the
-  transaction opened, and any failure after that point (dropped chunk roots, a
-  version conflict, a failed commit) ran the cleanup that deletes the new file —
+  transaction opened, and any later failure (such as dropped chunk roots or a
+  failed commit) ran the cleanup that deletes the new file —
   deleting the blob the committed row still named and leaving the resource
   undecryptable. Every reseal draws a fresh nonce, so no correct client is affected.
 - A failed signup no longer reports an unrelated server error as "email already
