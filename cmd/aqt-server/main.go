@@ -19,6 +19,13 @@ import (
 )
 
 func main() {
+	// `aqt-server admin ...` is operator tooling against the data dir, not a server
+	// run. Everything else, including no arguments at all, starts the server exactly
+	// as before, so existing systemd units and container commands are unaffected.
+	if len(os.Args) > 1 && os.Args[1] == "admin" {
+		os.Exit(runAdmin(os.Args[1:]))
+	}
+
 	dataDir := envOr("AQT_DATA_DIR", "./aqt-data")
 	addr := envOr("AQT_ADDR", "127.0.0.1:8080")
 

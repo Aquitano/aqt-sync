@@ -304,7 +304,7 @@ func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (in
 	return s.PutPackWithLimits(owner, packID, data, quotaBytes, 0)
 }
 
-func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (int, error) {
+func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (stored int, err error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
 		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
@@ -326,6 +326,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}
 
+	defer s.gcLocks.lock(owner)()
 	// Cheap early reject so an over-quota upload does not write a pack file it will
 	// discard. The authoritative check runs inside the transaction below.
 	if quotaBytes > 0 {
@@ -342,7 +343,23 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}
 
-	if err := s.writePack(owner, packID, data); err != nil {
+	path := s.packPath(owner, packID)
+	_, statErr := os.Stat(path)
+	created := errors.Is(statErr, os.ErrNotExist)
+	if statErr != nil && !created {
+		return 0, statErr
+	}
+	committed := false
+	defer func() {
+		if committed || !created {
+			return
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove uncommitted pack %s: %w", packID, removeErr))
+		}
+	}()
+
+	if err = s.writePack(owner, packID, data); err != nil {
 		return 0, err
 	}
 	tx, err := s.db.Begin()
@@ -350,6 +367,17 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Packs intentionally predate account foreign keys. Recheck the owner inside
+	// this write transaction so an upload authenticated just before an operator
+	// deletes the account cannot recreate pack/object rows after the deletion.
+	var accountExists int
+	err = tx.QueryRow(`SELECT 1 FROM accounts WHERE owner_handle = ?`, owner).Scan(&accountExists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
 	now := time.Now().Unix()
 	// DO NOTHING (not DO UPDATE) so RowsAffected distinguishes a first store from a
 	// re-PUT: only a first store counts against the quota and re-arms nothing here.
@@ -377,7 +405,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 				return 0, err
 			}
 			if used+int64(len(data)) > quotaBytes {
-				_ = os.Remove(s.packPath(owner, packID))
 				return 0, ErrQuotaExceeded
 			}
 		}
@@ -385,7 +412,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 			return 0, err
 		}
 	}
-	stored, err := insertObjects(tx, owner, packID, index)
+	stored, err = insertObjects(tx, owner, packID, index)
 	if err != nil {
 		return 0, err
 	}
@@ -395,9 +422,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 			return 0, err
 		}
 		if count > int64(maxObjects) {
-			if inserted > 0 {
-				_ = os.Remove(s.packPath(owner, packID))
-			}
 			return 0, &LimitExceededError{Kind: "objects", Current: count - int64(stored), Limit: int64(maxObjects)}
 		}
 	}
@@ -410,6 +434,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	committed = true
 	return stored, nil
 }
 
@@ -1086,11 +1111,31 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 		if newID == cand.packID {
 			continue // no dead bytes to reclaim (a candidate should always have some)
 		}
+		newPath := s.packPath(owner, newID)
+		cleanupRepack := func() error {
+			exists, err := s.packExists(owner, newID)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+			if err := os.Remove(newPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove uncommitted repack %s: %w", newID, err)
+			}
+			return nil
+		}
 		if err := s.writePack(owner, newID, newPack); err != nil {
+			if cleanupErr := cleanupRepack(); cleanupErr != nil {
+				return repacked, reclaimed, errors.Join(err, cleanupErr)
+			}
 			return repacked, reclaimed, err
 		}
 		ok, freed, err := s.commitRepack(owner, cutoff, cand, newID, len(newPack), newIndex)
 		if err != nil {
+			if cleanupErr := cleanupRepack(); cleanupErr != nil {
+				return repacked, reclaimed, errors.Join(err, cleanupErr)
+			}
 			return repacked, reclaimed, err
 		}
 		if !ok {
@@ -1098,8 +1143,8 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 			// vanished). The new file is normally an orphan we just wrote, but a
 			// content address can coincide with a pack a prior swap already committed,
 			// so drop it only when no row references it — never a live pack's file.
-			if exists, cerr := s.packExists(owner, newID); cerr == nil && !exists {
-				_ = os.Remove(s.packPath(owner, newID))
+			if cleanupErr := cleanupRepack(); cleanupErr != nil {
+				return repacked, reclaimed, cleanupErr
 			}
 			continue
 		}
@@ -1211,6 +1256,21 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 		return false, 0, err
 	}
 	defer tx.Rollback()
+	// Take SQLite's cross-process writer lock before validating the plan. Without
+	// this no-op write, an admin process can delete and commit after these reads,
+	// leaving this deferred transaction to fail with SQLITE_BUSY after its new pack
+	// file was already written.
+	accountLock, err := tx.Exec(`UPDATE accounts SET owner_handle = owner_handle WHERE owner_handle = ?`, owner)
+	if err != nil {
+		return false, 0, err
+	}
+	accountRows, err := accountLock.RowsAffected()
+	if err != nil {
+		return false, 0, err
+	}
+	if accountRows == 0 {
+		return false, 0, nil
+	}
 	var curCreated, curLen int64
 	err = tx.QueryRow(`SELECT created_at, length FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID).Scan(&curCreated, &curLen)
 	if errors.Is(err, sql.ErrNoRows) {

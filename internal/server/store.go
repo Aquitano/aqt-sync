@@ -164,10 +164,14 @@ type Store struct {
 	// concurrently with the single writer connection, so GETs, auth lookups, and GC
 	// planning no longer queue behind writes. Reads that are part of a mutation flow
 	// (inside a write transaction or under a resource lock) stay on db.
-	rdb      *sql.DB
-	auth     *authCache
-	blobsDir string
-	packsDir string
+	rdb  *sql.DB
+	auth *authCache
+	// suspended memoizes per-account suspension. It is separate from auth because
+	// an operator writes it from another process, so it needs a much shorter expiry
+	// than a token resolution this process controls. See suspensionTTL.
+	suspended *suspensionCache
+	blobsDir  string
+	packsDir  string
 	// gcLocks serializes the GC/repack sequence per owner. The single DB connection
 	// serializes the transactions, but not the pack-file writes and removes around
 	// them, so two concurrent passes could double-handle a repack candidate; this lock
@@ -206,7 +210,7 @@ func OpenStore(dataDir string) (*Store, error) {
 	// connection serializes every write in-process. This suits the v1
 	// single-instance server; horizontal scaling would need real row locks.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, auth: newAuthCache(), blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
+	s := &Store{db: db, auth: newAuthCache(), suspended: newSuspensionCache(), blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -471,6 +475,16 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// its per-repository bundle compaction threshold. Repository names, refs, and
 	// bundle topology remain inside the encrypted resource blob and metadata.
 	`ALTER TABLE resources ADD COLUMN compact_at INTEGER NOT NULL DEFAULT 0;`,
+	// 18: per-account operator overrides. quota_bytes NULL means "inherit
+	// AQT_QUOTA_BYTES", which is distinct from 0 ("explicitly unlimited") — an
+	// operator must be able to exempt one account on a server that caps the rest.
+	// disabled_at is when an operator suspended the account; 0 is active. Suspension
+	// is deliberately reversible and touches no ciphertext, unlike deletion.
+	// created_at cannot be backfilled — nothing recorded it — so pre-existing rows
+	// keep 0, which operator output renders as unknown rather than as the epoch.
+	`ALTER TABLE accounts ADD COLUMN quota_bytes INTEGER;
+	 ALTER TABLE accounts ADD COLUMN disabled_at INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE accounts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the

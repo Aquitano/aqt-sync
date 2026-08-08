@@ -11,6 +11,7 @@ metadata.
 - [systemd](#systemd)
 - [Docker](#docker)
 - [Backup and restore](#backup-and-restore)
+- [Managing accounts](#managing-accounts)
 - [Health checks and upgrades](#health-checks-and-upgrades)
 
 ## Build and run
@@ -48,7 +49,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_ALLOW_INSECURE_HTTP` | unset | Set to `1` to explicitly permit plain HTTP on a non-loopback listener (normally only behind a TLS proxy). |
 | `AQT_REGISTRATION` | `open` | `open` or `invite`. Invite mode gates every signup on a token. |
 | `AQT_INVITE_TOKENS` | unset | Comma-separated invite secrets (required in invite mode). |
-| `AQT_QUOTA_BYTES` | `0` | Per-owner physical storage cap across packs, resource blobs, retained snapshots, and attributable database growth. `0` = unlimited. |
+| `AQT_QUOTA_BYTES` | `0` | Default per-owner physical storage cap across packs, resource blobs, retained snapshots, and attributable database growth. `0` = unlimited. Overridable per account with `aqt-server admin accounts quota`. |
 | `AQT_MAX_RESOURCES` | `0` | Per-account live resource-row cap. `0` = unlimited. |
 | `AQT_MAX_SNAPSHOTS` | `0` | Per-account retained snapshot-row cap. `0` = unlimited. |
 | `AQT_MAX_OBJECTS` | `0` | Per-account packed object-row cap. `0` = unlimited. |
@@ -262,6 +263,71 @@ takes a cold backup, stands up a fresh server from the copy, recovers on a clean
 client config from email + passphrase, clones and diffs the folder, clones the Git
 remote, runs `git fsck`, and compares its branch/tag refs. `go test ./cmd/aqt -run
 TestFullBackupRestoreDrill` is the in-process twin that runs on every CI build.
+
+## Managing accounts
+
+`aqt-server admin` operates on the data directory. It reads `AQT_DATA_DIR` (or
+`--data-dir`) and is safe to run against a live server — SQLite's WAL mode allows
+concurrent access, and every policy change below is picked up without a restart.
+
+There is deliberately **no admin HTTP API**. The trust boundary is filesystem
+access to the data dir, which an operator already has; a remotely reachable
+privileged endpoint would add attack surface without adding capability.
+
+```console
+aqt-server admin accounts list [--json]
+aqt-server admin accounts show <email|handle> [--json]
+aqt-server admin accounts quota <email|handle> <bytes|unlimited|default>
+aqt-server admin accounts disable <email|handle>
+aqt-server admin accounts enable <email|handle>
+aqt-server admin accounts delete <email|handle> [--dry-run] [--yes]
+```
+
+An account is addressed by email, full owner handle, or an unambiguous handle
+prefix. A prefix matching several accounts is refused rather than resolved — every
+verb here is destructive or changes policy, so guessing is not acceptable.
+
+### Per-account quotas
+
+`AQT_QUOTA_BYTES` is the default, not the only setting. Three states are distinct:
+
+- **a byte count** — this account's cap, whatever the server default is. Accepts
+  suffixes: `500MB`, `20GB`, `1TB`.
+- **`unlimited`** — exempt, and *stays* exempt when `AQT_QUOTA_BYTES` changes.
+- **`default`** — clear the override; the account follows `AQT_QUOTA_BYTES` again.
+
+Lowering a quota below what an account already stores is allowed and does not
+delete anything; the account's next write is refused. `aqt usage` reports the cap
+that actually applies, so a user with an override does not see one they are not
+subject to.
+
+### Suspending an account
+
+`disable` is the abuse-response tool. Every authenticated route answers `403` with
+code `account_disabled` — deliberately not `401`, which would send the user into a
+re-login loop that cannot succeed. Nothing is deleted and no key is destroyed, so
+`enable` restores access with the account's existing device tokens.
+
+Suspension is written by a different process than the running server, so it cannot
+invalidate that server's caches directly. A running server picks the change up
+within **10 seconds**.
+
+### Deleting an account
+
+`delete` erases the account, its devices, resources, snapshots, grants, objects,
+packs, and every ciphertext file behind them. Grants *to* the account from other
+owners go too: its published key is gone, so those wraps could never be opened
+again.
+
+The row deletions commit as one transaction — the account never half-exists — and
+the files are removed afterwards, because a rollback cannot restore an unlinked
+file and an orphaned file is the recoverable direction of that trade. Any file that
+could not be removed is reported by path for manual cleanup.
+
+**This is irreversible.** The server holds no keys, so nothing about the account can
+be reconstructed. Run `--dry-run` first to see the scope, and take a data-dir backup
+if the deletion might need undoing. `--yes` skips the prompt; without a terminal the
+command refuses rather than let a prompt read EOF and be taken as consent.
 
 ## Privacy boundary
 
