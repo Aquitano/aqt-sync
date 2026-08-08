@@ -243,6 +243,7 @@ type DeletedAccount struct {
 // published key is going away, so the wrap becomes unopenable and keeping it would
 // leave the granter listing a share nobody can read.
 func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
+	defer s.gcLocks.lock(owner)()
 	var acct DeletedAccount
 
 	tx, err := s.db.Begin()
@@ -277,24 +278,25 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 	// Ordered children-before-parent: the accounts row is the FK target for
 	// devices and resources, so it must go last.
 	for _, step := range []struct {
-		table string
-		stmt  string
-		count *int64
+		table    string
+		stmt     string
+		argCount int
+		count    *int64
 	}{
-		{"grants", `DELETE FROM grants WHERE owner_handle = ? OR grantee_handle = ?`, &acct.Grants},
-		{"snapshot_chunks", `DELETE FROM snapshot_chunks WHERE owner_handle = ?`, nil},
-		{"resource_chunks", `DELETE FROM resource_chunks WHERE owner_handle = ?`, nil},
-		{"snapshots", `DELETE FROM snapshots WHERE owner_handle = ?`, &acct.Snapshots},
-		{"resources", `DELETE FROM resources WHERE owner_handle = ?`, &acct.Resources},
-		{"objects", `DELETE FROM objects WHERE owner_handle = ?`, &acct.Objects},
-		{"packs", `DELETE FROM packs WHERE owner_handle = ?`, &acct.Packs},
-		{"devices", `DELETE FROM devices WHERE owner_handle = ?`, &acct.Devices},
-		{"idempotency_keys", `DELETE FROM idempotency_keys WHERE owner_handle = ?`, nil},
-		{"accounts", `DELETE FROM accounts WHERE owner_handle = ?`, nil},
+		{"grants", `DELETE FROM grants WHERE owner_handle = ? OR grantee_handle = ?`, 2, &acct.Grants},
+		{"snapshot_chunks", `DELETE FROM snapshot_chunks WHERE owner_handle = ?`, 1, nil},
+		{"resource_chunks", `DELETE FROM resource_chunks WHERE owner_handle = ?`, 1, nil},
+		{"snapshots", `DELETE FROM snapshots WHERE owner_handle = ?`, 1, &acct.Snapshots},
+		{"resources", `DELETE FROM resources WHERE owner_handle = ?`, 1, &acct.Resources},
+		{"objects", `DELETE FROM objects WHERE owner_handle = ?`, 1, &acct.Objects},
+		{"packs", `DELETE FROM packs WHERE owner_handle = ?`, 1, &acct.Packs},
+		{"devices", `DELETE FROM devices WHERE owner_handle = ?`, 1, &acct.Devices},
+		{"idempotency_keys", `DELETE FROM idempotency_keys WHERE owner_handle = ?`, 1, nil},
+		{"accounts", `DELETE FROM accounts WHERE owner_handle = ?`, 1, nil},
 	} {
-		args := []any{owner}
-		if strings.Count(step.stmt, "?") == 2 {
-			args = append(args, owner)
+		args := make([]any, step.argCount)
+		for i := range args {
+			args[i] = owner
 		}
 		res, err := tx.Exec(step.stmt, args...)
 		if err != nil {
@@ -314,6 +316,7 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 		return acct, err
 	}
 	s.auth.invalidateOwner(owner)
+	s.suspended.invalidate(owner)
 
 	var blobs []string
 	for _, id := range blobIDs {

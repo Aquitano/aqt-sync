@@ -6,7 +6,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 )
@@ -136,7 +138,7 @@ func TestAdminAccountByRefRefusesAmbiguousPrefix(t *testing.T) {
 	// Handles are random, so find a prefix length that genuinely collides rather
 	// than assuming one does.
 	var second string
-	for i := range 200 {
+	for i := range 600 {
 		h := s.mustAccount(t, fmtEmail(i))
 		if h[:1] == first[:1] {
 			second = h
@@ -148,6 +150,22 @@ func TestAdminAccountByRefRefusesAmbiguousPrefix(t *testing.T) {
 	}
 	if _, err := s.AdminAccountByRef(first[:1]); !errors.Is(err, ErrAmbiguousAccount) {
 		t.Fatalf("ambiguous prefix = %v, want ErrAmbiguousAccount", err)
+	}
+}
+
+func TestSuspensionCachePurgesExpiredEntriesAndStaysBounded(t *testing.T) {
+	cache := newSuspensionCache()
+	cache.entries["expired"] = suspensionEntry{expires: time.Now().Add(-time.Second)}
+	cache.put("active", false)
+	if _, exists := cache.entries["expired"]; exists {
+		t.Fatal("expired entry survived a subsequent cache write")
+	}
+
+	for i := range suspensionCacheMaxEntries + 1 {
+		cache.put("owner-"+strconv.Itoa(i), false)
+	}
+	if got := len(cache.entries); got > suspensionCacheMaxEntries {
+		t.Fatalf("cache retained %d entries, max is %d", got, suspensionCacheMaxEntries)
 	}
 }
 
@@ -333,6 +351,7 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 		t.Fatalf("test setup stored nothing: %+v", before)
 	}
 
+	s.suspended.put(owner, true)
 	deleted, err := s.DeleteAccount(owner)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
@@ -345,6 +364,9 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	}
 	if len(deleted.FileErrors) != 0 {
 		t.Errorf("file removal errors: %v", deleted.FileErrors)
+	}
+	if _, cached := s.suspended.get(owner); cached {
+		t.Error("deletion retained the owner's suspension cache entry")
 	}
 
 	if _, err := s.AdminAccountByRef("gone@example.com"); !errors.Is(err, ErrNotFound) {
@@ -372,6 +394,17 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	}
 	if _, err := os.Stat(s.packPath(owner, lateID)); !os.IsNotExist(err) {
 		t.Fatalf("post-delete pack file survived: %v", err)
+	}
+
+	// A failed re-PUT must not remove a file that existed before this invocation.
+	if err := s.writePack(owner, lateID, latePack); err != nil {
+		t.Fatalf("stage pre-existing pack: %v", err)
+	}
+	if _, err := s.PutPack(owner, lateID, latePack, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("re-PUT after deletion = %v, want ErrNotFound", err)
+	}
+	if _, err := os.Stat(s.packPath(owner, lateID)); err != nil {
+		t.Fatalf("pre-existing pack was removed after failed re-PUT: %v", err)
 	}
 
 	// The neighbouring account must be untouched.

@@ -304,7 +304,7 @@ func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (in
 	return s.PutPackWithLimits(owner, packID, data, quotaBytes, 0)
 }
 
-func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (int, error) {
+func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (stored int, err error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
 		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
@@ -326,6 +326,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}
 
+	defer s.gcLocks.lock(owner)()
 	// Cheap early reject so an over-quota upload does not write a pack file it will
 	// discard. The authoritative check runs inside the transaction below.
 	if quotaBytes > 0 {
@@ -342,7 +343,23 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}
 
-	if err := s.writePack(owner, packID, data); err != nil {
+	path := s.packPath(owner, packID)
+	_, statErr := os.Stat(path)
+	created := errors.Is(statErr, os.ErrNotExist)
+	if statErr != nil && !created {
+		return 0, statErr
+	}
+	committed := false
+	defer func() {
+		if committed || !created {
+			return
+		}
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			err = errors.Join(err, fmt.Errorf("remove uncommitted pack %s: %w", packID, removeErr))
+		}
+	}()
+
+	if err = s.writePack(owner, packID, data); err != nil {
 		return 0, err
 	}
 	tx, err := s.db.Begin()
@@ -356,7 +373,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	var accountExists int
 	err = tx.QueryRow(`SELECT 1 FROM accounts WHERE owner_handle = ?`, owner).Scan(&accountExists)
 	if errors.Is(err, sql.ErrNoRows) {
-		_ = os.Remove(s.packPath(owner, packID))
 		return 0, ErrNotFound
 	}
 	if err != nil {
@@ -389,7 +405,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 				return 0, err
 			}
 			if used+int64(len(data)) > quotaBytes {
-				_ = os.Remove(s.packPath(owner, packID))
 				return 0, ErrQuotaExceeded
 			}
 		}
@@ -397,7 +412,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 			return 0, err
 		}
 	}
-	stored, err := insertObjects(tx, owner, packID, index)
+	stored, err = insertObjects(tx, owner, packID, index)
 	if err != nil {
 		return 0, err
 	}
@@ -407,9 +422,6 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 			return 0, err
 		}
 		if count > int64(maxObjects) {
-			if inserted > 0 {
-				_ = os.Remove(s.packPath(owner, packID))
-			}
 			return 0, &LimitExceededError{Kind: "objects", Current: count - int64(stored), Limit: int64(maxObjects)}
 		}
 	}
@@ -422,6 +434,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
+	committed = true
 	return stored, nil
 }
 

@@ -96,6 +96,10 @@ func (s *Server) putPack(c *gin.Context) {
 		}
 		return
 	}
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "store pack failed")
 		return

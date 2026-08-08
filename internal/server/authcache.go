@@ -40,6 +40,10 @@ func newAuthCache() *authCache {
 // operator acts.
 const suspensionTTL = 10 * time.Second
 
+// suspensionCacheMaxEntries is a backstop for a burst of distinct active accounts;
+// normal cleanup keeps only entries touched during the last suspensionTTL.
+const suspensionCacheMaxEntries = 4096
+
 // suspensionCache memoizes the per-account suspension flag, keyed by owner handle.
 // It is deliberately separate from authCache: that one memoizes a token resolution
 // that only this process can invalidate, whereas this one memoizes state another
@@ -75,7 +79,20 @@ func (c *suspensionCache) get(owner string) (disabled, ok bool) {
 func (c *suspensionCache) put(owner string, disabled bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.entries[owner] = suspensionEntry{disabled: disabled, expires: time.Now().Add(suspensionTTL)}
+	now := time.Now()
+	for key, entry := range c.entries {
+		if now.Before(entry.expires) {
+			continue
+		}
+		delete(c.entries, key)
+	}
+	if _, exists := c.entries[owner]; !exists && len(c.entries) >= suspensionCacheMaxEntries {
+		for key := range c.entries {
+			delete(c.entries, key)
+			break
+		}
+	}
+	c.entries[owner] = suspensionEntry{disabled: disabled, expires: now.Add(suspensionTTL)}
 }
 
 // invalidate drops one owner's entry, so a suspension written by *this* process

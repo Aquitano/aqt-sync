@@ -6,7 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -271,6 +273,14 @@ func withStore(cmd *cobra.Command, fn func(*server.Store) error) error {
 	if dir == "" {
 		dir = envOr("AQT_DATA_DIR", "./aqt-data")
 	}
+	dbPath := filepath.Join(dir, "aqt.db")
+	info, err := os.Stat(dbPath)
+	if errors.Is(err, os.ErrNotExist) || err == nil && info.IsDir() {
+		return fmt.Errorf("no server database in %s; set --data-dir or AQT_DATA_DIR to the server data directory", dir)
+	}
+	if err != nil {
+		return fmt.Errorf("inspect server database %s: %w", dbPath, err)
+	}
 	store, err := server.OpenStore(dir)
 	if err != nil {
 		return fmt.Errorf("open data dir %s: %w", dir, err)
@@ -446,10 +456,12 @@ func parseQuota(raw string) (*int64, error) {
 		}
 	}
 	n, err := strconv.ParseFloat(s, 64)
-	if err != nil || n < 0 {
+	scaled := n * float64(mult)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 ||
+		math.IsInf(scaled, 0) || scaled >= math.Exp2(63) {
 		return nil, fmt.Errorf("invalid quota %q: want a byte count (optionally suffixed MB/GB/TB), `unlimited`, or `default`", raw)
 	}
-	bytes := int64(n * float64(mult))
+	bytes := int64(scaled)
 	return &bytes, nil
 }
 

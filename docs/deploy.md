@@ -11,6 +11,7 @@ metadata.
 - [systemd](#systemd)
 - [Docker](#docker)
 - [Backup and restore](#backup-and-restore)
+- [Managing accounts](#managing-accounts)
 - [Health checks and upgrades](#health-checks-and-upgrades)
 
 ## Build and run
@@ -273,7 +274,7 @@ There is deliberately **no admin HTTP API**. The trust boundary is filesystem
 access to the data dir, which an operator already has; a remotely reachable
 privileged endpoint would add attack surface without adding capability.
 
-```
+```console
 aqt-server admin accounts list [--json]
 aqt-server admin accounts show <email|handle> [--json]
 aqt-server admin accounts quota <email|handle> <bytes|unlimited|default>
