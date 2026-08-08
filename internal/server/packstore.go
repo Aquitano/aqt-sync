@@ -1111,11 +1111,31 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 		if newID == cand.packID {
 			continue // no dead bytes to reclaim (a candidate should always have some)
 		}
+		newPath := s.packPath(owner, newID)
+		cleanupRepack := func() error {
+			exists, err := s.packExists(owner, newID)
+			if err != nil {
+				return err
+			}
+			if exists {
+				return nil
+			}
+			if err := os.Remove(newPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("remove uncommitted repack %s: %w", newID, err)
+			}
+			return nil
+		}
 		if err := s.writePack(owner, newID, newPack); err != nil {
+			if cleanupErr := cleanupRepack(); cleanupErr != nil {
+				return repacked, reclaimed, errors.Join(err, cleanupErr)
+			}
 			return repacked, reclaimed, err
 		}
 		ok, freed, err := s.commitRepack(owner, cutoff, cand, newID, len(newPack), newIndex)
 		if err != nil {
+			if cleanupErr := cleanupRepack(); cleanupErr != nil {
+				return repacked, reclaimed, errors.Join(err, cleanupErr)
+			}
 			return repacked, reclaimed, err
 		}
 		if !ok {
@@ -1123,8 +1143,8 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 			// vanished). The new file is normally an orphan we just wrote, but a
 			// content address can coincide with a pack a prior swap already committed,
 			// so drop it only when no row references it — never a live pack's file.
-			if exists, cerr := s.packExists(owner, newID); cerr == nil && !exists {
-				_ = os.Remove(s.packPath(owner, newID))
+			if cleanupErr := cleanupRepack(); cleanupErr != nil {
+				return repacked, reclaimed, cleanupErr
 			}
 			continue
 		}
@@ -1236,6 +1256,21 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 		return false, 0, err
 	}
 	defer tx.Rollback()
+	// Take SQLite's cross-process writer lock before validating the plan. Without
+	// this no-op write, an admin process can delete and commit after these reads,
+	// leaving this deferred transaction to fail with SQLITE_BUSY after its new pack
+	// file was already written.
+	accountLock, err := tx.Exec(`UPDATE accounts SET owner_handle = owner_handle WHERE owner_handle = ?`, owner)
+	if err != nil {
+		return false, 0, err
+	}
+	accountRows, err := accountLock.RowsAffected()
+	if err != nil {
+		return false, 0, err
+	}
+	if accountRows == 0 {
+		return false, 0, nil
+	}
 	var curCreated, curLen int64
 	err = tx.QueryRow(`SELECT created_at, length FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID).Scan(&curCreated, &curLen)
 	if errors.Is(err, sql.ErrNoRows) {
