@@ -350,6 +350,18 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		return 0, err
 	}
 	defer tx.Rollback()
+	// Packs intentionally predate account foreign keys. Recheck the owner inside
+	// this write transaction so an upload authenticated just before an operator
+	// deletes the account cannot recreate pack/object rows after the deletion.
+	var accountExists int
+	err = tx.QueryRow(`SELECT 1 FROM accounts WHERE owner_handle = ?`, owner).Scan(&accountExists)
+	if errors.Is(err, sql.ErrNoRows) {
+		_ = os.Remove(s.packPath(owner, packID))
+		return 0, ErrNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
 	now := time.Now().Unix()
 	// DO NOTHING (not DO UPDATE) so RowsAffected distinguishes a first store from a
 	// re-PUT: only a first store counts against the quota and re-arms nothing here.

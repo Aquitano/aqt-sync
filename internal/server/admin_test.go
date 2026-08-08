@@ -258,6 +258,34 @@ func TestPerAccountQuotaOverridesServerDefault(t *testing.T) {
 	}
 }
 
+// Scheduled snapshots are a write path too. They must use the account override,
+// not only the server default passed to the background job.
+func TestAutoSnapshotsHonorPerAccountQuota(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "auto-quota@example.com")
+	s.rootResource(t, owner, nil)
+
+	tiny := int64(1)
+	if err := s.SetAccountQuota(owner, &tiny); err != nil {
+		t.Fatal(err)
+	}
+	created, err := s.RunAutoSnapshotsWithLimits(0, 0) // server default: unlimited
+	var limit *LimitExceededError
+	if created != 0 || !errors.As(err, &limit) || limit.Limit != tiny {
+		t.Fatalf("capped auto-snapshot = created %d err %v, want 0 and limit %d", created, err, tiny)
+	}
+
+	// The reverse must also hold: an explicit exemption wins over a tiny server cap.
+	var unlimited int64
+	if err := s.SetAccountQuota(owner, &unlimited); err != nil {
+		t.Fatal(err)
+	}
+	created, err = s.RunAutoSnapshotsWithLimits(0, 1)
+	if err != nil || created != 1 {
+		t.Fatalf("exempt auto-snapshot = created %d err %v, want 1 nil", created, err)
+	}
+}
+
 // `aqt usage` must report the cap that actually applies, or an account with an
 // override sees a limit it is not subject to.
 func TestUsageReportsTheEffectiveQuota(t *testing.T) {
@@ -286,6 +314,9 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "gone@example.com")
 	other := s.mustAccount(t, "stays@example.com")
+	if _, _, err := s.CreateChallenge("gone@example.com"); err != nil {
+		t.Fatalf("create pending challenge: %v", err)
+	}
 
 	packID, data, ids := packOf("erasure chunk one", "erasure chunk two")
 	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
@@ -324,6 +355,23 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	}
 	if left := countFiles(t, filepath.Join(s.packsDir, owner)); left != 0 {
 		t.Errorf("%d pack file(s) left on disk", left)
+	}
+	var challenges int
+	if err := s.db.QueryRow(`SELECT count(*) FROM challenges WHERE email = ?`, "gone@example.com").Scan(&challenges); err != nil {
+		t.Fatal(err)
+	}
+	if challenges != 0 {
+		t.Errorf("%d pending authentication challenge(s) retained the deleted email", challenges)
+	}
+
+	// A request authenticated just before deletion can reach the store afterwards.
+	// The transaction-time account check must keep it from recreating ownerless rows.
+	lateID, latePack, _ := packOf("late upload")
+	if _, err := s.PutPack(owner, lateID, latePack, 0); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("post-delete pack upload = %v, want ErrNotFound", err)
+	}
+	if _, err := os.Stat(s.packPath(owner, lateID)); !os.IsNotExist(err) {
+		t.Fatalf("post-delete pack file survived: %v", err)
 	}
 
 	// The neighbouring account must be untouched.

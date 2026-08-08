@@ -92,7 +92,7 @@ func (s *Server) putPack(c *gin.Context) {
 	if errors.Is(err, ErrQuotaExceeded) {
 		if !abortLimit(c, err) {
 			u, _ := s.store.AccountUsage(owner)
-			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: s.cfg.QuotaBytes})
+			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota})
 		}
 		return
 	}

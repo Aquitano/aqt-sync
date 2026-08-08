@@ -160,6 +160,23 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	} else if found {
 		return prior, nil
 	}
+	// Revalidate the source inside the write transaction. Account deletion runs in
+	// another process and cannot take this process's resource lock; without this
+	// check it could delete the resource after the copy above, then this INSERT
+	// would recreate an ownerless snapshot because snapshots has no account FK.
+	var currentVersion int
+	err = tx.QueryRow(
+		`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner,
+	).Scan(&currentVersion)
+	if errors.Is(err, sql.ErrNoRows) {
+		return api.SnapshotInfo{}, ErrNotFound
+	}
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	if currentVersion != version {
+		return api.SnapshotInfo{}, ErrVersionConflict
+	}
 	info := api.SnapshotInfo{ID: snapID, ResourceID: resourceID, Version: version, CreatedAt: createdAt, EncryptedLabel: label, Anchored: anchored, Automatic: scheduled}
 	if err := decodeMetaKey(metaJSON, wrappedJSON, &info.EncryptedMeta, &info.WrappedKey); err != nil {
 		return api.SnapshotInfo{}, err
@@ -472,12 +489,29 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 	// resources must not recompute it per resource: read it once per owner and
 	// adjust the cached copy as snapshots land.
 	usageByOwner := map[string]*AccountUsage{}
+	quotaByOwner := map[string]int64{}
 	created := 0
 	var firstErr error
 	for _, r := range due {
+		quota, ok := quotaByOwner[r.owner]
+		if !ok {
+			quota = quotaBytes
+			override, err := s.AccountQuota(r.owner)
+			if err != nil {
+				if firstErr == nil {
+					firstErr = err
+				}
+				continue
+			}
+			if override.Valid {
+				quota = override.Int64
+			}
+			quotaByOwner[r.owner] = quota
+		}
+
 		var u *AccountUsage
 		var added int64
-		if maxSnapshots > 0 || quotaBytes > 0 {
+		if maxSnapshots > 0 || quota > 0 {
 			var ok bool
 			u, ok = usageByOwner[r.owner]
 			if !ok {
@@ -497,7 +531,7 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 				}
 				continue
 			}
-			if quotaBytes > 0 {
+			if quota > 0 {
 				res, err := s.GetResource(r.id, r.owner)
 				if err != nil {
 					if firstErr == nil {
@@ -506,9 +540,9 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 					continue
 				}
 				added = estimatedResourceBytes(api.PutResourceRequest{Blob: res.Blob, EncryptedMeta: res.EncryptedMeta, WrappedKey: res.WrappedKey})
-				if u.StorageBytes+added > quotaBytes {
+				if u.StorageBytes+added > quota {
 					if firstErr == nil {
-						firstErr = &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quotaBytes}
+						firstErr = &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota}
 					}
 					continue
 				}

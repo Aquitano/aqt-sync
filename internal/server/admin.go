@@ -245,13 +245,6 @@ type DeletedAccount struct {
 func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 	var acct DeletedAccount
 
-	// Collect the blob files before the rows naming them are gone. Packs need no
-	// such pass: they live under a single owner-scoped directory tree.
-	blobs, err := s.accountBlobPaths(owner)
-	if err != nil {
-		return acct, err
-	}
-
 	tx, err := s.db.Begin()
 	if err != nil {
 		return acct, err
@@ -264,6 +257,21 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 			return acct, ErrNotFound
 		}
 		return acct, err
+	}
+
+	// Capture ids inside the delete transaction, not before it. File-backed writes
+	// land their bytes before opening their transaction; taking the ids from this
+	// transaction means such a write either commits first and is included here, or
+	// loses the account/resource existence race and cleans up its uncommitted file.
+	blobIDs, err := accountBlobIDs(tx, owner)
+	if err != nil {
+		return acct, err
+	}
+
+	// Challenges are keyed by email rather than owner handle. Leaving one behind
+	// would retain account-identifying metadata after an erasure request.
+	if _, err := tx.Exec(`DELETE FROM challenges WHERE email = ?`, acct.Email); err != nil && !isMissingTable(err) {
+		return acct, fmt.Errorf("delete challenges: %w", err)
 	}
 
 	// Ordered children-before-parent: the accounts row is the FK target for
@@ -307,6 +315,15 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 	}
 	s.auth.invalidateOwner(owner)
 
+	var blobs []string
+	for _, id := range blobIDs {
+		matches, err := filepath.Glob(filepath.Join(s.blobDir(id), id+".*.bin"))
+		if err != nil {
+			acct.FileErrors = append(acct.FileErrors, fmt.Sprintf("locate blobs for %s: %v", id, err))
+			continue
+		}
+		blobs = append(blobs, matches...)
+	}
 	for _, path := range blobs {
 		if info, err := os.Stat(path); err == nil {
 			acct.Bytes += info.Size()
@@ -325,13 +342,11 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 	return acct, nil
 }
 
-// accountBlobPaths lists every blob file belonging to the account's resources and
-// snapshots. It globs each id's fan-out directory rather than addressing the live
-// nonce alone: a reseal writes a new nonce-addressed file, so an id can still have
-// superseded files on disk, and an erasure that left those behind would leave real
-// ciphertext for a deleted account.
-func (s *Store) accountBlobPaths(owner string) ([]string, error) {
-	rows, err := s.rdb.Query(
+// accountBlobIDs lists every resource and snapshot id belonging to the account.
+// The caller supplies its delete transaction so a concurrent file-before-row write
+// cannot land between enumeration and erasure.
+func accountBlobIDs(q rowQueryer, owner string) ([]string, error) {
+	rows, err := q.Query(
 		`SELECT id FROM resources WHERE owner_handle = ?
 		 UNION
 		 SELECT snapshot_id FROM snapshots WHERE owner_handle = ?`, owner, owner)
@@ -340,19 +355,15 @@ func (s *Store) accountBlobPaths(owner string) ([]string, error) {
 	}
 	defer rows.Close()
 
-	var out []string
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
-		matches, err := filepath.Glob(filepath.Join(s.blobDir(id), id+".*.bin"))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, matches...)
+		ids = append(ids, id)
 	}
-	return out, rows.Err()
+	return ids, rows.Err()
 }
 
 func treeSize(dir string) int64 {
