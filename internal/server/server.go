@@ -870,6 +870,10 @@ func (s *Server) putResource(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss", api.ErrCodeDropsRoots)
 		return
 	}
+	if errors.Is(err, ErrNonceReuse) {
+		abort(c, http.StatusBadRequest, "blob nonce matches the stored one; every reseal must draw a fresh nonce")
+		return
+	}
 	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
 		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
 		return
