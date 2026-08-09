@@ -82,6 +82,18 @@ exactly as before, so systemd units and container commands are unaffected.
 
 ### Fixed
 
+- Releases now publish the `git-remote-aqt` helper. It was built by `make build` but
+  attached to no release, and Git resolves an `aqt::` remote only by executing a
+  program named exactly `git-remote-aqt` on `PATH` — so encrypted Git remotes were
+  unusable for anyone who installed aqt from a release rather than building from
+  source. The helper is cross-compiled for the same five targets as the client and
+  ships as its own archive (`git-remote-aqt_<version>_<os>_<arch>`) beside the `aqt`
+  and `aqt-server` ones, because `aqt update` refuses a client archive holding any
+  entry other than the `aqt` executable. The signed update manifest is unaffected: it
+  looks up one exact archive name per platform rather than scanning the release
+  directory, so the new archives can neither be mistaken for a client build nor
+  duplicate a platform. `aqt update` still replaces only the client, so the helper is
+  upgraded by unpacking the matching archive from the same release.
 - A resource update that repeats the blob nonce already stored is refused with a
   `400`. Blobs are addressed by id+nonce and treated as immutable per nonce, so a
   repeated nonce made the write target the *live* file: it was truncated before the
