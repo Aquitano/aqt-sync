@@ -23,11 +23,15 @@ func stageRelease(t *testing.T, version string) string {
 			t.Fatal(err)
 		}
 	}
-	// The server archives published in the same release must not confuse anything.
-	for _, p := range update.Platforms {
-		name := strings.Replace(update.ArchiveName(version, p), "aqt_", "aqt-server_", 1)
-		if err := os.WriteFile(filepath.Join(dist, name), []byte("server"), 0o644); err != nil {
-			t.Fatal(err)
+	// The sibling archives published in the same release must not confuse anything.
+	// `git-remote-aqt_` is the closer call of the two: it ends in the client's own
+	// prefix, so any selection by substring rather than by exact name would pick it.
+	for _, sibling := range []string{"aqt-server_", "git-remote-aqt_"} {
+		for _, p := range update.Platforms {
+			name := strings.Replace(update.ArchiveName(version, p), "aqt_", sibling, 1)
+			if err := os.WriteFile(filepath.Join(dist, name), []byte(sibling), 0o644); err != nil {
+				t.Fatal(err)
+			}
 		}
 	}
 	return dist
@@ -92,8 +96,8 @@ func TestGenSignVerifyRoundTrip(t *testing.T) {
 		if a.Size != int64(len(body)) || a.SHA256 != hex.EncodeToString(sum[:]) {
 			t.Fatalf("%s: manifest does not describe the archive on disk", a.Platform())
 		}
-		if strings.Contains(a.Name, "aqt-server") {
-			t.Fatalf("%s: the server archive was published as a client build", a.Platform())
+		if strings.Contains(a.Name, "aqt-server") || strings.Contains(a.Name, "git-remote-aqt") {
+			t.Fatalf("%s: a sibling archive was published as a client build", a.Platform())
 		}
 	}
 }

@@ -18,7 +18,7 @@ See [DESIGN.md](DESIGN.md) for the full protocol and threat model.
 Requires Go (see `go.mod` for the version). Pure Go — no CGO, no system libraries.
 
 ```
-make build          # builds ./bin/aqt and ./bin/aqt-server
+make build          # builds ./bin/aqt, ./bin/git-remote-aqt, ./bin/aqt-server
 make test           # go test ./...
 make restore-drill  # full backup -> restore -> byte-diff proof (see below)
 ```

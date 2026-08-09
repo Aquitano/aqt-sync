@@ -8,7 +8,36 @@ commits, or object structure.
 
 ## Setup
 
-Build the CLI, helper, and server, then put `bin/` on `PATH`:
+Git resolves an `aqt::` remote by executing a program named exactly `git-remote-aqt`
+on `PATH`, so the helper has to be installed alongside `aqt`. It ships as its own
+release archive rather than inside the `aqt` one, because `aqt update` accepts only an
+archive holding the client executable and nothing else.
+
+Download both archives for your platform from the
+[latest release](https://github.com/Aquitano/aqt-sync/releases/latest) and unpack them
+into the same directory on `PATH`:
+
+```sh
+mkdir -p "$HOME/.local/bin"
+tar -xzf aqt_<version>_<os>_<arch>.tar.gz            -C "$HOME/.local/bin"
+tar -xzf git-remote-aqt_<version>_<os>_<arch>.tar.gz -C "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+On Windows the archives are `.zip` and carry `aqt.exe` and `git-remote-aqt.exe`. Both
+must land in the same directory: the helper looks for `aqt` beside itself first and
+only then falls back to `PATH`. Confirm the helper resolves before going further —
+this also proves it found `aqt`, since it forwards straight to it:
+
+```sh
+git-remote-aqt --help
+```
+
+`aqt update` replaces only the client, so upgrade the helper by unpacking the matching
+archive from the same release.
+
+From a source checkout, build the CLI, helper, and server and put `bin/` on `PATH`
+instead:
 
 ```sh
 make build
