@@ -2,10 +2,21 @@ allowBuilds:
   sharp: true
   unrs-resolver: true
 
+# Security releases can be newer than pnpm's minimum-release-age policy. Pin the
+# exact reviewed versions here so installs can take the fixes immediately.
+minimumReleaseAgeExclude:
+  - postcss@8.5.23
+  - brace-expansion@5.0.9
+  - brace-expansion@1.1.18
+  - js-yaml@4.3.1
+  - nanoid@3.3.17
+
 # Keep transitive build dependencies above their patched security floors without
 # forcing dependants on the 1.x and 5.x brace-expansion APIs onto one major line.
 overrides:
-  'brace-expansion@<1.1.17': 1.1.17
-  'brace-expansion@>=4.0.0 <5.0.8': 5.0.8
-  'postcss@<=8.5.17': 8.5.18
+  'brace-expansion@<1.1.18': 1.1.18
+  'brace-expansion@>=4.0.0 <5.0.9': 5.0.9
+  'js-yaml@>=4.0.0 <4.3.1': 4.3.1
+  'nanoid@<3.3.17': 3.3.17
+  'postcss@<=8.5.22': 8.5.23
   'sharp@<0.35.0': 0.35.0

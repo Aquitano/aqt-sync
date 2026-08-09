@@ -4,6 +4,8 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v0.6.0] - 2026-08-09
+
 ### Changed
 
 - A `426 Upgrade Required` now ends in the command that upgrades *this* install
@@ -110,6 +112,12 @@ exactly as before, so systemd units and container commands are unaffected.
   added the new pack's bytes unconditionally, but a pre-existing row's bytes were
   already counted, so the counter drifted upward permanently — it has no ceiling and
   feeds the quota check on every upload.
+- Updated `golang.org/x/text` and `golang.org/x/net` to their patched
+  releases. The former was reachable through the server's automatic-TLS host
+  validation and could loop indefinitely on invalid Unicode input.
+- Raised the landing site's transitive security floors for PostCSS, nanoid,
+  js-yaml, and both supported brace-expansion major lines. The lockfile now resolves
+  only versions that contain the corresponding denial-of-service and file-read fixes.
 
 ## [v0.5.0] - 2026-08-07
 
