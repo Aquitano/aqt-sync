@@ -18,8 +18,10 @@ Download both archives for your platform from the
 into the same directory on `PATH`:
 
 ```sh
-tar -xzf aqt_<version>_<os>_<arch>.tar.gz            -C ~/.local/bin
-tar -xzf git-remote-aqt_<version>_<os>_<arch>.tar.gz -C ~/.local/bin
+mkdir -p "$HOME/.local/bin"
+tar -xzf aqt_<version>_<os>_<arch>.tar.gz            -C "$HOME/.local/bin"
+tar -xzf git-remote-aqt_<version>_<os>_<arch>.tar.gz -C "$HOME/.local/bin"
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 On Windows the archives are `.zip` and carry `aqt.exe` and `git-remote-aqt.exe`. Both
