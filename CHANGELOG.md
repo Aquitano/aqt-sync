@@ -112,12 +112,16 @@ exactly as before, so systemd units and container commands are unaffected.
   added the new pack's bytes unconditionally, but a pre-existing row's bytes were
   already counted, so the counter drifted upward permanently — it has no ceiling and
   feeds the quota check on every upload.
-- Updated `golang.org/x/text` and `golang.org/x/net` to their patched
-  releases. The former was reachable through the server's automatic-TLS host
-  validation and could loop indefinitely on invalid Unicode input.
+
+### Security
+
+- Updated `golang.org/x/text` and `golang.org/x/net` to patch
+  GO-2026-5970 in automatic-TLS host validation and remove GO-2026-5942 from
+  the dependency graph.
 - Raised the landing site's transitive security floors for PostCSS, nanoid,
-  js-yaml, and both supported brace-expansion major lines. The lockfile now resolves
-  only versions that contain the corresponding denial-of-service and file-read fixes.
+  js-yaml, and both supported brace-expansion major lines, resolving
+  GHSA-fxqj-rqcc-2cmp, GHSA-2v37-7h3g-55p8, GHSA-5p4m-2wfm-xmqj, and
+  GHSA-rgw5-rvv9-x895.
 
 ## [v0.5.0] - 2026-08-07
 
