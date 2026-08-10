@@ -31,7 +31,20 @@ export function MotionLayer() {
 
         const hero = gsap.timeline({ defaults: { ease: "power4.out" } });
         hero
-          .from("[data-hero-kicker]", { opacity: 0, y: 12, duration: 0.45 })
+          .to(
+            "[data-hero-kicker]",
+            {
+              duration: 0.6,
+              ease: "none",
+              scrambleText: {
+                text: "{original}",
+                chars: cipherChars,
+                speed: 0.6,
+                tweenLength: false,
+              },
+            },
+            0,
+          )
           .to(
             "[data-hero-line]",
             {
@@ -47,10 +60,13 @@ export function MotionLayer() {
             },
             0,
           )
+          // Opacity only: everything else in the hero resolves in place, so a y-slide
+          // reads as a different language — and a clipPath wipe slices the glyphs.
+          .from("[data-hero-copy]", { opacity: 0, duration: 0.7 }, "-=0.55")
           .from(
-            "[data-hero-copy], [data-hero-actions]",
-            { opacity: 0, y: 22, duration: 0.65, stagger: 0.08 },
-            "-=0.55",
+            "[data-hero-actions] > *",
+            { opacity: 0, duration: 0.55, stagger: 0.08 },
+            "-=0.45",
           )
           .from(
             "[data-hero-visual]",
