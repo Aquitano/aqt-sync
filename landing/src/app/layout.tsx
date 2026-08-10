@@ -13,7 +13,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "aqt | Every file. Only yours.",
     description:
-      "Zero-knowledge sync for files, folders, snapshots, and private links.",
+      "Zero-knowledge sync for files, folders, Git remotes, snapshots, and private links.",
     type: "website",
   },
 };
