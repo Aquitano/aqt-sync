@@ -2,7 +2,8 @@ import Image from "next/image";
 import { CopyCommand } from "@/components/copy-command";
 import { MotionLayer } from "@/components/motion-layer";
 
-const installCommand = "go install github.com/aquitano/aqt-sync/cmd/aqt@latest";
+const installCommand = "curl -fsSL https://aqt-sync.vercel.app/install.sh | sh";
+const installCommandWindows = "iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex";
 
 const markPixels = [
   1, 1, 1, 0, 0, 1,
@@ -388,6 +389,9 @@ export default function Home() {
             <code>{installCommand}</code>
             <CopyCommand command={installCommand} />
           </div>
+          <p className="install-alt" data-reveal>
+            Windows: <code>{installCommandWindows}</code>
+          </p>
           <a className="button button-dark" href="https://github.com/aquitano/aqt-sync">View on GitHub</a>
         </section>
       </main>

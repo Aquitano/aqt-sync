@@ -1,6 +1,10 @@
 .next/
 node_modules/
 out/
+
+# Copied from ../scripts at build time; the repository copy is the original.
+public/install.sh
+public/install.ps1
 *.log
 *.tsbuildinfo
 .DS_Store

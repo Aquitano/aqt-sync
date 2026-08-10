@@ -4,7 +4,48 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Install scripts for macOS, Linux, and Windows, served from the landing site:
+  `curl -fsSL https://aqt-sync.vercel.app/install.sh | sh` and
+  `iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex`. Each reads the release's
+  signed update manifest to learn which archive belongs to the platform, then refuses
+  a download whose length or SHA-256 disagrees with what that manifest declares —
+  neither script guesses an asset name. `--server` also installs `aqt-server`,
+  `AQT_INSTALL_DIR` relocates the install, and `--version` pins a release. Installing
+  a release archive is also what makes `aqt update` work afterwards: the previously
+  advertised `go install` produced a binary stamped `dev`, which the updater declines
+  to replace because its version names no release. The scripts live in `scripts/` and
+  are copied into the site's `public/` at build time, so there is one copy to review.
+
 ### Changed
+
+- `aqt update` no longer requires the GitHub CLI. The repository is public, so the
+  default is now a plain HTTPS read of the release assets — no tool to install, no
+  `gh auth login`. The stable channel resolves through GitHub's
+  `releases/latest/download/` redirect, which is by definition the newest
+  non-prerelease, so the routine check costs no API call and cannot be rate limited;
+  `--prerelease` asks the public API for the newest release including prereleases,
+  which no static URL exposes. `gh` is still tried, but only after the HTTPS read
+  fails and only when it is already installed, which keeps a private fork or mirror
+  updating. `AQT_UPDATE_BASE_URL` still overrides everything for a mirror or
+  self-hoster. None of this moves the trust boundary: the manifest signature is
+  checked against the keys compiled into the binary whichever transport supplied the
+  bytes, and the archive is checked against the size and digest that manifest
+  declares.
+- A source build now reports its version as `dev` rather than a hardcoded
+  `0.3.0-dev`. The old default named a release that was never tagged, so
+  `aqt --version` on any source build claimed to be something it was not.
+
+### Fixed
+
+- HTTPS artifact downloads no longer fail on GitHub's own redirect. Release downloads
+  leave `github.com` for a signed, expiring `*.githubusercontent.com` asset URL, and
+  the update client refused every cross-host redirect — so the HTTPS path could never
+  have downloaded a real release, only the single-origin fixtures the tests serve.
+  That one hop is now permitted, matched against `githubusercontent.com` and its
+  subdomains (the leading dot keeps a lookalike domain out); every other cross-origin
+  redirect is still refused, and a differing port still counts as a different origin.
 
 - `aqt` is now a multi-call binary, so encrypted Git remotes no longer need a second
   executable. Git discovers a remote helper by exec'ing `git-remote-<transport>`;

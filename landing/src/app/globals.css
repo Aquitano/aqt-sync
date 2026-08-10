@@ -1181,6 +1181,18 @@ button:focus-visible {
   font-size: 1.1rem;
 }
 
+.install .install-alt {
+  grid-column: 1 / -1;
+  margin: 0;
+  font-size: 0.95rem;
+}
+
+.install .install-alt code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .install-command {
   grid-column: 1 / -1;
   display: grid;

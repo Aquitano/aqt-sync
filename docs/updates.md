@@ -5,9 +5,10 @@ that description, verifies it against signing keys compiled into the binary, and
 either reports what is available or installs it. `--check` keeps the whole path
 read-only.
 
-The transport is not trusted. Whoever serves the metadata — the GitHub CLI today, a
-static origin later — can only make the check fail, never make it lie: the signature
-is what makes an answer usable, and every field is refused until it verifies.
+The transport is not trusted. Whoever serves the metadata — GitHub's public release
+assets, a static origin, or the GitHub CLI — can only make the check fail, never make
+it lie: the signature is what makes an answer usable, and every field is refused until
+it verifies.
 
 ## Using it
 
@@ -23,11 +24,26 @@ aqt update --json               # machine-readable
 before writing anything. Without a terminal it refuses rather than assuming consent;
 `--yes` is the explicit non-interactive path.
 
-**Prerequisite:** the repository is private, so release assets are only reachable
-with credentials. The check shells out to the [GitHub CLI](https://cli.github.com)
-(`gh auth login` once). Set `AQT_UPDATE_BASE_URL` to fetch `<base>/stable.json` and
-`<base>/stable.json.sig` over plain HTTPS instead — that is how the tests run, and
-it is the switch for serving metadata from a public origin.
+**No prerequisites.** The repository is public, so the check reads the release's
+`aqt-update.json` and `aqt-update.json.sig` assets over plain HTTPS — no tool to
+install and no credentials. The stable channel resolves through GitHub's
+`releases/latest/download/` redirect, which is by definition the newest
+non-prerelease, so a routine check makes no API call and cannot be rate limited.
+`--prerelease` additionally asks the public API for the newest release including
+prereleases, since no static URL exposes that.
+
+Two fallbacks exist for anyone not served by the default:
+
+- `AQT_UPDATE_BASE_URL` fetches `<base>/stable.json` and `<base>/stable.json.sig`
+  instead. That is how the tests run and how a mirror or self-hoster serves its own
+  origin.
+- If the HTTPS read fails and the [GitHub CLI](https://cli.github.com) is already
+  installed, the check retries through `gh`, which carries the user's credentials.
+  That keeps a **private fork** updating; it is never required for this repository.
+
+Transport is not a trust decision. The manifest signature is checked against keys
+compiled into the binary whichever path supplied the bytes, and the artifact is
+checked against the size and digest that signed manifest declares.
 
 ### JSON output
 
