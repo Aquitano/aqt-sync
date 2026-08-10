@@ -62,7 +62,7 @@ var (
 
 func main() {
 	root := rootCmd()
-	root.SetArgs(escapeLeadingDashIDs(root, os.Args[1:]))
+	root.SetArgs(rootArgs(root, os.Args))
 	cmd, err := root.ExecuteC()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", explainError(err))
@@ -294,7 +294,7 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(initCmd(), statusCmd(), diffCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
-	root.AddCommand(repoCmd())
+	root.AddCommand(repoCmd(), gitCmd())
 	root.AddCommand(gitRemoteHelperCmd())
 	root.AddCommand(tuiCmd(), updateCmd())
 

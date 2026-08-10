@@ -1,9 +1,11 @@
 .PHONY: build build-server test test-short test-race vet fmt fuzz restore-drill docker clean
 
-# Build the CLI, Git helper, and server into ./bin.
+# Build the CLI and server into ./bin. aqt is a multi-call binary: Git reaches its
+# remote helper through a link named git-remote-aqt, which is what `aqt git setup`
+# creates next to an installed client.
 build:
 	go build -o bin/aqt ./cmd/aqt
-	go build -o bin/git-remote-aqt ./cmd/git-remote-aqt
+	ln -sf aqt bin/git-remote-aqt
 	go build -o bin/aqt-server ./cmd/aqt-server
 
 build-server:

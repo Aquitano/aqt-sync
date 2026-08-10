@@ -1,6 +1,6 @@
 name: release
 
-# Build every shipped binary (aqt client + git-remote-aqt helper + aqt-server) for
+# Build every shipped binary (aqt client + aqt-server) for
 # every platform and attach them to a GitHub Release. Pure Go with CGO off, so one
 # Linux runner cross-compiles all targets. Push a version tag to cut a release:
 #   git tag v0.1.0 && git push origin v0.1.0
@@ -91,16 +91,15 @@ jobs:
             ext=""; [ "$GOOS" = windows ] && ext=".exe"
             stage="stage/${GOOS}_${GOARCH}"; mkdir -p "$stage"
             echo "::group::build $GOOS/$GOARCH"
-            for cmd in aqt git-remote-aqt aqt-server; do
+            for cmd in aqt aqt-server; do
               GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -ldflags "$ldflags" \
                 -o "$stage/$cmd$ext" "./cmd/$cmd"
             done
             echo "::endgroup::"
-            # One archive per binary so client, Git helper, and server can be grabbed
-            # separately. The helper gets its own archive rather than riding inside the
-            # client's: the updater refuses a release archive holding any entry other
-            # than the `aqt` executable itself.
-            for cmd in aqt git-remote-aqt aqt-server; do
+            # One archive per binary so client and server can be grabbed separately.
+            # There is no Git-helper archive: `aqt` answers to the helper's name itself
+            # and `aqt git setup` links it.
+            for cmd in aqt aqt-server; do
               base="${cmd}_${VERSION}_${GOOS}_${GOARCH}"
               if [ "$GOOS" = windows ]; then
                 (cd "$stage" && zip -q "$GITHUB_WORKSPACE/dist/$base.zip" "$cmd$ext")

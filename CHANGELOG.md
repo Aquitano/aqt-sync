@@ -4,6 +4,35 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- `aqt` is now a multi-call binary, so encrypted Git remotes no longer need a second
+  executable. Git discovers a remote helper by exec'ing `git-remote-<transport>`;
+  invoked under the name `git-remote-aqt` — matched exactly, plus `.exe`, so renaming
+  the binary cannot change what it runs — `aqt` runs its own `git-remote-helper`
+  subcommand. `aqt git setup` creates that link beside the running binary (symlink,
+  falling back to a hard link and then a copy on Windows, where symlinks need
+  Developer Mode), reports where it went, and warns when the directory is not on
+  `PATH` or another `git-remote-aqt` comes first. It refuses a directory Homebrew,
+  WinGet, or Scoop owns, because a package that records every file it installs should
+  ship the link itself; `--dir` puts one anywhere else. Re-running is a no-op, and
+  replacing an existing helper asks first.
+
+  This closes the gap where `aqt update` upgraded only the client: there is now one
+  file to replace, so the two can no longer disagree about protocol or crypto. A
+  symlink resolves by name and follows the update; the hard-link and copy fallbacks
+  stay bound to the file the update renamed away, so the update reports the stale
+  link and names the command that remakes it.
+
+### Removed
+
+- The standalone `git-remote-aqt` archive and the `cmd/git-remote-aqt` binary it was
+  built from. Releases now publish `aqt` and `aqt-server` only, so an install script
+  that fetches `git-remote-aqt_<version>_<os>_<arch>` needs updating: download `aqt`
+  and run `aqt git setup`. A standalone helper already on disk keeps working — it
+  execs the `aqt` beside it, and the subcommand it targets is unchanged — so no
+  existing checkout breaks at the moment of upgrade.
+
 ## [v0.6.0] - 2026-08-09
 
 ### Changed

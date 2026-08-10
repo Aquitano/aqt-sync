@@ -18,7 +18,7 @@ See [DESIGN.md](DESIGN.md) for the full protocol and threat model.
 Requires Go (see `go.mod` for the version). Pure Go — no CGO, no system libraries.
 
 ```
-make build          # builds ./bin/aqt, ./bin/git-remote-aqt, ./bin/aqt-server
+make build          # builds ./bin/aqt and ./bin/aqt-server (+ the git-remote-aqt link)
 make test           # go test ./...
 make restore-drill  # full backup -> restore -> byte-diff proof (see below)
 ```
@@ -160,8 +160,8 @@ branch/tag ref comparison:
 
 Copyright (C) 2026 Thomas Breindl.
 
-AGPL-3.0-or-later, across the whole repository: the `aqt` client, the
-`git-remote-aqt` helper, `aqt-server`, and the landing site. Full text in
+AGPL-3.0-or-later, across the whole repository: the `aqt` client, `aqt-server`,
+and the landing site. Full text in
 [LICENSE](LICENSE).
 
 Self-hosting a **modified** server entitles its users to your source.

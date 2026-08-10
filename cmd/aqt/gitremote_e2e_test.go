@@ -25,8 +25,7 @@ func TestGitRemotePushAndClone(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -136,8 +135,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	var injected atomic.Bool
 	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && injected.CompareAndSwap(false, true) {
@@ -177,8 +175,7 @@ func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("sha256", 64); err != nil {
@@ -215,8 +212,7 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	var armed, injected atomic.Bool
 	var resourcePuts atomic.Int32
 	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
@@ -329,8 +325,7 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("restore", 2); err != nil {
@@ -395,8 +390,7 @@ func TestGitRemoteConcurrentPushRace(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("race", 64); err != nil {
@@ -479,8 +473,7 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	harness := newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("crash", 64); err != nil {
@@ -563,6 +556,20 @@ func configureGitTestEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_2", "false")
 }
 
+// installGitRemoteHelper wires Git up the way an install does: one aqt binary and
+// the git-remote-aqt link `aqt git setup` creates beside it.
+func installGitRemoteHelper(t *testing.T, bin string) {
+	t.Helper()
+	exe := filepath.Join(bin, "aqt")
+	buildTestBinary(t, exe, ".")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	if _, err := linkHelper(exe, filepath.Join(bin, helperLinkName())); err != nil {
+		t.Fatalf("link %s: %v", helperName, err)
+	}
+}
+
 func buildTestBinary(t *testing.T, output, pkg string) {
 	t.Helper()
 	// Git discovers the helper by PATH lookup, which on Windows only considers
@@ -616,8 +623,7 @@ func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 

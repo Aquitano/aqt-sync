@@ -9,40 +9,46 @@ commits, or object structure.
 ## Setup
 
 Git resolves an `aqt::` remote by executing a program named exactly `git-remote-aqt`
-on `PATH`, so the helper has to be installed alongside `aqt`. It ships as its own
-release archive rather than inside the `aqt` one, because `aqt update` accepts only an
-archive holding the client executable and nothing else.
+on `PATH`. `aqt` answers to that name itself, so the integration is a link pointing at
+the client — one binary, nothing to upgrade separately.
 
-Download both archives for your platform from the
-[latest release](https://github.com/Aquitano/aqt-sync/releases/latest) and unpack them
-into the same directory on `PATH`:
+Unpack the `aqt` archive for your platform from the
+[latest release](https://github.com/Aquitano/aqt-sync/releases/latest) into a directory
+on `PATH`, then create the link:
 
 ```sh
 mkdir -p "$HOME/.local/bin"
-tar -xzf aqt_<version>_<os>_<arch>.tar.gz            -C "$HOME/.local/bin"
-tar -xzf git-remote-aqt_<version>_<os>_<arch>.tar.gz -C "$HOME/.local/bin"
+tar -xzf aqt_<version>_<os>_<arch>.tar.gz -C "$HOME/.local/bin"
 export PATH="$HOME/.local/bin:$PATH"
+aqt git setup
 ```
 
-On Windows the archives are `.zip` and carry `aqt.exe` and `git-remote-aqt.exe`. Both
-must land in the same directory: the helper looks for `aqt` beside itself first and
-only then falls back to `PATH`. Confirm the helper resolves before going further —
-this also proves it found `aqt`, since it forwards straight to it:
+`aqt git setup` creates the link beside the running binary, reports where it put it,
+and warns if that directory is not on `PATH` or if another `git-remote-aqt` comes
+first. It is safe to re-run. Pass `--dir` to put the link somewhere else on `PATH`;
+for a Homebrew, WinGet, or Scoop install it refuses the package's own directory,
+because the package provides the link.
 
-```sh
-git-remote-aqt --help
-```
+On Windows the archive is a `.zip` carrying `aqt.exe`, and the link is
+`git-remote-aqt.exe`. A symlink there needs Developer Mode or an elevated shell, so
+setup falls back to a hard link (which needs neither, on one volume) and then to a
+copy. Only a symlink resolves by name and so follows `aqt update`; a hard link or a
+copy stays bound to the file the update replaced. The update reports a link that has
+gone stale, and re-running `aqt git setup` remakes it.
 
-`aqt update` replaces only the client, so upgrade the helper by unpacking the matching
-archive from the same release.
-
-From a source checkout, build the CLI, helper, and server and put `bin/` on `PATH`
-instead:
+From a source checkout, `make build` produces `bin/aqt`, the same link beside it, and
+`bin/aqt-server`:
 
 ```sh
 make build
 export PATH="$PWD/bin:$PATH"
 ```
+
+Releases up to and including v0.6.0 shipped a standalone `git-remote-aqt` archive.
+Later releases do not: there is nothing to download but `aqt`. A copy already on disk
+keeps working — it execs the `aqt` beside it, which still answers to the subcommand it
+targets — but replace it with `aqt git setup`, and drop the archive from any install
+script that fetches it.
 
 Create and attach a private remote from an existing repository:
 

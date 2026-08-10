@@ -200,8 +200,8 @@ func runRepoCreate(name string, compactAt int) error {
 		return printJSON(map[string]any{"id": resp.ID, "name": name, "url": url, "compactAt": compactAt})
 	}
 	fmt.Println(url)
-	if _, err := exec.LookPath("git-remote-aqt"); err != nil {
-		fmt.Fprintln(os.Stderr, "warning: git-remote-aqt is not on PATH; run `make build` and add ./bin to PATH before cloning")
+	if _, err := exec.LookPath(helperName); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: %s is not on PATH; run `aqt git setup` before cloning\n", helperName)
 	}
 	return nil
 }
