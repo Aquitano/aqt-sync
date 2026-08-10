@@ -674,13 +674,21 @@ button:focus-visible {
   background-image: repeating-linear-gradient(135deg, transparent 0 7px, color-mix(in srgb, var(--paper) 7%, transparent) 7px 8px);
 }
 
+.feature-git {
+  grid-column: span 7;
+  grid-row: span 2;
+  color: var(--paper);
+  background-color: var(--ink-soft);
+  background-image: repeating-linear-gradient(90deg, transparent 0 25px, color-mix(in srgb, var(--paper) 6%, transparent) 25px 26px);
+}
+
 .feature-history {
   grid-column: span 5;
   background-image: linear-gradient(90deg, transparent 0 22%, rgb(29 28 25 / 8%) 22% 22.4%, transparent 22.4%);
 }
 
 .feature-tui {
-  grid-column: span 7;
+  grid-column: span 5;
   color: var(--paper);
   background-color: var(--ink-deep);
   background-image: repeating-linear-gradient(0deg, transparent 0 25px, color-mix(in srgb, var(--paper) 5%, transparent) 25px 26px);
@@ -1076,6 +1084,10 @@ button:focus-visible {
   color: color-mix(in srgb, var(--paper) 66%, transparent);
 }
 
+.host-copy p + p {
+  margin-top: 1.1rem;
+}
+
 .text-link-light {
   color: var(--paper);
 }
@@ -1105,6 +1117,7 @@ button:focus-visible {
   font-family: var(--font-mono);
   font-size: clamp(0.75rem, 1.1vw, 0.9rem);
   line-height: 1.7;
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -1281,7 +1294,8 @@ button:focus-visible {
 
 .footer-links {
   display: flex;
-  gap: 1.6rem;
+  flex-wrap: wrap;
+  gap: 0.9rem 1.6rem;
   font-family: var(--font-mono);
   font-size: 0.68rem;
   text-transform: uppercase;
@@ -1433,6 +1447,7 @@ button:focus-visible {
   .feature-zero,
   .feature-dag,
   .feature-links,
+  .feature-git,
   .feature-history,
   .feature-tui {
     grid-column: auto;

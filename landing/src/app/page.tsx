@@ -71,9 +71,9 @@ const workflow = [
   {
     verb: "Sync",
     title: "Track folders like git.",
-    body: "Two-way sync, conflict copies, ignore rules, and a watcher that waits when git is busy.",
-    command: "aqt init ~/vault && aqt sync ~/vault",
-    output: "3 pushed / 0 pulled / 0 conflicts",
+    body: "Two-way sync that merges non-overlapping text edits and keeps a conflict copy when they collide. Preview any of it with aqt diff, or let aqt watch run it for you.",
+    command: "aqt sync ~/vault --conflicts=merge",
+    output: "~ merged notes/plan.md",
     meta: "content addressed / deduplicated",
   },
   {
@@ -92,6 +92,7 @@ const specRows = [
   { term: "Keys", detail: "Derived locally, never transmitted" },
   { term: "Server stores", detail: "Ciphertext and opaque IDs" },
   { term: "Transport", detail: "HTTPS enforced off loopback" },
+  { term: "Updates", detail: "Ed25519-signed manifest, verified before install" },
 ];
 
 export default function Home() {
@@ -172,8 +173,8 @@ export default function Home() {
           <CornerMarks />
           <div className="section-heading" data-reveal>
             <h2 id="features-title">Built for the whole life of a file.</h2>
-            <p>Push it once, keep a folder in sync, share it safely, or recover it years later.</p>
-            <HatchLine label="PUSH / SYNC / SHARE / SNAPSHOT / RESTORE" />
+            <p>Push it once, keep a folder in sync, back a repository up, share it safely, or recover it years later.</p>
+            <HatchLine label="PUSH / SYNC / SHARE / GIT / SNAPSHOT / RESTORE" />
           </div>
           <div className="feature-grid" data-feature-grid>
             <article data-feature className="feature-cell feature-zero">
@@ -218,6 +219,21 @@ export default function Home() {
               </div>
               <h3>The key stays after the #.</h3>
               <p>Public links keep their key after the #. For private account grants, aqt share --with gives read-only access, aqt shares lists incoming grants, and aqt contacts pins recipient keys.</p>
+            </article>
+
+            <article data-feature className="feature-cell feature-git">
+              <CornerMarks />
+              <p className="feature-label">Encrypted Git remotes</p>
+              <div className="feature-visual" aria-hidden="true">
+                <div className="snap-rows">
+                  <code><span>$</span> aqt repo create notes</code>
+                  <code><span>$</span> git remote add origin aqt::notes</code>
+                  <code><span>$</span> git push -u origin main</code>
+                </div>
+                <p className="visual-caption">BUNDLES / REFS / CIPHERTEXT</p>
+              </div>
+              <h3>Push history, not a .git folder.</h3>
+              <p>Git owns commits, refs, and merges; aqt stores the bundles as ciphertext. Clone, fetch, push, tags, and ref deletion all work through the same binary, and the server never sees a path, a ref, or an object.</p>
             </article>
 
             <article data-feature className="feature-cell feature-history">
@@ -340,6 +356,9 @@ export default function Home() {
             <p>
               aqt-server is a static Go binary backed by SQLite and a ciphertext data directory. Put it behind Caddy, systemd, or Docker.
             </p>
+            <p>
+              Accounts are managed from the data directory, not a privileged HTTP surface: inspect one, cap its storage, suspend it, or erase it and sweep its ciphertext, with any file left behind named in the receipt.
+            </p>
             <a className="text-link text-link-light" href="https://github.com/aquitano/aqt-sync/blob/main/docs/deploy.md">Read the deploy guide <span aria-hidden="true">&#8599;</span></a>
           </div>
           <div className="host-ticket frame" data-reveal>
@@ -347,7 +366,10 @@ export default function Home() {
               <span>AQT-SERVER</span>
               <span>SELF-HOSTED</span>
             </div>
-            <code><span>$</span> AQT_DATA_DIR=./aqt-data ./bin/aqt-server</code>
+            <code>
+              <span>$</span> AQT_DATA_DIR=./aqt-data ./bin/aqt-server{"\n"}
+              <span>$</span> aqt-server admin accounts quota you@example.com 20GB
+            </code>
             <HatchLine />
             <div className="host-specs">
               <span>SQLite</span><span>Prometheus</span><span>Native TLS</span><span>Pure Go</span>
@@ -384,6 +406,7 @@ export default function Home() {
           <div className="footer-links">
             <a href="https://github.com/aquitano/aqt-sync">GitHub</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/DESIGN.md">Protocol</a>
+            <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/git-repositories.md">Git remotes</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/deploy.md">Deploy</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/LICENSE">AGPL-3.0</a>
           </div>
