@@ -19,17 +19,19 @@ All notable changes to this project are documented in this file.
   replacing an existing helper asks first.
 
   This closes the gap where `aqt update` upgraded only the client: there is now one
-  file to replace, so the two can no longer disagree about protocol or crypto. An
-  update that leaves a hard link or copy behind — the Windows fallbacks, which stay
-  bound to the replaced file — says so and names the command that fixes it.
+  file to replace, so the two can no longer disagree about protocol or crypto. A
+  symlink resolves by name and follows the update; the hard-link and copy fallbacks
+  stay bound to the file the update renamed away, so the update reports the stale
+  link and names the command that remakes it.
 
-### Deprecated
+### Removed
 
-- The standalone `git-remote-aqt` archive. Existing copies keep working unchanged
-  (the shim execs the `aqt` beside it, and the subcommand it targets is unchanged),
-  and it is still published, but it will stop being. Run `aqt git setup` to replace
-  one with a link. `make build` and the restore drill already build only `aqt` and
-  `aqt-server` and link the helper.
+- The standalone `git-remote-aqt` archive and the `cmd/git-remote-aqt` binary it was
+  built from. Releases now publish `aqt` and `aqt-server` only, so an install script
+  that fetches `git-remote-aqt_<version>_<os>_<arch>` needs updating: download `aqt`
+  and run `aqt git setup`. A standalone helper already on disk keeps working — it
+  execs the `aqt` beside it, and the subcommand it targets is unchanged — so no
+  existing checkout breaks at the moment of upgrade.
 
 ## [v0.6.0] - 2026-08-09
 

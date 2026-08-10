@@ -19,14 +19,25 @@ import (
 // so there is no second executable that can fall out of step with the client.
 const helperName = "git-remote-aqt"
 
-// multiCallArgs rewrites an invocation made under the helper name into the
-// equivalent `aqt git-remote-helper` command line. The name must match exactly,
-// never as a prefix, so renaming the binary cannot change what it runs.
-func multiCallArgs(argv []string) []string {
+// multiCallArgs reports the arguments an invocation made under the helper name
+// stands for: the hidden `git-remote-helper` subcommand followed by whatever Git
+// passed. The name must match exactly, never as a prefix, so renaming the binary
+// cannot change what it runs.
+func multiCallArgs(argv []string) ([]string, bool) {
 	if len(argv) == 0 || !isHelperName(filepath.Base(argv[0])) {
-		return argv
+		return nil, false
 	}
-	return append([]string{argv[0], "git-remote-helper"}, argv[1:]...)
+	return append([]string{"git-remote-helper"}, argv[1:]...), true
+}
+
+// rootArgs is the command line the root command runs. Git's arguments belong to the
+// remote-helper protocol and reach it verbatim; the legacy dash-id rewrite applies
+// only to what a user typed, where a dash-leading id cannot be told from a flag.
+func rootArgs(root *cobra.Command, argv []string) []string {
+	if args, ok := multiCallArgs(argv); ok {
+		return args
+	}
+	return escapeLeadingDashIDs(root, argv[1:])
 }
 
 func isHelperName(base string) bool {
@@ -94,14 +105,13 @@ func runGitSetup(dir string, assumeYes bool) error {
 	if err != nil {
 		return fmt.Errorf("locating the running executable: %w", err)
 	}
-	if dir == "" {
-		in, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
-		if err != nil {
-			return err
-		}
-		if dir, err = defaultHelperDir(exe, in); err != nil {
-			return err
-		}
+	in, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
+	if err != nil {
+		return err
+	}
+	dir, err = helperDir(dir, exe, in)
+	if err != nil {
+		return err
 	}
 	info, err := os.Stat(dir)
 	if err != nil {
@@ -113,58 +123,72 @@ func runGitSetup(dir string, assumeYes bool) error {
 	link := filepath.Join(dir, helperLinkName())
 	report := gitSetupReport{Link: link, Target: exe}
 
-	if sameExecutable(link, exe) {
-		if flagJSON {
-			return printJSON(report)
+	if samePath(link, exe) {
+		if !flagJSON {
+			fmt.Printf("%s already points at this binary\n", link)
 		}
-		fmt.Printf("%s already points at this binary\n", link)
-		return nil
-	}
-	if _, err := os.Lstat(link); err == nil {
-		// Anything else under this name is either a pre-multi-call helper binary or a
-		// link to a different aqt, and both mean Git runs something other than this
-		// client. Replacing it is the point of the command, so only confirm it.
-		if err := confirmDestructive(fmt.Sprintf("Replace %s? [y/N] ", link), assumeYes); err != nil {
-			return err
+	} else {
+		if _, err := os.Lstat(link); err == nil {
+			// Anything else under this name is either a pre-multi-call helper binary or a
+			// link to a different aqt, and both mean Git runs something other than this
+			// client. Replacing it is the point of the command, so only confirm it.
+			if err := confirmDestructive(fmt.Sprintf("Replace %s? [y/N] ", link), assumeYes); err != nil {
+				return err
+			}
+			if err := os.Remove(link); err != nil {
+				return err
+			}
 		}
-		if err := os.Remove(link); err != nil {
-			return err
+		method, err := linkHelper(exe, link)
+		if err != nil {
+			return fmt.Errorf("creating %s: %w", link, err)
+		}
+		report.Method, report.Created = method, true
+		if !flagJSON {
+			fmt.Printf("installed %s (%s)\n", link, method)
+			if method != "symlink" && !flagQuiet {
+				fmt.Printf("note: a %s does not follow `aqt update`; re-run `aqt git setup` after upgrading\n", method)
+			}
 		}
 	}
 
-	method, err := linkHelper(exe, link)
-	if err != nil {
-		return fmt.Errorf("creating %s: %w", link, err)
-	}
-	report.Method, report.Created = method, true
+	// A link Git cannot reach is the failure this command exists to prevent, so the
+	// warning is worth emitting even when the link was already correct or the caller
+	// asked for JSON; it goes to stderr and leaves the report intact.
+	warnHelperUnreachable(link)
 	if flagJSON {
 		return printJSON(report)
 	}
-	fmt.Printf("installed %s (%s)\n", link, method)
-	if method == "copy" && !flagQuiet {
-		fmt.Println("note: a copy does not follow `aqt update`; re-run `aqt git setup` after upgrading")
-	}
-	warnHelperUnreachable(link)
 	return nil
 }
 
-// defaultHelperDir is the directory holding the running binary, unless a package
-// manager owns it. Those record every file they install, so a sibling dropped into
-// their tree leaves them describing a directory they no longer match; their own
-// packaging is what should create the link.
-func defaultHelperDir(exe string, in update.Install) (string, error) {
-	switch in.Owner {
-	case update.OwnerStandalone, update.OwnerSource:
+// helperDir resolves where the link goes. A package manager records every file it
+// installs, so a sibling dropped into its tree leaves it describing a directory it
+// no longer matches; its own packaging is what should create the link. --dir is the
+// way out of that, but not a way back into the same directory.
+func helperDir(dir, exe string, in update.Install) (string, error) {
+	packageOwned := in.Owner != update.OwnerStandalone && in.Owner != update.OwnerSource
+	if dir == "" {
+		if packageOwned {
+			return "", packageOwnedDirErr(in, "pass --dir to create one in a directory you own")
+		}
 		return filepath.Dir(exe), nil
-	default:
-		return "", fmt.Errorf("%s owns %s and provides the %s link in its own package; pass --dir to create one in a directory you own", in.Owner, in.Dir, helperName)
 	}
+	if packageOwned && samePath(dir, in.Dir) {
+		return "", packageOwnedDirErr(in, "pass --dir a directory you own")
+	}
+	return dir, nil
+}
+
+func packageOwnedDirErr(in update.Install, hint string) error {
+	return fmt.Errorf("%s owns %s and provides the %s link in its own package; %s", in.Owner, in.Dir, helperName, hint)
 }
 
 // linkHelper points link at exe by the cheapest mechanism that works and reports
 // which one it used. Windows symlinks need Developer Mode or an elevated shell;
-// hard links need neither, as long as both paths sit on one volume. A copy always
-// works and is the only variant that can go stale, so it is the last resort.
+// hard links need neither, as long as both paths sit on one volume. Only a symlink
+// resolves by name, so it is the only variant `aqt update` carries along; a copy
+// always works but duplicates the binary, which is why it is the last resort.
 func linkHelper(exe, link string) (string, error) {
 	target := exe
 	if filepath.Dir(link) == filepath.Dir(exe) {
@@ -206,10 +230,11 @@ func copyExecutable(src, dst string) error {
 	return os.Rename(tmp.Name(), dst)
 }
 
-// sameExecutable reports whether both paths name one file, through a symlink, a
-// hard link, or being the same path. A copy is deliberately not the same file: it
-// can go stale, and every caller here wants to notice that.
-func sameExecutable(a, b string) bool {
+// samePath reports whether both paths name one file or directory, through a
+// symlink, a hard link, or being the same location spelled differently. A copy is
+// deliberately not the same file: it can go stale, and every caller here wants to
+// notice that.
+func samePath(a, b string) bool {
 	ai, err := os.Stat(a)
 	if err != nil {
 		return false
@@ -221,15 +246,23 @@ func sameExecutable(a, b string) bool {
 	return os.SameFile(ai, bi)
 }
 
-// helperLinkStale reports that a link exists beside the binary but no longer names
-// it. `aqt update` swaps the file the hard-link and copy fallbacks are bound to, so
-// they keep serving the old client until the link is made again.
-func helperLinkStale(dir, exe string) bool {
-	link := filepath.Join(dir, helperLinkName())
-	if _, err := os.Lstat(link); err != nil {
-		return false
+// staleHelperLink finds the helper Git would run and reports whether it still names
+// the installed client. Git resolves it through PATH, so that is what decides;
+// `aqt git setup --dir` can put the link anywhere, and only when PATH holds none
+// does the sibling of the client — where setup puts one by default — matter.
+//
+// `aqt update` replaces the client by renaming a staged file over it. A symlink
+// resolves by name and follows; a hard link or a copy stays bound to the file that
+// was renamed away and keeps serving the previous client.
+func staleHelperLink(in update.Install) (string, bool) {
+	link, err := exec.LookPath(helperName)
+	if err != nil {
+		link = filepath.Join(in.Dir, helperLinkName())
+		if _, err := os.Lstat(link); err != nil {
+			return "", false
+		}
 	}
-	return !sameExecutable(link, exe)
+	return link, !samePath(link, in.Path)
 }
 
 // warnHelperUnreachable covers the two ways a correct link still leaves Git
@@ -241,7 +274,7 @@ func warnHelperUnreachable(link string) {
 		fmt.Fprintf(os.Stderr, "warning: %s is not on PATH; add %s to it before cloning\n", helperName, filepath.Dir(link))
 		return
 	}
-	if !sameExecutable(found, link) {
+	if !samePath(found, link) {
 		fmt.Fprintf(os.Stderr, "warning: Git resolves %s to %s, which comes earlier on PATH\n", helperName, found)
 	}
 }

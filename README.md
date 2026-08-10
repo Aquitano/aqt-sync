@@ -160,8 +160,8 @@ branch/tag ref comparison:
 
 Copyright (C) 2026 Thomas Breindl.
 
-AGPL-3.0-or-later, across the whole repository: the `aqt` client, the
-`git-remote-aqt` helper, `aqt-server`, and the landing site. Full text in
+AGPL-3.0-or-later, across the whole repository: the `aqt` client, `aqt-server`,
+and the landing site. Full text in
 [LICENSE](LICENSE).
 
 Self-hosting a **modified** server entitles its users to your source.

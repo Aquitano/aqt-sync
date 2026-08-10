@@ -61,9 +61,8 @@ var (
 )
 
 func main() {
-	argv := multiCallArgs(os.Args)
 	root := rootCmd()
-	root.SetArgs(escapeLeadingDashIDs(root, argv[1:]))
+	root.SetArgs(rootArgs(root, os.Args))
 	cmd, err := root.ExecuteC()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", explainError(err))

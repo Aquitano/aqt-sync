@@ -32,8 +32,9 @@ because the package provides the link.
 On Windows the archive is a `.zip` carrying `aqt.exe`, and the link is
 `git-remote-aqt.exe`. A symlink there needs Developer Mode or an elevated shell, so
 setup falls back to a hard link (which needs neither, on one volume) and then to a
-copy. A copy is the only variant that does not follow `aqt update`; the update
-reports when the link needs remaking.
+copy. Only a symlink resolves by name and so follows `aqt update`; a hard link or a
+copy stays bound to the file the update replaced. The update reports a link that has
+gone stale, and re-running `aqt git setup` remakes it.
 
 From a source checkout, `make build` produces `bin/aqt`, the same link beside it, and
 `bin/aqt-server`:
@@ -44,8 +45,10 @@ export PATH="$PWD/bin:$PATH"
 ```
 
 Releases up to and including v0.6.0 shipped a standalone `git-remote-aqt` archive.
-That binary still works — it execs the `aqt` beside it — but it is deprecated and
-will stop being published; replace it by running `aqt git setup`.
+Later releases do not: there is nothing to download but `aqt`. A copy already on disk
+keeps working — it execs the `aqt` beside it, which still answers to the subcommand it
+targets — but replace it with `aqt git setup`, and drop the archive from any install
+script that fetches it.
 
 Create and attach a private remote from an existing repository:
 
