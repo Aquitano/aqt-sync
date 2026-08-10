@@ -357,7 +357,7 @@ export default function Home() {
               aqt-server is a static Go binary backed by SQLite and a ciphertext data directory. Put it behind Caddy, systemd, or Docker.
             </p>
             <p>
-              Accounts are managed from the data directory, not a privileged HTTP surface: inspect one, cap its storage, suspend it, or delete it and every ciphertext behind it.
+              Accounts are managed from the data directory, not a privileged HTTP surface: inspect one, cap its storage, suspend it, or erase it and sweep its ciphertext, with any file left behind named in the receipt.
             </p>
             <a className="text-link text-link-light" href="https://github.com/aquitano/aqt-sync/blob/main/docs/deploy.md">Read the deploy guide <span aria-hidden="true">&#8599;</span></a>
           </div>
