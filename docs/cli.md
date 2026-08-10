@@ -50,5 +50,6 @@ require a chunked folder; pack-and-seal folders can use the snapshot form.
 prints the Git URL (`aqt::<name>`); `--compact-at` sets the chain threshold. `ls`,
 `info`, `gc`, `restore`, and `create` support `--json`; `restore` and `rm` use the
 normal confirmation flow.
-Git itself invokes `git-remote-aqt`, which must be on `PATH` and uses the active aqt
-profile/session. See [`git-repositories.md`](git-repositories.md) for the workflow.
+Git itself invokes `git-remote-aqt`, which is a link to `aqt` created by `aqt git
+setup` (`--dir` places it elsewhere, `--json` reports what it did) and uses the active
+aqt profile/session. See [`git-repositories.md`](git-repositories.md) for the workflow.

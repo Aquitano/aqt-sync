@@ -1,5 +1,7 @@
-// Command git-remote-aqt is the executable Git discovers for aqt:: URLs. All
-// protocol and crypto logic stays in aqt itself so both binaries ship one behavior.
+// Command git-remote-aqt is the standalone executable Git used to discover for
+// aqt:: URLs. It is deprecated: aqt answers to this name itself, and `aqt git
+// setup` links it, so nothing has to be upgraded separately. This shim stays
+// published for a release or two so installs that already carry it keep working.
 package main
 
 import (

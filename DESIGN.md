@@ -429,6 +429,7 @@ files: **docs/updates.md**.
 ### 3.9 Encrypted Git remotes
 
 ```console
+aqt git setup [--dir D] [-y]             Install the git-remote-aqt link.
 aqt repo create <name> [--compact-at N]  Create a private encrypted Git remote.
 aqt repo ls                              List remotes and bundle-chain state.
 aqt repo info <name-or-id>               Show refs, HEAD, format and snapshots.
@@ -440,9 +441,14 @@ git clone aqt::<name-or-id> [dir]
 git remote add origin aqt::<name-or-id>
 ```
 
-`make build` installs `aqt`, `git-remote-aqt`, and `aqt-server` under `bin/`; Git
-discovers the helper by name on `PATH`. The URL deliberately carries no server or
-credential: the helper uses the active aqt profile and cached unlocked session, and
+Git discovers a remote helper by exec'ing `git-remote-<transport>`, so `aqt` is a
+multi-call binary: invoked under the name `git-remote-aqt` (matched exactly, plus
+`.exe`) it runs its own hidden `git-remote-helper` subcommand. `aqt git setup` creates
+that link beside the client — symlink, else hard link, else copy — and refuses a
+directory a package manager owns, since the package ships its own link. One binary
+means `aqt update` can never leave the helper a version behind. `make build` installs
+`aqt`, the link, and `aqt-server` under `bin/`. The URL deliberately carries no server
+or credential: the helper uses the active aqt profile and cached unlocked session, and
 never prompts when Git invokes it non-interactively. Fetch, push, force-push, tags,
 ref deletion, SHA-1/SHA-256 repositories, optimistic concurrency retries, manual
 compaction, and automatic compaction at the configured threshold are supported.
@@ -453,8 +459,8 @@ Shallow clone, sharing/grants, and the Git wire protocol are not.
 ## 3a. Project layout & status
 
 ```text
-cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, repo, watch/agent, tui, update  [implemented]
-cmd/git-remote-aqt/ Git remote-helper shim                                     [implemented]
+cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, repo, git setup, watch/agent, tui, update  [implemented]
+cmd/git-remote-aqt/ standalone remote-helper shim, superseded by the multi-call binary [deprecated]
 cmd/aqt-server/     server entrypoint                                          [implemented]
 cmd/updatectl/      release tooling: generate/sign/verify the update manifest   [implemented + tested]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]

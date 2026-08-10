@@ -25,8 +25,7 @@ func TestGitRemotePushAndClone(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
@@ -136,8 +135,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	var injected atomic.Bool
 	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && injected.CompareAndSwap(false, true) {
@@ -168,7 +166,10 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	}
 }
 
-func TestGitRemoteSHA256PushAndClone(t *testing.T) {
+// The standalone helper binary is deprecated but still published, and a machine
+// that has one keeps it until the next install. It execs the sibling aqt, so it
+// must keep working against a client that no longer ships it.
+func TestGitRemoteLegacyStandaloneHelper(t *testing.T) {
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -179,6 +180,41 @@ func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 	bin := t.TempDir()
 	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
 	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	newE2E(t)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	if err := runRepoCreate("legacy", 64); err != nil {
+		t.Fatalf("repo create: %v", err)
+	}
+	source := t.TempDir()
+	gitRun(t, source, "init", "-b", "main")
+	gitRun(t, source, "config", "user.email", "e2e@example.com")
+	gitRun(t, source, "config", "user.name", "AQT E2E")
+	writeTree(t, source, "README.md", "legacy helper\n")
+	gitRun(t, source, "add", "README.md")
+	gitRun(t, source, "commit", "-m", "initial")
+	gitRun(t, source, "remote", "add", "origin", "aqt::legacy")
+	gitRun(t, source, "push", "-u", "origin", "main")
+
+	cloneParent := t.TempDir()
+	gitRun(t, cloneParent, "clone", "aqt::legacy", "clone")
+	clone := filepath.Join(cloneParent, "clone")
+	if got, want := gitOutput(t, clone, "rev-parse", "refs/heads/main"), gitOutput(t, source, "rev-parse", "refs/heads/main"); got != want {
+		t.Fatalf("cloned main = %s, want %s", got, want)
+	}
+	gitRun(t, clone, "fsck", "--full")
+}
+
+func TestGitRemoteSHA256PushAndClone(t *testing.T) {
+	if testing.Short() {
+		t.Skip("builds helper binaries and runs Git end to end")
+	}
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git is not installed")
+	}
+	configureGitTestEnv(t)
+	bin := t.TempDir()
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("sha256", 64); err != nil {
@@ -215,8 +251,7 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	var armed, injected atomic.Bool
 	var resourcePuts atomic.Int32
 	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
@@ -329,8 +364,7 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("restore", 2); err != nil {
@@ -395,8 +429,7 @@ func TestGitRemoteConcurrentPushRace(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("race", 64); err != nil {
@@ -479,8 +512,7 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	harness := newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	if err := runRepoCreate("crash", 64); err != nil {
@@ -563,6 +595,20 @@ func configureGitTestEnv(t *testing.T) {
 	t.Setenv("GIT_CONFIG_VALUE_2", "false")
 }
 
+// installGitRemoteHelper wires Git up the way an install does: one aqt binary and
+// the git-remote-aqt link `aqt git setup` creates beside it.
+func installGitRemoteHelper(t *testing.T, bin string) {
+	t.Helper()
+	exe := filepath.Join(bin, "aqt")
+	buildTestBinary(t, exe, ".")
+	if runtime.GOOS == "windows" {
+		exe += ".exe"
+	}
+	if _, err := linkHelper(exe, filepath.Join(bin, helperLinkName())); err != nil {
+		t.Fatalf("link %s: %v", helperName, err)
+	}
+}
+
 func buildTestBinary(t *testing.T, output, pkg string) {
 	t.Helper()
 	// Git discovers the helper by PATH lookup, which on Windows only considers
@@ -616,8 +662,7 @@ func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
 	}
 	configureGitTestEnv(t)
 	bin := t.TempDir()
-	buildTestBinary(t, filepath.Join(bin, "aqt"), ".")
-	buildTestBinary(t, filepath.Join(bin, "git-remote-aqt"), "../git-remote-aqt")
+	installGitRemoteHelper(t, bin)
 	newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 

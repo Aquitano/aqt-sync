@@ -2,7 +2,7 @@
 #
 # restore-drill.sh — prove a full backup -> restore cycle end to end.
 #
-# It builds aqt + git-remote-aqt + aqt-server, runs a real server, pushes a realistic tree
+# It builds aqt + aqt-server, runs a real server, pushes a realistic tree
 # (nested dirs, a binary, an executable, a Unicode name, a tracked .git), takes a
 # cold backup of the server data dir, stands a fresh server up from that backup,
 # recovers the account on a clean client config from just the email + passphrase,
@@ -37,11 +37,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-log "building aqt, git-remote-aqt, and aqt-server"
+log "building aqt and aqt-server"
 mkdir -p "$WORK/bin"
 ( cd "$REPO" && go build -o "$WORK/bin/aqt" ./cmd/aqt )
-( cd "$REPO" && go build -o "$WORK/bin/git-remote-aqt" ./cmd/git-remote-aqt )
 ( cd "$REPO" && go build -o "$WORK/bin/aqt-server" ./cmd/aqt-server )
+# Git resolves aqt:: through this link into the same binary; see cmd/aqt/githelper.go.
+ln -sf aqt "$WORK/bin/git-remote-aqt"
 AQT="$WORK/bin/aqt"
 SERVER="$WORK/bin/aqt-server"
 export PATH="$WORK/bin:$PATH"

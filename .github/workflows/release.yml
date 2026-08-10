@@ -97,9 +97,9 @@ jobs:
             done
             echo "::endgroup::"
             # One archive per binary so client, Git helper, and server can be grabbed
-            # separately. The helper gets its own archive rather than riding inside the
-            # client's: the updater refuses a release archive holding any entry other
-            # than the `aqt` executable itself.
+            # separately. The helper archive is deprecated: `aqt` now answers to the
+            # helper's name itself and `aqt git setup` links it, so this ships only for
+            # installs that still carry the standalone binary.
             for cmd in aqt git-remote-aqt aqt-server; do
               base="${cmd}_${VERSION}_${GOOS}_${GOARCH}"
               if [ "$GOOS" = windows ]; then

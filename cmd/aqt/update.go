@@ -149,6 +149,9 @@ func runUpdate(opts updateOptions) error {
 	if applied.RollbackPath != "" && !flagQuiet {
 		fmt.Println("the previous binary is still open by this process; the next update removes it")
 	}
+	if helperLinkStale(in.Dir, in.Path) && !flagQuiet {
+		fmt.Printf("run `aqt git setup` to point %s at the new binary\n", helperLinkName())
+	}
 	return nil
 }
 
