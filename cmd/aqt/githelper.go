@@ -175,7 +175,7 @@ func helperDir(dir, exe string, in update.Install) (string, error) {
 		return filepath.Dir(exe), nil
 	}
 	if packageOwned && samePath(dir, in.Dir) {
-		return "", packageOwnedDirErr(in, "pass --dir a directory you own")
+		return "", packageOwnedDirErr(in, "name a directory you own instead")
 	}
 	return dir, nil
 }
