@@ -1,0 +1,45 @@
+name: linux
+
+on:
+  push:
+    branches: [main]
+  pull_request: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: race test + restore drill
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Build
+        run: go build ./cmd/...
+      # -race roughly triples the suite, so go test's 10m per-package default is
+      # a tighter fit here than it looks. The windows job hit exactly that wall.
+      - name: Test
+        run: go test -race -timeout 20m ./...
+      # The only end-to-end proof that a backup is actually restorable. It broke
+      # unnoticed once already because nothing ran it.
+      - name: Restore drill
+        run: ./scripts/restore-drill.sh
