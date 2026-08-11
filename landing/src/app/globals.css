@@ -628,6 +628,7 @@ button:focus-visible {
 .feature-git,
 .feature-tui {
   --texture: color-mix(in srgb, var(--paper) 9%, transparent);
+
   color: var(--paper);
 }
 
@@ -652,6 +653,7 @@ button:focus-visible {
 
 .feature-dag {
   --texture: rgb(29 28 25 / 15%);
+
   grid-column: span 5;
   background-color: var(--paper-deep);
 }
