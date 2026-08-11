@@ -292,7 +292,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
-	root.AddCommand(signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
+	root.AddCommand(signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), accountCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
 	root.AddCommand(initCmd(), statusCmd(), diffCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
@@ -344,12 +344,16 @@ func confirmDestructive(prompt string, assumeYes bool) error {
 	return nil
 }
 
+// errNotConfirmable means a destructive command needed a confirmation that the
+// run could never answer (no terminal, no -y/--yes).
+var errNotConfirmable = errors.New("confirmation required: pass -y/--yes to proceed non-interactively")
+
 // requireConfirmable fails fast when a later destructive confirmation could never
 // be answered, so commands that resolve refs before prompting abort before doing
 // any auth or network work.
 func requireConfirmable(assumeYes bool) error {
 	if !assumeYes && !interactiveStdin() {
-		return errors.New("confirmation required: pass -y/--yes to proceed non-interactively")
+		return errNotConfirmable
 	}
 	return nil
 }

@@ -249,6 +249,16 @@ func (c *Client) Usage() (api.UsageResponse, error) {
 	return r, err
 }
 
+// DeleteAccount erases the account and everything stored under it, returning the
+// server's receipt. The request carries the passphrase-derived auth verifier: this
+// client's token alone does not authorize it. Every token on the account, including
+// this one, stops working on success.
+func (c *Client) DeleteAccount(req api.DeleteAccountRequest) (api.DeleteAccountResponse, error) {
+	var r api.DeleteAccountResponse
+	err := c.do(http.MethodDelete, "/v1/account", req, &r)
+	return r, err
+}
+
 // Bootstrap fetches the new-device bootstrap for an email: the KDF params and the
 // wrapped root key. The server returns an indistinguishable decoy for an unknown
 // email (not a 404), so the caller cannot read account existence off the response;

@@ -329,6 +329,15 @@ be reconstructed. Run `--dry-run` first to see the scope, and take a data-dir ba
 if the deletion might need undoing. `--yes` skips the prompt; without a terminal the
 command refuses rather than let a prompt read EOF and be taken as consent.
 
+Account holders can erase their own accounts with `aqt account delete`, which runs
+the same erasure over `DELETE /v1/account`. That route requires the caller's
+passphrase-derived verifier on top of a valid device token, so a leaked token is not
+enough to destroy an account. Operators do not need this route and cannot use it:
+the admin path is authorized by filesystem access instead, which is why it needs no
+passphrase. Nothing here gates self-service deletion — an operator who needs to hold
+an account (a legal hold, a billing dispute) suspends it with `disable`, which makes
+every authenticated route including the deletion answer `403`.
+
 ## Privacy boundary
 
 Resource content, filenames, directory structure, and snapshot labels are encrypted by clients before upload. The server does not receive their plaintext or live content keys. This is a content-confidentiality boundary, not a metadata-anonymity claim: account emails, opaque owner handles, device labels, request timing and peer addresses, public/private visibility, expiry/read-limit policy and counters, resource/snapshot/device/object counts, storage usage, grant relationships, and other lifecycle or relationship metadata can remain observable in live server state, logs, metrics, and backups. Protect the data directory, backups, metrics listener, and operator access accordingly.

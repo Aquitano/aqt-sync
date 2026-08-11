@@ -326,11 +326,27 @@ aqt passphrase change       Re-wrap master key under a new passphrase (no re-enc
 aqt passphrase calibrate    Re-tune Argon2id cost, same passphrase (other devices re-login).
 aqt passphrase rotate-root  Compromise recovery: mint a fresh root key, re-wrap every
                             resource/snapshot/grant, revoke every other device (-y skips).
+aqt account delete          Erase the account and everything stored under it. Needs the
+      (alias: unregister)   passphrase, not just this device's token (-y skips the
+                            confirmation, never the passphrase).
 ```
 
 Because a typo'd first passphrase is **unrecoverable** (zero-knowledge), `signup` on a
 terminal confirms it and warns explicitly that it cannot be reset. Without a terminal
 (a scripted signup) the passphrase is read once and the confirmation is skipped.
+
+**Account deletion.** `aqt account delete` erases the account, its devices,
+resources, snapshots, grants, objects, packs, and every ciphertext file behind them —
+the same erasure an operator can run from `aqt-server admin`, reached over
+`DELETE /v1/account`. Grants *to* the account go too: its published key is gone, so
+those wraps could never be opened again. The request carries the passphrase-derived
+verifier, checked inside the deleting transaction, so a device token on its own is
+not authority to destroy an account and a passphrase change cannot land between the
+proof and the erasure it authorizes. The client verifies the passphrase locally
+against the cached `wrappedRoot` first, so a typo fails without a round trip. On
+success the local profile, cached session, and keychain entries go with it; tracked
+folders keep their plaintext files but their `.aqt/state.json` now names an account
+that no longer exists.
 
 A tracked folder records the account that created it (`.aqt/state.json`), and every
 command that touches its remote resource refuses to run under a different account.
@@ -873,6 +889,11 @@ POST   /v1/devices                   Attach device. Body: { email, challengeId, 
                                      authVerifier, deviceName }.
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
 DELETE /v1/devices/:id               Revoke a device.
+DELETE /v1/account                   Erase the account and everything under it. Body: { authVerifier }
+                                     — the passphrase proof, so a device token alone cannot destroy an
+                                     account; 403 if it does not match.
+                                     → { ownerHandle, resources, snapshots, devices, packs, objects,
+                                         grants, bytes }  (a receipt; every token on the account dies)
 
 POST   /v1/resources                 Create (server-assigned id). Same body/echo as PUT below.
 PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). Also still

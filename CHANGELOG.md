@@ -6,6 +6,24 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- `aqt account delete` (alias `aqt account unregister`) erases your own account and
+  everything stored under it: devices, resources, snapshots, grants, objects, packs,
+  and every ciphertext file behind them. Grants *to* the account go too — its
+  published key is gone, so those wraps could never be opened again. Until now the
+  only way out was to ask the server's operator, which is a poor answer for a
+  product whose whole claim is that the operator cannot read your data.
+
+  The request carries the passphrase-derived verifier, not just a device token: a
+  token can leak from a stolen laptop, a backup, or a CI secret, and this is the one
+  operation no restore undoes. The proof is checked inside the same transaction that
+  does the deleting, so a passphrase change cannot land between the proof and the
+  erasure it authorizes. The client checks the passphrase locally against the cached
+  wrapped root first, so a typo fails without a round trip, and the confirmation
+  wants the account email typed back rather than a `y`. `-y/--yes` skips that
+  confirmation but never the passphrase. A suspended account cannot delete itself,
+  so an operator hold still holds. On success the local profile, cached session, and
+  keychain entries are removed; tracked folders keep their local files.
+
 - Install scripts for macOS, Linux, and Windows, served from the landing site:
   `curl -fsSL https://aqt-sync.vercel.app/install.sh | sh` and
   `iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex`. Each reads the release's

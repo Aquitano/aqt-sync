@@ -234,15 +234,37 @@ type DeletedAccount struct {
 	FileErrors []string
 }
 
-// DeleteAccount erases an account and everything attributable to it. The row
+// DeleteAccount erases an account and everything attributable to it, on an
+// operator's authority. The account holder's own erasure goes through
+// DeleteAccountWithProof instead.
+func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
+	return s.deleteAccount(owner, nil)
+}
+
+// DeleteAccountWithProof is the self-service erasure: same effect as DeleteAccount,
+// but the caller must present the passphrase-derived auth verifier. A device token
+// is not enough on its own, so a stolen or leaked token cannot destroy an account.
+// A wrong verifier returns ErrNotFound, matching ChangePassphrase.
+func (s *Store) DeleteAccountWithProof(owner string, authVerifier []byte) (DeletedAccount, error) {
+	if len(authVerifier) == 0 {
+		return DeletedAccount{}, ErrNotFound
+	}
+	return s.deleteAccount(owner, authVerifier)
+}
+
+// deleteAccount erases an account and everything attributable to it. The row
 // deletions commit as one transaction, so the account never half-exists; the files
 // are removed afterwards, because a rollback cannot restore an unlinked file and
 // an orphaned file is the recoverable direction of that trade.
 //
+// A non-nil authVerifier is checked against the stored hash inside the same
+// transaction that does the deleting, so a passphrase change cannot land between
+// the proof and the erasure it authorizes.
+//
 // Grants *to* this account from other owners are removed too: the grantee's
 // published key is going away, so the wrap becomes unopenable and keeping it would
 // leave the granter listing a share nobody can read.
-func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
+func (s *Store) deleteAccount(owner string, authVerifier []byte) (DeletedAccount, error) {
 	defer s.gcLocks.lock(owner)()
 	var acct DeletedAccount
 
@@ -252,12 +274,16 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 	}
 	defer tx.Rollback()
 
-	if err := tx.QueryRow(`SELECT owner_handle, email FROM accounts WHERE owner_handle = ?`, owner).
-		Scan(&acct.OwnerHandle, &acct.Email); err != nil {
+	var verifierHash []byte
+	if err := tx.QueryRow(`SELECT owner_handle, email, auth_verifier FROM accounts WHERE owner_handle = ?`, owner).
+		Scan(&acct.OwnerHandle, &acct.Email, &verifierHash); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return acct, ErrNotFound
 		}
 		return acct, err
+	}
+	if authVerifier != nil && !verifierMatches(authVerifier, verifierHash) {
+		return DeletedAccount{}, ErrNotFound
 	}
 
 	// Capture ids inside the delete transaction, not before it. File-backed writes

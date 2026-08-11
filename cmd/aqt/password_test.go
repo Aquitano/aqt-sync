@@ -18,7 +18,10 @@ func withStdin(t *testing.T, s string) {
 	}
 	orig := os.Stdin
 	os.Stdin = r
-	t.Cleanup(func() { os.Stdin = orig; r.Close() })
+	// The prompt helpers share one buffered reader across a process; without this
+	// a second test would read the first test's leftovers instead of the new pipe.
+	sharedStdin = nil
+	t.Cleanup(func() { os.Stdin = orig; sharedStdin = nil; r.Close() })
 	go func() {
 		defer w.Close()
 		_, _ = w.WriteString(s)
