@@ -121,7 +121,7 @@ func TestAccountDeleteYesStillRequiresThePassphrase(t *testing.T) {
 func TestAccountDeleteReceiptOmitsAnUnknownTotal(t *testing.T) {
 	var out, errOut bytes.Buffer
 	r := api.DeleteAccountResponse{Resources: 2, Devices: 1}
-	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", true, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(out.String(), "storage") {
@@ -131,7 +131,7 @@ func TestAccountDeleteReceiptOmitsAnUnknownTotal(t *testing.T) {
 	total := int64(4096)
 	out.Reset()
 	r.Bytes = &total
-	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", true, false); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "4.0 KB") {
@@ -144,7 +144,7 @@ func TestAccountDeleteReceiptOmitsAnUnknownTotal(t *testing.T) {
 func TestAccountDeleteReceiptWarnsAboutFilesLeftBehind(t *testing.T) {
 	var out, errOut bytes.Buffer
 	r := api.DeleteAccountResponse{Resources: 1, FileErrors: 3}
-	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", true, false); err != nil {
 		t.Fatal(err)
 	}
 	warning := errOut.String()
@@ -157,11 +157,29 @@ func TestAccountDeleteReceiptWarnsAboutFilesLeftBehind(t *testing.T) {
 
 	errOut.Reset()
 	r.FileErrors = 0
-	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", true, false); err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(errOut.String(), "warning") {
 		t.Fatalf("clean erasure warned anyway:\n%s", errOut.String())
+	}
+}
+
+// A failed local cleanup must not swallow the receipt: the erasure already happened
+// and cannot be repeated, so its file warning has nowhere else to be reported. The
+// line claiming the local profile went too has to drop instead, since that is the
+// one part of the receipt this client is the authority on.
+func TestAccountDeleteReceiptSurvivesAFailedLocalCleanup(t *testing.T) {
+	var out, errOut bytes.Buffer
+	r := api.DeleteAccountResponse{Resources: 1, FileErrors: 2}
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false, false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(errOut.String(), "2 stored files could not be removed") {
+		t.Fatalf("file warning lost when the local profile stayed:\n%s", errOut.String())
+	}
+	if strings.Contains(errOut.String(), "local profile") {
+		t.Fatalf("receipt claimed a local removal that failed:\n%s", errOut.String())
 	}
 }
 

@@ -69,10 +69,17 @@ func runAccountDelete(assumeYes, asJSON bool) error {
 	}
 	// The account is gone server-side; the local profile now names nothing. Remove it
 	// even though the caller may be scripting, since leaving it strands a dead token.
-	if err := identity.Delete(prof.Name); err != nil {
-		return fmt.Errorf("account deleted, but removing the local profile failed: %w", err)
+	// The erasure cannot be repeated, so the receipt is printed whatever happens here:
+	// its file warning is the caller's only notice that ciphertext of theirs may still
+	// be on the operator's disk, and a local cleanup failure must not swallow it.
+	cleanupErr := identity.Delete(prof.Name)
+	if err := printAccountDeleteReceipt(os.Stdout, os.Stderr, receipt, prof.Email, cleanupErr == nil, asJSON); err != nil {
+		return err
 	}
-	return printAccountDeleteReceipt(os.Stdout, os.Stderr, receipt, prof.Email, asJSON)
+	if cleanupErr != nil {
+		return fmt.Errorf("account deleted, but removing the local profile failed: %w", cleanupErr)
+	}
+	return nil
 }
 
 // accountDeleteProof runs the confirmation and returns the auth verifier that
@@ -124,11 +131,18 @@ func confirmAccountDelete(email string, cl accountDeleteClient) error {
 	return nil
 }
 
-func printAccountDeleteReceipt(out, errOut io.Writer, r api.DeleteAccountResponse, email string, asJSON bool) error {
+// printAccountDeleteReceipt reports what the server erased. localRemoved says
+// whether the local profile went with it, since the line claiming so is the one part
+// of the receipt this client is the authority on.
+func printAccountDeleteReceipt(out, errOut io.Writer, r api.DeleteAccountResponse, email string, localRemoved, asJSON bool) error {
 	if asJSON {
 		return printJSONTo(out, r)
 	}
-	fmt.Fprintf(errOut, "%s deleted; local profile and cached key removed\n", email)
+	if localRemoved {
+		fmt.Fprintf(errOut, "%s deleted; local profile and cached key removed\n", email)
+	} else {
+		fmt.Fprintf(errOut, "%s deleted on the server\n", email)
+	}
 	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
 	// An absent total means the server could not read one, not that nothing was
 	// stored; printing 0 would be a claim it did not make.

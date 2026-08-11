@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -121,6 +122,9 @@ func TestAccountDeleteRejectsAnotherAccountsProof(t *testing.T) {
 // but the person who asked to be erased is the one who needs to know, and the count
 // is the part of it that is theirs (the paths are the operator's).
 func TestAccountDeleteReportsUnremovableFiles(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Chmod carries only the write bit, so a directory that denies unlink is not representable")
+	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; permission bits do not apply")
 	}
@@ -177,6 +181,40 @@ func TestSuspendedAccountCannotSelfDelete(t *testing.T) {
 	}
 	if _, err := h.store.AccountByEmail(email); err != nil {
 		t.Fatalf("suspended account after the refused delete: %v", err)
+	}
+}
+
+// The middleware's suspension check answers from a cache an operator suspending in
+// another process cannot invalidate, so for up to suspensionTTL a held account still
+// reaches the handler. Every other route survives that window; an erasure would not,
+// so the store re-reads the flag in the deleting transaction. Calling the store
+// directly is the window: it is what a request that passed a stale cache reaches.
+func TestSuspendedSelfDeleteIsRefusedBelowTheAuthCache(t *testing.T) {
+	const email, pass = "stale-cache@example.com", "correct horse battery staple"
+	h := newHarness(t)
+	token, _ := h.signup(email, pass)
+	verifier := h.authVerifier(email, pass)
+
+	owner, err := h.store.OwnerByToken(token)
+	if err != nil {
+		t.Fatalf("resolve owner: %v", err)
+	}
+	if err := h.store.SetAccountDisabled(owner, true); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := h.store.DeleteAccountWithProof(owner, verifier); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("suspended self-delete = %v, want ErrAccountDisabled", err)
+	}
+	if _, err := h.store.AccountByEmail(email); err != nil {
+		t.Fatalf("suspended account after the refused delete: %v", err)
+	}
+	// The operator path carries no proof and must still erase a suspended account:
+	// suspending before deleting is the usual order of those two commands.
+	if _, err := h.store.DeleteAccount(owner); err != nil {
+		t.Fatalf("operator delete of a suspended account: %v", err)
+	}
+	if _, err := h.store.AccountByEmail(email); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("account survived the operator deletion: %v", err)
 	}
 }
 

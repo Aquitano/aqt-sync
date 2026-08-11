@@ -735,6 +735,13 @@ func (s *Server) deleteAccount(c *gin.Context) {
 		abort(c, http.StatusForbidden, "passphrase proof did not match")
 		return
 	}
+	// The middleware answered this from a cache an operator suspending in another
+	// process cannot invalidate; the store re-read the row, so a hold that landed
+	// inside that window still holds.
+	if errors.Is(err, ErrAccountDisabled) {
+		abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "account deletion failed")
 		return

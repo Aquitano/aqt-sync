@@ -336,17 +336,25 @@ terminal confirms it and warns explicitly that it cannot be reset. Without a ter
 (a scripted signup) the passphrase is read once and the confirmation is skipped.
 
 **Account deletion.** `aqt account delete` erases the account, its devices,
-resources, snapshots, grants, objects, packs, and every ciphertext file behind them —
-the same erasure an operator can run from `aqt-server admin`, reached over
-`DELETE /v1/account`. Grants *to* the account go too: its published key is gone, so
-those wraps could never be opened again. The request carries the passphrase-derived
-verifier, checked inside the deleting transaction, so a device token on its own is
-not authority to destroy an account and a passphrase change cannot land between the
-proof and the erasure it authorizes. The client verifies the passphrase locally
-against the cached `wrappedRoot` first, so a typo fails without a round trip. On
-success the local profile, cached session, and keychain entries go with it; tracked
-folders keep their plaintext files but their `.aqt/state.json` now names an account
-that no longer exists.
+resources, snapshots, grants, objects, packs, and the ciphertext files behind them,
+over `DELETE /v1/account`. Grants *to* the account go too: its published key is gone,
+so those wraps could never be opened again. The row deletions are one transaction and
+are authoritative; the files are unlinked after it commits, so any the server could
+not remove are counted back in `fileErrors` — the account is gone either way, but
+that ciphertext is still on the operator's disk. The request carries the
+passphrase-derived verifier, checked inside the deleting transaction, so a device
+token on its own is not authority to destroy an account and a passphrase change
+cannot land between the proof and the erasure it authorizes. That same read re-checks
+suspension, which the middleware answers from a cache an operator in another process
+cannot invalidate; every other route tolerates that window, and this one cannot. The
+client verifies the passphrase locally against the cached `wrappedRoot` first, so a
+typo fails without a round trip. On success the local profile, cached session, and
+keychain entries go with it; tracked folders keep their plaintext files but their
+`.aqt/state.json` now names an account that no longer exists.
+
+An operator reaches the same store-level erasure through `aqt-server admin accounts
+delete`, authorized by filesystem access to the data directory rather than by a
+passphrase, and not through this route.
 
 A tracked folder records the account that created it (`.aqt/state.json`), and every
 command that touches its remote resource refuses to run under a different account.
@@ -891,7 +899,8 @@ POST   /v1/devices                   Attach device. Body: { email, challengeId, 
 DELETE /v1/devices/:id               Revoke a device.
 DELETE /v1/account                   Erase the account and everything under it. Body: { authVerifier }
                                      — the passphrase proof, so a device token alone cannot destroy an
-                                     account; 403 if it does not match.
+                                     account. 400 if it is absent, 403 if it does not match or the
+                                     account is suspended.
                                      → { ownerHandle, resources, snapshots, devices, packs, objects,
                                          grants, bytes?, fileErrors? }  (a receipt; every token dies)
                                      bytes is the total `usage` reports, so it matches what the caller

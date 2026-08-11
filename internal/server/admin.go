@@ -244,7 +244,8 @@ func (s *Store) DeleteAccount(owner string) (DeletedAccount, error) {
 // DeleteAccountWithProof is the self-service erasure: same effect as DeleteAccount,
 // but the caller must present the passphrase-derived auth verifier. A device token
 // is not enough on its own, so a stolen or leaked token cannot destroy an account.
-// A wrong verifier returns ErrNotFound, matching ChangePassphrase.
+// A wrong verifier returns ErrNotFound, matching ChangePassphrase; a suspended
+// account returns ErrAccountDisabled.
 func (s *Store) DeleteAccountWithProof(owner string, authVerifier []byte) (DeletedAccount, error) {
 	if len(authVerifier) == 0 {
 		return DeletedAccount{}, ErrNotFound
@@ -257,9 +258,14 @@ func (s *Store) DeleteAccountWithProof(owner string, authVerifier []byte) (Delet
 // are removed afterwards, because a rollback cannot restore an unlinked file and
 // an orphaned file is the recoverable direction of that trade.
 //
-// A non-nil authVerifier is checked against the stored hash inside the same
-// transaction that does the deleting, so a passphrase change cannot land between
-// the proof and the erasure it authorizes.
+// A non-nil authVerifier marks the self-service path. It is checked against the
+// stored hash inside the same transaction that does the deleting, so a passphrase
+// change cannot land between the proof and the erasure it authorizes, and the same
+// read re-checks the suspension the request already passed at the middleware: that
+// check answers from a cache an operator in another process cannot invalidate, and
+// this is the one operation for which a suspensionTTL-wide window is unrecoverable.
+// The operator path passes no verifier and deletes a suspended account, which is the
+// usual order of those two commands.
 //
 // Grants *to* this account from other owners are removed too: the grantee's
 // published key is going away, so the wrap becomes unopenable and keeping it would
@@ -275,15 +281,21 @@ func (s *Store) deleteAccount(owner string, authVerifier []byte) (DeletedAccount
 	defer tx.Rollback()
 
 	var verifierHash []byte
-	if err := tx.QueryRow(`SELECT owner_handle, email, auth_verifier FROM accounts WHERE owner_handle = ?`, owner).
-		Scan(&acct.OwnerHandle, &acct.Email, &verifierHash); err != nil {
+	var disabledAt int64
+	if err := tx.QueryRow(`SELECT owner_handle, email, auth_verifier, disabled_at FROM accounts WHERE owner_handle = ?`, owner).
+		Scan(&acct.OwnerHandle, &acct.Email, &verifierHash, &disabledAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return acct, ErrNotFound
 		}
 		return acct, err
 	}
-	if authVerifier != nil && !verifierMatches(authVerifier, verifierHash) {
-		return DeletedAccount{}, ErrNotFound
+	if authVerifier != nil {
+		if disabledAt > 0 {
+			return DeletedAccount{}, ErrAccountDisabled
+		}
+		if !verifierMatches(authVerifier, verifierHash) {
+			return DeletedAccount{}, ErrNotFound
+		}
 	}
 
 	// Capture ids inside the delete transaction, not before it. File-backed writes
