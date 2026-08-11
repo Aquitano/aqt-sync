@@ -23,10 +23,13 @@ curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --server
 AQT_DATA_DIR=./aqt-data ~/.local/bin/aqt-server     # plain HTTP on :8080
 ```
 
-`aqt` is verified against the release's signed update manifest; `aqt-server`, which
-that manifest does not cover, is verified against the release's `checksums.txt` and
-the install fails rather than proceeding unverified. `AQT_INSTALL_DIR` picks another
-directory and `--version=vX.Y.Z` pins a release.
+`aqt` is checked against the size and SHA-256 the release's `aqt-update.json`
+declares; `aqt-server`, which that manifest does not cover, is checked against the
+release's `checksums.txt`, and the install fails rather than proceeding unverified.
+Neither check is a signature check — verifying Ed25519 in shell is not practical, so
+the script trusts the origin it downloads from, and every later `aqt update` verifies
+the manifest signature against keys compiled into the binary. `AQT_INSTALL_DIR` picks
+another directory and `--version=vX.Y.Z` pins a release.
 
 Building from a checkout works too — pure Go, no CGO:
 

@@ -39,9 +39,11 @@ only when it is itself a tracked root.
   appear.
 - `--against <snapshot-id>`: snapshot versus the working tree. The snapshot must
   belong to that tracked resource.
-- `--against remote`: the folder's current remote state versus the working tree,
-  with no base involved — so two sides that converged on the same content report no
-  differences even while `status` still shows work pending on each. It needs the
+- `--against remote`: the folder's current remote state versus the working tree.
+  Neither side is the last-synced base — it is read only to reuse node ciphertexts
+  and skip re-hashing unchanged files, and a folder without one still compares — so
+  two sides that converged on the same content report no differences even while
+  `status` still shows work pending on each. It needs the
   folder key: on a terminal it prompts, and under `--json` or a non-terminal stdin a
   locked session reports `"complete": false` with `"reason": "session-locked"`
   instead of blocking on a prompt nobody would answer.

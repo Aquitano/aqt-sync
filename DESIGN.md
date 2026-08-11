@@ -1093,9 +1093,9 @@ function currentSession(): Session | null;                                 // fo
 
 ---
 
-## 5. Implementation questions
+## 5. Resolved behavior and open limitations
 
-The questions the interface deliberately left open. Every one carries its status:
+The questions the interface deliberately left open, and what became of each.
 *resolved* means it ships and the behavior described is exercised by `go test ./...`,
 with the remaining caveats stated inline. What is still genuinely open is collected
 under [Still open](#still-open) at the end, rather than buried inside a resolution.

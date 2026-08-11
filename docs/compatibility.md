@@ -19,10 +19,11 @@ API layer, *before* any payload is served.
 | `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
 
-The release column names the first version a user could install. Root-key rotation is
-described under `v0.3.0` in the changelog and was tagged `v0.4.0`, but neither
-published artifacts (see those entries), so v0.4.1 is where capability 3 actually
-reached clients.
+The release column names the first version a user could install. Root-key rotation
+appears under `v0.3.0` in the changelog, which was never tagged, and shipped in the
+`v0.4.0` tag, which published no artifacts because its signing key was lost. Both are
+recorded as such in the changelog. Capability 3 therefore first reached clients in
+v0.4.1.
 
 `api.ClientCapability` is `4` today. Capability 3 is required for root-key recovery;
 capability 4 is required for encrypted Git remote resources. `aqt repo create` declares
