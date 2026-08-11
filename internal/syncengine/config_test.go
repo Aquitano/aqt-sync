@@ -218,28 +218,29 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
-// The .aqtconfig example documented in DESIGN.md must be accepted by the real
+// The .aqtconfig example in the folder-sync spec must be accepted by the real
 // parser, so the docs cannot drift into showing a config the CLI rejects.
 func TestDesignConfigExampleParses(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("..", "..", "DESIGN.md"))
+	doc := filepath.Join("..", "..", "docs", "protocol", "folder-sync.md")
+	b, err := os.ReadFile(doc)
 	if err != nil {
 		t.Fatal(err)
 	}
 	design := strings.ReplaceAll(string(b), "\r\n", "\n")
-	marker := "**`.aqtconfig`** (JSON)"
+	marker := "## `.aqtconfig`"
 	i := strings.Index(design, marker)
 	if i < 0 {
-		t.Fatalf("DESIGN.md no longer contains the marker %q", marker)
+		t.Fatalf("%s no longer contains the marker %q", doc, marker)
 	}
 	rest := design[i:]
 	start := strings.Index(rest, "```json\n")
 	if start < 0 {
-		t.Fatal("no ```json fence after the .aqtconfig marker in DESIGN.md")
+		t.Fatalf("no ```json fence after the .aqtconfig marker in %s", doc)
 	}
 	rest = rest[start+len("```json\n"):]
 	end := strings.Index(rest, "```")
 	if end < 0 {
-		t.Fatal("unterminated .aqtconfig example fence in DESIGN.md")
+		t.Fatalf("unterminated .aqtconfig example fence in %s", doc)
 	}
 	if _, err := ParseConfig([]byte(rest[:end])); err != nil {
 		t.Fatalf("the documented .aqtconfig example is rejected by the parser: %v", err)

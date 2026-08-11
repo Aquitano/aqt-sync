@@ -71,7 +71,7 @@ func TestPushDirectoryPointsAtInitSync(t *testing.T) {
 }
 
 // Bare -P/--password prompts on a terminal; without one it must error rather than
-// hang or silently take an empty password. DESIGN.md promises the prompt.
+// hang or silently take an empty password. docs/cli.md promises the prompt.
 func TestPasswordFlagPromptsWithoutValue(t *testing.T) {
 	cmd := pushCmd()
 	f := cmd.Flags().Lookup("password")

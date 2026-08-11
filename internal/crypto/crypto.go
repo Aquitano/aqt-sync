@@ -93,7 +93,7 @@ type KdfParams struct {
 }
 
 // Argon2id defaults. Tuned for an interactive unlock on a developer laptop; see
-// DESIGN.md section 5 for the open question of per-machine tuning.
+// docs/threat-model.md ("KDF calibration") for per-machine tuning.
 const (
 	defaultTime    = 3
 	defaultMemory  = 64 * 1024 // 64 MiB

@@ -212,7 +212,7 @@ func upgradeGuidance(e *client.UpgradeRequiredError, install update.Install) str
 	return msg
 }
 
-// exitCode maps an error to the documented CLI contract (DESIGN.md §3):
+// exitCode maps an error to the documented CLI contract (docs/cli.md):
 // 0 ok · 1 generic · 3 auth/locked · 4 sync conflict · 5 network · 6 upgrade
 // required · 7 link gone (expired/exhausted). Scripts and cron (`--once`) use it to
 // tell a retryable network blip from re-login from a conflict needing resolution from a

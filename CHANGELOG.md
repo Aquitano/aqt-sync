@@ -62,6 +62,30 @@ All notable changes to this project are documented in this file.
 - A source build now reports its version as `dev` rather than a hardcoded
   `0.3.0-dev`. The old default named a release that was never tagged, so
   `aqt --version` on any source build claimed to be something it was not.
+- `DESIGN.md` has been split into `docs/`. One ~1,100-line file held the threat
+  model, the whole CLI flag list, three wire formats, the HTTP API, and a resolution
+  log, which is why the last documentation pass found the same fact stated twice and
+  drifted — server env vars in `DESIGN.md` against `docs/deploy.md`, capability rules
+  against `docs/compatibility.md`.
+
+  The content now lives in `docs/architecture.md` (locked decisions, package layout,
+  and an index of everything else), `docs/threat-model.md`,
+  `docs/protocol/api.md`, `docs/protocol/folder-sync.md`,
+  `docs/protocol/git-remote.md`, and `docs/decisions.md` for the resolution log.
+  Each moved fact has exactly one home; the other documents link to it rather than
+  restating it, which is what `docs/compatibility.md` now does for the wire protocol
+  and rate-limit contracts.
+
+  The CLI flag list is gone rather than moved: `aqt --help` is generated from the
+  same code that parses the flags, so a hand-maintained third copy could only be
+  wrong. The behavior `--help` cannot express — exit codes, `--json` envelopes, what
+  each comparison command compares — is in `docs/cli.md`. The pre-Go TypeScript
+  interface sketches are gone too; the Go signatures in `internal/` were always the
+  authoritative ones.
+
+  `DESIGN.md` stays at its path, because past pull requests and issues cite it, but
+  now holds only a table mapping each old section to its new home, with anchors so
+  existing deep links still land.
 
 ### Fixed
 

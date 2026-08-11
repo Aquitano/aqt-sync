@@ -163,8 +163,8 @@ func Save(p *Profile) error {
 //
 // SECURITY TRADE-OFF: a process running as the same user can still reach the
 // keychain (or re-derive the machine key) and open the cache. Fully closing that
-// needs a passphrase/biometric-gated agent or hardware enclave; see DESIGN.md
-// section 5. Exposure is otherwise bounded by the TTL and cleared by `aqt logout`.
+// needs a passphrase/biometric-gated agent or hardware enclave; see
+// docs/threat-model.md ("Still open"). Exposure is otherwise bounded by the TTL and cleared by `aqt logout`.
 
 type session struct {
 	Sealed    crypto.SealedBlob `json:"sealed"`

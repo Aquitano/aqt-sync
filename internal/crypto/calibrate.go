@@ -20,7 +20,7 @@ const (
 	PresetSensitive   KdfPreset = "sensitive"
 
 	// DefaultPreset balances offline-cracking resistance against a one-time
-	// per-session unlock pause; see DESIGN.md section 5.
+	// per-session unlock pause; see docs/threat-model.md ("KDF calibration").
 	DefaultPreset = PresetModerate
 )
 
