@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"text/tabwriter"
 
@@ -71,7 +72,7 @@ func runAccountDelete(assumeYes, asJSON bool) error {
 	if err := identity.Delete(prof.Name); err != nil {
 		return fmt.Errorf("account deleted, but removing the local profile failed: %w", err)
 	}
-	return printAccountDeleteReceipt(receipt, prof.Email, asJSON)
+	return printAccountDeleteReceipt(os.Stdout, os.Stderr, receipt, prof.Email, asJSON)
 }
 
 // accountDeleteProof runs the confirmation and returns the auth verifier that
@@ -123,18 +124,31 @@ func confirmAccountDelete(email string, cl accountDeleteClient) error {
 	return nil
 }
 
-func printAccountDeleteReceipt(r api.DeleteAccountResponse, email string, asJSON bool) error {
+func printAccountDeleteReceipt(out, errOut io.Writer, r api.DeleteAccountResponse, email string, asJSON bool) error {
 	if asJSON {
-		return printJSON(r)
+		return printJSONTo(out, r)
 	}
-	fmt.Fprintf(os.Stderr, "%s deleted; local profile and cached key removed\n", email)
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "storage freed\t%s\n", humanBytes(r.Bytes))
+	fmt.Fprintf(errOut, "%s deleted; local profile and cached key removed\n", email)
+	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	// An absent total means the server could not read one, not that nothing was
+	// stored; printing 0 would be a claim it did not make.
+	if r.Bytes != nil {
+		fmt.Fprintf(w, "storage freed\t%s\n", humanBytes(*r.Bytes))
+	}
 	fmt.Fprintf(w, "resources\t%d\n", r.Resources)
 	fmt.Fprintf(w, "snapshots\t%d\n", r.Snapshots)
 	fmt.Fprintf(w, "packs\t%d\n", r.Packs)
 	fmt.Fprintf(w, "objects\t%d\n", r.Objects)
 	fmt.Fprintf(w, "grants\t%d\n", r.Grants)
 	fmt.Fprintf(w, "devices\t%d\n", r.Devices)
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	// The account is gone either way, but its ciphertext is not, and the person who
+	// asked for it to be erased is the one who needs to know.
+	if r.FileErrors > 0 {
+		fmt.Fprintf(errOut, "warning: %d stored files could not be removed from the server; "+
+			"the account is deleted but ask its operator to purge them\n", r.FileErrors)
+	}
+	return nil
 }

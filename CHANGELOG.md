@@ -24,6 +24,14 @@ All notable changes to this project are documented in this file.
   so an operator hold still holds. On success the local profile, cached session, and
   keychain entries are removed; tracked folders keep their local files.
 
+  The receipt reports the storage total on the same basis `aqt usage` does, so it is
+  the number the confirmation quoted rather than a smaller one covering only the
+  ciphertext files; if the server cannot read a total it reports none instead of
+  approximating. Files it could not unlink are counted back to the caller — the rows
+  are gone, so the account is deleted regardless, but the ciphertext may still be on
+  the operator's disk, and the person who asked to be erased is the one who needs to
+  know to ask about it.
+
 - Install scripts for macOS, Linux, and Windows, served from the landing site:
   `curl -fsSL https://aqt-sync.vercel.app/install.sh | sh` and
   `iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex`. Each reads the release's

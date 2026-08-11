@@ -3,6 +3,7 @@ package server
 import (
 	"errors"
 	"net/http"
+	"os"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -76,8 +77,14 @@ func TestAccountDeleteErasesAccountAndRevokesToken(t *testing.T) {
 	// The receipt must quote the same total `aqt usage` did a moment earlier, not
 	// just the unlinked ciphertext files: a user who confirmed against one number
 	// and is shown a much smaller one has been told the account partly survived.
-	if receipt.Bytes != usage.StorageBytes {
-		t.Fatalf("receipt freed %d bytes, usage reported %d", receipt.Bytes, usage.StorageBytes)
+	if receipt.Bytes == nil {
+		t.Fatal("receipt omits the storage total after a readable usage query")
+	}
+	if *receipt.Bytes != usage.StorageBytes {
+		t.Fatalf("receipt freed %d bytes, usage reported %d", *receipt.Bytes, usage.StorageBytes)
+	}
+	if receipt.FileErrors != 0 {
+		t.Fatalf("receipt reports %d file errors on a clean erasure", receipt.FileErrors)
 	}
 
 	// The token authenticated a moment ago and must stop now, not at the auth
@@ -106,6 +113,47 @@ func TestAccountDeleteRejectsAnotherAccountsProof(t *testing.T) {
 	}
 	if _, err := h.store.AccountByEmail("victim@example.com"); err != nil {
 		t.Fatalf("victim account after the refused delete: %v", err)
+	}
+}
+
+// A file the server could not unlink means the account's ciphertext is still on the
+// operator's disk. The rows are gone either way, so the deletion still succeeds —
+// but the person who asked to be erased is the one who needs to know, and the count
+// is the part of it that is theirs (the paths are the operator's).
+func TestAccountDeleteReportsUnremovableFiles(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission bits do not apply")
+	}
+	const email, pass = "stuck@example.com", "correct horse battery staple"
+	h := newHarness(t)
+	token, mk := h.signup(email, pass)
+	res, code := h.putSized(token, mk, "", 64)
+	if code != http.StatusCreated {
+		t.Fatalf("seed resource = %d, want 201", code)
+	}
+
+	// Removing a file needs write permission on its directory, not the file.
+	dir := h.store.blobDir(res.ID)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatalf("chmod blob dir: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+
+	var receipt api.DeleteAccountResponse
+	if code := h.do(http.MethodDelete, "/v1/account", token,
+		api.DeleteAccountRequest{AuthVerifier: h.authVerifier(email, pass)}, &receipt); code != http.StatusOK {
+		t.Fatalf("delete = %d, want 200", code)
+	}
+	if receipt.FileErrors == 0 {
+		t.Fatal("receipt reports a clean erasure while a blob could not be removed")
+	}
+	// Prove the scenario is real rather than just the counter moving: the ciphertext
+	// is still there, which is exactly what the warning exists to tell the user.
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) == 0 {
+		t.Fatalf("blob dir has %d entries (err=%v); the removal did not actually fail", len(entries), err)
+	}
+	if _, err := h.store.AccountByEmail(email); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("account survived an erasure that could not unlink a file: %v", err)
 	}
 }
 

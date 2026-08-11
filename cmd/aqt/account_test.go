@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -111,6 +112,56 @@ func TestAccountDeleteYesStillRequiresThePassphrase(t *testing.T) {
 	}
 	if len(got) == 0 {
 		t.Fatal("--yes produced an empty proof")
+	}
+}
+
+// The byte total is the number the user confirmed against. When the server could
+// not read one it sends none, and the receipt has to stay silent rather than print
+// a 0 the server never claimed.
+func TestAccountDeleteReceiptOmitsAnUnknownTotal(t *testing.T) {
+	var out, errOut bytes.Buffer
+	r := api.DeleteAccountResponse{Resources: 2, Devices: 1}
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "storage") {
+		t.Fatalf("receipt invented a storage total:\n%s", out.String())
+	}
+
+	total := int64(4096)
+	out.Reset()
+	r.Bytes = &total
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "4.0 KB") {
+		t.Fatalf("receipt did not report the total it was given:\n%s", out.String())
+	}
+}
+
+// Ciphertext left on the server outlives the account, so a clean-looking receipt
+// would be the one place this could hide.
+func TestAccountDeleteReceiptWarnsAboutFilesLeftBehind(t *testing.T) {
+	var out, errOut bytes.Buffer
+	r := api.DeleteAccountResponse{Resources: 1, FileErrors: 3}
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	warning := errOut.String()
+	if !strings.Contains(warning, "3 stored files could not be removed") {
+		t.Fatalf("no warning about files left on the server:\n%s", warning)
+	}
+	if !strings.Contains(warning, "operator") {
+		t.Fatalf("warning does not say who to ask:\n%s", warning)
+	}
+
+	errOut.Reset()
+	r.FileErrors = 0
+	if err := printAccountDeleteReceipt(&out, &errOut, r, "owner@example.com", false); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(errOut.String(), "warning") {
+		t.Fatalf("clean erasure warned anyway:\n%s", errOut.String())
 	}
 }
 

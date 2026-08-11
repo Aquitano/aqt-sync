@@ -893,7 +893,11 @@ DELETE /v1/account                   Erase the account and everything under it. 
                                      — the passphrase proof, so a device token alone cannot destroy an
                                      account; 403 if it does not match.
                                      → { ownerHandle, resources, snapshots, devices, packs, objects,
-                                         grants, bytes }  (a receipt; every token on the account dies)
+                                         grants, bytes?, fileErrors? }  (a receipt; every token dies)
+                                     bytes is the total `usage` reports, so it matches what the caller
+                                     confirmed against, and is absent rather than approximated if the
+                                     server could not read one. fileErrors counts stored files it could
+                                     not unlink: the account is gone, but that ciphertext is not.
 
 POST   /v1/resources                 Create (server-assigned id). Same body/echo as PUT below.
 PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). Also still

@@ -722,11 +722,12 @@ func (s *Server) deleteAccount(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "passphrase proof is required")
 		return
 	}
-	// Read the storage total before erasing it. DeletedAccount.Bytes counts only the
-	// blob and pack files unlinked, which is a fraction of what `aqt usage` reports
-	// (that total also models the account's database rows) — reporting it back would
-	// read as though most of the account had survived. A failed read falls back to
-	// the file total rather than refusing a deletion over a usage query.
+	// Read the storage total before erasing it, so the receipt can quote the number
+	// the caller confirmed against. DeletedAccount.Bytes counts only the blob and
+	// pack files unlinked, which is a fraction of what `aqt usage` reports (that
+	// total also models the account's database rows), so it is not a substitute: a
+	// failed read omits the total rather than quietly swapping in a smaller one, and
+	// never blocks the deletion.
 	usage, usageErr := s.store.AccountUsage(owner)
 
 	acct, err := s.store.DeleteAccountWithProof(owner, req.AuthVerifier)
@@ -738,13 +739,14 @@ func (s *Server) deleteAccount(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "account deletion failed")
 		return
 	}
-	freed := acct.Bytes
+	var freed *int64
 	if usageErr == nil {
-		freed = usage.StorageBytes
+		freed = &usage.StorageBytes
 	}
 	// The rows are gone, so the account is deleted whatever happened to the files.
 	// The paths are operator detail and must not go back to a client, so they are
-	// logged for the operator to clean up by hand.
+	// logged here; the caller is told only how many, which is enough to know their
+	// ciphertext may still be on disk and to ask.
 	for _, e := range acct.FileErrors {
 		log.Printf("delete account %s: %s", owner, e)
 	}
@@ -757,6 +759,7 @@ func (s *Server) deleteAccount(c *gin.Context) {
 		Objects:     acct.Objects,
 		Grants:      acct.Grants,
 		Bytes:       freed,
+		FileErrors:  len(acct.FileErrors),
 	})
 }
 
