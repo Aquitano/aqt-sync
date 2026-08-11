@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -49,6 +50,9 @@ func testModel(t *testing.T) *tuiModel {
 		exe:      "/bin/aqt-test",
 	}
 	m := newTUIModel(ctx, "fold_1", nil)
+	// The expiry tick is what the toast tests assert on, not how long it waits;
+	// at the real TTL each of those assertions costs four seconds of sleeping.
+	m.toastTTL = time.Millisecond
 	m.resources = []lsRow{
 		{ID: "r1", Name: "notes.md", Kind: "file", Size: 100, Visibility: "private", Version: 1},
 		{ID: "r2", Name: "deploy.log", Kind: "file", Size: 200, Visibility: "public", Version: 3},

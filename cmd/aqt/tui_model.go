@@ -128,7 +128,13 @@ type tuiModel struct {
 	// toastSeq tags each transient status line so its expiry tick only clears
 	// the line it was scheduled for, never a newer one.
 	toastSeq int
+	// toastTTL is how long a status line stays up. It is a field rather than a
+	// constant so a test can assert on the expiry tick without waiting it out.
+	toastTTL time.Duration
 }
+
+// defaultToastTTL is how long a status line stays up in a real session.
+const defaultToastTTL = 4 * time.Second
 
 // tuiToastExpiredMsg fires a few seconds after a status line is set.
 type tuiToastExpiredMsg struct{ seq int }
@@ -146,11 +152,11 @@ func (m *tuiModel) toastStyled(s string, style lipgloss.Style) tea.Cmd {
 	m.statusStyle = style
 	m.toastSeq++
 	seq := m.toastSeq
-	return tea.Tick(4*time.Second, func(time.Time) tea.Msg { return tuiToastExpiredMsg{seq: seq} })
+	return tea.Tick(m.toastTTL, func(time.Time) tea.Msg { return tuiToastExpiredMsg{seq: seq} })
 }
 
 func newTUIModel(ctx *tuiCtx, folderID string, fsEvents <-chan struct{}) *tuiModel {
-	m := &tuiModel{ctx: ctx, folderID: folderID, fsEvents: fsEvents, focus: tuiPanelFiles, logFollow: true}
+	m := &tuiModel{ctx: ctx, folderID: folderID, fsEvents: fsEvents, focus: tuiPanelFiles, logFollow: true, toastTTL: defaultToastTTL}
 	if ctx.root == "" {
 		m.focus = tuiPanelResources
 	}
