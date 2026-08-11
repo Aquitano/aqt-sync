@@ -68,6 +68,14 @@ else
 	die "curl or wget is required"
 fi
 
+if command -v sha256sum >/dev/null 2>&1; then
+	sha256_of() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+	sha256_of() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+	die "sha256sum or shasum is required to verify a download"
+fi
+
 case "$(uname -s)" in
 Linux) os=linux ;;
 Darwin) os=darwin ;;
@@ -119,13 +127,7 @@ actual_size="$(wc -c <"$tmp/$asset_name" | tr -d ' ')"
 [ "$actual_size" = "$asset_size" ] ||
 	die "size mismatch: got $actual_size bytes, the manifest declares $asset_size"
 
-if command -v sha256sum >/dev/null 2>&1; then
-	actual_sha="$(sha256sum "$tmp/$asset_name" | cut -d' ' -f1)"
-elif command -v shasum >/dev/null 2>&1; then
-	actual_sha="$(shasum -a 256 "$tmp/$asset_name" | cut -d' ' -f1)"
-else
-	die "sha256sum or shasum is required to verify the download"
-fi
+actual_sha="$(sha256_of "$tmp/$asset_name")"
 [ "$actual_sha" = "$asset_sha" ] ||
 	die "checksum mismatch for $asset_name: got $actual_sha, want $asset_sha"
 
@@ -139,19 +141,16 @@ if [ "$want_server" -eq 1 ]; then
 	server_name="$(printf '%s' "$asset_name" | sed 's/^aqt_/aqt-server_/')"
 	server_url="$(printf '%s' "$asset_url" | sed "s|/$asset_name\$|/$server_name|")"
 	# The server archive is not described by the client manifest, so its checksum
-	# comes from the release's own checksums.txt rather than a signed source.
+	# comes from the release's own checksums.txt rather than a signed source. An
+	# unreadable or silent checksums.txt is a refusal, not a warning: a check that
+	# quietly passes when it cannot run is worse than no check at all.
 	fetch_to "$server_url" "$tmp/$server_name" || die "download failed: $server_url"
-	if checksums="$(fetch "${server_url%/*}/checksums.txt" 2>/dev/null)"; then
-		want="$(printf '%s\n' "$checksums" | awk -v n="$server_name" '$2 == n || $2 == "*" n { print $1; exit }')"
-		if [ -n "$want" ]; then
-			if command -v sha256sum >/dev/null 2>&1; then
-				got="$(sha256sum "$tmp/$server_name" | cut -d' ' -f1)"
-			else
-				got="$(shasum -a 256 "$tmp/$server_name" | cut -d' ' -f1)"
-			fi
-			[ "$got" = "$want" ] || die "checksum mismatch for $server_name"
-		fi
-	fi
+	checksums="$(fetch "${server_url%/*}/checksums.txt")" ||
+		die "could not read checksums.txt; refusing to install an unverified $server_name"
+	want="$(printf '%s\n' "$checksums" | awk -v n="$server_name" '$2 == n || $2 == "*" n { print $1; exit }')"
+	[ -n "$want" ] || die "checksums.txt lists no entry for $server_name"
+	got="$(sha256_of "$tmp/$server_name")"
+	[ "$got" = "$want" ] || die "checksum mismatch for $server_name: got $got, want $want"
 	tar -xzf "$tmp/$server_name" -C "$tmp"
 	install -m 0755 "$tmp/aqt-server" "$install_dir/aqt-server" 2>/dev/null ||
 		{ cp "$tmp/aqt-server" "$install_dir/aqt-server" && chmod 0755 "$install_dir/aqt-server"; }

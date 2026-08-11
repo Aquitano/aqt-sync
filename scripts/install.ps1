@@ -85,18 +85,23 @@ try {
         $serverArchive = Join-Path $tmp $serverName
         Invoke-WebRequest -Uri $serverUrl -OutFile $serverArchive -UseBasicParsing
         # The server archive is not described by the client manifest, so its checksum
-        # comes from the release's own checksums.txt rather than a signed source.
+        # comes from the release's own checksums.txt rather than a signed source. An
+        # unreadable or silent checksums.txt is a refusal, not a warning: a check that
+        # quietly passes when it cannot run is worse than no check at all.
         try {
-            $sums = (Invoke-WebRequest -Uri "$base/checksums.txt" -UseBasicParsing).Content
-            $line = $sums -split "`n" | Where-Object { $_ -match ([regex]::Escape($serverName) + '\s*$') } | Select-Object -First 1
-            if ($line) {
-                $want = ($line -split '\s+')[0].ToLowerInvariant()
-                $got = (Get-FileHash -Path $serverArchive -Algorithm SHA256).Hash.ToLowerInvariant()
-                if ($got -ne $want) { throw "checksum mismatch for $serverName" }
-            }
-        } catch [System.Net.WebException] {
-            Write-Warning "could not fetch checksums.txt; $serverName was not verified"
+            # Derived from the archive's own URL, not $base: the manifest pins an
+            # exact tag, so a release published mid-install cannot be consulted here.
+            $sumsUrl = ($serverUrl -replace ([regex]::Escape($serverName) + '$'), 'checksums.txt')
+            $sums = (Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing).Content
+        } catch {
+            throw "could not read checksums.txt; refusing to install an unverified $serverName"
         }
+        $line = $sums -split "`n" | Where-Object { $_ -match ([regex]::Escape($serverName) + '\s*$') } | Select-Object -First 1
+        if (-not $line) { throw "checksums.txt lists no entry for $serverName" }
+        $want = ($line -split '\s+')[0].ToLowerInvariant()
+        $got = (Get-FileHash -Path $serverArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($got -ne $want) { throw "checksum mismatch for ${serverName}: got $got, want $want" }
+
         Expand-Archive -Path $serverArchive -DestinationPath $tmp -Force
         Copy-Item -Path (Join-Path $tmp 'aqt-server.exe') -Destination (Join-Path $Dir 'aqt-server.exe') -Force
         Write-Host "installed $(Join-Path $Dir 'aqt-server.exe')"
