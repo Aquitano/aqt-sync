@@ -19,7 +19,7 @@ metadata.
 The install script fetches the release build of both binaries:
 
 ```
-curl -fsSL https://aqt-sync.vercel.app/install.sh | sh -s -- --server
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --server
 AQT_DATA_DIR=./aqt-data ~/.local/bin/aqt-server     # plain HTTP on :8080
 ```
 

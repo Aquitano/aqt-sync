@@ -33,8 +33,8 @@ All notable changes to this project are documented in this file.
   know to ask about it.
 
 - Install scripts for macOS, Linux, and Windows, served from the landing site:
-  `curl -fsSL https://aqt-sync.vercel.app/install.sh | sh` and
-  `iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex`. Each reads the release's
+  `curl -fsSL https://web.sync.aquitano.me/install.sh | sh` and
+  `iwr -useb https://web.sync.aquitano.me/install.ps1 | iex`. Each reads the release's
   signed update manifest to learn which archive belongs to the platform, then refuses
   a download whose length or SHA-256 disagrees with what that manifest declares —
   neither script guesses an asset name. `--server` also installs `aqt-server`,

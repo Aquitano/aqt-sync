@@ -15,7 +15,7 @@ the client — one binary, nothing to upgrade separately.
 Install `aqt` (see the [README](../README.md#install)), then create the link:
 
 ```sh
-curl -fsSL https://aqt-sync.vercel.app/install.sh | sh
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 aqt git setup
 ```

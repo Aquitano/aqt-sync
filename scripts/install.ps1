@@ -9,10 +9,10 @@ filename or trusts a length. Full signature verification happens on every later
 `aqt update`, which checks the manifest against keys compiled into the binary.
 
 .EXAMPLE
-iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex
+iwr -useb https://web.sync.aquitano.me/install.ps1 | iex
 
 .EXAMPLE
-& ([scriptblock]::Create((iwr -useb https://aqt-sync.vercel.app/install.ps1))) -Server
+& ([scriptblock]::Create((iwr -useb https://web.sync.aquitano.me/install.ps1))) -Server
 #>
 [CmdletBinding()]
 param(

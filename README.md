@@ -18,13 +18,13 @@ See [DESIGN.md](DESIGN.md) for the full protocol and threat model.
 macOS and Linux:
 
 ```
-curl -fsSL https://aqt-sync.vercel.app/install.sh | sh
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```
-iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex
+iwr -useb https://web.sync.aquitano.me/install.ps1 | iex
 ```
 
 Both scripts read the release's signed update manifest to learn which archive

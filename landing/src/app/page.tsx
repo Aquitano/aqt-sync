@@ -2,8 +2,8 @@ import Image from "next/image";
 import { CopyCommand } from "@/components/copy-command";
 import { MotionLayer } from "@/components/motion-layer";
 
-const installCommand = "curl -fsSL https://aqt-sync.vercel.app/install.sh | sh";
-const installCommandWindows = "iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex";
+const installCommand = "curl -fsSL https://web.sync.aquitano.me/install.sh | sh";
+const installCommandWindows = "iwr -useb https://web.sync.aquitano.me/install.ps1 | iex";
 
 const markPixels = [
   1, 1, 1, 0, 0, 1,

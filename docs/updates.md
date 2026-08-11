@@ -89,8 +89,8 @@ beta manifest served to a stable check is refused even though it is authentic.
 from the install script the landing site serves:
 
 ```
-curl -fsSL https://aqt-sync.vercel.app/install.sh | sh      # macOS, Linux
-iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex     # Windows
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh      # macOS, Linux
+iwr -useb https://web.sync.aquitano.me/install.ps1 | iex     # Windows
 ```
 
 Both read the release's signed `aqt-update.json` to learn which archive belongs to
