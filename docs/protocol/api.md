@@ -58,7 +58,7 @@ in-place mutations return `200` (or `204` when no response body is defined).
 
 ## Routes
 
-```
+```text
 POST   /v1/account                  Create account. Body: { email, kdf, publicKey, wrappedRoot,
                                      authVerifier, deviceName, inviteToken? }
                                      → { ownerHandle, deviceId, token }  (stores kdf + Ed25519 public key)
@@ -69,6 +69,11 @@ POST   /v1/auth/challenge            Body: { email } → { challengeId, nonce } 
 POST   /v1/devices                   Attach device. Body: { email, challengeId, signature,
                                      authVerifier, deviceName }.
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
+GET    /v1/devices                   List the account's attached devices (owner token).
+                                     Paginated (?limit=, ?cursor=)
+                                     → { devices: [{ id, name, current? }], nextCursor? }
+                                     `current` marks the calling device. Names are client-supplied
+                                     labels, not secrets.
 DELETE /v1/devices/:id               Revoke a device.
 DELETE /v1/account                   Erase the account and everything under it. Body: { authVerifier }
                                      — the passphrase proof, so a device token alone cannot destroy an
@@ -85,7 +90,10 @@ PUT    /v1/resources                 Replace in place (id set, owner-checked, ve
                                                                                        // policy only for public
                                      → { id, version, expiresAt?, maxReads? }  // echoes the accepted policy
 GET    /v1/resources/:id             → { ciphertext, encryptedMeta, visibility, wrappedKey?, version }
-                                     Public ids are fetchable without auth; private require the owner token.
+                                     Public ids are fetchable without auth. A private id needs the owner
+                                     token OR a grant to the caller; a grantee gets the grant wrap and the
+                                     owner handle in place of the owner's wrapped key (see grants below).
+                                     Anyone else gets 404, so a private id is not an existence oracle.
                                      410 Gone (code "gone") if the public link has expired, exhausted its
                                      read limit, or been reclaimed. Owner reads are never counted or expired
                                      (until reclaimed).

@@ -59,7 +59,7 @@ on-disk blobs. Larger files are split with **FastCDC** — content-defined, so a
 re-chunks locally around the change. Each chunk is sealed with **keyed convergent
 encryption**:
 
-```
+```text
 convergenceKey = HKDF(masterKey, "aqt-convergence-v1")     // account-scoped, never sent
 chunkKey       = HKDF(convergenceKey, sha256(plaintext))    // unique per distinct plaintext
 ciphertext     = XChaCha20-Poly1305(chunkKey, nonce=0, compress(plaintext))   // deterministic
@@ -122,13 +122,17 @@ ingesting a pack of many small chunks.
 ### Garbage collection
 
 **Mark-and-sweep at pack granularity, per owner.** Roots are the object references of
-the owner's live resources (file-chunk ids ∪ manifest-object ids). A pack is deleted
-when **none** of its objects is reachable from any root *and* it is older than an age
-guard, so an in-flight upload is not reaped before its manifest commits.
+the owner's live resources **and of every retained snapshot** — file-chunk ids ∪
+manifest-object ids, folded from both root tables. A snapshot reuses the resource's
+ciphertext rather than copying it, so a snapshot's references have to keep objects
+alive on their own; otherwise syncing past a snapshot would collect the very objects
+that snapshot exists to preserve. A pack is deleted when **none** of its objects is
+reachable from any root *and* it is older than an age guard, so an in-flight upload is
+not reaped before its manifest commits.
 
 Dead objects inside a still-live pack are reclaimed separately by `RepackOwner`,
 which copies the live objects into a fresh pack under a bounded byte budget and swaps
-atomically after re-checking age and liveness.
+atomically after re-checking age and liveness against the same combined root set.
 
 There are no refcounts. The manifests are the source of truth, which survives
 crashes; the resource→objects foreign key is the backstop that rejects a root

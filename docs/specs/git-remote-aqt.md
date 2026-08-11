@@ -5,12 +5,18 @@ Owner: Thomas Breindl · Consumer driving the design: the `~/Brain` vault (two-w
 git repo: macOS laptop + Linux VPS automation)
 
 This is a self-contained implementation spec, kept as a record of the track. It was
-written against `DESIGN.md`, which has since been split into `docs/`: its § references
-below now resolve to [protocol/folder-sync.md](../protocol/folder-sync.md) (§3.4,
-§4.2a), [protocol/api.md](../protocol/api.md) (§4.3), and
-[decisions.md](../decisions.md) (§5). The shipped format lives in
-[protocol/git-remote.md](../protocol/git-remote.md); where this spec and that document
-disagree, that document is right.
+written against `DESIGN.md`, which has since been split into `docs/`, so the section
+numbers it cites no longer exist. They map as follows:
+
+| Cited as | Read instead |
+| --- | --- |
+| §3.4 (tracked folder) | [protocol/folder-sync.md](../protocol/folder-sync.md#a-folder-is-a-resource) |
+| §4.2a (folder sync design) | [protocol/folder-sync.md](../protocol/folder-sync.md#storage-layout) for the pack pipeline, [reconcile](../protocol/folder-sync.md#reconcile) for the version CAS |
+| §4.3 (HTTP API) | [protocol/api.md](../protocol/api.md#routes) |
+| §5 (single-instance server assumption) | [decisions.md](../decisions.md#server-exposure) |
+
+The shipped format lives in [protocol/git-remote.md](../protocol/git-remote.md); where
+this spec and that document disagree, that document is right.
 
 ---
 

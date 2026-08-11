@@ -13,18 +13,26 @@ are collected under [Still open](#still-open).
 
 ## Key hierarchy
 
-```
-passphrase ──Argon2id(salt)──▶ masterKey            (never leaves the device)
+```text
+passphrase ──Argon2id(salt)──▶ unlockKey (UK)       (never leaves the device)
                                   │
-                                  ├─ wraps ─▶ contentKey   (random, one per resource)
-                                  │
-                                  └─ HKDF ─▶ Ed25519 signing key
-                                              (public half registered with server;
-                                               logins sign a server challenge — no
-                                               secret is ever sent)
+                                  └─ unwraps ─▶ rootKey (RK), the master key
+                                                  │    (random, minted at signup;
+                                                  │     the server stores only
+                                                  │     wrappedRoot = seal(RK, UK))
+                                                  ├─ wraps ─▶ contentKey (one per resource)
+                                                  ├─ HKDF ─▶ convergence key (chunk dedup)
+                                                  └─ HKDF ─▶ Ed25519 signing key
+                                                               (public half registered with the
+                                                                server; logins sign a server
+                                                                challenge — no secret is sent)
 file ──encrypt(contentKey)──▶ ciphertext + nonce + AEAD tag  ──▶ server (opaque blob)
-metadata (real name, size…) ──encrypt(contentKey)──▶ encrypted manifest ──▶ server
+metadata (real name, size…) ──encrypt(contentKey)──▶ sealed metadata ──▶ server
 ```
+
+The passphrase never derives the master key directly. It derives `UK`, whose only job
+is to wrap `RK` — which is what makes a passphrase change cheap; see
+[the wrapped-root model](#the-wrapped-root-model).
 
 ### The wrapped-root model
 
@@ -75,7 +83,14 @@ Per resource: `id`, opaque `ownerHandle`, ciphertext blob(s), encrypted-metadata
 blob, a `visibility` flag, a wrapped-key record *only for private resources owned by
 an account*, version counter, timestamps, and — for a public link with a lifecycle
 policy — an `expires_at` timestamp, a `max_reads` cap, a `reads` counter, an
-`exhausted_at` stamp, and a `reclaimed` tombstone flag. Nothing plaintext, ever.
+`exhausted_at` stamp, and a `reclaimed` tombstone flag.
+
+No user content is ever stored in plaintext: the file, its name, its size, and every
+other attribute a user set live inside the sealed blob and sealed metadata. What is
+plaintext is the operational metadata in that list — visibility, version, timestamps,
+and the lifecycle counters — which the server must read to route and enforce. Those
+are the [deliberate side channels](#deliberate-side-channels) below; nothing in them
+identifies content.
 
 ## Reference forms
 
