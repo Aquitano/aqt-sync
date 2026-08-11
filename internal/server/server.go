@@ -455,7 +455,7 @@ func (s *Server) createAccount(c *gin.Context) {
 		// response shape can: signing up for a free email must succeed, so "the token
 		// worked" still means "the email was free". Registration=invite is the setting
 		// that actually closes it. What the decoy buys is that a prober cannot confirm
-		// a *specific* address without also taking it. See DESIGN.md section 6.
+		// a *specific* address without also taking it. See docs/threat-model.md.
 		if s.signupProvesOwnership(req.Email, req.AuthVerifier) {
 			abortCode(c, http.StatusConflict, "an account already exists for this email; use `aqt login` to attach this device", api.ErrCodeAccountExists)
 			return

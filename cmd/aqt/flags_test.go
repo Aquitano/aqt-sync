@@ -8,7 +8,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// TestGlobalFlagWiring pins the DESIGN §3 global flag surface: the persistent
+// TestGlobalFlagWiring pins the docs/cli.md global flag surface: the persistent
 // flags live on root, --version/-v print and exit 0, and the per-command --json
 // duplicates were consolidated onto the global.
 func TestGlobalFlagWiring(t *testing.T) {

@@ -4,10 +4,19 @@ Status: approved for implementation · 2026-07-18
 Owner: Thomas Breindl · Consumer driving the design: the `~/Brain` vault (two-writer
 git repo: macOS laptop + Linux VPS automation)
 
-This is a self-contained implementation spec. DESIGN.md remains the product's
-interface spec; a task below folds a condensed section into it once the shape is
-final. Read DESIGN.md §3.4, §4.2a, and §4.3 first — this spec reuses the resource
-model, pack pipeline, version CAS, and snapshot machinery defined there.
+This is a self-contained implementation spec, kept as a record of the track. It was
+written against `DESIGN.md`, which has since been split into `docs/`, so the section
+numbers it cites no longer exist. They map as follows:
+
+| Cited as | Read instead |
+| --- | --- |
+| §3.4 (tracked folder) | [protocol/folder-sync.md](../protocol/folder-sync.md#a-folder-is-a-resource) |
+| §4.2a (folder sync design) | [protocol/folder-sync.md](../protocol/folder-sync.md#storage-layout) for the pack pipeline, [reconcile](../protocol/folder-sync.md#reconcile) for the version CAS |
+| §4.3 (HTTP API) | [protocol/api.md](../protocol/api.md#routes) |
+| §5 (single-instance server assumption) | [decisions.md](../decisions.md#server-exposure) |
+
+The shipped format lives in [protocol/git-remote.md](../protocol/git-remote.md); where
+this spec and that document disagree, that document is right.
 
 ---
 

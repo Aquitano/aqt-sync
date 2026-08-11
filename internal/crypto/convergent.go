@@ -18,7 +18,7 @@ import (
 // the same account encrypting the same bytes always produces identical ciphertext
 // — letting the server store one copy (dedup). Two different accounts derive
 // different keys, so identical plaintext yields different ciphertext: no
-// cross-account equality oracle. See DESIGN.md section 4.2a.
+// cross-account equality oracle. See docs/protocol/folder-sync.md.
 
 // ConvergenceKey is an account-scoped secret, derived from the master key, that
 // keys convergent chunk encryption. It never leaves the device.
@@ -71,8 +71,8 @@ var aadChunk = []byte("aqt-chunk-aad-v1")
 // chunks. Both seal through this same convergent pipeline, so a directory node and a
 // file chunk with byte-identical plaintext would otherwise share one object id; the
 // distinct tag keeps the roles apart (identical directory nodes still dedup against
-// each other, since the tag is constant). See DESIGN.md section 5 (AEAD domain
-// separation).
+// each other, since the tag is constant). See docs/threat-model.md (domain
+// separation and record binding).
 var aadTreeNode = []byte("aqt-treenode-v1")
 
 // aadChunkList domain-separates a sealed chunk-list segment — the indirect form of

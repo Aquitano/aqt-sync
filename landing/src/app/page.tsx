@@ -409,7 +409,7 @@ export default function Home() {
           </div>
           <div className="footer-links">
             <a href="https://github.com/aquitano/aqt-sync">GitHub</a>
-            <a href="https://github.com/aquitano/aqt-sync/blob/main/DESIGN.md">Protocol</a>
+            <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/architecture.md">Protocol</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/git-repositories.md">Git remotes</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/deploy.md">Deploy</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/LICENSE">AGPL-3.0</a>

@@ -1,5 +1,51 @@
 # CLI output contracts
 
+`aqt --help` is the authoritative list of commands and flags. This document covers
+the contracts a script depends on and the behavior `--help` cannot express.
+
+## Invocation
+
+`aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>` when
+the argument contains a path separator; a bare word that names an existing file asks
+for confirmation first, and errors as an unknown command without a terminal, so a
+typo'd subcommand never uploads a file.
+
+Global flags apply to every command: `--server <url>` (default
+`http://localhost:8080`), `--profile <name>`, `--json`, `-q/--quiet`, `--progress`
+(a live transfer bar on a terminal, for sync and clone), `-h/--help`, and
+`-v/--version`.
+
+Everyday resource arguments accept a unique name, an id, or a tracked path.
+
+## Exit codes
+
+| Code | Meaning |
+| --- | --- |
+| `0` | ok |
+| `1` | generic failure |
+| `3` | auth required, or the session is locked |
+| `4` | sync conflict |
+| `5` | network, including a rate limit that outlasted the client's retry budget |
+| `6` | upgrade required — the remote resource is sealed in a format this build cannot read |
+| `7` | link gone — the public link expired or reached its read limit |
+| `75` | deferred — `watch --once` skipped because git was busy |
+
+`5` and `75` are temporary by construction, so cron retries rather than giving up.
+The `6` message names the command that upgrades *this* install; see
+[`compatibility.md`](compatibility.md#recovering-from-a-426).
+
+## Push
+
+Human default: the ref or URL, with `(copied to clipboard)` when applicable, then a
+metadata line. `-q` prints only the ref or URL on stdout, so it pipes. `--json`
+returns `{ id, ref, url?, name?, bytes, visibility }`.
+
+The lifecycle flags (`--expire`, `--max-reads`, `--burn`) require an explicit
+`--public` or `-P`; they never silently mint a link. They are server-enforced, and
+the client fails closed against a server that does not echo the accepted policy,
+deleting the just-created resource rather than handing out a link that would never
+expire. An expired or exhausted link returns exit `7`.
+
 ## Destructive batches
 
 `aqt rm --json`, `aqt snapshot prune --json`, and `aqt devices rm --json`
@@ -27,6 +73,24 @@ Resource results may also include `snapshotsDeleted` or `snapshotsRemaining`.
 On preflight or execution failure the command exits non-zero after writing the full
 report, so scripts can use both the exit status and the per-item results.
 
+## Four questions, four commands
+
+Comparison commands are easy to confuse, so each one names what it compares:
+
+| command | left | right | answers |
+| --- | --- | --- | --- |
+| `aqt status` | last-synced base | working tree, *and* current remote | what changed here, and what is waiting there |
+| `aqt sync --dry-run` | base + both sides | — | what a reconcile would do (three-way plan) |
+| `aqt diff --against=remote` | current remote | working tree | how these two states differ, right now |
+| `aqt snapshot diff <id>` | a snapshot | live resource, or a second snapshot | how a past state differs from another |
+
+`status` is base-relative and reports two independent halves, so a path can appear in
+both when each side moved. Neither command replaces the other.
+
+Every `diff` mode is read-only: nothing is uploaded, nothing lands in the working
+tree, and neither `.aqt/base.json` nor the recorded remote version is touched, so a
+comparison can never change what a later `sync` decides to do.
+
 ## Line diffs
 
 `aqt diff [path...] [dir]` writes standard three-context unified diffs to stdout and
@@ -51,6 +115,18 @@ only when it is itself a tracked root.
 Binary files (a NUL in the first 8 KiB) and files over 8 MiB emit one
 `Binary files <old> and <new> differ` line. Last-synced and incoming comparisons
 require a chunked folder; pack-and-seal folders can use the snapshot form.
+
+`--name-status` lists classified paths instead of file content — `A` added,
+`M` modified, `P` permissions, `T` type, `D` deleted, `R` renamed — and is implied by
+`--json`. A chunked folder answers a remote comparison from directory-node metadata
+alone. A pack-and-seal folder has no per-file remote metadata, so its whole tree is
+streamed back and hashed in memory: a truthful per-entry answer that costs the
+folder's full download but writes nothing to disk. A unified text diff needs both
+sides' bytes, so a pack-and-seal folder is reconstructed into a temporary directory
+and removed again on exit; the working tree is still never written.
+
+The same completeness fields appear in the human output as an explicit sentence, so
+an incomplete comparison is never mistaken for a clean one.
 
 ## Encrypted Git remotes
 

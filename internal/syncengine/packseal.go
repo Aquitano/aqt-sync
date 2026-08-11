@@ -18,7 +18,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// Pack-and-seal (DESIGN.md 4.2a) is the alternative to the chunked default: the whole
+// Pack-and-seal (docs/protocol/folder-sync.md) is the alternative to the chunked default: the whole
 // tree is tarred and sealed into one opaque, per-sync-unique object stream. It hides
 // file structure at the cost of dedup — any change re-ships the folder. Selected per
 // folder by .aqtconfig pack=true.

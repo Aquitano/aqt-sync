@@ -11,7 +11,9 @@ metadata and never sees a key, a filename, or a plaintext byte.
 - **Self-hostable** — one static Go binary (`aqt-server`) plus a SQLite data
   directory. The data dir is 100% ciphertext, so it can be backed up anywhere.
 
-See [DESIGN.md](DESIGN.md) for the full protocol and threat model.
+See [docs/architecture.md](docs/architecture.md) for the design and an index of every
+specification document, [docs/threat-model.md](docs/threat-model.md) for what the
+server can and cannot see, and [docs/protocol/](docs/protocol/) for the wire formats.
 
 ## Install
 
