@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -32,12 +33,16 @@ func openMetadata(it api.ResourceListItem, mk crypto.MasterKey) (m api.Metadata,
 	return m, true
 }
 
-func printJSON(v any) error {
+func printJSON(v any) error { return printJSONTo(os.Stdout, v) }
+
+// printJSONTo is printJSON against an explicit sink, so a command whose output a
+// test needs to read does not have to redirect os.Stdout to get it.
+func printJSONTo(w io.Writer, v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintln(os.Stdout, string(b))
+	_, err = fmt.Fprintln(w, string(b))
 	return err
 }
 

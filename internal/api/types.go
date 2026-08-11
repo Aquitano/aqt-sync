@@ -223,6 +223,41 @@ type RootKeyRotationRequest struct {
 	IncomingGrants  []GrantKeyMigration `json:"incomingGrants"`
 }
 
+// DeleteAccountRequest erases the calling account and everything stored under it.
+// AuthVerifier proves the caller knows the current passphrase, so a stolen device
+// token alone cannot destroy an account — the same proof the passphrase change and
+// root-key rotation require. There is no epoch field: a passphrase changed
+// elsewhere already invalidates the verifier.
+type DeleteAccountRequest struct {
+	AuthVerifier []byte `json:"authVerifier"`
+}
+
+// DeleteAccountResponse is the receipt for an erasure: what the server actually
+// removed. Counts are of rows deleted.
+//
+// Bytes is the storage total the account held, on the same basis UsageResponse and
+// the quota report it, so the receipt and the usage the caller saw before
+// confirming are the same number. It is a pointer because the only honest
+// alternative to that number is no number: the server's other byte total counts
+// unlinked files alone, a fraction of this one, and substituting it would read as
+// though most of the account had survived.
+//
+// FileErrors counts stored files the server could not remove. The rows are gone, so
+// the account is deleted either way, but the ciphertext may still be on the
+// operator's disk — which is the account holder's business, not just the operator's.
+// The paths themselves stay server-side.
+type DeleteAccountResponse struct {
+	OwnerHandle string `json:"ownerHandle"`
+	Resources   int64  `json:"resources"`
+	Snapshots   int64  `json:"snapshots"`
+	Devices     int64  `json:"devices"`
+	Packs       int64  `json:"packs"`
+	Objects     int64  `json:"objects"`
+	Grants      int64  `json:"grants"`
+	Bytes       *int64 `json:"bytes,omitempty"`
+	FileErrors  int    `json:"fileErrors,omitempty"`
+}
+
 // PutResourceRequest creates a resource (ID empty) or replaces an existing one
 // in place (ID set, must be owned by the caller). WrappedKey is present only for
 // private resources (the content key wrapped under the owner's master key); for

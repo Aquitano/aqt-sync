@@ -155,6 +155,11 @@ location / {
 }
 ```
 
+`DELETE /v1/account` carries a JSON body (the passphrase proof), which Caddy and
+nginx forward as configured above. A proxy or CDN that drops bodies from `DELETE`
+turns `aqt account delete` into a `400 passphrase proof is required`; if you put one
+in front of the server, keep the body and its `Content-Type`.
+
 ## systemd
 
 `deploy/aqt-server.service` runs the server as a locked-down dynamic user with a
@@ -328,6 +333,19 @@ could not be removed is reported by path for manual cleanup.
 be reconstructed. Run `--dry-run` first to see the scope, and take a data-dir backup
 if the deletion might need undoing. `--yes` skips the prompt; without a terminal the
 command refuses rather than let a prompt read EOF and be taken as consent.
+
+Account holders can erase their own accounts with `aqt account delete`, which runs
+the same erasure over `DELETE /v1/account`. That route requires the caller's
+passphrase-derived verifier on top of a valid device token, so a leaked token is not
+enough to destroy an account. Operators do not need this route and cannot use it:
+the admin path is authorized by filesystem access instead, which is why it needs no
+passphrase. Nothing here gates self-service deletion — an operator who needs to hold
+an account (a legal hold, a billing dispute) suspends it with `disable`, which makes
+every authenticated route including the deletion answer `403`. The suspension a
+running server enforces on other routes can lag `disable` by up to ten seconds
+(`admin` is a separate process, so it cannot invalidate that server's cache); the
+deletion re-reads the flag in the transaction that erases, so a hold takes effect
+against it immediately.
 
 ## Privacy boundary
 

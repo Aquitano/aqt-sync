@@ -102,6 +102,11 @@ git push -u origin main
 for the full command set (`ls`, `find`, `cat`, `share`, `unshare`, `shares`,
 `contacts`, `snapshot`, `checkpoint`, `restore`, `watch`, `devices`, `passphrase`, …).
 
+Leaving is a client command, not a support ticket: `aqt account delete` erases the
+account and every byte stored under it, and asks for the passphrase rather than
+trusting the device token alone. It cannot be undone — the server holds no keys, so
+there is nothing to restore from.
+
 Grant a resource read-only to another account by email with `aqt share <id> --with
 <email>`; the recipient sees it under `aqt shares` and pulls or clones it, while you
 can never modify their copy. `aqt contacts` lists the accounts pinned on first use for

@@ -317,6 +317,10 @@ func (s *Server) Router() *gin.Engine {
 			// row counts. All plaintext-side metadata the owner already implies.
 			authed.GET("/account/usage", s.accountUsage)
 
+			// Self-service erasure. The body carries only the passphrase proof, so it
+			// keeps the control cap.
+			authed.DELETE("/account", limitBody(maxControlBody), s.deleteAccount)
+
 			// Account-to-account grants. The key lookup answers unknown emails with a
 			// deterministic decoy (like /account/salt), so it is not an existence
 			// oracle; it still sits behind auth to keep probing costed. Grant rows are
@@ -701,6 +705,69 @@ func (s *Server) rotateRootKey(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
+}
+
+// deleteAccount erases the calling account and everything stored under it. It
+// requires the passphrase proof, not just a device token: a token is a credential
+// the account holder may have lost control of, and this is the one operation no
+// backup can undo. The server holds no plaintext, so there is nothing to hand back
+// first — the client is expected to have pulled anything it wants to keep.
+func (s *Server) deleteAccount(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.DeleteAccountRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.AuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "passphrase proof is required")
+		return
+	}
+	// Read the storage total before erasing it, so the receipt can quote the number
+	// the caller confirmed against. DeletedAccount.Bytes counts only the blob and
+	// pack files unlinked, which is a fraction of what `aqt usage` reports (that
+	// total also models the account's database rows), so it is not a substitute: a
+	// failed read omits the total rather than quietly swapping in a smaller one, and
+	// never blocks the deletion.
+	usage, usageErr := s.store.AccountUsage(owner)
+
+	acct, err := s.store.DeleteAccountWithProof(owner, req.AuthVerifier)
+	if errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusForbidden, "passphrase proof did not match")
+		return
+	}
+	// The middleware answered this from a cache an operator suspending in another
+	// process cannot invalidate; the store re-read the row, so a hold that landed
+	// inside that window still holds.
+	if errors.Is(err, ErrAccountDisabled) {
+		abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "account deletion failed")
+		return
+	}
+	var freed *int64
+	if usageErr == nil {
+		freed = &usage.StorageBytes
+	}
+	// The rows are gone, so the account is deleted whatever happened to the files.
+	// The paths are operator detail and must not go back to a client, so they are
+	// logged here; the caller is told only how many, which is enough to know their
+	// ciphertext may still be on disk and to ask.
+	for _, e := range acct.FileErrors {
+		log.Printf("delete account %s: %s", owner, e)
+	}
+	c.JSON(http.StatusOK, api.DeleteAccountResponse{
+		OwnerHandle: acct.OwnerHandle,
+		Resources:   acct.Resources,
+		Snapshots:   acct.Snapshots,
+		Devices:     acct.Devices,
+		Packs:       acct.Packs,
+		Objects:     acct.Objects,
+		Grants:      acct.Grants,
+		Bytes:       freed,
+		FileErrors:  len(acct.FileErrors),
+	})
 }
 
 func (s *Server) accountUsage(c *gin.Context) {
