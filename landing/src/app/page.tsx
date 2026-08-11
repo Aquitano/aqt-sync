@@ -87,6 +87,13 @@ const workflow = [
   },
 ];
 
+const tuiKeys = [
+  { key: "s", action: "sync" },
+  { key: "c", action: "checkpoint" },
+  { key: "d", action: "diff" },
+  { key: "R", action: "restore" },
+];
+
 const specRows = [
   { term: "Cipher", detail: "XChaCha20-Poly1305, role-separated AADs" },
   { term: "KDF", detail: "Argon2id, calibrated on your device" },
@@ -255,11 +262,23 @@ export default function Home() {
               <CornerMarks />
               <p className="feature-label">Terminal UI</p>
               <div className="feature-visual" aria-hidden="true">
-                <pre className="tui-panel">{`┌ changes ─────────────┐┌ snapshots ──────────┐
-│ M  notes/plan.md     ││ pre-release  anchored│
-│ +  assets/logo.png   ││ auto  today 21:04    │
-└──────────────────────┘└─────────────────────┘
-  s sync   c checkpoint   d diff   R restore`}</pre>
+                <div className="tui-mock">
+                  <div className="tui-pane">
+                    <p><span>changes</span></p>
+                    <p><span><b>M</b>notes/plan.md</span></p>
+                    <p><span><b>+</b>assets/logo.png</span></p>
+                  </div>
+                  <div className="tui-pane">
+                    <p><span>snapshots</span></p>
+                    <p><span>pre-release</span><span className="tui-meta">anchored</span></p>
+                    <p><span>auto</span><span className="tui-meta">today 21:04</span></p>
+                  </div>
+                </div>
+                <p className="tui-keys">
+                  {tuiKeys.map((key) => (
+                    <span key={key.key}><b>{key.key}</b>{key.action}</span>
+                  ))}
+                </p>
               </div>
               <h3>The whole vault on one screen.</h3>
               <p>aqt tui is a lazygit-style dashboard. Live changes, snapshots, and shares, driven by single-key actions that run real aqt commands.</p>
@@ -323,7 +342,7 @@ export default function Home() {
           <div className="crypto-flow" data-reveal>
             <div className="crypto-node"><span>Your input</span><strong>Passphrase</strong></div>
             <span className="flow-arrow" aria-hidden="true">&#8594;</span>
-            <div className="crypto-node crypto-node-accent"><span>Memory-hard KDF</span><strong>Argon2id</strong></div>
+            <div className="crypto-node"><span>Memory-hard KDF</span><strong>Argon2id</strong></div>
             <span className="flow-arrow" aria-hidden="true">&#8594;</span>
             <div className="crypto-node"><span>Unlocks locally</span><strong>Root key</strong></div>
             <span className="flow-arrow" aria-hidden="true">&#8594;</span>
