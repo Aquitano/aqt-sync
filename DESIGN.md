@@ -60,8 +60,8 @@ been fetched.
 | Form | Looks like | Who can decrypt | Used for |
 | --- | --- | --- | --- |
 | Private ref | `aqt://<id>` | only the owning account (master key unwraps the stored wrapped key) | `.env`-to-your-other-machine |
-| Public link | `https://aqt.sh/x/<id>#k.<key>` | anyone with the link (key in fragment) | sharing |
-| Gated link | `https://aqt.sh/x/<id>#p.<wrappedKey>` | anyone with the link **and** the password | sharing a secret semi-publicly |
+| Public link | `https://aqt.example.com/x/<id>#k.<key>` | anyone with the link (key in fragment) | sharing |
+| Gated link | `https://aqt.example.com/x/<id>#p.<wrappedKey>` | anyone with the link **and** the password | sharing a secret semi-publicly |
 
 The `k.` / `p.` prefix in the fragment is how the client knows whether to use the
 key directly or prompt for a password to unwrap it. The server sees only `<id>`.
@@ -75,8 +75,9 @@ when the argument contains a path separator; a bare word that names an existing 
 asks for confirmation first (and errors as an unknown command without a terminal),
 so a typo'd subcommand never uploads a file.
 
-Global flags (all commands): `--server <url>` (default `http://localhost:8080`; the
-`aqt.sh` URLs below stand in for wherever you host it),
+Global flags (all commands): `--server <url>` (default `http://localhost:8080`; a
+share link is served by the server that stores the resource, so the
+`aqt.example.com` URLs below stand in for wherever you host it),
 `--profile <name>`, `--json`, `-q/--quiet`, `--progress` (live transfer bar on a
 terminal, for sync/clone), `-h/--help`, `-v/--version`.
 
@@ -133,12 +134,12 @@ aqt://7yQ2pe        (copied to clipboard)
 .env · 1.2 KB · private
 
 $ aqt push deploy.log --public
-https://aqt.sh/x/9fK2qd#k.Hs7nT4pQ2v…   (copied to clipboard)
+https://aqt.example.com/x/9fK2qd#k.Hs7nT4pQ2v…   (copied to clipboard)
 deploy.log · 84 KB · public
 
 $ aqt push .env --public -P
 Share password: ********
-https://aqt.sh/x/Qz81mn#p.R4t…         (copied to clipboard)
+https://aqt.example.com/x/Qz81mn#p.R4t…         (copied to clipboard)
 .env · 1.2 KB · public · password-gated
 ```
 
@@ -155,7 +156,7 @@ aqt cat  <url|id|ref>     Decrypt to stdout, never touches disk.
 ```
 
 ```console
-$ aqt pull https://aqt.sh/x/9fK2qd#k.Hs7…
+$ aqt pull https://aqt.example.com/x/9fK2qd#k.Hs7…
 wrote ./deploy.log (84 KB)
 
 $ aqt pull aqt://7yQ2pe          # private ref; uses your unlocked master key
@@ -486,22 +487,24 @@ Shallow clone, sharing/grants, and the Git wire protocol are not.
 ## 3a. Project layout & status
 
 ```text
-cmd/aqt/            CLI: login/logout, whoami, devices, passphrase, push, pull, cat, ls, info, find, share, unshare, shares, contacts, rm, snapshot, checkpoint, restore, usage, repo, git setup, watch/agent, tui, update  [implemented]
-cmd/aqt-server/     server entrypoint                                          [implemented]
+cmd/aqt/            CLI: signup/login/logout/lock, whoami, devices, passphrase, account, push, pull, cat, ls, info, find, mv, share, unshare, shares, contacts, rm, init/status/sync/clone/diff, snapshot, checkpoint, restore, usage, repo, git setup, watch/agent, tui, update  [implemented]
+cmd/aqt-server/     server entrypoint + `admin` account/quota tooling           [implemented + tested]
 cmd/updatectl/      release tooling: generate/sign/verify the update manifest   [implemented + tested]
-internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)         [implemented + tested]
-internal/api/       shared wire types                                          [implemented]
+internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)          [implemented + tested]
+internal/compress/  the one pinned zstd codec (convergent ids depend on it)     [implemented + tested]
+internal/api/       shared wire types + capability constants                    [implemented]
 internal/server/    Gin handlers + SQLite/FS store + packed object store + GC   [implemented + tested]
-internal/identity/  local profile, keystore, session cache                     [implemented + tested]
-internal/client/    HTTP API client                                            [implemented]
+internal/identity/  local profile, keystore, session cache                      [implemented + tested]
+internal/client/    HTTP API client                                             [implemented]
 internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
-internal/update/    signed release manifest + `aqt update --check`              [implemented + tested]
+internal/gitremote/ sealed bundle chain + RefsRoot behind `git-remote-aqt`      [implemented + tested]
+internal/update/    signed release manifest, verified download, atomic install  [implemented + tested]
 ```
 
 Working end-to-end today: signup/device-attach (Ed25519 challenge/response),
 device management (`devices ls`/`devices rm`, `logout --all-devices` to revoke
 other devices), private + public push/pull (key-in-fragment), password-gated
-links, `share`, `private` (key rotation), `ls` (decrypts names + sizes locally
+links, `share`, `unshare` (key rotation), `ls` (decrypts names + sizes locally
 from each resource's owner-wrapped key), `find` (fzf fuzzy search across files and
 folder contents), and a `login`-cached session key so the passphrase is entered
 once per session (`logout` clears it). Every push wraps the content key
@@ -759,10 +762,11 @@ unchanged, so pack non-determinism (ordering) does not affect dedup.
 references of the owner's live resources (file-chunk IDs ∪ manifest-object IDs). A
 pack is deleted when **none** of its objects is reachable from any root *and* it is
 older than an age guard (so an in-flight upload isn't reaped before its manifest
-commits). v1 tolerates dead objects inside a still-live pack (repack is a
-follow-up). No refcounts — the manifests are the source of truth, which survives
-crashes; the resource→objects foreign key is the backstop that rejects a root
-referencing an object the owner no longer stores.
+commits). Dead objects inside a still-live pack are reclaimed separately by
+`RepackOwner`, which copies the live objects into a fresh pack under a bounded byte
+budget and swaps atomically (§5). No refcounts — the manifests are the source of
+truth, which survives crashes; the resource→objects foreign key is the backstop that
+rejects a root referencing an object the owner no longer stores.
 
 **`.aqtignore`** uses a pragmatic gitignore subset (comments, anchored paths,
 `*`/`?`/`**` globs, trailing-slash dir rules); `.aqt/` and `.git/` are always
@@ -921,15 +925,42 @@ GET    /v1/resources/:id             → { ciphertext, encryptedMeta, visibility
                                      read limit, or been reclaimed. Owner reads are never counted or expired
                                      (until reclaimed).
 POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxReads? }
-                                     Used by `share`/`private`; rotation just replaces the blob. Echoes the
+                                     Used by `share`/`unshare`; rotation just replaces the blob. Echoes the
                                      accepted policy; a private flip clears it.
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility). Paginated
                                      (?limit=, ?cursor=) → { resources, nextCursor? }; see pagination note below.
+PUT    /v1/resources/:id/metadata    Replace only the sealed metadata (a rename), leaving the blob
+                                     and objects untouched. Owner only, `expectedVersion`-checked.
 POST   /v1/public/resources/:id/objects  Unauthenticated. Body: { ids } → positional length-prefixed
                                      object slices. Serves exact objects of a PUBLIC resource, each id
                                      of which must be referenced by that resource (the share-link read
                                      path for a public/gated streamed file). ≤10,000 ids per call.
+GET    /v1/public/resources/:id/preflight  Unauthenticated, uncounted. → { id, encryptedMeta, minClient,
+                                     expiresAt?, maxReads?, reads? }. Lets the browser share page decide
+                                     whether a counted fetch is supported and worth spending, without
+                                     serving ciphertext or key material. 410 like any dead link.
+
+# Account maintenance (owner token). None of these re-encrypt a resource:
+PUT    /v1/account/passphrase        Re-wrap the root key under a new passphrase. Bumps the auth epoch
+                                     (every other device's token dies) and rotates the stored verifier.
+PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root key with every re-wrapped
+                                     key and migrated identity, atomically, keeping only this device.
+GET    /v1/account/usage             → { storageBytes, quotaBytes?, packs, objects, resources, snapshots,
+                                     devices, max*? }  What `aqt usage` reports, including the caps that
+                                     actually apply to this account.
+
+# Snapshots (owner token): immutable, GC-pinned copies of a resource version. The
+# ciphertext is reused, not re-uploaded, and min_client is copied from the source at
+# capture time so a restore is gated exactly like a resource read:
+POST   /v1/snapshots                 Body: { resourceId, encryptedLabel?, anchor?, automatic? } → SnapshotInfo
+GET    /v1/snapshots                 List (?resourceId=, ?limit=, ?cursor=) → { snapshots, nextCursor? }
+GET    /v1/snapshots/:id             → { snapshot, blob, minClient? }; 426 like a resource read.
+POST   /v1/snapshots/:id/anchor      Body: { anchored }. An anchored snapshot is exempt from every
+                                     retention path; deleting one is 409 `snapshot_anchored`.
+DELETE /v1/snapshots/:id
+POST   /v1/resources/:id/auto-snapshot   Body: { enabled }. Per-resource opt-out from the server's
+                                     scheduled snapshot job.
 
 # Account-to-account grants (read-only). A grant is the resource's content key
 # HPKE-wrapped (RFC 9180, X25519+ChaCha20-Poly1305) client-side to the grantee's
@@ -1011,12 +1042,20 @@ self-hosted default):
 ```
 AQT_REGISTRATION     open (default) | invite      # invite gates signup on a token
 AQT_INVITE_TOKENS    tok1,tok2                     # accepted invite secrets (invite mode)
-AQT_QUOTA_BYTES      0                             # per-owner stored-pack-byte cap; 0 = unlimited
+AQT_QUOTA_BYTES      0                             # per-owner physical storage cap; 0 = unlimited
+AQT_MAX_RESOURCES    0                             # per-account live resource rows; 0 = unlimited
+AQT_MAX_SNAPSHOTS    0                             # per-account retained snapshot rows; 0 = unlimited
+AQT_MAX_OBJECTS      0                             # per-account packed object rows; 0 = unlimited
 AQT_MAX_DEVICES      0                             # per-account device cap; 0 = unlimited
 AQT_AUTH_RATE        0                             # authed requests/sec per token; 0 = default (50)
 AQT_AUTH_BURST       0                             # authed burst per token; 0 = default (500)
 AQT_TRUSTED_PROXIES  (unset = loopback)            # X-Forwarded-* trust; "none" trusts none
 ```
+
+Those are the abuse controls the protocol assumes. The full operator surface — TLS,
+metrics, snapshot and GC timers, shutdown grace, per-account quota overrides — lives
+in **docs/deploy.md**, which is authoritative for defaults; this list is not repeated
+there and does not try to mirror it.
 
 A client whose server runs in invite mode passes the token via `aqt signup --invite`
 (or `AQT_INVITE_TOKEN`). `aqt login` attaches a device to an account that already
@@ -1054,10 +1093,15 @@ function currentSession(): Session | null;                                 // fo
 
 ---
 
-## 5. Open implementation questions (not blocking the interface)
+## 5. Resolved behavior and open limitations
 
-- **Large single files / streaming** — a private single file at or above ~8 MiB now streams: `push` chunks it (FastCDC), convergent-seals and packs it in a bounded-memory pass, and stores a tiny sealed `FileRoot` (the resource blob) naming the objects; `pull`/`cat` range-fetch the packs and materialize straight to disk. Memory is O(one pack), and the inline body cap no longer bounds private file size. Smaller files keep the one-shot inline path. Public and gated single files now stream the same way — a link holder reads their objects through the per-resource public object endpoint (`POST /v1/public/resources/:id/objects`), and `share`/`private` re-wrap only the root, so the content bytes are never re-sealed. Stdin still seals in memory under the body cap.
-- **Manifest size / subtree dedup** — *implemented (Phase 4):* a chunked folder is now a Merkle DAG of directory nodes. Each directory node lists its name-sorted children and is sealed through the convergent pipeline under a distinct `aqt-treenode-v1` AAD, so a node's content address is its subtree Merkle hash and a moved/copied/renamed directory dedups for free (its node and file chunks are already on the server). The resource blob is a tiny sealed `TreeRoot` under `AADTreeRoot`. Directories are first-class: empty directories round-trip and directory modes propagate. The format is a clean break (`tree` metadata flag, v2); older folders are not read. The reconcile's remote read is lazy: because directory nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares with it is served from those bytes, so an unchanged subtree is reconstructed without a fetch and only the nodes on a spine that changed since the base hit the network — a no-op sync does zero node round-trips. The level-batched fetch shares one pack source (object locations, spans, and the byte-bounded LRU) across the whole walk, so a pack carrying nodes from several levels is range-fetched once, and a node landing inside an already-fetched span is served from memory. Directory-mode conflicts surface like file conflicts (a plain sync aborts; `--force` takes local; `--conflicts=copy` keeps the local file and preserves the remote one as a `<name>.conflict-<host>-<timestamp>` copy, but a directory-mode conflict has no copy and always resolves local-wins). Rename detection is reporting-only: a move dedups its bytes and still executes as delete+add, but `status`, `sync --dry-run`, and `snapshot diff` coalesce an unambiguous delete+add pair (same content address, one path per side) into `renamed old -> new`, with whole-directory moves collapsing to one entry via the stable subtree hash.
+The questions the interface deliberately left open, and what became of each.
+*resolved* means it ships and the behavior described is exercised by `go test ./...`,
+with the remaining caveats stated inline. What is still genuinely open is collected
+under [Still open](#still-open) at the end, rather than buried inside a resolution.
+
+- **Large single files / streaming** — *resolved:* a private single file at or above ~8 MiB now streams: `push` chunks it (FastCDC), convergent-seals and packs it in a bounded-memory pass, and stores a tiny sealed `FileRoot` (the resource blob) naming the objects; `pull`/`cat` range-fetch the packs and materialize straight to disk. Memory is O(one pack), and the inline body cap no longer bounds private file size. Smaller files keep the one-shot inline path. Public and gated single files now stream the same way — a link holder reads their objects through the per-resource public object endpoint (`POST /v1/public/resources/:id/objects`), and `share`/`unshare` re-wrap only the root, so the content bytes are never re-sealed. Stdin still seals in memory under the body cap.
+- **Manifest size / subtree dedup** — *resolved:* a chunked folder is now a Merkle DAG of directory nodes. Each directory node lists its name-sorted children and is sealed through the convergent pipeline under a distinct `aqt-treenode-v1` AAD, so a node's content address is its subtree Merkle hash and a moved/copied/renamed directory dedups for free (its node and file chunks are already on the server). The resource blob is a tiny sealed `TreeRoot` under `AADTreeRoot`. Directories are first-class: empty directories round-trip and directory modes propagate. The format is a clean break (`tree` metadata flag, v2); older folders are not read. The reconcile's remote read is lazy: because directory nodes are content-addressed, the last-synced base tree is sealed in memory and any node the remote shares with it is served from those bytes, so an unchanged subtree is reconstructed without a fetch and only the nodes on a spine that changed since the base hit the network — a no-op sync does zero node round-trips. The level-batched fetch shares one pack source (object locations, spans, and the byte-bounded LRU) across the whole walk, so a pack carrying nodes from several levels is range-fetched once, and a node landing inside an already-fetched span is served from memory. Directory-mode conflicts surface like file conflicts (a plain sync aborts; `--force` takes local; `--conflicts=copy` keeps the local file and preserves the remote one as a `<name>.conflict-<host>-<timestamp>` copy, but a directory-mode conflict has no copy and always resolves local-wins). Rename detection is reporting-only: a move dedups its bytes and still executes as delete+add, but `status`, `sync --dry-run`, and `snapshot diff` coalesce an unambiguous delete+add pair (same content address, one path per side) into `renamed old -> new`, with whole-directory moves collapsing to one entry via the stable subtree hash.
 - **Persistent metadata cache** — *resolved:* every remote tree walk (clone, cold reconcile, `find`, snapshot diff) shares an on-disk, content-addressed cache of directory-node and chunk-list ciphertexts (default `~/.cache/aqt/nodes`, `AQT_NODE_CACHE_DIR` overrides, `AQT_NO_NODE_CACHE=1` disables). An object's id is the sha256 of its ciphertext, so entries are immutable (no invalidation, ever) and self-verifying (a corrupt file fails its hash check and is dropped); `OpenNode` re-verifies on open either way, so a disk hit is exactly as trustworthy as a server fetch. Only ciphertext is stored — the same bytes the server keeps — and the cache is LRU-pruned to a 256 MiB budget. A repeated `find` or diff over a large account therefore fetches only nodes it has never seen.
 - **Subpath addressing** — *resolved:* `aqt://<id>/<path>` addresses one entry inside a chunked folder. `pull`/`cat` walk only the path's spine (one directory node per segment) and fetch just that entry's chunks; pulling a directory materializes its subtree from the subtree's own content-addressed node without touching the rest of the folder; `aqt ls <folder>[/<path>]` lists one directory by fetching the spine plus that node. Pack-and-seal folders refuse with guidance (no per-entry objects exist — the privacy trade-off working as intended).
 - **Repack** — *resolved:* `RepackOwner` compacts partially-dead packs (copies live objects into a fresh pack under a bounded byte budget, swapping atomically after a re-check of age and liveness), so dead objects inside still-live packs are now reclaimed.
@@ -1066,7 +1110,7 @@ function currentSession(): Session | null;                                 // fo
 - **Public whole-folder sharing** — *resolved:* `aqt share <folder-id>` now works for chunked (tree) folders. No new object space was needed: a folder's `chunkRefs` already root every directory node, chunk-list segment, and file chunk, so the existing per-resource public object endpoint (`POST /v1/public/resources/:id/objects`, membership-checked against the referenced set) serves the whole DAG once the resource is public, and the folder content key travels in the link fragment exactly as for files (`#k.` public, `#p.` gated; expiry/`--max-reads`/`--burn` apply unchanged — only the resource fetch counts as a read, so a clone's many object requests consume one). A link holder runs `aqt clone <link>` (materializes the tree read-only, writes no tracking state — there is no token to sync with) or `aqt pull <link>/<subpath>` (spine-only walk; both the URL-path form `.../x/<id>/<path>#<frag>` and a subpath appended after the fragment are accepted). Zero-knowledge is unchanged: the server still stores and serves only ciphertext, and there is no unauthenticated write route, so links are pull-only by construction. `aqt unshare <folder-id>` rotates root-only, like a streamed file: the `TreeRoot` and metadata re-seal under a fresh content key while the convergent nodes/chunks stay (their per-object keys derive from the account convergence key, which a link never carried), and the re-PUT carries the full recomputed GC roots. Pack-and-seal folders stay unshareable (no per-entry objects — the privacy trade-off working as intended).
 - **Argon2id tuning** (`time`/`memory`) per machine — *resolved:* `crypto.CalibrateKdf` benchmarks the creating machine at signup (and on `passphrase change`) and scales the iteration count to a preset's target unlock time (`interactive` ~0.5s/64 MiB, `moderate` ~1s/256 MiB default, `sensitive` ~2.5s/1 GiB), stepping memory down toward a 64 MiB floor on a machine too slow to fit one pass. Params are public and travel with the account, so every device re-derives the same key; `--kdf-preset` and manual `--kdf-time/--kdf-memory/--kdf-threads` override, and `passphrase calibrate` re-tunes an existing account in place via the cheap wrapped-root re-wrap (no resource is re-encrypted; other devices re-login).
 - **Account-enumeration oracle** — *resolved:* unauthenticated auth routes are rate-limited, and `GET /account/salt` returns an indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 404. The decoy's Argon2id costs are now drawn per-email (HKDF over the server secret) from the same value set a moderate calibration produces (memory ∈ {64, 128, 256 MiB}, iterations clustered where a ~1 s unlock lands on common hardware) rather than the fixed package default, so a decoy's params no longer stand out. `POST /account` no longer answers `409` on a duplicate email in the default *open* registration mode: it returns the same success shape with a decoy token that grants nothing, so signup stops being an existence oracle (the caller's next authenticated call fails, matching the wrong-passphrase ambiguity). An *invite* mode (`AQT_REGISTRATION=invite` + `AQT_INVITE_TOKENS`) additionally gates every signup on a server-issued token, closing the email-squatting hole for hosted deployments.
-- **Authenticated-route abuse / quotas** — *resolved:* the authenticated group is now rate-limited per device token (coarse token-bucket, generous burst so a large sync/clone is unaffected), with a second, far tighter limiter on the expensive `POST /gc` keyed per owner. Per-owner quotas cap stored pack bytes (`AQT_QUOTA_BYTES`) and device count (`AQT_MAX_DEVICES`); `0` means unlimited. The byte counter is maintained incrementally inside the pack put / GC / repack transactions (a column on `accounts`, backfilled on migration), so a quota check is one indexed read and never scans the objects table. An over-quota pack put returns `507`, which the client surfaces distinctly.
+- **Authenticated-route abuse / quotas** — *resolved:* the authenticated group is now rate-limited per device token (coarse token-bucket, generous burst so a large sync/clone is unaffected), with a second, far tighter limiter on the expensive `POST /gc` keyed per owner. Per-owner quotas cap physical storage — packs, resource blobs, retained snapshots, and attributable database growth (`AQT_QUOTA_BYTES`, overridable per account with `aqt-server admin accounts quota`) — plus resource, snapshot, object, and device counts (`AQT_MAX_RESOURCES`/`_SNAPSHOTS`/`_OBJECTS`/`_DEVICES`); `0` means unlimited. The byte counter is maintained incrementally inside the pack put / GC / repack transactions (a column on `accounts`, backfilled on migration), so a quota check is one indexed read and never scans the objects table. An over-quota pack put returns `507`, which the client surfaces distinctly.
 - **Trusted proxies** — *resolved:* the Gin engine's trusted-proxy list is set explicitly (`AQT_TRUSTED_PROXIES`, default loopback-only, `none` to trust none), so the `X-Forwarded-*` foot-gun is no longer left at Gin's trust-all default. The rate-limit bucket key stays on the TCP peer address regardless, so a spoofed forwarded header cannot mint fresh buckets.
 - **Defense-in-depth crypto** — *resolved:* AEAD additional-data domain separation across blob/wrap/gated-wrap has been in since v1; the resource id is now bound into the AAD as well (`SealBound`/`OpenBound`, tag form `aqt-<role>-v2:<id>` over the meta, inline body, and the FileRoot/TreeRoot/PackRoot resource blobs, plus snapshot labels), so a server swapping whole records (blob + meta + wrapped key are mutually consistent under the per-resource key) between ids fails the tag check. The id the check verifies against is the client's own: `GetResource` rejects a response whose echoed id differs from the requested one (and a filtered snapshot listing rejects rows claiming another resource), so the server cannot satisfy the binding by echoing the id of whatever record it chose to serve. Chunk objects, directory nodes, and pack segments stay id-free — they are content-addressed, client-verified against their address, and reachable only through an id-bound root, and binding them would kill cross-resource dedup. Bounded caveats: (1) a create seals before the server assigns the id, so a resource is unbound until its first re-seal (folder syncs upgrade the root — and once, the metadata — on the next update; a one-shot `push` stays unbound); (2) the v1 fallback that keeps old blobs readable means a server can serve a stale unbound blob (it still cannot forge or cross-open one) — full strictness would need client-generated ids and a fallback cut-off; (3) a snapshot browsed without naming a resource has no client-side expectation to pin its claimed resource id to (in-place restore checks the tracked folder's id; `--out` restores trust the claim); (4) once a folder has synced with an id-binding client, its root no longer opens on clients from before this change — upgrade every device together. Capability negotiation (`X-Aqt-Capability` request header + a per-resource `min_client` the server enforces with `426 Upgrade Required`, see §4.3 and `docs/compatibility.md`) gates every declared format boundary: a client below a resource's `min_client`, including a header-less client treated as baseline capability 1, is refused before any ciphertext is served. Key wiping: `ContentKey.Wipe` exists and every acquisition site scrubs on scope exit, including the longest-lived by-value copies in the sync/pack apply contexts; transient by-value copies on intermediate stack frames remain out of reach, the inherent Go caveat `Wipe` documents.
 - **Session cache at rest** — *resolved:* the cached master key is sealed under a random per-profile key kept in the OS keychain (macOS Keychain, Windows Credential Manager, Linux Secret Service, via pure-Go `zalando/go-keyring`); the on-disk 0600 file holds only ciphertext + `expiresAt` and is useless without the keychain entry. The device token moves into the keychain too. A host with no keychain backend (headless server), or one that sets `AQT_NO_KEYCHAIN=1`, falls back to the machine-bound key/file, so non-interactive operation is unchanged there. Remaining caveat: a process running as the same user can still reach the keychain (or re-derive the machine key); fully closing that needs a passphrase/biometric-gated agent or hardware enclave, still deferred. Exposure stays bounded by `--ttl` and cleared by `logout`.
@@ -1079,5 +1123,33 @@ passphrase is cached per session so it is entered once, not per command. Content
 defined chunking + dedup is built for folders (FastCDC + keyed convergent
 encryption, §4.2a); chunk lifecycle is mark-and-sweep GC scoped per owner.
 
-These are deliberately left to implementation; the interfaces above don't change
-based on how they're answered.
+### Still open
+
+Everything above ships. These four do not, and each is a deliberate limit rather
+than an unfinished task — they are the honest answer to "what does aqt still not
+protect you from":
+
+- **Chunk size-sequence fingerprint.** Chunked mode leaks the sequence of ciphertext
+  chunk lengths, so an attacker holding a candidate file can confirm its presence
+  without breaking anything (§4.2a). The mitigation that exists today is choosing
+  `pack: true`. Length-bucket padding would blunt it but changes the sealed
+  ciphertext length and therefore the content address, breaking dedup identity
+  against every existing chunk; deferred rather than folded into the seal path.
+- **Same-user process reach.** The session cache and `.aqt/base.json` are sealed
+  under a keychain-held per-profile key, which stops an off-machine copy but not a
+  process running as the same user on the same machine. Closing it needs a
+  passphrase- or biometric-gated agent, or a hardware enclave.
+- **Grant to an address that has never been pinned.** `GET /v1/account/keys` returns
+  an indistinguishable decoy for an unknown email — that is what removes the
+  existence oracle, but it also means a hostile server can answer a first-time
+  `share --with` for an unregistered address with a key it controls. The client
+  pins on first use, warns on stderr, and offers `aqt contacts verify <email>` for an
+  out-of-band fingerprint comparison, so the exposure is trust-on-first-use, not a
+  standing hole — but a first grant to a never-seen address is only as trustworthy
+  as that verification.
+- **Pre-migration plaintext residue.** Upgrading an old plaintext `.aqt/base.json`
+  writes the sealed form through an atomic rename; the freed disk blocks holding the
+  old plaintext are not scrubbed. Forensic-only, and local to that disk.
+
+Nothing here changes an interface above, which is why they are recorded as limits
+rather than blocking work.

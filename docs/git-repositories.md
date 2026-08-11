@@ -12,22 +12,19 @@ Git resolves an `aqt::` remote by executing a program named exactly `git-remote-
 on `PATH`. `aqt` answers to that name itself, so the integration is a link pointing at
 the client — one binary, nothing to upgrade separately.
 
-Unpack the `aqt` archive for your platform from the
-[latest release](https://github.com/Aquitano/aqt-sync/releases/latest) into a directory
-on `PATH`, then create the link:
+Install `aqt` (see the [README](../README.md#install)), then create the link:
 
 ```sh
-mkdir -p "$HOME/.local/bin"
-tar -xzf aqt_<version>_<os>_<arch>.tar.gz -C "$HOME/.local/bin"
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh
 export PATH="$HOME/.local/bin:$PATH"
 aqt git setup
 ```
 
 `aqt git setup` creates the link beside the running binary, reports where it put it,
 and warns if that directory is not on `PATH` or if another `git-remote-aqt` comes
-first. It is safe to re-run. Pass `--dir` to put the link somewhere else on `PATH`;
-for a Homebrew, WinGet, or Scoop install it refuses the package's own directory,
-because the package provides the link.
+first. It is safe to re-run. Pass `--dir` to put the link somewhere else on `PATH`.
+It refuses to write into a directory a package manager owns, since a package that
+ships `aqt` would ship the link with it.
 
 On Windows the archive is a `.zip` carrying `aqt.exe`, and the link is
 `git-remote-aqt.exe`. A symlink there needs Developer Mode or an elevated shell, so

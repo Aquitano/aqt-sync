@@ -5,7 +5,7 @@ HTTP(S) and stores everything under one data directory. It performs no decryptio
 merge, or filename inspection — the data directory is entirely ciphertext and opaque
 metadata.
 
-- [Build and run](#build-and-run)
+- [Install and run](#install-and-run)
 - [Configuration](#configuration)
 - [TLS](#tls)
 - [systemd](#systemd)
@@ -14,9 +14,24 @@ metadata.
 - [Managing accounts](#managing-accounts)
 - [Health checks and upgrades](#health-checks-and-upgrades)
 
-## Build and run
+## Install and run
 
-Pure Go, no CGO:
+The install script fetches the release build of both binaries:
+
+```
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --server
+AQT_DATA_DIR=./aqt-data ~/.local/bin/aqt-server     # plain HTTP on :8080
+```
+
+`aqt` is checked against the size and SHA-256 the release's `aqt-update.json`
+declares; `aqt-server`, which that manifest does not cover, is checked against the
+release's `checksums.txt`, and the install fails rather than proceeding unverified.
+Neither check is a signature check — verifying Ed25519 in shell is not practical, so
+the script trusts the origin it downloads from, and every later `aqt update` verifies
+the manifest signature against keys compiled into the binary. `AQT_INSTALL_DIR` picks
+another directory and `--version=vX.Y.Z` pins a release.
+
+Building from a checkout works too — pure Go, no CGO:
 
 ```
 go build -o aqt-server ./cmd/aqt-server
@@ -397,7 +412,9 @@ via `aqt usage` (`GET /v1/account/usage`).
 
 - **Liveness.** `GET /livez` (and the compatibility alias `/healthz`) returns `200` without touching storage.
 - **Readiness.** `GET /readyz` checks storage and returns `503` during shutdown or when storage is unavailable. Use it for traffic admission.
-- **Upgrades.** Build the new binary, replace it, and restart the service. The
+- **Upgrades.** Fetch the new binary (install script or a build from the checkout),
+  replace it, and restart the service. `aqt update` is the client's self-update path
+  and does not touch a server install. The
   graceful shutdown marks readiness false, stops new background work, and drains HTTP, metrics, snapshots, and GC, so a restart does not sever an
   upload mid-write. Storage formats are versioned; a newer server reads older data.
 - **Scheduled jobs.** Snapshots and GC run on the server timers above; there is no

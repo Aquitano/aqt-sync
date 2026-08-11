@@ -6,8 +6,8 @@
 # a filename or trusts a length. Full signature verification happens on every later
 # `aqt update`, which checks the manifest against keys compiled into the binary.
 #
-#   curl -fsSL https://aqt-sync.vercel.app/install.sh | sh
-#   curl -fsSL https://aqt-sync.vercel.app/install.sh | sh -s -- --server
+#   curl -fsSL https://web.sync.aquitano.me/install.sh | sh
+#   curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --server
 #
 # Environment:
 #   AQT_INSTALL_DIR   where to put the binaries (default ~/.local/bin)

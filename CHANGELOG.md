@@ -33,8 +33,8 @@ All notable changes to this project are documented in this file.
   know to ask about it.
 
 - Install scripts for macOS, Linux, and Windows, served from the landing site:
-  `curl -fsSL https://aqt-sync.vercel.app/install.sh | sh` and
-  `iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex`. Each reads the release's
+  `curl -fsSL https://web.sync.aquitano.me/install.sh | sh` and
+  `iwr -useb https://web.sync.aquitano.me/install.ps1 | iex`. Each reads the release's
   signed update manifest to learn which archive belongs to the platform, then refuses
   a download whose length or SHA-256 disagrees with what that manifest declares —
   neither script guesses an asset name. `--server` also installs `aqt-server`,
@@ -406,6 +406,11 @@ No release artifacts were published. The signing key was lost before publication
 and this tag is superseded by v0.4.1.
 
 ## [v0.3.0] - 2026-07-21
+
+Never tagged or published — the date is when the work landed on `main`. Everything
+below first reached users in v0.4.1, since v0.4.0 published no artifacts either.
+Kept as written because other documents cite these changes; do not treat `v0.3.0`
+as an installable version.
 
 ### Breaking Changes
 

@@ -18,13 +18,13 @@ See [DESIGN.md](DESIGN.md) for the full protocol and threat model.
 macOS and Linux:
 
 ```
-curl -fsSL https://aqt-sync.vercel.app/install.sh | sh
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh
 ```
 
 Windows (PowerShell):
 
 ```
-iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex
+iwr -useb https://web.sync.aquitano.me/install.ps1 | iex
 ```
 
 Both scripts read the release's signed update manifest to learn which archive
@@ -164,9 +164,11 @@ length and digest, and keeps the previous binary until the new one has run and
 reported the expected version. `--check` changes nothing; `--yes` skips the prompt;
 `--prerelease` opts into the beta channel; `--json` is machine-readable.
 
-Only a standalone installation is replaced. Homebrew, WinGet, and Scoop
-installations, and builds from source, are reported with the command their owner
-expects and are never overwritten.
+Only a standalone installation is replaced — which is what the install scripts
+produce. A build from source, or a copy some package manager owns, is reported with
+the command its owner expects and is never overwritten. aqt is not published through
+Homebrew, WinGet, or Scoop; that detection exists so a third-party package would
+never be clobbered.
 
 Nothing checks on its own by default. `aqt update policy notify` prints one line a day
 when a release is available; `auto` also installs stable releases once no watch agent
