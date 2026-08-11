@@ -407,6 +407,11 @@ and this tag is superseded by v0.4.1.
 
 ## [v0.3.0] - 2026-07-21
 
+Never tagged or published — the date is when the work landed on `main`. Everything
+below first reached users in v0.4.1, since v0.4.0 published no artifacts either.
+Kept as written because other documents cite these changes; do not treat `v0.3.0`
+as an installable version.
+
 ### Breaking Changes
 
 - `aqt logout` now revokes this device on the server and deletes its local

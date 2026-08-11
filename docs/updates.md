@@ -49,12 +49,12 @@ checked against the size and digest that signed manifest declares.
 
 ```json
 {
-  "currentVersion": "v0.3.0",
-  "availableVersion": "v0.4.0",
+  "currentVersion": "v0.5.0",
+  "availableVersion": "v0.6.0",
   "channel": "stable",
   "status": "updateAvailable",
-  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.4.0",
-  "publishedAt": "2026-07-26T11:00:00Z"
+  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.6.0",
+  "publishedAt": "2026-08-09T21:47:59Z"
 }
 ```
 
@@ -72,7 +72,7 @@ failed check exits `1`, or `5` for a network error.
 ### Channels
 
 `stable` is the default and never carries a prerelease. `beta` is opt-in via
-`--prerelease` and additionally carries tags with a prerelease suffix (`v0.4.0-rc.1`),
+`--prerelease` and additionally carries tags with a prerelease suffix (`v0.7.0-rc.1`),
 which the release workflow already marks as GitHub prereleases.
 
 Beta is a superset, not a separate track: when no prerelease is outstanding — the
@@ -83,13 +83,44 @@ published on, so a beta check that lands on a stable release says `stable`.
 The containment is one-directional, and the channel is part of what is signed: a
 beta manifest served to a stable check is refused even though it is authentic.
 
+## The first install
+
+`aqt update` maintains an installation; it cannot create one. The first copy comes
+from the install script the landing site serves:
+
+```
+curl -fsSL https://aqt-sync.vercel.app/install.sh | sh      # macOS, Linux
+iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex     # Windows
+```
+
+Both read the release's signed `aqt-update.json` to learn which archive belongs to
+the platform, then refuse a download whose length or SHA-256 disagrees with what
+that manifest declares — neither script guesses an asset name. `sh -s -- --server`
+also installs `aqt-server`, which no signed manifest covers, so it is checked
+against the release's `checksums.txt` instead; an unreadable or entry-less
+checksums file is a refusal rather than a warning. `AQT_INSTALL_DIR` relocates the
+install (default `~/.local/bin`) and `--version=vX.Y.Z` pins a release.
+
+The trust boundary differs from `aqt update` in exactly one place. Verifying an
+Ed25519 signature in shell is not practical, so the first install trusts the origin
+it downloads from; everything after it does not, because the updater checks the
+manifest signature against keys compiled into the binary. To close that first gap
+too, download from the releases page and check the build provenance with
+`gh attestation verify` before running anything.
+
+Installing a release archive is also what makes updating work at all: a `make build`
+or `go install` copy reports its version as `dev`, which names no release, so the
+updater reports it rather than replacing it.
+
 ## Installation ownership
 
 `aqt update` replaces only an installation nothing else is tracking. Everything else
 is reported with the command its real owner expects, and is never overwritten:
 rewriting a file a package manager installed would leave that manager's records
 describing bytes that no longer match, and the next `brew upgrade` would quietly
-revert the update anyway.
+revert the update anyway. aqt is not published through any of these managers today —
+the install script produces a standalone copy — so the rows below exist to keep a
+third-party or future package from being clobbered.
 
 | Owner | How it is recognized | What `aqt update` does |
 | --- | --- | --- |
@@ -222,17 +253,17 @@ Published as the release asset `aqt-update.json`:
 {
   "schema": 1,
   "channel": "stable",
-  "version": "v0.4.0",
-  "publishedAt": "2026-07-26T11:00:00Z",
-  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.4.0",
+  "version": "v0.6.0",
+  "publishedAt": "2026-08-09T21:47:59Z",
+  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.6.0",
   "artifacts": [
     {
       "os": "linux",
       "arch": "amd64",
-      "name": "aqt_v0.4.0_linux_amd64.tar.gz",
+      "name": "aqt_v0.6.0_linux_amd64.tar.gz",
       "size": 8123456,
       "sha256": "3b1f…",
-      "url": "https://github.com/Aquitano/aqt-sync/releases/download/v0.4.0/aqt_v0.4.0_linux_amd64.tar.gz"
+      "url": "https://github.com/Aquitano/aqt-sync/releases/download/v0.6.0/aqt_v0.6.0_linux_amd64.tar.gz"
     }
   ]
 }
@@ -377,7 +408,7 @@ installation. A forged manifest can misreport a version, not install anything.
 ## Verifying a release by hand
 
 ```
-gh release download v0.4.1 --pattern 'aqt-update.json*' --dir /tmp/aqt
+gh release download v0.6.0 --pattern 'aqt-update.json*' --dir /tmp/aqt
 go run ./cmd/updatectl verify --in /tmp/aqt/aqt-update.json --sig /tmp/aqt/aqt-update.json.sig
 ```
 

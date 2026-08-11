@@ -39,6 +39,12 @@ only when it is itself a tracked root.
   appear.
 - `--against <snapshot-id>`: snapshot versus the working tree. The snapshot must
   belong to that tracked resource.
+- `--against remote`: the folder's current remote state versus the working tree,
+  with no base involved — so two sides that converged on the same content report no
+  differences even while `status` still shows work pending on each. It needs the
+  folder key: on a terminal it prompts, and under `--json` or a non-terminal stdin a
+  locked session reports `"complete": false` with `"reason": "session-locked"`
+  instead of blocking on a prompt nobody would answer.
 
 Binary files (a NUL in the first 8 KiB) and files over 8 MiB emit one
 `Binary files <old> and <new> differ` line. Last-synced and incoming comparisons
