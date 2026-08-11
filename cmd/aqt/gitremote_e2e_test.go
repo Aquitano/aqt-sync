@@ -2,12 +2,14 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -560,28 +562,53 @@ func configureGitTestEnv(t *testing.T) {
 // the git-remote-aqt link `aqt git setup` creates beside it.
 func installGitRemoteHelper(t *testing.T, bin string) {
 	t.Helper()
-	exe := filepath.Join(bin, "aqt")
-	buildTestBinary(t, exe, ".")
-	if runtime.GOOS == "windows" {
-		exe += ".exe"
+	src, err := sharedAqtBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	exe := filepath.Join(bin, filepath.Base(src))
+	if _, err := linkHelper(src, exe); err != nil {
+		t.Fatalf("install aqt: %v", err)
 	}
 	if _, err := linkHelper(exe, filepath.Join(bin, helperLinkName())); err != nil {
 		t.Fatalf("link %s: %v", helperName, err)
 	}
 }
 
-func buildTestBinary(t *testing.T, output, pkg string) {
-	t.Helper()
-	// Git discovers the helper by PATH lookup, which on Windows only considers
-	// PATHEXT suffixes. An extensionless git-remote-aqt is invisible to it.
-	if runtime.GOOS == "windows" {
-		output += ".exe"
-	}
-	cmd := exec.Command("go", "build", "-o", output, pkg)
-	cmd.Dir = "."
-	if data, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("build %s: %v\n%s", pkg, err, data)
-	}
+// The nine tests that install the Git helper all want the same aqt binary. Its
+// compile is cached but its link is not, so building per test spent about half a
+// second each on Linux and considerably more on Windows. Build it once per package
+// run and link that into each test's bin directory.
+var (
+	sharedAqtOnce sync.Once
+	sharedAqtExe  string
+	sharedAqtErr  error
+	sharedAqtDir  string
+)
+
+func sharedAqtBinary() (string, error) {
+	sharedAqtOnce.Do(func() {
+		dir, err := os.MkdirTemp("", "aqt-helper-*")
+		if err != nil {
+			sharedAqtErr = err
+			return
+		}
+		sharedAqtDir = dir
+		// Git discovers the helper by PATH lookup, which on Windows only considers
+		// PATHEXT suffixes. An extensionless git-remote-aqt is invisible to it.
+		exe := filepath.Join(dir, "aqt")
+		if runtime.GOOS == "windows" {
+			exe += ".exe"
+		}
+		cmd := exec.Command("go", "build", "-o", exe, ".")
+		cmd.Dir = "."
+		if data, err := cmd.CombinedOutput(); err != nil {
+			sharedAqtErr = fmt.Errorf("build aqt: %v\n%s", err, data)
+			return
+		}
+		sharedAqtExe = exe
+	})
+	return sharedAqtExe, sharedAqtErr
 }
 
 func gitRun(t *testing.T, dir string, args ...string) {

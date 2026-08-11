@@ -28,6 +28,9 @@ func TestMain(m *testing.M) {
 	os.Setenv("AQT_NODE_CACHE_DIR", filepath.Join(testRoot, "nodecache"))
 	code := m.Run()
 	os.RemoveAll(testRoot)
+	if sharedAqtDir != "" {
+		os.RemoveAll(sharedAqtDir)
+	}
 	os.Exit(code)
 }
 

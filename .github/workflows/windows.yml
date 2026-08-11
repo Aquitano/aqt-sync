@@ -16,6 +16,8 @@ jobs:
   test:
     name: native test
     runs-on: windows-latest
+    # A hung job would otherwise run to the 6h default, billed at the 2x Windows rate.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
