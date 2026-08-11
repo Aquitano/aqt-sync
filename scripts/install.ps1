@@ -111,9 +111,13 @@ try {
 }
 
 $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-if ($userPath -notlike "*$Dir*") {
-    [Environment]::SetEnvironmentVariable('Path', "$userPath;$Dir", 'User')
-    $env:Path = "$env:Path;$Dir"
+# Compare entry by entry rather than as a substring: a directory nested under one
+# already on PATH is not itself on PATH. An empty entry means "the current
+# directory" to Windows, so an unset user PATH must not gain a leading separator.
+$entries = @($userPath -split ';' | Where-Object { $_ })
+if (@($entries | ForEach-Object { $_.TrimEnd('\') }) -notcontains $Dir.TrimEnd('\')) {
+    [Environment]::SetEnvironmentVariable('Path', (($entries + $Dir) -join ';'), 'User')
+    $env:Path = (@($env:Path -split ';' | Where-Object { $_ }) + $Dir) -join ';'
     Write-Host "added $Dir to your user PATH (open a new terminal for it to take effect elsewhere)"
 }
 

@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v0.7.0] - 2026-08-11
 
 ### Added
 
@@ -114,6 +114,18 @@ All notable changes to this project are documented in this file.
   symlink resolves by name and follows the update; the hard-link and copy fallbacks
   stay bound to the file the update renamed away, so the update reports the stale
   link and names the command that remakes it.
+
+- An update fetch that started over HTTPS now refuses a redirect back to plain
+  HTTP, even on the same host. The manifest signature and the archive digest are
+  what make a download trustworthy, so this was never an integrity hole, but a
+  downgrade would put which version a client is fetching in the clear.
+
+- `install.ps1` no longer writes an empty entry into the user `PATH`. It appended
+  `";$Dir"` to whatever was there, and an unset user `PATH` — normal on a fresh
+  Windows account — left a leading separator, which Windows reads as "the current
+  directory" and searches for every command. It now compares and joins real
+  entries, so a directory nested under one already on `PATH` is also no longer
+  mistaken for being on it.
 
 ### Removed
 

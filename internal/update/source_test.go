@@ -314,6 +314,8 @@ func TestCheckRedirectAllowsOnlyGitHubsAssetHop(t *testing.T) {
 		{"https://github.com/o/r/releases/latest/download/a", "https://example.com/x", false},
 		{"https://updates.example.com/stable.json", "https://cdn.example.net/stable.json", false},
 		{"https://updates.example.com/stable.json", "https://updates.example.com/other.json", true},
+		{"https://updates.example.com/stable.json", "http://updates.example.com/stable.json", false},
+		{"https://github.com/o/r/releases/latest/download/a", "http://objects.githubusercontent.com/x", false},
 	} {
 		from := httptest.NewRequest(http.MethodGet, tc.from, nil)
 		to := httptest.NewRequest(http.MethodGet, tc.to, nil)

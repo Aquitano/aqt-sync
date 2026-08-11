@@ -360,6 +360,12 @@ func checkRedirect(req *http.Request, via []*http.Request) error {
 	if len(via) > 5 {
 		return errors.New("too many redirects")
 	}
+	// A fetch that started over TLS stays over TLS. The bytes are verified either
+	// way, but a downgrade would hand the plaintext of what this client is asking
+	// for to anyone on the path.
+	if via[0].URL.Scheme == "https" && req.URL.Scheme != "https" {
+		return fmt.Errorf("refusing redirect from https to %s", req.URL.Scheme)
+	}
 	// Host, not Hostname: a different port on the same name is still a different
 	// origin, and two local test servers differ only there.
 	if strings.EqualFold(via[0].URL.Host, req.URL.Host) {
