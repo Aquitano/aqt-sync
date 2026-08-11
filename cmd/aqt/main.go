@@ -28,8 +28,10 @@ import (
 const defaultServer = "http://localhost:8080"
 
 // version is reported by `aqt --version` / `-v`, overridable at build time via
-// -ldflags "-X main.version=...".
-var version = "0.3.0-dev"
+// -ldflags "-X main.version=...". The default names no release on purpose: a
+// hardcoded number goes stale the moment it is tagged, and claiming a version this
+// build is not is worse than admitting it has none.
+var version = "dev"
 
 // buildKind records where this binary came from. The release workflow stamps
 // "release" on a tagged build; anything else is a source build whose version

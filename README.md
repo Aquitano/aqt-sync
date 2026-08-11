@@ -13,7 +13,37 @@ metadata and never sees a key, a filename, or a plaintext byte.
 
 See [DESIGN.md](DESIGN.md) for the full protocol and threat model.
 
-## Build
+## Install
+
+macOS and Linux:
+
+```
+curl -fsSL https://aqt-sync.vercel.app/install.sh | sh
+```
+
+Windows (PowerShell):
+
+```
+iwr -useb https://aqt-sync.vercel.app/install.ps1 | iex
+```
+
+Both scripts read the release's signed update manifest to learn which archive
+belongs to your platform, check the download against the size and SHA-256 the
+manifest declares, and install to `~/.local/bin` (`%LOCALAPPDATA%\Programs\aqt` on
+Windows). `--server` also installs `aqt-server`; `AQT_INSTALL_DIR` picks a different
+location. Add `--version=vX.Y.Z` to pin a release.
+
+The script trusts the origin it downloads from — verifying an Ed25519 signature in
+shell is not practical. Everything after that does not: `aqt update` checks the
+manifest signature against keys compiled into the binary. To verify the first
+install too, download from the [releases
+page](https://github.com/Aquitano/aqt-sync/releases) and check the build provenance:
+
+```
+gh attestation verify aqt_<version>_<os>_<arch>.tar.gz --repo Aquitano/aqt-sync
+```
+
+### From source
 
 Requires Go (see `go.mod` for the version). Pure Go — no CGO, no system libraries.
 
@@ -22,6 +52,10 @@ make build          # builds ./bin/aqt and ./bin/aqt-server (+ the git-remote-aq
 make test           # go test ./...
 make restore-drill  # full backup -> restore -> byte-diff proof (see below)
 ```
+
+A source build reports its version as `dev`, and `aqt update` reports it rather than
+replacing it: its version string says nothing about which release it corresponds to,
+so there is nothing safe to compare against. Use a release build for self-updates.
 
 ## Client quickstart
 

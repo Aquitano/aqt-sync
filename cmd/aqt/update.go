@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
 	"time"
 
@@ -13,8 +14,8 @@ import (
 )
 
 // updateBaseURLEnv points the check at a static metadata origin instead of the
-// GitHub CLI. Tests use it, and it is the switch for serving update metadata from
-// a public origin once the repository is public.
+// GitHub release assets. Tests use it, and it is how a mirror or a self-hoster
+// serves update metadata from their own origin.
 const updateBaseURLEnv = "AQT_UPDATE_BASE_URL"
 
 // updateCheckTimeout bounds the metadata check. The metadata is a few kilobytes,
@@ -196,25 +197,29 @@ func printAvailable(res update.Result) {
 	}
 }
 
-// updateSource picks how release metadata is fetched. The repository is private,
-// so release assets are only reachable with the user's own credentials: gh is the
-// default. The signature is verified either way, so neither transport is trusted.
-func updateSource() update.Source {
+// updateSource picks how release metadata is fetched. The repository is public, so
+// the default is a plain HTTPS read of the release assets, which needs no tool and
+// no credentials. `gh` is tried only after that fails, and only when it is already
+// installed, so a private fork or mirror still updates. The manifest signature is
+// checked against the compiled trust roots whichever transport wins, so this order
+// decides reachability, not trust.
+func updateSource() update.ReleaseSource {
 	if base := os.Getenv(updateBaseURLEnv); base != "" {
 		return update.HTTPSource{BaseURL: base}
 	}
-	return update.GHSource{Repo: update.DefaultRepo}
+	sources := []update.ReleaseSource{update.GHWebSource{Repo: update.DefaultRepo}}
+	if _, err := exec.LookPath("gh"); err == nil {
+		sources = append(sources, update.GHSource{Repo: update.DefaultRepo})
+	}
+	return update.FallbackSource{Sources: sources}
 }
 
-// updateArtifactSource fetches the archive itself, over the same transport as the
-// metadata. Its contents are checked against the signed size and digest, so this
-// is a delivery mechanism and not a trust boundary. A variable because artifact
-// URLs are pinned to github.com, which is the one thing a test cannot serve.
+// updateArtifactSource fetches the archive itself, over the same transports as the
+// metadata. Its contents are checked against the signed size and digest, so this is
+// a delivery mechanism and not a trust boundary. A variable because artifact URLs
+// are pinned to github.com, which is the one thing a test cannot serve.
 var updateArtifactSource = func() update.ArtifactSource {
-	if base := os.Getenv(updateBaseURLEnv); base != "" {
-		return update.HTTPSource{BaseURL: base}
-	}
-	return update.GHSource{Repo: update.DefaultRepo}
+	return updateSource()
 }
 
 func updatePolicyCmd() *cobra.Command {

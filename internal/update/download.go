@@ -131,11 +131,16 @@ func (g GHSource) FetchArtifact(ctx context.Context, version string, a Artifact,
 // FetchArtifact streams a release asset over HTTPS. The URL comes from the signed
 // manifest, which CheckURLs has already pinned to the one location it may name.
 func (h HTTPSource) FetchArtifact(ctx context.Context, _ string, a Artifact, w io.Writer) error {
-	client := h.Client
+	return streamURL(ctx, h.Client, a.URL, w)
+}
+
+// streamURL copies one URL's body to w without buffering it whole. Callers bound
+// the size: DownloadArtifact stops at the manifest's declared length.
+func streamURL(ctx context.Context, client *http.Client, rawURL string, w io.Writer) error {
 	if client == nil {
 		client = defaultHTTPClient()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.URL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return err
 	}
@@ -145,7 +150,7 @@ func (h HTTPSource) FetchArtifact(ctx context.Context, _ string, a Artifact, w i
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GET %s: %s", a.URL, resp.Status)
+		return fmt.Errorf("GET %s: %s", rawURL, resp.Status)
 	}
 	_, err = io.Copy(w, resp.Body)
 	return err
