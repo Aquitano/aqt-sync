@@ -719,7 +719,7 @@ func runSync(dir string, opts syncOptions) error {
 	// Seal the base tree's node ciphertexts once, up front, and reuse them across every
 	// reconcile attempt. This is the base-serving map the reuse read consults so an
 	// unchanged remote subtree costs no fetch; sealing it here (rather than inside the
-	// retry closure) stops a conflict retry from re-sealing the whole DAG each pass (3.3).
+	// retry closure) stops a conflict retry from re-sealing the whole DAG each pass.
 	var baseCT map[string][]byte
 	if baseExists {
 		baseCT, err = syncengine.SealTreeCiphertexts(base, conv)
@@ -1795,7 +1795,7 @@ type packSpan struct {
 // spanSplitGap bounds wasted read-ahead within a pack: two needed objects more than
 // this many bytes apart are fetched as separate ranges rather than one span swallowing
 // the dead bytes between them. Needing 2 objects at opposite ends of a 16 MiB pack thus
-// costs two small ranges instead of the whole pack (3.5); below the gap, one range
+// costs two small ranges instead of the whole pack; below the gap, one range
 // still wins (one request, and the skipped bytes are cheap).
 const spanSplitGap = 256 << 10
 
