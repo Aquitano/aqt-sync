@@ -9,17 +9,20 @@
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-1d1c19?labelColor=544e42)](LICENSE)
 
 aqt syncs files and folders between your machines through a server you run yourself.
-Everything is encrypted on your machine before it is uploaded, so the server only ever
-holds ciphertext. It never learns a key, a filename, or a byte of your data.
+Your files are encrypted on your machine before they are uploaded, and the server never
+sees a key, a filename, or a plaintext byte. What it does hold is ciphertext plus the
+operational metadata it needs to route requests and enforce policy, and none of that
+identifies your content.
 
-Encryption is XChaCha20-Poly1305, and your keys come from your passphrase via Argon2id
-and never leave the machine. Folders sync incrementally: unchanged chunks are not
-re-sent, and a file that appears in several of your folders is stored once. If you would
-rather not reveal even the shape of a folder, it can go up as a single sealed pack
-instead.
+Encryption is XChaCha20-Poly1305. Argon2id turns your passphrase into an unlock key that
+wraps a random root key, and the root key never leaves the machine. Folders sync
+incrementally: unchanged chunks are not re-sent, and a file that appears in several of
+your folders is stored once. If you would rather not reveal even the shape of a folder,
+it can go up as a single sealed pack instead.
 
-The server is one static Go binary (`aqt-server`) and a SQLite data directory. That
-directory is nothing but ciphertext, so you can back it up somewhere you do not control.
+The server is one static Go binary (`aqt-server`) and a SQLite data directory. Nothing in
+that directory identifies your content, so you can back it up somewhere you do not
+control.
 
 See [docs/architecture.md](docs/architecture.md) for the design and an index of every
 specification document, [docs/threat-model.md](docs/threat-model.md) for what the
