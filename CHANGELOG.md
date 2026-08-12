@@ -2,7 +2,7 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v0.7.0] - 2026-08-11
 
 ### Added
 
@@ -83,9 +83,7 @@ All notable changes to this project are documented in this file.
   interface sketches are gone too; the Go signatures in `internal/` were always the
   authoritative ones.
 
-  `DESIGN.md` stays at its path, because past pull requests and issues cite it, but
-  now holds only a table mapping each old section to its new home, with anchors so
-  existing deep links still land.
+  `DESIGN.md` is gone; see the Removed section below.
 
 ### Fixed
 
@@ -115,7 +113,27 @@ All notable changes to this project are documented in this file.
   stay bound to the file the update renamed away, so the update reports the stale
   link and names the command that remakes it.
 
+- An update fetch that started over HTTPS now refuses a redirect back to plain
+  HTTP, even on the same host. The manifest signature and the archive digest are
+  what make a download trustworthy, so this was never an integrity hole, but a
+  downgrade would put which version a client is fetching in the clear.
+
+- `install.ps1` no longer writes an empty entry into the user `PATH`. It appended
+  `";$Dir"` to whatever was there, and an unset user `PATH` — normal on a fresh
+  Windows account — left a leading separator, which Windows reads as "the current
+  directory" and searches for every command. It now compares and joins real
+  entries, so a directory nested under one already on `PATH` is also no longer
+  mistaken for being on it.
+
 ### Removed
+
+- `DESIGN.md`. It briefly survived the split above as a table of redirects, which
+  bought deep links from old pull requests one release of grace and otherwise gave
+  the repository a top-level file whose only content was where to look instead.
+  Start at [docs/architecture.md](docs/architecture.md), which indexes every
+  specification document. An old `DESIGN.md#…` link now 404s rather than landing on
+  a signpost; where each part of it went is in the Changed entry above, and the one
+  spec that cites the old section numbers carries its own mapping table.
 
 - The standalone `git-remote-aqt` archive and the `cmd/git-remote-aqt` binary it was
   built from. Releases now publish `aqt` and `aqt-server` only, so an install script
