@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 )
 
 // harness wires a real store (temp dir) to the Gin router for a full HTTP cycle.
@@ -26,9 +28,15 @@ type harness struct {
 	srv    *Server
 }
 
+// Set once here rather than per-harness: gin.SetMode writes package state, which
+// the parallel tests would otherwise race on.
+func TestMain(m *testing.M) {
+	gin.SetMode(gin.TestMode)
+	os.Exit(m.Run())
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
-	gin.SetMode(gin.TestMode)
 	store, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
@@ -68,6 +76,7 @@ func (h *harness) do(method, path, token string, body, out any) int {
 // TestHealthzIsPublic covers the liveness probe: it answers 200 without a token so
 // load balancers and container healthchecks can reach it before any device exists.
 func TestHealthzIsPublic(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	var body struct {
 		Status string `json:"status"`
@@ -95,10 +104,8 @@ func (h *harness) get(path string) *httptest.ResponseRecorder {
 // root key (wrappedRoot) and derives the attach verifier.
 func (h *harness) signup(email, passphrase string) (token string, mk crypto.MasterKey) {
 	h.t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		h.t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(h.t)
+	var err error
 	mk, err = crypto.GenerateMasterKey()
 	if err != nil {
 		h.t.Fatal(err)
@@ -137,6 +144,7 @@ func (h *harness) bootstrap(email string) api.SaltResponse {
 }
 
 func TestPrivatePushPullRoundTrip(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("dev@example.com", "correct horse battery staple")
 
@@ -199,6 +207,7 @@ func TestPrivatePushPullRoundTrip(t *testing.T) {
 }
 
 func TestPublicResourceReadableWithoutAuth(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("pub@example.com", "another passphrase here")
 
@@ -273,6 +282,7 @@ func (h *harness) attachWith(email, passphrase string, out *api.AuthResponse) in
 }
 
 func TestDeviceAttachRequiresSignatureAndVerifier(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	const email, pass = "multi@example.com", "shared passphrase"
 	h.signup(email, pass)
@@ -306,6 +316,7 @@ func TestDeviceAttachRequiresSignatureAndVerifier(t *testing.T) {
 }
 
 func TestChallengeIsSingleUse(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	const email, pass = "replay@example.com", "a passphrase"
 	h.signup(email, pass)
@@ -338,6 +349,7 @@ func TestChallengeIsSingleUse(t *testing.T) {
 }
 
 func TestBootstrapDecoyForUnknownEmail(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.signup("real@example.com", "the real passphrase")
 
@@ -365,6 +377,7 @@ func TestBootstrapDecoyForUnknownEmail(t *testing.T) {
 }
 
 func TestPassphraseChangeInvalidatesOtherDevices(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	const email, oldPass, newPass = "rotate@example.com", "old passphrase here", "new passphrase here"
 	token1, rk := h.signup(email, oldPass)
@@ -378,7 +391,7 @@ func TestPassphraseChangeInvalidatesOtherDevices(t *testing.T) {
 	// Device 1 changes the passphrase: the root key is unchanged, only re-wrapped.
 	boot := h.bootstrap(email)
 	oldUK, _ := crypto.DeriveUnlockKey(oldPass, boot.Kdf)
-	newKdf, _ := crypto.NewKdfParams()
+	newKdf := cryptotest.KdfParams(t)
 	newUK, _ := crypto.DeriveUnlockKey(newPass, newKdf)
 	newWrapped, _ := crypto.WrapRoot(rk, newUK)
 	var chResp api.AuthResponse
@@ -415,6 +428,7 @@ func TestPassphraseChangeInvalidatesOtherDevices(t *testing.T) {
 }
 
 func TestUpdateResourceReplacesInPlace(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("upd@example.com", "passphrase for updates")
 
@@ -460,6 +474,7 @@ func TestUpdateResourceReplacesInPlace(t *testing.T) {
 }
 
 func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("share@example.com", "passphrase here")
 
@@ -506,6 +521,7 @@ func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
 }
 
 func TestPublicPutKeepsOwnerWrappedKey(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("pubowner@example.com", "a passphrase")
 
@@ -536,6 +552,7 @@ func TestPublicPutKeepsOwnerWrappedKey(t *testing.T) {
 }
 
 func TestShareViewLandingPage(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("web@example.com", "a passphrase for the web view")
 
@@ -578,6 +595,7 @@ func TestShareViewLandingPage(t *testing.T) {
 }
 
 func TestPutResourceVersionConflictReturns409(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("occ-http@example.com", "passphrase for occ http")
 	ck, _ := crypto.GenerateContentKey()
@@ -624,6 +642,7 @@ func (h *harness) raw(method, path, token string, header map[string]string, body
 }
 
 func TestPackEndpointsRoundTrip(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("packapi@example.com", "passphrase for pack api")
 	packID, pack, ids := packOf("hello pack world", "second object here")
@@ -694,6 +713,7 @@ func TestPackEndpointsRoundTrip(t *testing.T) {
 }
 
 func TestResourceBodyAllowsBlobAboveControlCap(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("bigblob@example.com", "passphrase for a big blob")
 
@@ -714,6 +734,7 @@ func TestResourceBodyAllowsBlobAboveControlCap(t *testing.T) {
 }
 
 func TestControlRouteRejectsOversizedBody(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	// A control body padded past the tight control cap is rejected by the size
 	// limit (the same payload would be well within the resource route's cap).
@@ -728,6 +749,7 @@ func TestControlRouteRejectsOversizedBody(t *testing.T) {
 }
 
 func TestDeviceListAndRevoke(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	const email, pass = "devices@example.com", "a passphrase for devices"
 	token1, _ := h.signup(email, pass)
@@ -777,6 +799,7 @@ func TestDeviceListAndRevoke(t *testing.T) {
 }
 
 func TestListResourcesReturnsWrappedKey(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("listkey@example.com", "passphrase for list key")
 
@@ -880,6 +903,7 @@ func mustPutID(t *testing.T, rec *httptest.ResponseRecorder) string {
 // capability is below the resource's stored min_client is refused with 426 and a
 // structured upgrade error, before any payload is served.
 func TestCapabilityReadBelowMinClientIs426(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("cap-read@example.com", "a good long passphrase here")
 
@@ -911,6 +935,7 @@ func TestCapabilityReadBelowMinClientIs426(t *testing.T) {
 // TestCapabilityMissingHeaderFailsClosed ensures a header-less legacy client never
 // receives an id-bound encrypted resource.
 func TestCapabilityMissingHeaderFailsClosed(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("cap-missing.com", "a good long passphrase here")
 	req, _ := sealResource(t, api.CapabilityIDBinding)
@@ -924,6 +949,7 @@ func TestCapabilityMissingHeaderFailsClosed(t *testing.T) {
 // stored, a declaration above the writer's own capability is rejected, and an omitted
 // declaration stores the baseline.
 func TestCapabilityWriteDeclaration(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("cap-write@example.com", "a good long passphrase here")
 
@@ -944,6 +970,7 @@ func TestCapabilityWriteDeclaration(t *testing.T) {
 // TestCapabilityUpdateGate covers update enforcement: a client that cannot read the
 // current state cannot overwrite it, but a capable client may lower min_client.
 func TestCapabilityUpdateGate(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("cap-update@example.com", "a good long passphrase here")
 
@@ -970,6 +997,7 @@ func TestCapabilityUpdateGate(t *testing.T) {
 // TestCapabilityPublicReadEnforced covers the unauthenticated (public) read path,
 // which is served by its own handler outside the authed group.
 func TestCapabilityPublicReadEnforced(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("cap-public@example.com", "a good long passphrase here")
 
@@ -987,6 +1015,7 @@ func TestCapabilityPublicReadEnforced(t *testing.T) {
 }
 
 func TestLivenessAndReadinessTransitions(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	if rec := h.get("/livez"); rec.Code != http.StatusOK {
 		t.Fatalf("livez = %d", rec.Code)
@@ -1004,6 +1033,7 @@ func TestLivenessAndReadinessTransitions(t *testing.T) {
 }
 
 func TestBackgroundWorkersDrainAfterStop(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	stop := make(chan struct{})
 	h.srv.StartAutoSnapshot(time.Millisecond, 1, stop)

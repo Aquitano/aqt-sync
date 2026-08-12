@@ -8,6 +8,7 @@ import (
 )
 
 func TestFingerprintStableThenDetectsChanges(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(file, []byte("hello"), 0o644); err != nil {
@@ -45,6 +46,7 @@ func TestFingerprintStableThenDetectsChanges(t *testing.T) {
 // .git is ignored by default, so a watcher does not churn on git's internal
 // writes (lock files, objects) — which is what makes the git-lock guard useful.
 func TestFingerprintIgnoresGitDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "tracked.txt"), []byte("x"), 0o644); err != nil {
 		t.Fatal(err)

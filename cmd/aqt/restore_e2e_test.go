@@ -17,6 +17,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
@@ -174,10 +175,7 @@ func buildRealisticTree(t *testing.T, root string) (hasSymlink bool) {
 // session into the active config dir, mirroring `aqt login` on a first machine.
 func signupAt(t *testing.T, serverURL, email, pass string) {
 	t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(t)
 	mk, err := crypto.GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)

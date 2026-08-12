@@ -23,6 +23,7 @@ func modeFile(path, content string, mode uint32) Entry {
 }
 
 func TestDiffClassifies(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		old, cur Manifest
@@ -131,6 +132,7 @@ func TestDiffClassifies(t *testing.T) {
 }
 
 func TestDiffRenameSwallowsTheDirectoryPair(t *testing.T) {
+	t.Parallel()
 	old := Manifest{
 		Entries: []Entry{file("olddir/a.txt", "a"), file("olddir/sub/b.txt", "b")},
 		Dirs:    []DirEntry{dir("olddir", 0o755), dir("olddir/sub", 0o755)},
@@ -156,6 +158,7 @@ func TestDiffRenameSwallowsTheDirectoryPair(t *testing.T) {
 // A directory that moves *and* changes mode does not pair: the rename claim would
 // hide the permission edit, so both sides are reported instead.
 func TestDiffDirectoryRenameWithModeEditStaysExplicit(t *testing.T) {
+	t.Parallel()
 	old := Manifest{
 		Entries: []Entry{file("olddir/a.txt", "a")},
 		Dirs:    []DirEntry{dir("olddir", 0o755)},
@@ -179,6 +182,7 @@ func TestDiffDirectoryRenameWithModeEditStaysExplicit(t *testing.T) {
 // apply never sets them — so a manifest that carries one must not manufacture a change
 // no side could resolve.
 func TestDiffIgnoresSymlinkMode(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{link("ln", "target")}}
 	cur := Manifest{Entries: []Entry{link("ln", "target")}}
 	cur.Entries[0].Mode = 0o777
@@ -225,6 +229,7 @@ func deltaManifestsGen() *rapid.Generator[[2]Manifest] {
 // TestDiffProps pins the invariants every caller relies on: one verdict per path,
 // convergence means silence, and a difference is never dropped.
 func TestDiffProps(t *testing.T) {
+	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		ms := deltaManifestsGen().Draw(t, "manifests")
 		old, cur := ms[0], ms[1]
@@ -280,6 +285,7 @@ func union(a, b map[string]tracked) map[string]struct{} {
 // the flat-manifest comparison must classify the same on-disk trees identically, so a
 // caller cannot get a different answer depending on which side of the wire it read.
 func TestDiffTreeRootsMatchesManifestDiff(t *testing.T) {
+	t.Parallel()
 	oldDir, curDir := t.TempDir(), t.TempDir()
 	for _, d := range []string{oldDir, curDir} {
 		writeFile(t, d, "keep.txt", []byte("same"))

@@ -28,6 +28,7 @@ func (h *harness) authVerifier(email, passphrase string) []byte {
 // leak — from a stolen laptop, a backup, a CI secret — and this is the one operation
 // no restore undoes, so it takes the passphrase as well.
 func TestAccountDeleteRequiresPassphraseProof(t *testing.T) {
+	t.Parallel()
 	const email, pass = "erase@example.com", "correct horse battery staple"
 	h := newHarness(t)
 	token, mk := h.signup(email, pass)
@@ -54,6 +55,7 @@ func TestAccountDeleteRequiresPassphraseProof(t *testing.T) {
 }
 
 func TestAccountDeleteErasesAccountAndRevokesToken(t *testing.T) {
+	t.Parallel()
 	const email, pass = "gone@example.com", "correct horse battery staple"
 	h := newHarness(t)
 	token, mk := h.signup(email, pass)
@@ -104,6 +106,7 @@ func TestAccountDeleteErasesAccountAndRevokesToken(t *testing.T) {
 // The proof is checked against the account being deleted, so one account's
 // passphrase cannot erase another's.
 func TestAccountDeleteRejectsAnotherAccountsProof(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	victimToken, _ := h.signup("victim@example.com", "victim passphrase here")
 	h.signup("attacker@example.com", "attacker passphrase here")
@@ -122,6 +125,7 @@ func TestAccountDeleteRejectsAnotherAccountsProof(t *testing.T) {
 // but the person who asked to be erased is the one who needs to know, and the count
 // is the part of it that is theirs (the paths are the operator's).
 func TestAccountDeleteReportsUnremovableFiles(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows Chmod carries only the write bit, so a directory that denies unlink is not representable")
 	}
@@ -164,6 +168,7 @@ func TestAccountDeleteReportsUnremovableFiles(t *testing.T) {
 // Suspension is how an operator holds an account (legal hold, billing dispute), so
 // it has to hold against the account's own erasure too, not just its writes.
 func TestSuspendedAccountCannotSelfDelete(t *testing.T) {
+	t.Parallel()
 	const email, pass = "held@example.com", "correct horse battery staple"
 	h := newHarness(t)
 	token, _ := h.signup(email, pass)
@@ -190,6 +195,7 @@ func TestSuspendedAccountCannotSelfDelete(t *testing.T) {
 // so the store re-reads the flag in the deleting transaction. Calling the store
 // directly is the window: it is what a request that passed a stale cache reaches.
 func TestSuspendedSelfDeleteIsRefusedBelowTheAuthCache(t *testing.T) {
+	t.Parallel()
 	const email, pass = "stale-cache@example.com", "correct horse battery staple"
 	h := newHarness(t)
 	token, _ := h.signup(email, pass)
@@ -221,6 +227,7 @@ func TestSuspendedSelfDeleteIsRefusedBelowTheAuthCache(t *testing.T) {
 // DeleteAccountWithProof is the only erasure path a request handler may reach, so
 // an empty verifier must refuse rather than fall through to the operator path.
 func TestDeleteAccountWithProofRefusesEmptyVerifier(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "empty-proof@example.com")
 

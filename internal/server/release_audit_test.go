@@ -30,6 +30,7 @@ func (h *harness) putSized(token string, mk crypto.MasterKey, id string, n int) 
 // arbitrary blob past it — the headline feature of the release, bypassed by a PUT
 // that carried an id.
 func TestQuotaAppliesToInPlaceUpdate(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{QuotaBytes: 64 * 1024})
 	token, mk := h.signup("quota-update@example.com", "a passphrase here")
 
@@ -52,6 +53,7 @@ func TestQuotaAppliesToInPlaceUpdate(t *testing.T) {
 // An update replaces the resource's bytes rather than adding to them, so rewriting a
 // resource at its current size must not be charged twice and trip the quota.
 func TestQuotaChargesOnlyTheUpdateDelta(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{QuotaBytes: 96 * 1024})
 	token, mk := h.signup("quota-delta@example.com", "a passphrase here")
 
@@ -70,6 +72,7 @@ func TestQuotaChargesOnlyTheUpdateDelta(t *testing.T) {
 // fresh create answered 507 for a resource that already existed, defeating the retry
 // the key exists for.
 func TestIdempotentCreateReplayNotChargedAgain(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{QuotaBytes: 96 * 1024})
 	token, mk := h.signup("quota-replay@example.com", "a passphrase here")
 
@@ -101,6 +104,7 @@ func TestIdempotentCreateReplayNotChargedAgain(t *testing.T) {
 // A read the server goes on to refuse serves no bytes, so it must not spend one of a
 // --burn / --max-reads link's permits. Both refusal paths run before the count.
 func TestRefusedReadDoesNotSpendAPermit(t *testing.T) {
+	t.Parallel()
 	t.Run("stale capability", func(t *testing.T) {
 		h := newHarness(t)
 		token, mk := h.signup("burn-cap@example.com", "a passphrase here")
@@ -158,6 +162,7 @@ func TestRefusedReadDoesNotSpendAPermit(t *testing.T) {
 // is a single connection, so the abandoned transaction held it forever and every
 // later write on the server — for any account — blocked indefinitely.
 func TestDeleteGrantRollsBackOnExecFailure(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("txleak@example.com", "a passphrase here")
 	grantee, _ := h.signup("txleak-g@example.com", "a passphrase here")
@@ -201,6 +206,7 @@ func TestDeleteGrantRollsBackOnExecFailure(t *testing.T) {
 // A reclaimed tombstone answers 410 to everyone, including the owner, whose only
 // remaining action is to delete the row. The delete must therefore work.
 func TestReclaimedTombstoneIsDeletable(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("tombstone@example.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 0, 1)
@@ -230,6 +236,7 @@ func TestReclaimedTombstoneIsDeletable(t *testing.T) {
 // violates the stable-error-code contract and which the client's idempotent retry
 // treats as worth repeating.
 func TestSnapshotOfTombstoneIsGoneNot500(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("snap-tombstone@example.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 0, 1)
@@ -250,6 +257,7 @@ func TestSnapshotOfTombstoneIsGoneNot500(t *testing.T) {
 // unaddressable as a bare CLI positional. Both generators fold it identically, which
 // is what keeps a deterministic decoy handle indistinguishable from a minted id.
 func TestMintedIDsNeverStartWithADash(t *testing.T) {
+	t.Parallel()
 	for range 20_000 {
 		if id := newID(8); id[0] == '-' {
 			t.Fatalf("newID produced %q", id)
@@ -266,6 +274,7 @@ func TestMintedIDsNeverStartWithADash(t *testing.T) {
 // still tell the account's actual owner what happened, since someone presenting the
 // account's own passphrase verifier already has everything the answer would leak.
 func TestDuplicateSignupConfirmsOnlyToTheOwner(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	req := createReq(t, "dup@example.com", "a passphrase here")
 	var first api.AuthResponse
@@ -299,6 +308,7 @@ func TestDuplicateSignupConfirmsOnlyToTheOwner(t *testing.T) {
 // 429 carries a stable code like every other error condition, so a client can branch
 // on it without string-matching the message.
 func TestRateLimitCarriesStableCode(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	limiter := newIPRateLimiter(0.01, 1)
 	h.router.GET("/audit-ratelimit", limiter.middleware, func(c *gin.Context) { c.Status(http.StatusOK) })

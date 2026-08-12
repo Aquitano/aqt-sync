@@ -13,6 +13,7 @@ import (
 // resource, ship the client-side state machine, and pin a CSP that keeps the
 // fragment key from ever leaving the page.
 func TestShareViewServesDecryptorPage(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("decryptor@example.com", "a passphrase for the decryptor page")
 
@@ -115,6 +116,7 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 // carries the source link. An operator running patched code overrides the upstream
 // default; a bad override is a startup error, not a dead link on a served page.
 func TestShareViewOffersSourceLink(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name string
 		cfg  Config
@@ -146,6 +148,7 @@ func TestShareViewOffersSourceLink(t *testing.T) {
 }
 
 func TestShareCryptoAssetsAreSelfHostedAndAllowlisted(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	for _, name := range []string{
 		"libsodium-0.7.10.js",

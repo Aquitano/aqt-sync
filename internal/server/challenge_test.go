@@ -6,6 +6,7 @@ import (
 )
 
 func TestCreateChallengeSweepsExpired(t *testing.T) {
+	t.Parallel()
 	s, err := OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)

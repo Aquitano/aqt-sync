@@ -19,6 +19,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -26,10 +27,7 @@ import (
 // profile name, so a test acts as several users by flipping flagProfile.
 func grantSignup(t *testing.T, h *e2eHarness, email, profile, pass string) {
 	t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(t)
 	mk, err := crypto.GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)
@@ -318,10 +316,7 @@ func TestAccountKeysDecoy(t *testing.T) {
 	}
 	// An account that never published an enc key gets the decoy too — the lookup
 	// must not reveal that the account exists but predates grants.
-	legacyKdf, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	legacyKdf := cryptotest.KdfParams(t)
 	legacyMK, err := crypto.GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)

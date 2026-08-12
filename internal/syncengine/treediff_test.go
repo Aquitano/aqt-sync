@@ -41,6 +41,7 @@ func file(path, content string) Entry {
 }
 
 func TestDiffTreeRootsReportsChanges(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("keep/same.txt", "same"),
@@ -104,6 +105,7 @@ func TestDiffTreeRootsReportsChanges(t *testing.T) {
 }
 
 func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	m := Manifest{Version: TreeManifestVersion, Entries: []Entry{file("a/b.txt", "x")}}
 	sink := mapSink{}
@@ -125,6 +127,7 @@ func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
 }
 
 func TestDiffTreeRootsTypeChange(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("x", "was a file"),

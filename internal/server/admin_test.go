@@ -14,6 +14,7 @@ import (
 )
 
 func TestListAdminAccountsReportsUsageAndPolicy(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	alice := s.mustAccount(t, "alice@example.com")
 	s.mustAccount(t, "bob@example.com")
@@ -56,6 +57,7 @@ func TestListAdminAccountsReportsUsageAndPolicy(t *testing.T) {
 // exemption, and inheritance. Collapsing "unlimited" into "no override" would
 // silently re-cap an exempt account the next time the server default changes.
 func TestQuotaOverrideStates(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "quota@example.com")
 
@@ -94,6 +96,7 @@ func TestQuotaOverrideStates(t *testing.T) {
 }
 
 func TestSetAccountQuotaRejectsNegative(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "neg@example.com")
 	bad := int64(-1)
@@ -103,6 +106,7 @@ func TestSetAccountQuotaRejectsNegative(t *testing.T) {
 }
 
 func TestAdminAccountByRefResolvesEmailHandleAndPrefix(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "ref@example.com")
 
@@ -133,6 +137,7 @@ func TestAdminAccountByRefResolvesEmailHandleAndPrefix(t *testing.T) {
 // Every admin verb is destructive or policy-changing, so a prefix matching more
 // than one account must refuse rather than pick one.
 func TestAdminAccountByRefRefusesAmbiguousPrefix(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	first := s.mustAccount(t, "one@example.com")
 	// Handles are random, so find a prefix length that genuinely collides rather
@@ -154,6 +159,7 @@ func TestAdminAccountByRefRefusesAmbiguousPrefix(t *testing.T) {
 }
 
 func TestSuspensionCachePurgesExpiredEntriesAndStaysBounded(t *testing.T) {
+	t.Parallel()
 	cache := newSuspensionCache()
 	cache.entries["expired"] = suspensionEntry{expires: time.Now().Add(-time.Second)}
 	cache.put("active", false)
@@ -176,6 +182,7 @@ func fmtEmail(i int) string {
 // Suspension must be reversible and touch no stored data: it is the tool for
 // "stop this account now", not for erasure.
 func TestSuspensionIsReversibleAndKeepsData(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "suspend@example.com")
 	id := s.rootResource(t, owner, nil)
@@ -202,6 +209,7 @@ func TestSuspensionIsReversibleAndKeepsData(t *testing.T) {
 // A suspended account's devices must be refused with 403, not 401: the token is
 // valid, so telling the user to re-authenticate would loop them.
 func TestSuspendedAccountIsForbiddenNotUnauthorized(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("suspended@example.com", "pw-suspended-account")
 
@@ -242,6 +250,7 @@ func TestSuspendedAccountIsForbiddenNotUnauthorized(t *testing.T) {
 // directions: capping an account on an uncapped server, and exempting one on a
 // capped server.
 func TestPerAccountQuotaOverridesServerDefault(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.srv.cfg.QuotaBytes = 0 // server-wide: unlimited
 	token, _ := h.signup("capped@example.com", "pw-per-account-quota")
@@ -279,6 +288,7 @@ func TestPerAccountQuotaOverridesServerDefault(t *testing.T) {
 // Scheduled snapshots are a write path too. They must use the account override,
 // not only the server default passed to the background job.
 func TestAutoSnapshotsHonorPerAccountQuota(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto-quota@example.com")
 	s.rootResource(t, owner, nil)
@@ -307,6 +317,7 @@ func TestAutoSnapshotsHonorPerAccountQuota(t *testing.T) {
 // `aqt usage` must report the cap that actually applies, or an account with an
 // override sees a limit it is not subject to.
 func TestUsageReportsTheEffectiveQuota(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.srv.cfg.QuotaBytes = 1 << 30
 	token, _ := h.signup("usage@example.com", "pw-usage-quota")
@@ -329,6 +340,7 @@ func TestUsageReportsTheEffectiveQuota(t *testing.T) {
 // real ciphertext behind on a server whose whole premise is that it holds only
 // ciphertext it cannot read.
 func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "gone@example.com")
 	other := s.mustAccount(t, "stays@example.com")
@@ -414,6 +426,7 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 }
 
 func TestDeleteAccountIsNotFoundForUnknownOwner(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if _, err := s.DeleteAccount("no-such-handle"); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("delete unknown = %v, want ErrNotFound", err)

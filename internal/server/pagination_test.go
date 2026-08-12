@@ -6,6 +6,7 @@ import "testing"
 // indistinguishable from a real one), so a cursor part can contain the separator
 // itself. Escaping must survive that rather than splitting into an extra field.
 func TestCursorPartsSurviveSeparatorBytes(t *testing.T) {
+	t.Parallel()
 	for _, parts := range [][]string{
 		{"1700000000", "handle\x1fwith-sep"},
 		{"1700000000", "handle\x1ewith-esc"},

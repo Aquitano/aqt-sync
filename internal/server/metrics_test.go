@@ -29,6 +29,7 @@ func wantMetric(t *testing.T, body, line string) {
 }
 
 func TestMetricsNotOnAPIRouter(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	if rec := h.get("/metrics"); rec.Code != http.StatusNotFound {
 		t.Fatalf("GET /metrics on the API router = %d, want 404 (metrics belong to the operator listener)", rec.Code)
@@ -36,6 +37,7 @@ func TestMetricsNotOnAPIRouter(t *testing.T) {
 }
 
 func TestMetricsRequestCountersAndAccountGauges(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("metrics@example.com", "passphrase for metrics")
 	packID, pack, _ := packOf("metrics object one", "metrics object two")
@@ -73,6 +75,7 @@ func TestMetricsRequestCountersAndAccountGauges(t *testing.T) {
 }
 
 func TestMetricsPackBytesServed(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("served@example.com", "passphrase for served bytes")
 	packID, pack, _ := packOf("served object payload")
@@ -88,6 +91,7 @@ func TestMetricsPackBytesServed(t *testing.T) {
 }
 
 func TestAccountUsageEndpoint(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("usage@example.com", "passphrase for usage")
 	packID, pack, _ := packOf("usage object one", "usage object two", "usage object three")
@@ -116,6 +120,7 @@ func TestAccountUsageEndpoint(t *testing.T) {
 }
 
 func TestAccountUsageAllPerOwnerIsolation(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	tokenA, _ := h.signup("a@example.com", "passphrase for owner a")
 	tokenB, _ := h.signup("b@example.com", "passphrase for owner b")

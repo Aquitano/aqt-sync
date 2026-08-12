@@ -18,6 +18,7 @@ import (
 // ciphertext travels verbatim (no base64), and both the bytes and the sealed
 // metadata survive the round trip.
 func TestRawResourceRoundTrip(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("raw@example.com", "correct horse battery staple")
 
@@ -92,6 +93,7 @@ func TestRawResourceRoundTrip(t *testing.T) {
 // blob uploaded raw is readable by a legacy JSON client, and vice versa, so an
 // upgrade needs no coordinated flag day.
 func TestRawResourceLegacyInterop(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("interop@example.com", "another passphrase here now")
 
@@ -144,6 +146,7 @@ func TestRawResourceLegacyInterop(t *testing.T) {
 // maxResourceBody cap as the JSON path: an over-cap body is refused before it is
 // buffered, not read whole into memory.
 func TestRawResourceBodyCapEnforced(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("cap@example.com", "passphrase for the cap test")
 
@@ -162,6 +165,7 @@ func TestRawResourceBodyCapEnforced(t *testing.T) {
 // TestGzipNegotiatesJSON checks that a compressible JSON reply is gzip-encoded only
 // when the client offers it, and decodes cleanly either way.
 func TestGzipNegotiatesJSON(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("gz@example.com", "passphrase for gzip negotiation")
 
@@ -220,6 +224,7 @@ func TestGzipNegotiatesJSON(t *testing.T) {
 // TestGzipSkipsOctetStream confirms the middleware never compresses an
 // already-encrypted pack body, even when the client offers gzip.
 func TestGzipSkipsOctetStream(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("gzpack@example.com", "passphrase for the pack gzip test")
 	packID, pack, _ := packOf("hello pack world for gzip", "second object here padded out")
@@ -243,6 +248,7 @@ func TestGzipSkipsOctetStream(t *testing.T) {
 }
 
 func TestVersionedMediaNegotiationConformance(t *testing.T) {
+	t.Parallel()
 	if got, ok := negotiateResourceResponse("application/vnd.aqt.resource+json; version=1; q=0.2, application/vnd.aqt.resource+octet-stream; version=1; q=0.9"); !ok || got != resourceEnvelope {
 		t.Fatalf("quality negotiation = %v/%v", got, ok)
 	}

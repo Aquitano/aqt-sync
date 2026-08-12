@@ -36,6 +36,7 @@ func manifestsGen() *rapid.Generator[[3]Manifest] {
 }
 
 func TestPlanProps(t *testing.T) {
+	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		ms := manifestsGen().Draw(t, "manifests")
 		local, base, remote := ms[0], ms[1], ms[2]
@@ -99,6 +100,7 @@ func TestPlanProps(t *testing.T) {
 }
 
 func TestPlanReconcileProps(t *testing.T) {
+	t.Parallel()
 	rapid.Check(t, func(t *rapid.T) {
 		ms := manifestsGen().Draw(t, "manifests")
 		local, remote := ms[0], ms[2]

@@ -24,6 +24,7 @@ func fakeChunks(n int) []crypto.Chunk {
 // segments and reconstructs to the identical records, and its content still writes
 // out byte-for-byte.
 func TestFileRootIndirectRoundTrip(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
@@ -103,6 +104,7 @@ func TestFileRootIndirectRoundTrip(t *testing.T) {
 // A version-1 root (list inline, no ChunkList marker) still opens and resolves
 // without any fetch, and a root from a newer client is rejected with a clear error.
 func TestFileRootLegacyInlineAndVersionGuard(t *testing.T) {
+	t.Parallel()
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
 		t.Fatal(err)
@@ -142,6 +144,7 @@ func TestFileRootLegacyInlineAndVersionGuard(t *testing.T) {
 // Indirection kicks in strictly above the threshold: a list of exactly the maximum
 // stays inline, one record more moves to segments.
 func TestFileRootThresholdBoundary(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 
 	atMax, _, err := BuildFileRoot(fakeChunks(chunkListInlineMax), 1, conv, memSink{})
@@ -172,6 +175,7 @@ func TestFileRootThresholdBoundary(t *testing.T) {
 // reconstructs the identical manifest, keeping both content chunks and list segments
 // as GC roots.
 func TestTreeIndirectChunkListRoundTrip(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	sink := mapSink{}
 
@@ -224,6 +228,7 @@ func TestTreeIndirectChunkListRoundTrip(t *testing.T) {
 // A directory node with too many direct children to fit one pack fails with a clear,
 // actionable client-side error rather than an opaque server rejection later.
 func TestNodeSizeCeiling(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	var entries []Entry
 	for i := 0; i < 25; i++ { // 25 x ~1 MiB inline overflows MaxNodeBytes (24 MiB)

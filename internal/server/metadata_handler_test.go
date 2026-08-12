@@ -44,6 +44,7 @@ func sealedMeta(t *testing.T, name string) crypto.SealedBlob {
 // HTTP layer: happy path, input validation, version conflict, unknown id, and the
 // capability gate that keeps a client too old to read the sealed format from overwriting it.
 func TestUpdateResourceMetadataHandler(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("meta-handler@example.com", "a good long passphrase here")
 

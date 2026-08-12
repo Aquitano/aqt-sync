@@ -72,6 +72,7 @@ func decodeFrames(t *testing.T, body []byte, want int) [][]byte {
 // A public streamed resource's objects are served unauthenticated, exact bytes in
 // request order, with duplicate ids honored positionally.
 func TestPublicObjectsServesExactSlicesInOrder(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	router := New(s).Router()
 	owner := s.mustAccount(t, "share@example.com")
@@ -103,6 +104,7 @@ func TestPublicObjectsServesExactSlicesInOrder(t *testing.T) {
 // A private resource must not confirm its own existence: the same 404 as an unknown
 // id, so the endpoint is no oracle.
 func TestPublicObjectsRejectsPrivateAndUnknownResource(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	router := New(s).Router()
 	owner := s.mustAccount(t, "private@example.com")
@@ -125,6 +127,7 @@ func TestPublicObjectsRejectsPrivateAndUnknownResource(t *testing.T) {
 // it does not reference. An id the owner stores but this resource does not root fails
 // the whole request with 404, and it does not leak which id failed.
 func TestPublicObjectsRejectsUnreferencedObject(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	router := New(s).Router()
 	owner := s.mustAccount(t, "oracle@example.com")
@@ -160,6 +163,7 @@ func TestPublicObjectsRejectsUnreferencedObject(t *testing.T) {
 // More than maxPublicObjectIDs ids in one request is rejected before any store work,
 // so a single response can never fan out to an unbounded read set.
 func TestPublicObjectsRejectsOverLimitIDCount(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	router := New(s).Router()
 	owner := s.mustAccount(t, "toomany@example.com")
@@ -177,6 +181,7 @@ func TestPublicObjectsRejectsOverLimitIDCount(t *testing.T) {
 // PublicObjectSlices resolves locations in request order and re-arms the GC age guard
 // on every pack it touches, so an in-flight public download cannot be reaped.
 func TestPublicObjectSlicesOrderingAndTouch(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "slices@example.com")
 	packID, data, ids := packOf("obj a", "obj b")

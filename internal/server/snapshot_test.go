@@ -31,6 +31,7 @@ func (s *Store) supersede(t *testing.T, owner, id string, refs []string) {
 // the GC root queries union snapshot_chunks, so a chunk only a snapshot needs is
 // neither swept nor dropped during compaction.
 func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "snap@example.com")
 
@@ -96,6 +97,7 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 }
 
 func TestClientAutomaticSnapshotIsMarkedForRetention(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "automatic@example.com")
 	rid := s.rootResource(t, owner, nil)
@@ -118,6 +120,7 @@ func TestClientAutomaticSnapshotIsMarkedForRetention(t *testing.T) {
 // Deleting the source resource entirely must not take its snapshots with it: this is
 // the protection against a sync-propagated delete.
 func TestSnapshotSurvivesResourceDelete(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "del@example.com")
 	packA, dataA, idsA := packOf("kept by snapshot")
@@ -152,6 +155,7 @@ func TestSnapshotSurvivesResourceDelete(t *testing.T) {
 // The scheduled job snapshots a resource once per version: a second run with nothing
 // changed is a no-op, a new version becomes due again, and an opt-out excludes it.
 func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto@example.com")
 	packA, dataA, idsA := packOf("v1 object")
@@ -202,6 +206,7 @@ func TestRunAutoSnapshotsDedupsByVersion(t *testing.T) {
 // never touches a manual one, so a user's explicit snapshots are safe while automatic
 // ones converge.
 func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "retain@example.com")
 	pack, data, ids := packOf("v1 object")
@@ -264,6 +269,7 @@ func TestPruneAutoSnapshotsKeepsLastAndSparesManual(t *testing.T) {
 // Anchoring protects a snapshot from an explicit delete and round-trips through the
 // read paths; removing the anchor makes it prunable again.
 func TestSnapshotAnchorRefusesDelete(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "anchor@example.com")
 	pack, data, ids := packOf("obj")
@@ -309,6 +315,7 @@ func TestSnapshotAnchorRefusesDelete(t *testing.T) {
 // prune, and it does not consume a keep-last slot (it is outside the retention
 // universe entirely).
 func TestPruneAutoSnapshotsSkipsAnchored(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "anchorprune@example.com")
 	pack, data, ids := packOf("v1 object")
@@ -361,6 +368,7 @@ func TestPruneAutoSnapshotsSkipsAnchored(t *testing.T) {
 }
 
 func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "a@example.com")
 	other := s.mustAccount(t, "b@example.com")
@@ -407,6 +415,7 @@ func TestSnapshotCRUDAndOwnerIsolation(t *testing.T) {
 // A client-sealed label survives the round trip through create, list, and get as
 // opaque ciphertext and decrypts back; a scheduled (keyless) snapshot carries none.
 func TestSnapshotLabelRoundTrip(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "label@example.com")
 	packA, dataA, idsA := packOf("obj")
@@ -467,6 +476,7 @@ func TestSnapshotLabelRoundTrip(t *testing.T) {
 // ListResources surfaces each resource's scheduled-snapshot coverage so the CLI can
 // show it without a per-resource fetch; SetAutoSnapshot flips it.
 func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "auto-list@example.com")
 	packA, dataA, idsA := packOf("obj")

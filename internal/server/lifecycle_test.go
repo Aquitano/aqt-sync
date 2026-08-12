@@ -51,6 +51,7 @@ func (s *Store) linkState(t *testing.T, id string) (vis string, expiresAt, maxRe
 // This is what a link over a synced folder needs — reclaiming it would delete the copy
 // every other device pulls from.
 func TestSweepRetiresLinkAndKeepsContent(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "retire@example.com")
 	id := s.putPublicOnExpiry(t, owner, "keep me", 3600, 0, api.ExpiryRetire)
@@ -100,6 +101,7 @@ func TestSweepRetiresLinkAndKeepsContent(t *testing.T) {
 // The reclaim action still destroys the content — an ephemeral `push --public --burn`
 // depends on it. This is the counterpart of the retire case above.
 func TestSweepReclaimStillDestroysContent(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "reclaim@example.com")
 	id := s.putPublicOnExpiry(t, owner, "burn me", 3600, 0, api.ExpiryReclaim)
@@ -122,6 +124,7 @@ func TestSweepReclaimStillDestroysContent(t *testing.T) {
 // folder sync path re-PUTs the whole manifest on every change, and taking the policy
 // (and the visibility) from those writes silently un-shared a folder on its next sync.
 func TestPutResourceKeepsLiveLinkPolicy(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "sync@example.com")
 	id := s.putPublicOnExpiry(t, owner, "v1", 3600, 5, api.ExpiryRetire)
@@ -172,6 +175,7 @@ func (s *Store) pokeExpiry(t *testing.T, id string, ts int64) {
 
 // A create carries the policy through to the stored columns.
 func TestPutResourceStoresPolicy(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "policy@example.com")
 	id := s.putPublic(t, owner, "hello", 3600, 5)
@@ -194,6 +198,7 @@ func TestPutResourceStoresPolicy(t *testing.T) {
 // A lifecycle policy is legal only on a public resource; a private put with one is a
 // client bug.
 func TestPutResourceRejectsPolicyOnPrivate(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "priv@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -210,6 +215,7 @@ func TestPutResourceRejectsPolicyOnPrivate(t *testing.T) {
 
 // Negative policy values are rejected before anything is stored.
 func TestPutResourceRejectsNegativePolicy(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "neg@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -227,6 +233,7 @@ func TestPutResourceRejectsNegativePolicy(t *testing.T) {
 // An expired link is gone to a non-owner but still readable by the owner (who reaches
 // it to delete it); expiry is not counted against the read limit.
 func TestGetResourceExpiryEnforced(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "expiry@example.com")
 	id := s.putPublic(t, owner, "secret", 3600, 0)
@@ -249,6 +256,7 @@ func TestGetResourceExpiryEnforced(t *testing.T) {
 // max_reads counts only non-owner serves: the Nth read succeeds, the (N+1)th is gone,
 // and interleaved owner reads never consume a permit.
 func TestGetResourceMaxReadsCounting(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "maxreads@example.com")
 	id := s.putPublic(t, owner, "burnme", 0, 2)
@@ -288,6 +296,7 @@ func TestGetResourceMaxReadsCounting(t *testing.T) {
 // Concurrent non-owner reads of a max_reads-limited link must never over-serve: exactly
 // max_reads succeed no matter how many race.
 func TestGetResourceMaxReadsNoOverServe(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "concurrent@example.com")
 	const limit = 5
@@ -329,6 +338,7 @@ func TestGetResourceMaxReadsNoOverServe(t *testing.T) {
 // SetVisibility applies a policy, a fresh policy resets the read counter, and the flip
 // back to private clears the policy entirely.
 func TestSetVisibilityPolicyLifecycle(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "setvis@example.com")
 	id := s.putPublic(t, owner, "data", 0, 1)
@@ -369,6 +379,7 @@ func TestSetVisibilityPolicyLifecycle(t *testing.T) {
 // SweepExpired reclaims an expired link: its blob files are deleted, its objects
 // unrooted, and it leaves a tombstone that keeps returning ErrGone (never 404).
 func TestSweepExpiredReclaimsAndTombstones(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "sweep@example.com")
 	packID, data, ids := packOf("streamed object bytes")
@@ -417,6 +428,7 @@ func TestSweepExpiredReclaimsAndTombstones(t *testing.T) {
 // An exhausted link gets a grace window (gcMinAge) before it is reclaimed, so an
 // in-flight permitted streamed pull can finish fetching its objects.
 func TestSweepExhaustedGrace(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "grace@example.com")
 	id := s.putPublic(t, owner, "burned", 0, 1)
@@ -450,6 +462,7 @@ func TestSweepExhaustedGrace(t *testing.T) {
 // link and destroy its only wrapped key. reclaimResource is called directly with the
 // scan's now to reproduce the race deterministically.
 func TestReclaimResourceSkipsResurrectedLink(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "resurrect@example.com")
 	packID, data, ids := packOf("streamed object bytes")
@@ -504,6 +517,7 @@ func TestReclaimResourceSkipsResurrectedLink(t *testing.T) {
 // The exhaustion variant of the resurrection race: SetVisibility clears exhausted_at on
 // re-share, so a stale reclaim keyed on the pre-share exhaustion must skip.
 func TestReclaimResourceSkipsResurrectedExhaustedLink(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "resurrect-exhaust@example.com")
 	id := s.putPublic(t, owner, "burned", 0, 1)
@@ -546,6 +560,7 @@ func TestReclaimResourceSkipsResurrectedExhaustedLink(t *testing.T) {
 // GC runs the expiry sweep, so a manual POST /v1/gc (or the scheduled RunGCAll)
 // reclaims expired links, not only the direct SweepExpired call.
 func TestGCTriggersExpirySweep(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "gcsweep@example.com")
 	id := s.putPublic(t, owner, "gc me", 3600, 0)
@@ -563,6 +578,7 @@ func TestGCTriggersExpirySweep(t *testing.T) {
 // at all. Split apart, a rotation whose delete is lost leaves the revoked account still
 // listed as a grantee — and the next rotation's re-wrap would hand it the new key.
 func TestPutResourceRevokesGranteeAtomically(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "rotate@example.com")
 	id := s.putPublic(t, owner, "v1", 0, 0)
@@ -616,6 +632,7 @@ func TestPutResourceRevokesGranteeAtomically(t *testing.T) {
 // recipient must not learn when the link dies or how many reads remain; enforcement is
 // server-side and unchanged, so the fields carry no information the reader needs.
 func TestGetResourceLifecycleFieldsOwnerOnly(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "lifecycle-fields@example.com")
 	id := s.putPublic(t, owner, "body", 3600, 5)

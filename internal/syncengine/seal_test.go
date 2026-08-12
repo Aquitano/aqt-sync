@@ -26,6 +26,7 @@ func (s *recordingSink) Add(ch crypto.Chunk, ct []byte) error {
 // records in the same order, and sink.Add called in that order with ciphertext
 // that opens back to the original bytes.
 func TestSealStreamMatchesSerial(t *testing.T) {
+	t.Parallel()
 	data := make([]byte, 1<<20)
 	rand.New(rand.NewSource(42)).Read(data)
 	var conv crypto.ConvergenceKey
@@ -92,6 +93,7 @@ func (s *failingSink) Add(crypto.Chunk, []byte) error {
 // A sink error must surface (not the internal abort sentinel), and sealStream must
 // not deadlock or leak goroutines while draining in-flight work.
 func TestSealStreamSinkError(t *testing.T) {
+	t.Parallel()
 	data := make([]byte, 1<<20)
 	rand.New(rand.NewSource(1)).Read(data)
 	var conv crypto.ConvergenceKey

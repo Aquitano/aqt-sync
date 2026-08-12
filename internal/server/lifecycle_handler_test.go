@@ -32,6 +32,7 @@ func (h *harness) putPublicViaAPI(token string, mk crypto.MasterKey, expireSecon
 // A PUT echoes the accepted lifecycle policy, so a new client can confirm the server
 // enforces it.
 func TestPutResourceEchoesPolicy(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("echo@example.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 3600, 4)
@@ -47,6 +48,7 @@ func TestPutResourceEchoesPolicy(t *testing.T) {
 // SetVisibility echoes the applied policy the same way, so `aqt share --expire` can
 // fail closed against an old server.
 func TestSetVisibilityEchoesPolicy(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("svecho@example.com", "a passphrase here")
 
@@ -73,6 +75,7 @@ func TestSetVisibilityEchoesPolicy(t *testing.T) {
 
 // An expired public resource returns 410 with the stable "gone" code, not a 404.
 func TestGetResourceExpiredReturns410(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("gone410@example.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 3600, 0)
@@ -93,6 +96,7 @@ func TestGetResourceExpiredReturns410(t *testing.T) {
 
 // A max-reads-exhausted public resource returns 410 to the next reader.
 func TestGetResourceExhaustedReturns410(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("exhaust410@example.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 0, 1)
@@ -108,6 +112,7 @@ func TestGetResourceExhaustedReturns410(t *testing.T) {
 // publicObjects 410s on an expired/reclaimed resource, but still serves an exhausted
 // (not-yet-swept) one so the final permitted streamed pull can complete.
 func TestPublicObjectsGoneVsExhausted(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("pubobj@example.com", "a passphrase here")
 	owner, _ := h.store.OwnerByToken(token)
@@ -142,6 +147,7 @@ func TestPublicObjectsGoneVsExhausted(t *testing.T) {
 
 // The /x/<id> landing page renders a 410 gone page for an expired public link.
 func TestShareViewGonePage(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("shareview@example.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 3600, 0)
@@ -157,6 +163,7 @@ func TestShareViewGonePage(t *testing.T) {
 }
 
 func TestPublicPreflightDoesNotConsumeBurnRead(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, mk := h.signup("preflight.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 0, 1)

@@ -23,6 +23,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
@@ -838,10 +839,7 @@ func (h *e2eHarness) countPacks() int {
 // unlock without prompting.
 func (h *e2eHarness) signup(email, pass string) {
 	h.t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		h.t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(h.t)
 	mk, err := crypto.GenerateMasterKey()
 	if err != nil {
 		h.t.Fatal(err)

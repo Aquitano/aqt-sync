@@ -38,7 +38,10 @@ var presetTargets = map[KdfPreset]presetTarget{
 // calibrateMemoryFloor is the lowest memory CalibrateKdf drops to on a machine
 // too slow to fit even one pass inside the target. It stays at the interactive
 // budget, so the calibrated cost is never weaker than the lightest preset.
-const calibrateMemoryFloor = 64 * 1024 // KiB
+//
+// A var, not a const, only so calibrate_test.go can shrink it alongside
+// presetTargets; nothing outside a test assigns to it.
+var calibrateMemoryFloor uint32 = 64 * 1024 // KiB
 
 // Fixed inputs for the timing probe; the cost of Argon2id is independent of the
 // passphrase and salt contents, so any fixed values measure the same work.

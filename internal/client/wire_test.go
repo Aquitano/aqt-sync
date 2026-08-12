@@ -9,6 +9,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
 
@@ -101,10 +102,7 @@ func idHex(i int) string {
 // master key, mirroring the server package's test harness.
 func signup(t *testing.T, baseURL, email, passphrase string) (string, crypto.MasterKey) {
 	t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(t)
 	mk, err := crypto.GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)

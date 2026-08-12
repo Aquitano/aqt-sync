@@ -16,6 +16,7 @@ func deterministicData(seed int64, n int) []byte {
 }
 
 func TestSplitCoversInputInOrder(t *testing.T) {
+	t.Parallel()
 	c := DefaultChunker()
 	data := deterministicData(1, 200<<10)
 
@@ -35,6 +36,7 @@ func TestSplitCoversInputInOrder(t *testing.T) {
 }
 
 func TestSplitIsDeterministic(t *testing.T) {
+	t.Parallel()
 	c := DefaultChunker()
 	data := deterministicData(2, 128<<10)
 	a := c.Split(data)
@@ -52,6 +54,7 @@ func TestSplitIsDeterministic(t *testing.T) {
 // Inserting bytes near the front must not re-cut the whole file: most boundaries
 // past the edit should be preserved (the point of content-defined chunking).
 func TestSplitBoundariesStableUnderInsert(t *testing.T) {
+	t.Parallel()
 	c := DefaultChunker()
 	data := deterministicData(3, 256<<10)
 	base := c.Split(data)
@@ -77,6 +80,7 @@ func TestSplitBoundariesStableUnderInsert(t *testing.T) {
 }
 
 func TestSplitSmallInputIsOneChunk(t *testing.T) {
+	t.Parallel()
 	c := DefaultChunker()
 	data := []byte("tiny")
 	chunks := c.Split(data)

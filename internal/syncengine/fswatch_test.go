@@ -36,6 +36,7 @@ func expectQuiet(t *testing.T, w *TreeWatcher, what string) {
 }
 
 func TestTreeWatcherSignalsOnChange(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	w := newTreeWatcher(t, root)
 
@@ -48,6 +49,7 @@ func TestTreeWatcherSignalsOnChange(t *testing.T) {
 // Churn in an ignored subtree (here .git, always ignored) must produce no signal:
 // the subtree is never watched, so a busy repo cannot wake the daemon.
 func TestTreeWatcherIgnoresIgnoredSubtree(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, ".aqtignore"), []byte("build/\n*.log\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -82,6 +84,7 @@ func TestTreeWatcherIgnoresIgnoredSubtree(t *testing.T) {
 // A directory created while watching must itself be watched, so edits inside it
 // keep signaling without waiting for the safety rescan.
 func TestTreeWatcherFollowsNewSubdir(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	w := newTreeWatcher(t, root)
 

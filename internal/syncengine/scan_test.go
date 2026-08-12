@@ -22,6 +22,7 @@ func scanEntry(t *testing.T, m Manifest, path string) Entry {
 // entry verbatim — hash and content refs included — without being read. The
 // sentinel hash proves no re-hash happened: a content read would replace it.
 func TestScanReusingStatFastPath(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
@@ -67,6 +68,7 @@ func TestScanReusingStatFastPath(t *testing.T) {
 // entry with the fresh mtime so the next scan stat-fast-paths it again. A real
 // edit gets a new hash and drops the stale refs.
 func TestScanReusingRehashOnStatMiss(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.txt")
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
@@ -119,6 +121,7 @@ func TestScanReusingRehashOnStatMiss(t *testing.T) {
 // A zero base mtime (an entry recorded before mtimes existed) never stat-matches,
 // so the content is hashed rather than blindly trusted.
 func TestScanReusingZeroMTimeForcesHash(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
