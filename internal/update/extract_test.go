@@ -248,7 +248,14 @@ func TestExtractRefusesANonRegularZipEntry(t *testing.T) {
 // A gzip stream that expands far beyond its compressed size is bounded by the
 // output cap, not read to completion first.
 func TestExtractRefusesADecompressionBomb(t *testing.T) {
-	bomb := archiveEntry{name: "aqt", body: strings.Repeat("\x00", maxExecutableBytes+1)}
+	// Shrink the cap rather than build a 256 MiB bomb to cross it: what is under
+	// test is that the copy stops at the cap, which is the same assertion at any
+	// cap, and the real one costs ~15s here under -race.
+	orig := maxExecutableBytes
+	t.Cleanup(func() { maxExecutableBytes = orig })
+	maxExecutableBytes = 4 << 10
+
+	bomb := archiveEntry{name: "aqt", body: strings.Repeat("\x00", int(maxExecutableBytes)+1)}
 	archive := writeArchive(t, "aqt.tar.gz", tarGz(t, bomb))
 	dst := filepath.Join(t.TempDir(), "out")
 
