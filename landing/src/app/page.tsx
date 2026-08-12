@@ -1,9 +1,6 @@
 import Image from "next/image";
-import { CopyCommand } from "@/components/copy-command";
+import { InstallPicker } from "@/components/install-picker";
 import { MotionLayer } from "@/components/motion-layer";
-
-const installCommand = "curl -fsSL https://web.sync.aquitano.me/install.sh | sh";
-const installCommandWindows = "iwr -useb https://web.sync.aquitano.me/install.ps1 | iex";
 
 const markPixels = [
   1, 1, 1, 0, 0, 1,
@@ -404,13 +401,7 @@ export default function Home() {
             <h2 id="install-title">Your files are ready to disappear.</h2>
             <p>From everyone except you.</p>
           </div>
-          <div className="install-command" data-reveal>
-            <code>{installCommand}</code>
-            <CopyCommand command={installCommand} />
-          </div>
-          <p className="install-alt" data-reveal>
-            Windows: <code>{installCommandWindows}</code>
-          </p>
+          <InstallPicker />
           <a className="button button-dark" href="https://github.com/aquitano/aqt-sync">View on GitHub</a>
         </section>
       </main>
