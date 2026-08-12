@@ -28,13 +28,18 @@ type OsKey = keyof typeof targets;
 const order = ["macos", "linux", "windows"] as const satisfies readonly OsKey[];
 
 // Even a reduced user-agent string still carries its platform token, so it is the
-// one signal every browser agrees on. Order matters: "X11; Linux" also says X11.
+// one signal every browser agrees on.
 function detectOs(): OsKey | null {
   const ua = navigator.userAgent;
 
+  // Neither installer runs on a phone, and both handheld families claim a desktop
+  // token anyway: iOS says "like Mac OS X", Android says "Linux; Android". They have
+  // to be answered first, and the answer is no detection rather than a wrong one.
+  if (/iphone|ipad|ipod|android/i.test(ua)) return null;
+
   if (/windows|win64|win32/i.test(ua)) return "windows";
-  if (/macintosh|mac os x|iphone|ipad|ipod/i.test(ua)) return "macos";
-  if (/linux|android|cros|x11/i.test(ua)) return "linux";
+  if (/macintosh|mac os x/i.test(ua)) return "macos";
+  if (/linux|cros|x11/i.test(ua)) return "linux";
   return null;
 }
 
