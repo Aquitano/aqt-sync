@@ -1,41 +1,51 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="340" viewBox="0 0 1200 340" role="img" aria-label="aqt — zero-knowledge encrypted file and folder sync">
+  <defs>
+    <pattern id="dots" width="12" height="12" patternUnits="userSpaceOnUse">
+      <circle cx="1" cy="1" r="1" fill="#1d1c19" fill-opacity="0.14"/>
+    </pattern>
+  </defs>
+
   <rect width="1200" height="340" fill="#ddc998"/>
-  <g stroke="#1d1c19" stroke-opacity="0.32" fill="none">
-    <rect x="20.5" y="20.5" width="1159" height="299"/>
-    <g stroke="#1d1c19" stroke-opacity="0.55" stroke-width="2">
-      <path d="M20 44V20h24M1180 44V20h-24M20 296v24h24M1180 296v24h-24"/>
-    </g>
+  <rect width="1200" height="340" fill="url(#dots)"/>
+
+  <rect x="20.5" y="20.5" width="1159" height="299" fill="none" stroke="#1d1c19" stroke-opacity="0.32" stroke-dasharray="6 6"/>
+  <g fill="#1d1c19" fill-opacity="0.55">
+    <rect x="16" y="16" width="9" height="9"/><rect x="1175" y="16" width="9" height="9"/>
+    <rect x="16" y="315" width="9" height="9"/><rect x="1175" y="315" width="9" height="9"/>
   </g>
+
+  <path d="M44 104H1156M44 118H1156M44 132H1156M44 146H1156" stroke="#1d1c19" stroke-opacity="0.32" fill="none"/>
 
   <g fill="#1d1c19">
-    <rect x="64" y="72" width="12" height="12"/><rect x="76" y="72" width="12" height="12"/><rect x="88" y="72" width="12" height="12"/><rect x="124" y="72" width="12" height="12"/>
-    <rect x="64" y="84" width="12" height="12"/><rect x="88" y="84" width="12" height="12"/><rect x="100" y="84" width="12" height="12"/><rect x="124" y="84" width="12" height="12"/>
-    <rect x="64" y="96" width="12" height="12"/><rect x="76" y="96" width="12" height="12"/><rect x="88" y="96" width="12" height="12"/><rect x="100" y="96" width="12" height="12"/><rect x="112" y="96" width="12" height="12"/><rect x="124" y="96" width="12" height="12"/>
-    <rect x="76" y="108" width="12" height="12"/><rect x="100" y="108" width="12" height="12"/>
-    <rect x="76" y="120" width="12" height="12"/><rect x="88" y="120" width="12" height="12"/><rect x="100" y="120" width="12" height="12"/><rect x="112" y="120" width="12" height="12"/>
-    <rect x="88" y="132" width="12" height="12"/><rect x="100" y="132" width="12" height="12"/><rect x="112" y="132" width="12" height="12"/><rect x="124" y="132" width="12" height="12"/>
+    <rect x="88" y="86" width="14" height="14"/>
+    <rect x="102" y="86" width="14" height="14"/>
+    <rect x="116" y="86" width="14" height="14"/>
+    <rect x="158" y="86" width="14" height="14"/>
+    <rect x="88" y="100" width="14" height="14"/>
+    <rect x="116" y="100" width="14" height="14"/>
+    <rect x="130" y="100" width="14" height="14"/>
+    <rect x="158" y="100" width="14" height="14"/>
+    <rect x="88" y="114" width="14" height="14"/>
+    <rect x="102" y="114" width="14" height="14"/>
+    <rect x="116" y="114" width="14" height="14"/>
+    <rect x="130" y="114" width="14" height="14"/>
+    <rect x="144" y="114" width="14" height="14"/>
+    <rect x="158" y="114" width="14" height="14"/>
+    <rect x="102" y="128" width="14" height="14"/>
+    <rect x="130" y="128" width="14" height="14"/>
+    <rect x="102" y="142" width="14" height="14"/>
+    <rect x="116" y="142" width="14" height="14"/>
+    <rect x="130" y="142" width="14" height="14"/>
+    <rect x="144" y="142" width="14" height="14"/>
+    <rect x="116" y="156" width="14" height="14"/>
+    <rect x="130" y="156" width="14" height="14"/>
+    <rect x="144" y="156" width="14" height="14"/>
+    <rect x="158" y="156" width="14" height="14"/>
   </g>
 
-  <text x="164" y="138" fill="#1d1c19" font-family="'Space Grotesk','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="92" font-weight="700" letter-spacing="-2">aqt</text>
+  <text x="204" y="164" fill="#1d1c19" font-family="'Space Grotesk','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="96" font-weight="700" letter-spacing="-3">aqt</text>
 
-  <text x="64" y="198" fill="#1d1c19" font-family="'Space Grotesk','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="27">Zero-knowledge encrypted file and folder sync.</text>
+  <text x="88" y="238" fill="#1d1c19" font-family="'Space Grotesk','Helvetica Neue',Helvetica,Arial,sans-serif" font-size="27">Zero-knowledge encrypted file and folder sync.</text>
 
-  <path d="M64 226H700" stroke="#1d1c19" stroke-opacity="0.32"/>
-
-  <text x="64" y="260" fill="#544e42" font-family="'IBM Plex Mono',SFMono-Regular,Menlo,Consolas,monospace" font-size="17" letter-spacing="1.2">end-to-end encrypted · content-addressed · self-hostable</text>
-
-  <g transform="translate(0,4)">
-    <g stroke="#1d1c19" stroke-opacity="0.4" fill="none">
-      <path d="M1000 110 920 168M1000 110 1080 168M920 168 880 226M920 168 960 226M1080 168 1040 226M1080 168 1120 226"/>
-    </g>
-    <g fill="#1d1c19">
-      <circle cx="1000" cy="110" r="9"/>
-      <circle cx="920" cy="168" r="9"/>
-      <circle cx="1080" cy="168" r="9"/>
-      <circle cx="880" cy="226" r="9"/>
-      <circle cx="960" cy="226" r="9"/>
-      <circle cx="1120" cy="226" r="9"/>
-    </g>
-    <circle cx="1040" cy="226" r="8.5" fill="none" stroke="#1d1c19" stroke-width="2"/>
-  </g>
+  <text x="88" y="276" fill="#544e42" font-family="'IBM Plex Mono',SFMono-Regular,Menlo,Consolas,monospace" font-size="17" letter-spacing="1.2">end-to-end encrypted · content-addressed · self-hostable</text>
 </svg>
