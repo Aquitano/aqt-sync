@@ -706,15 +706,6 @@ button:focus-visible {
   height: auto;
 }
 
-.dag-diagram text {
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  fill: currentColor;
-  opacity: 0.65;
-}
-
 .link-anatomy {
   margin: 0;
   font-family: var(--font-mono);

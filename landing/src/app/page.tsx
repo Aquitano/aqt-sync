@@ -62,13 +62,12 @@ const dagEdges = [
 // places in the tree pointing at it. That shared node is what dedup looks like.
 function DagDiagram() {
   return (
-    <svg className="dag-diagram" viewBox="0 0 200 132" aria-hidden="true">
+    <svg className="dag-diagram" viewBox="0 0 200 114" aria-hidden="true">
       <path d={dagEdges} fill="none" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1.5" />
       {dagNodes.map((node) => (
         <rect key={`${node.cx}-${node.cy}`} x={node.cx - 7} y={node.cy - 7} width="14" height="14" fill="currentColor" />
       ))}
       <rect x="93" y="96" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" />
-      <text x="100" y="127" textAnchor="middle">already stored</text>
     </svg>
   );
 }
