@@ -42,14 +42,36 @@ function HatchLine({ label }: { label?: string }) {
 }
 
 const dagNodes = [
-  { row: 1, col: 4 },
-  { row: 2, col: 2 },
-  { row: 2, col: 6 },
-  { row: 3, col: 1 },
-  { row: 3, col: 3 },
-  { row: 3, col: 5, hollow: true },
-  { row: 3, col: 7 },
+  { cx: 100, cy: 15 },
+  { cx: 52, cy: 59 },
+  { cx: 148, cy: 59 },
+  { cx: 22, cy: 103 },
+  { cx: 178, cy: 103 },
 ];
+
+const dagEdges = [
+  "M100 15L52 59",
+  "M100 15L148 59",
+  "M52 59L22 103",
+  "M52 59L100 103",
+  "M148 59L178 103",
+  "M148 59L100 103",
+].join("");
+
+// The hollow chunk hangs from both parents that reference it: one copy stored, two
+// places in the tree pointing at it. That shared node is what dedup looks like.
+function DagDiagram() {
+  return (
+    <svg className="dag-diagram" viewBox="0 0 200 132" aria-hidden="true">
+      <path d={dagEdges} fill="none" stroke="currentColor" strokeOpacity="0.5" strokeWidth="1.5" />
+      {dagNodes.map((node) => (
+        <rect key={`${node.cx}-${node.cy}`} x={node.cx - 7} y={node.cy - 7} width="14" height="14" fill="currentColor" />
+      ))}
+      <rect x="93" y="96" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" />
+      <text x="100" y="127" textAnchor="middle">already stored</text>
+    </svg>
+  );
+}
 
 const triptychPanels = [
   { src: "/halftone-blocks.webp", caption: "Blocks", alt: "Halftone artwork of stacked encrypted data blocks" },
@@ -197,15 +219,7 @@ export default function Home() {
               <CornerMarks />
               <p className="feature-label">Content addressed</p>
               <div className="feature-visual" aria-hidden="true">
-                <div className="dag-diagram">
-                  {dagNodes.map((node, index) => (
-                    <i
-                      key={index}
-                      className={node.hollow ? "dag-hollow" : undefined}
-                      style={{ gridRow: node.row, gridColumn: node.col }}
-                    />
-                  ))}
-                </div>
+                <DagDiagram />
                 <p className="visual-caption">ROOT / CHUNKS / DEDUP</p>
               </div>
               <h3>Sync less. Restore faster.</h3>
