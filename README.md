@@ -1,8 +1,16 @@
-# aqt
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="aqt — zero-knowledge encrypted file and folder sync" src="docs/assets/banner-light.svg">
+</picture>
 
-Zero-knowledge encrypted file and folder sync. The client encrypts everything
-before it leaves the machine; the server stores only ciphertext and opaque
-metadata and never sees a key, a filename, or a plaintext byte.
+[![linux](https://github.com/Aquitano/aqt-sync/actions/workflows/linux.yml/badge.svg)](https://github.com/Aquitano/aqt-sync/actions/workflows/linux.yml)
+[![windows](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml/badge.svg)](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml)
+[![release](https://img.shields.io/github/v/release/Aquitano/aqt-sync?color=1d1c19&labelColor=544e42)](https://github.com/Aquitano/aqt-sync/releases)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-1d1c19?labelColor=544e42)](LICENSE)
+
+Zero-knowledge encrypted file and folder sync. The client encrypts everything before
+it leaves the machine; the server stores only ciphertext and opaque metadata and never
+sees a key, a filename, or a plaintext byte.
 
 - **End-to-end encrypted** — XChaCha20-Poly1305 with role-separated AADs; keys are
   derived from a passphrase via calibrated Argon2id and never transmitted.
