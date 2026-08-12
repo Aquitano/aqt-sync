@@ -8,10 +8,7 @@ import (
 )
 
 func TestDeriveSigningKeyDeterministicAndVerifiable(t *testing.T) {
-	params, err := NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	params := cheapKdf(t)
 	mk, err := DeriveMasterKey("passphrase for signing", params)
 	if err != nil {
 		t.Fatal(err)
@@ -37,10 +34,7 @@ func TestDeriveSigningKeyDeterministicAndVerifiable(t *testing.T) {
 }
 
 func TestKeyFingerprintStableAndKeyDependent(t *testing.T) {
-	params, err := NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	params := cheapKdf(t)
 	pub := DeriveSigningKey(mustDerive(t, "first passphrase", params)).Public().(ed25519.PublicKey)
 
 	fp := KeyFingerprint(pub)
@@ -57,6 +51,21 @@ func TestKeyFingerprintStableAndKeyDependent(t *testing.T) {
 	}
 }
 
+// cheapKdf is NewKdfParams at the minimum cost the validator accepts, for the
+// tests that need a derived key rather than an expensive one. At the real
+// default a derivation is ~215ms under -race, and far worse on a small CI
+// runner; the in-package twin of internal/cryptotest, which crypto itself
+// cannot import. Tests that assert on cost keep NewKdfParams.
+func cheapKdf(t *testing.T) KdfParams {
+	t.Helper()
+	p, err := NewKdfParams()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Time, p.Memory, p.Threads = 1, 8, 1
+	return p
+}
+
 func mustDerive(t *testing.T, pass string, p KdfParams) MasterKey {
 	t.Helper()
 	mk, err := DeriveMasterKey(pass, p)
@@ -67,10 +76,7 @@ func mustDerive(t *testing.T, pass string, p KdfParams) MasterKey {
 }
 
 func TestDeriveMasterKeyDeterministic(t *testing.T) {
-	params, err := NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	params := cheapKdf(t)
 	a, err := DeriveMasterKey("correct horse battery staple", params)
 	if err != nil {
 		t.Fatal(err)
@@ -275,7 +281,7 @@ func TestBoundAADDisjointAcrossRoles(t *testing.T) {
 }
 
 func TestWrapUnwrapRoundTrip(t *testing.T) {
-	params, _ := NewKdfParams()
+	params := cheapKdf(t)
 	mk, err := DeriveMasterKey("master passphrase", params)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +313,7 @@ func TestContentKeyWipe(t *testing.T) {
 }
 
 func TestWrapUnwrapRoot(t *testing.T) {
-	params, _ := NewKdfParams()
+	params := cheapKdf(t)
 	rk, err := GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)
@@ -337,7 +343,7 @@ func TestWrapUnwrapRoot(t *testing.T) {
 }
 
 func TestDeriveAuthVerifier(t *testing.T) {
-	params, _ := NewKdfParams()
+	params := cheapKdf(t)
 	uk, _ := DeriveUnlockKey("passphrase one", params)
 	v1 := DeriveAuthVerifier(uk)
 	if len(v1) != KeySize {
@@ -371,7 +377,20 @@ func TestFragmentPublicRoundTrip(t *testing.T) {
 	}
 }
 
+// useCheapGate shrinks the gated-link profile for the duration of a test. The
+// costs travel inside the fragment, so encode and decode stay self-consistent;
+// what the round trip proves is unchanged, and the real profile still costs
+// three 256 MiB derivations per test. TestDeriveMasterKeyClampsParams keeps the
+// real values for its cost assertion.
+func useCheapGate(t *testing.T) {
+	t.Helper()
+	origTime, origMemory, origThreads := gatedTime, gatedMemory, gatedThreads
+	t.Cleanup(func() { gatedTime, gatedMemory, gatedThreads = origTime, origMemory, origThreads })
+	gatedTime, gatedMemory, gatedThreads = 1, 8, 1
+}
+
 func TestFragmentGatedRoundTrip(t *testing.T) {
+	useCheapGate(t)
 	ck, _ := GenerateContentKey()
 	frag, err := EncodeFragment(ck, "hunter2")
 	if err != nil {

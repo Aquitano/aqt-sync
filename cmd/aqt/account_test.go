@@ -8,6 +8,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -29,10 +30,7 @@ func (f *fakeAccountClient) DeleteAccount(api.DeleteAccountRequest) (api.DeleteA
 // is what the local passphrase check reads.
 func accountProfile(t *testing.T, email, pass string) *identity.Profile {
 	t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(t)
 	uk, err := crypto.DeriveUnlockKey(pass, kdf)
 	if err != nil {
 		t.Fatal(err)

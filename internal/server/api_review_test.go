@@ -16,6 +16,7 @@ import (
 // TestListResourcesPaginationWalksAllPages covers the multi-page walk: every
 // resource is returned exactly once, in id order, across bounded pages.
 func TestListResourcesPaginationWalksAllPages(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "page@example.com")
 
@@ -66,6 +67,7 @@ func TestListResourcesPaginationWalksAllPages(t *testing.T) {
 // TestListResourcesExactBoundary covers the boundary case: when the total is an exact
 // multiple of the limit, the last full page must not be followed by a phantom empty page.
 func TestListResourcesExactBoundary(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "boundary@example.com")
 	for i := 0; i < 10; i++ {
@@ -86,6 +88,7 @@ func TestListResourcesExactBoundary(t *testing.T) {
 // TestListRejectsBadCursor covers cursor validation at the store: a non-decodable
 // cursor and a well-formed one with the wrong key shape both return errBadCursor.
 func TestListRejectsBadCursor(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "badcursor@example.com")
 
@@ -101,6 +104,7 @@ func TestListRejectsBadCursor(t *testing.T) {
 // TestListResourcesHTTPPaging covers the wire contract: the response carries the
 // items array and a nextCursor a caller feeds back to fetch the rest.
 func TestListResourcesHTTPPaging(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("httppage@example.com", "a passphrase for paging")
 	owner, err := h.store.OwnerByToken(token)
@@ -131,6 +135,7 @@ func TestListResourcesHTTPPaging(t *testing.T) {
 // TestListPageParamValidation covers the 400s: a bad cursor and a non-positive limit
 // each carry their stable code.
 func TestListPageParamValidation(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("pageparams@example.com", "a passphrase for params")
 
@@ -154,6 +159,7 @@ func TestListPageParamValidation(t *testing.T) {
 // TestChunkEndpointsCapIDCount covers the id-count cap on check/locate: over the cap
 // is a 400 with the too_many_ids code, exactly at the cap is accepted.
 func TestChunkEndpointsCapIDCount(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("chunkcap@example.com", "a passphrase for chunks")
 
@@ -179,6 +185,7 @@ func TestChunkEndpointsCapIDCount(t *testing.T) {
 // TestRateLimitSetsRetryAfter covers item 27: a 429 carries a Retry-After header of
 // whole seconds computed from the limiter's own refill rate.
 func TestRateLimitSetsRetryAfter(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	var rec *httptest.ResponseRecorder
 	for i := 0; i < unauthBurst+5; i++ {

@@ -6,6 +6,7 @@ import (
 )
 
 func TestThreeWay(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name         string
 		base, local  string
@@ -78,6 +79,7 @@ func TestThreeWay(t *testing.T) {
 }
 
 func TestChangesReconstructsTarget(t *testing.T) {
+	t.Parallel()
 	cases := [][2]string{
 		{"", "new\n"},
 		{"old\n", ""},
@@ -98,6 +100,7 @@ func TestChangesReconstructsTarget(t *testing.T) {
 }
 
 func TestIsText(t *testing.T) {
+	t.Parallel()
 	if !IsText([]byte("plain\ntext\n")) {
 		t.Fatal("plain text rejected")
 	}
@@ -114,6 +117,7 @@ func TestIsText(t *testing.T) {
 }
 
 func TestThreeWayComplexDiffIsNotClean(t *testing.T) {
+	t.Parallel()
 	lines := maxEditDistance/2 + 1
 	base := bytes.Repeat([]byte("base\n"), lines)
 	local := bytes.Repeat([]byte("local\n"), lines)
@@ -124,6 +128,7 @@ func TestThreeWayComplexDiffIsNotClean(t *testing.T) {
 }
 
 func TestThreeWayDoesNotConcatenateAdjacentUnterminatedHunks(t *testing.T) {
+	t.Parallel()
 	if got, clean := ThreeWay([]byte("\n"), []byte("\n0"), []byte("0")); clean || got != nil {
 		t.Fatalf("unterminated adjacent hunks = clean %v, content %q; want fallback", clean, got)
 	}

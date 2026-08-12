@@ -8,6 +8,7 @@ import (
 )
 
 func TestLoadConfigWatch(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	body := `{"watch": {"interval": "7s", "gitGuard": false}}`
 	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(body), 0o644); err != nil {
@@ -26,6 +27,7 @@ func TestLoadConfigWatch(t *testing.T) {
 }
 
 func TestLoadConfigConflicts(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(`{"conflicts": "copy"}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -52,6 +54,7 @@ func TestLoadConfigConflicts(t *testing.T) {
 
 // A missing .aqtconfig (or an omitted gitGuard) defaults the guard on.
 func TestWatchConfigGuardDefaultsOn(t *testing.T) {
+	t.Parallel()
 	cfg, err := LoadConfig(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -62,6 +65,7 @@ func TestWatchConfigGuardDefaultsOn(t *testing.T) {
 }
 
 func TestConfigChunkerProfiles(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name                         string
 		cfg                          Config
@@ -86,6 +90,7 @@ func TestConfigChunkerProfiles(t *testing.T) {
 }
 
 func TestConfigChunkerRejectsBadConfig(t *testing.T) {
+	t.Parallel()
 	bad := []struct {
 		name string
 		cfg  Config
@@ -108,6 +113,7 @@ func TestConfigChunkerRejectsBadConfig(t *testing.T) {
 // The default size-scaling selector picks a profile from file size at deterministic
 // boundaries: the coarser profile takes over exactly at its threshold.
 func TestDefaultChunkSelectorBySize(t *testing.T) {
+	t.Parallel()
 	sel := DefaultChunkSelector()
 	cases := []struct {
 		name string
@@ -134,6 +140,7 @@ func TestDefaultChunkSelectorBySize(t *testing.T) {
 
 // A pinned profile ignores file size; the default config scales; a bad profile errors.
 func TestConfigChunkSelectorPinnedVsScaled(t *testing.T) {
+	t.Parallel()
 	scaled, err := Config{}.ChunkSelector()
 	if err != nil {
 		t.Fatal(err)
@@ -166,6 +173,7 @@ func TestConfigChunkSelectorPinnedVsScaled(t *testing.T) {
 // A misspelled or unknown key must fail the load with the file path and the
 // field name, not silently fall back to defaults.
 func TestLoadConfigRejectsUnknownFields(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, configFile)
 	if err := os.WriteFile(path, []byte(`{"chunkProfiles": "large"}`), 0o644); err != nil {
@@ -184,6 +192,7 @@ func TestLoadConfigRejectsUnknownFields(t *testing.T) {
 }
 
 func TestParseConfigRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
 	bad := []struct {
 		name string
 		body string
@@ -221,6 +230,7 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 // The .aqtconfig example in the folder-sync spec must be accepted by the real
 // parser, so the docs cannot drift into showing a config the CLI rejects.
 func TestDesignConfigExampleParses(t *testing.T) {
+	t.Parallel()
 	doc := filepath.Join("..", "..", "docs", "protocol", "folder-sync.md")
 	b, err := os.ReadFile(doc)
 	if err != nil {
@@ -249,6 +259,7 @@ func TestDesignConfigExampleParses(t *testing.T) {
 
 // The chunkProfile field round-trips from JSON and drives Chunker.
 func TestLoadConfigChunkProfile(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, configFile), []byte(`{"chunkProfile": "large"}`), 0o644); err != nil {
 		t.Fatal(err)

@@ -6,6 +6,7 @@ import (
 )
 
 func TestKeyedMutexSerializesSameKey(t *testing.T) {
+	t.Parallel()
 	k := newKeyedMutex()
 	unlock := k.lock("r1")
 
@@ -33,6 +34,7 @@ func TestKeyedMutexSerializesSameKey(t *testing.T) {
 }
 
 func TestKeyedMutexIndependentKeys(t *testing.T) {
+	t.Parallel()
 	k := newKeyedMutex()
 	held := k.lock("a")
 	defer held()
@@ -51,6 +53,7 @@ func TestKeyedMutexIndependentKeys(t *testing.T) {
 }
 
 func TestKeyedMutexPrunesReleasedKeys(t *testing.T) {
+	t.Parallel()
 	k := newKeyedMutex()
 	// Lock-and-release many distinct keys (the bogus-id DoS shape). A non-pruning
 	// map would retain one mutex per id; a self-pruning one drops back to empty.

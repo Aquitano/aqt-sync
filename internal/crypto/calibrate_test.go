@@ -1,8 +1,30 @@
 package crypto
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
+
+// useCheapPresets shrinks the calibration targets for the duration of a test.
+// CalibrateKdf is wall-clock driven, so at the real budgets (up to 1 GiB and a
+// 2.5s target) these tests cost seconds by construction, and tens of seconds
+// under -race. The logic under test is the search, not the constants, and the
+// shrunk floor is what finally exercises the step-down branch that never fires
+// at the real budgets on a fast machine.
+func useCheapPresets(t *testing.T) {
+	t.Helper()
+	origTargets, origFloor := presetTargets, calibrateMemoryFloor
+	t.Cleanup(func() { presetTargets, calibrateMemoryFloor = origTargets, origFloor })
+	calibrateMemoryFloor = 8
+	presetTargets = map[KdfPreset]presetTarget{
+		PresetInteractive: {memory: 16, target: time.Millisecond},
+		PresetModerate:    {memory: 32, target: 2 * time.Millisecond},
+		PresetSensitive:   {memory: 64, target: 5 * time.Millisecond},
+	}
+}
 
 func TestCalibrateKdfPresets(t *testing.T) {
+	useCheapPresets(t)
 	for _, preset := range []KdfPreset{PresetInteractive, PresetModerate, PresetSensitive} {
 		p, err := CalibrateKdf(preset, 1)
 		if err != nil {
@@ -30,6 +52,7 @@ func TestCalibrateKdfUnknownPreset(t *testing.T) {
 }
 
 func TestCalibrateKdfFreshSalt(t *testing.T) {
+	useCheapPresets(t)
 	a, err := CalibrateKdf(PresetInteractive, 1)
 	if err != nil {
 		t.Fatal(err)

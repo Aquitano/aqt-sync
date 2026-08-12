@@ -6,6 +6,7 @@ import (
 )
 
 func TestResolveTreePathFetchesOnlyTheSpine(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	m := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("a/b/target.txt", "found"),
@@ -43,6 +44,7 @@ func TestResolveTreePathFetchesOnlyTheSpine(t *testing.T) {
 }
 
 func TestResolveTreePathRootAndMisses(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	m := Manifest{Version: TreeManifestVersion, Entries: []Entry{file("dir/f.txt", "x")}}
 	sink := mapSink{}
@@ -64,6 +66,7 @@ func TestResolveTreePathRootAndMisses(t *testing.T) {
 }
 
 func TestEntryFromChild(t *testing.T) {
+	t.Parallel()
 	link := TreeChild{Name: "ln", Type: ChildSymlink, Size: 3, Hash: linkHash("tgt"), Link: "tgt"}
 	e, err := EntryFromChild("sub/ln", link, nil)
 	if err != nil || e.Link != "tgt" || e.Path != "sub/ln" {

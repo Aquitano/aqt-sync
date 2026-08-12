@@ -30,6 +30,7 @@ func normalize(m Manifest) Manifest {
 }
 
 func TestSealOpenTreeRoundTrip(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	key := make([]byte, crypto.KeySize)
 	in := Manifest{
@@ -81,6 +82,7 @@ func TestSealOpenTreeRoundTrip(t *testing.T) {
 }
 
 func TestSubtreeDedup(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	// The same two files under lib/ vs vendor/lib/. Their containing directory node
 	// must seal to the same object id, so a move re-uploads zero objects.
@@ -118,6 +120,7 @@ func subtreeRootID(t *testing.T, conv crypto.ConvergenceKey, entries []Entry) st
 }
 
 func TestEditLocality(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	base := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		{Path: "main.go", Hash: "main", Inline: []byte("m")},
@@ -172,6 +175,7 @@ func dirNodeID(t *testing.T, m Manifest, conv crypto.ConvergenceKey, dir string)
 // yields exactly the manifest a full server walk would, while fetching only the nodes on a
 // changed spine. A remote identical to base fetches nothing.
 func TestOpenTreeReusingBaseNodes(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	base := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		{Path: "keep/a.txt", Hash: "a", Inline: []byte("a")},
@@ -237,6 +241,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 // tree's node fetches to one batch per depth level (the fix for 2.4's 2-RTT-per-node
 // cost), and reconstructs exactly the manifest the depth-first OpenTree does.
 func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	in := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		{Path: "a/sub/f1.txt", Hash: "h1", Inline: []byte("1")},
@@ -289,6 +294,7 @@ func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
 // both exactly like the depth-first OpenTree: earlier it dropped ChunksRef (restoring
 // the file with zero chunks) and InlineAlg (writing raw compressed bytes as plaintext).
 func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	key := make([]byte, crypto.KeySize)
 	bigChunks := make([]crypto.Chunk, chunkListInlineMax+1)
@@ -337,6 +343,7 @@ func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
 }
 
 func TestTreeRootAADSeparation(t *testing.T) {
+	t.Parallel()
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
 		t.Fatal(err)
@@ -362,6 +369,7 @@ func TestTreeRootAADSeparation(t *testing.T) {
 }
 
 func TestTreeRootBoundToResourceID(t *testing.T) {
+	t.Parallel()
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
 		t.Fatal(err)

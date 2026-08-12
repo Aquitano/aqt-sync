@@ -15,7 +15,10 @@ import (
 // already length- and hash-checked against the signed manifest, so this is the
 // backstop for the one thing a checksum cannot bound: how much a few verified
 // megabytes expand into. A real aqt binary is tens of megabytes.
-const maxExecutableBytes = 256 << 20
+//
+// A var, not a const, only so extract_test.go can shrink it rather than build a
+// 256 MiB bomb to cross it; nothing outside a test assigns to it.
+var maxExecutableBytes int64 = 256 << 20
 
 var (
 	// ErrUnexpectedEntry means the archive holds something other than the single

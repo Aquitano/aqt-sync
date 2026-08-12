@@ -44,6 +44,7 @@ func testContentKey(t *testing.T) crypto.ContentKey {
 // manifest that matches a direct Scan of the source — the parity the LWW base
 // detection depends on.
 func TestPackRoundTrip(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("hello"))
 	writeFile(t, src, "nested/b.txt", []byte("nested body"))
@@ -111,6 +112,7 @@ func TestPackRoundTrip(t *testing.T) {
 // tree yields entirely different segment ids (fresh nonces), which is what makes
 // every change re-ship the whole folder and lets a new sync supersede the last.
 func TestPackNonConvergent(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("stable content"))
 	ck := testContentKey(t)
@@ -135,6 +137,7 @@ func TestPackNonConvergent(t *testing.T) {
 // TestPackSegmentTamperRejected ensures a flipped byte in a stored segment fails the
 // content-address/AEAD check on extract rather than landing corrupt bytes on disk.
 func TestPackSegmentTamperRejected(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("trust but verify"))
 	ck := testContentKey(t)
@@ -153,6 +156,7 @@ func TestPackSegmentTamperRejected(t *testing.T) {
 
 // TestPackWrongKeyRejected ensures a different content key cannot open the segments.
 func TestPackWrongKeyRejected(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("secret"))
 	store := memObjects{}
@@ -171,6 +175,7 @@ func TestPackWrongKeyRejected(t *testing.T) {
 // file at the symlink's target. safeJoin alone would pass both entries (neither path
 // contains ".."); refuseSymlinkParents is what stops the escape.
 func TestExtractRefusesSymlinkTraversal(t *testing.T) {
+	t.Parallel()
 	outside := t.TempDir() // stands in for an out-of-tree location the symlink targets
 
 	var tarBuf bytes.Buffer
@@ -220,6 +225,7 @@ func TestExtractRefusesSymlinkTraversal(t *testing.T) {
 // before compression existed — still extracts, and that a root newer than this
 // client is refused instead of misread.
 func TestExtractLegacyRawTarRoot(t *testing.T) {
+	t.Parallel()
 	var tarBuf bytes.Buffer
 	tw := tar.NewWriter(&tarBuf)
 	body := []byte("legacy body")
@@ -266,6 +272,7 @@ func TestExtractLegacyRawTarRoot(t *testing.T) {
 // nothing. The distinct AADs must make the cross-open fail while each root still
 // opens as itself.
 func TestPackRootDoesNotCrossOpenAsTree(t *testing.T) {
+	t.Parallel()
 	ck := testContentKey(t)
 
 	packBlob, err := SealPackRoot(PackRoot{Version: PackRootVersion, Size: 123, Segments: []Segment{{ID: "abc", Len: 10}}}, ck, "res1")
@@ -296,6 +303,7 @@ func TestPackRootDoesNotCrossOpenAsTree(t *testing.T) {
 // source does, so remoteEqualsLocal can decide tree equality without materializing the
 // remote to disk and deleting it.
 func TestPackTreeManifestMatchesScan(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("hello"))
 	writeFile(t, src, "nested/b.txt", []byte("nested body"))
@@ -332,6 +340,7 @@ func TestPackTreeManifestMatchesScan(t *testing.T) {
 // cleared so extraction can create the directory, instead of aborting on MkdirAll
 // (ENOTDIR for a file) or refuseSymlinkParents (for a symlink).
 func TestExtractReplacesStaleParent(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "data/inner.txt", []byte("hello"))
 	ck := testContentKey(t)
@@ -368,6 +377,7 @@ func TestExtractReplacesStaleParent(t *testing.T) {
 // not land until the whole stream has been extracted, or the directory locks out its
 // own children.
 func TestExtractAppliesDirModesAfterContents(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows Chmod carries only the write bit, so a non-writable directory is not representable")
 	}
@@ -419,6 +429,7 @@ func TestExtractAppliesDirModesAfterContents(t *testing.T) {
 // survive), but is still hashed from the archive and recorded in the returned
 // manifest, so the caller's base always describes the full remote tree.
 func TestExtractSafeSkipsVetoedEntry(t *testing.T) {
+	t.Parallel()
 	src := t.TempDir()
 	writeFile(t, src, "keep.txt", []byte("remote keep"))
 	writeFile(t, src, "guarded.txt", []byte("remote body"))

@@ -10,6 +10,7 @@ func ent(path string, mode uint32, hash string) Entry {
 }
 
 func TestDetectRenamesSimpleFileRename(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{ent("a.txt", 0o644, "H")}}
 	cur := Manifest{Entries: []Entry{ent("b.txt", 0o644, "H")}}
 
@@ -28,6 +29,7 @@ func TestDetectRenamesSimpleFileRename(t *testing.T) {
 }
 
 func TestDetectRenamesDuplicateContentNotPaired(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{ent("d1.txt", 0o644, "H"), ent("d2.txt", 0o644, "H")}}
 	cur := Manifest{Entries: []Entry{ent("a1.txt", 0o644, "H")}}
 
@@ -46,6 +48,7 @@ func TestDetectRenamesDuplicateContentNotPaired(t *testing.T) {
 }
 
 func TestDetectRenamesContentReferencedElsewhereBlocksPairing(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{ent("a.txt", 0o644, "H"), ent("keep.txt", 0o644, "H")}}
 	cur := Manifest{Entries: []Entry{ent("b.txt", 0o644, "H"), ent("keep.txt", 0o644, "H")}}
 
@@ -64,6 +67,7 @@ func TestDetectRenamesContentReferencedElsewhereBlocksPairing(t *testing.T) {
 }
 
 func TestDetectRenamesModeMismatchBlocksPairing(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{ent("a.txt", 0o644, "H")}}
 	cur := Manifest{Entries: []Entry{ent("b.txt", 0o755, "H")}}
 
@@ -82,6 +86,7 @@ func TestDetectRenamesModeMismatchBlocksPairing(t *testing.T) {
 }
 
 func TestDetectRenamesWholeDirectoryMoveCoalesces(t *testing.T) {
+	t.Parallel()
 	old := Manifest{
 		Entries: []Entry{ent("dir/x.txt", 0o644, "Hx"), ent("dir/sub/y.txt", 0o644, "Hy")},
 		Dirs:    []DirEntry{{Path: "dir", Mode: 0o755}, {Path: "dir/sub", Mode: 0o755}},
@@ -108,6 +113,7 @@ func TestDetectRenamesWholeDirectoryMoveCoalesces(t *testing.T) {
 }
 
 func TestDetectRenamesPartialMoveStaysPerFile(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{ent("dir/a.txt", 0o644, "Ha"), ent("dir/b.txt", 0o644, "Hb")}}
 	cur := Manifest{Entries: []Entry{ent("dir/a.txt", 0o644, "Ha"), ent("moved/b.txt", 0o644, "Hb")}}
 
@@ -126,6 +132,7 @@ func TestDetectRenamesPartialMoveStaysPerFile(t *testing.T) {
 }
 
 func TestDetectRenamesDirModeChangeBlocksCoalescing(t *testing.T) {
+	t.Parallel()
 	old := Manifest{
 		Entries: []Entry{ent("dir/x.txt", 0o644, "Hx"), ent("dir/y.txt", 0o644, "Hy")},
 		Dirs:    []DirEntry{{Path: "dir", Mode: 0o755}},
@@ -155,6 +162,7 @@ func TestDetectRenamesDirModeChangeBlocksCoalescing(t *testing.T) {
 }
 
 func TestDetectRenamesEmptyInputReturnsUnchanged(t *testing.T) {
+	t.Parallel()
 	old := Manifest{Entries: []Entry{ent("a.txt", 0o644, "H")}}
 	cur := Manifest{Entries: []Entry{ent("a.txt", 0o644, "H")}}
 

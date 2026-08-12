@@ -26,6 +26,7 @@ func diffManifests(t *testing.T, left, right Manifest) (Delta, *diffFetcher, Tre
 }
 
 func TestDiffTreeRootsFileRename(t *testing.T) {
+	t.Parallel()
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{file("dir/old.txt", "same")}}
 	right := Manifest{Version: TreeManifestVersion, Entries: []Entry{file("dir/new.txt", "same")}}
 
@@ -44,6 +45,7 @@ func TestDiffTreeRootsFileRename(t *testing.T) {
 }
 
 func TestDiffTreeRootsDirectoryRenameCoalesces(t *testing.T) {
+	t.Parallel()
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("olddir/a.txt", "a"),
 		file("olddir/sub/b.txt", "b"),
@@ -68,6 +70,7 @@ func TestDiffTreeRootsDirectoryRenameCoalesces(t *testing.T) {
 }
 
 func TestDiffTreeRootsDuplicateContentStaysDeleteAdd(t *testing.T) {
+	t.Parallel()
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("one.txt", "dup"),
 		file("two.txt", "dup"),
@@ -88,6 +91,7 @@ func TestDiffTreeRootsDuplicateContentStaysDeleteAdd(t *testing.T) {
 }
 
 func TestDiffTreeRootsModifiedUntouchedByPairing(t *testing.T) {
+	t.Parallel()
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("dir/old.txt", "same"),
 		file("mod.txt", "v1"),
@@ -111,6 +115,7 @@ func TestDiffTreeRootsModifiedUntouchedByPairing(t *testing.T) {
 }
 
 func TestDiffTreeRootsRenameDoesNotFetchUnchangedSubtree(t *testing.T) {
+	t.Parallel()
 	left := Manifest{Version: TreeManifestVersion, Entries: []Entry{
 		file("keep/same.txt", "same"),
 		file("dir/old.txt", "renamed"),

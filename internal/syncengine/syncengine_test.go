@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 )
 
 // captureSink records the chunks a snapshot seals so a test can assert what was
@@ -29,10 +30,7 @@ func (s *captureSink) Add(ch crypto.Chunk, ct []byte) error {
 
 func testConv(t *testing.T) crypto.ConvergenceKey {
 	t.Helper()
-	p, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	p := cryptotest.KdfParams(t)
 	mk, err := crypto.DeriveMasterKey("folder passphrase", p)
 	if err != nil {
 		t.Fatal(err)
@@ -41,6 +39,7 @@ func testConv(t *testing.T) crypto.ConvergenceKey {
 }
 
 func TestEntryFromBytesRoundTrip(t *testing.T) {
+	t.Parallel()
 	conv := testConv(t)
 	defer conv.Wipe()
 	data := bytes.Repeat([]byte("merged line with enough content\n"), 500)
@@ -73,6 +72,7 @@ func writeFile(t *testing.T, dir, rel string, data []byte) {
 }
 
 func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "small.txt", []byte("just a little config"))
 	big := bytes.Repeat([]byte("0123456789abcdef"), 8<<10) // 128 KiB
@@ -99,6 +99,7 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 }
 
 func TestTakeReusesUnchangedEntries(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	big := bytes.Repeat([]byte("reuse-me"), 32<<10)
 	writeFile(t, dir, "a.bin", big)
@@ -126,6 +127,7 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 // without reading the file — so a content change that preserves all three is not
 // seen by default, and --rehash forces the authoritative content read that catches it.
 func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.bin")
 	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("fastpath"), 32<<10))
@@ -181,6 +183,7 @@ func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
 // content re-read, and the planner must surface it as an Upload despite an unchanged
 // content hash.
 func TestModeOnlyChangeSnapshottedAndPlanned(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		// Windows file modes carry no exec/group permission bits, so chmod cannot
 		// move a file's recorded mode here; mode propagation is a Unix-only concern.
@@ -238,6 +241,7 @@ func TestModeOnlyChangeSnapshottedAndPlanned(t *testing.T) {
 }
 
 func TestIgnoreMatching(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, ".aqtignore", []byte("*.log\n/build/\nnode_modules\n!keep.log\n"))
 	ig, err := LoadIgnore(dir)
@@ -270,6 +274,7 @@ func TestIgnoreMatching(t *testing.T) {
 // everything under it — the override the init prompt writes when the user opts to
 // sync their git history.
 func TestIgnoreGitNegation(t *testing.T) {
+	t.Parallel()
 	def := t.TempDir()
 	igDef, err := LoadIgnore(def)
 	if err != nil {
@@ -294,6 +299,7 @@ func TestIgnoreGitNegation(t *testing.T) {
 }
 
 func TestPlanThreeWay(t *testing.T) {
+	t.Parallel()
 	mk := func(entries ...Entry) Manifest { return Manifest{Entries: entries} }
 	e := func(path, hash string) Entry { return Entry{Path: path, Hash: hash} }
 
@@ -325,6 +331,7 @@ func TestPlanThreeWay(t *testing.T) {
 }
 
 func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, "real.txt", []byte("hello"))
 	if err := os.Symlink("real.txt", filepath.Join(dir, "link.txt")); err != nil {
@@ -367,6 +374,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 }
 
 func TestWriteFileRejectsPathEscape(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := WriteFile(dir, Entry{Path: "../escape.txt", Mode: 0o600}, []byte("x")); err == nil {
 		t.Fatal("a path escaping the tracked root must be rejected")
@@ -377,6 +385,7 @@ func TestWriteFileRejectsPathEscape(t *testing.T) {
 }
 
 func TestWriteFileReplacesStaleSymlinkInsteadOfFollowing(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	outside := t.TempDir()
 	victim := filepath.Join(outside, "victim.txt")
@@ -408,6 +417,7 @@ func TestWriteFileReplacesStaleSymlinkInsteadOfFollowing(t *testing.T) {
 }
 
 func TestWriteFileReplacesEmptyDirectoryWithFile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// The remote turned a directory into a regular file at the same path; once its
 	// children are deleted an empty directory remains, and Rename cannot replace it.
@@ -430,6 +440,7 @@ func TestWriteFileReplacesEmptyDirectoryWithFile(t *testing.T) {
 }
 
 func TestWriteFileLeavesNoTempBehind(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := WriteFile(dir, Entry{Path: "nested/file.txt", Mode: 0o640}, []byte("payload")); err != nil {
 		t.Fatal(err)
@@ -448,6 +459,7 @@ func TestWriteFileLeavesNoTempBehind(t *testing.T) {
 }
 
 func TestNestedAqtignore(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeFile(t, dir, ".aqtignore", []byte("*.log\n"))
 	writeFile(t, dir, "app.log", []byte("x"))  // ignored by root

@@ -11,6 +11,7 @@ import (
 // forces: applying it on sight would leave nothing able to create the directories
 // underneath it, so every directory is created first and the modes come after.
 func TestMaterializeDirsAppliesModesLast(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows Chmod carries only the write bit, so a non-writable directory is not representable")
 	}
@@ -43,6 +44,7 @@ func TestMaterializeDirsAppliesModesLast(t *testing.T) {
 // RemoveDir must be a no-op that leaves the replacement file intact rather than failing on
 // the ENOTDIR that os.ReadDir returns for a non-directory.
 func TestRemoveDirPathBecameFile(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	file := filepath.Join(root, "x")
 	if err := os.WriteFile(file, []byte("now a file"), 0o600); err != nil {
@@ -60,6 +62,7 @@ func TestRemoveDirPathBecameFile(t *testing.T) {
 // removed and its now-empty parents pruned up to the root, while a directory still holding
 // entries is left in place.
 func TestRemoveDirEmptyAndNonEmpty(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 
 	// Empty nested directory: removed, and the empty parent pruned (but not the root).

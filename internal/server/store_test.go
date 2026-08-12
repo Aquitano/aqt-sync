@@ -19,6 +19,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 )
 
 // forceGC sweeps ignoring the age guard (cutoff in the future), so a test does
@@ -66,7 +67,7 @@ func packOf(payloads ...string) (packID string, pack []byte, ids []string) {
 
 func (s *Store) mustAccount(t *testing.T, email string) string {
 	t.Helper()
-	kdf, _ := crypto.NewKdfParams()
+	kdf := cryptotest.KdfParams(t)
 	acc, err := s.CreateAccount(email, kdf, make([]byte, 32), crypto.SealedBlob{Nonce: make([]byte, 1), Ciphertext: make([]byte, 1)}, make([]byte, 32), nil, nil)
 	if err != nil {
 		t.Fatalf("create account: %v", err)
@@ -97,6 +98,7 @@ func (s *Store) rootResource(t *testing.T, owner string, refs []string) string {
 // pre-migration row and a legacy writer are never over-restricted), while a declared
 // value is stored verbatim.
 func TestResourceMinClientDefaultsToBaseline(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "mincli@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -132,6 +134,7 @@ func TestResourceMinClientDefaultsToBaseline(t *testing.T) {
 }
 
 func TestGitRemoteResourcePolicy(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "gitremote@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -194,6 +197,7 @@ func TestGitRemoteResourcePolicy(t *testing.T) {
 }
 
 func TestPackStoreRoundTripAndGC(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "packs@example.com")
 	packA, dataA, idsA := packOf("alpha chunk", "beta chunk")
@@ -275,6 +279,7 @@ func (s *Store) readLocated(t *testing.T, owner, id string) []byte {
 // reclaims them (see TestRepackCompactsPartiallyDeadPack). The pack file stays
 // readable here because only GCPacks runs.
 func TestPartiallyReferencedPackSurvives(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "partial@example.com")
 	packID, data, ids := packOf("kept object", "dead object")
@@ -299,6 +304,7 @@ func TestPartiallyReferencedPackSurvives(t *testing.T) {
 // copied into a fresh pack and still decrypts, the dead object is dropped, and the
 // old pack file is removed.
 func TestRepackCompactsPartiallyDeadPack(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "repack@example.com")
 	livePayload := "live-object-keep"
@@ -346,6 +352,7 @@ func TestRepackCompactsPartiallyDeadPack(t *testing.T) {
 
 // A pack with no dead objects is never rewritten, even with the age guard disabled.
 func TestRepackLeavesFullyLivePack(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "dense@example.com")
 	packID, data, ids := packOf("aaaa", "bbbb")
@@ -365,6 +372,7 @@ func TestRepackLeavesFullyLivePack(t *testing.T) {
 // Repack honors the same age guard as the sweep, so a pack uploaded moments ago (its
 // manifest may still be committing) is left untouched.
 func TestRepackHonorsAgeGuard(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "young@example.com")
 	packID, data, ids := packOf("keep", strings.Repeat("dead", 64))
@@ -387,6 +395,7 @@ func TestRepackHonorsAgeGuard(t *testing.T) {
 // time — the counter has no ceiling, so any drift is permanent and only inflates the
 // quota the owner is charged.
 func TestRepackDoesNotDoubleCountExistingPack(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "collide@example.com")
 	packID, data, ids := packOf("live-object-keep", strings.Repeat("dead", 64))
@@ -448,6 +457,7 @@ func (s *Store) mustPackRowBytes(t *testing.T, owner string) int64 {
 }
 
 func TestUpdateResourceVersionConflict(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "occ@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -481,6 +491,7 @@ func TestUpdateResourceVersionConflict(t *testing.T) {
 }
 
 func TestStoreConcurrencyConfig(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if got := s.db.Stats().MaxOpenConnections; got != 1 {
 		t.Errorf("MaxOpenConnections = %d, want 1 (concurrent writers would hit SQLITE_BUSY)", got)
@@ -502,6 +513,7 @@ func TestStoreConcurrencyConfig(t *testing.T) {
 }
 
 func TestConcurrentPackWritesDoNotError(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "concurrent@example.com")
 
@@ -530,6 +542,7 @@ func TestConcurrentPackWritesDoNotError(t *testing.T) {
 // race window is fresh, so the age guard spares it even though the sweep runs
 // against it. This is the pack analogue of the chunk-store upload/GC race.
 func TestConcurrentUploadAndGCKeepsFreshPacks(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "uploadrace@example.com")
 
@@ -572,6 +585,7 @@ func TestConcurrentUploadAndGCKeepsFreshPacks(t *testing.T) {
 // sweep if a concurrent sync checks it (dedup hit) before referencing it: the check
 // re-arms the age guard on the pack holding it.
 func TestDedupCheckReArmsGCAgeGuard(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "race@example.com")
 	packID, data, ids := packOf("dedup target")
@@ -603,6 +617,7 @@ func TestDedupCheckReArmsGCAgeGuard(t *testing.T) {
 // not committed as a dangling reference; a failed update leaves the prior blob
 // intact and decryptable (no leftover staged temp).
 func TestManifestRejectsDanglingChunkReference(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "fk@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -667,6 +682,7 @@ func countBlobs(t *testing.T, dir string) int {
 // Re-opening a data dir re-runs migrate as a no-op (user_version gates already-applied
 // steps), and the scaffold has created the device-token index.
 func TestMigrateIsIdempotentAndIndexesDeviceToken(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s, err := OpenStore(dir)
 	if err != nil {
@@ -698,6 +714,7 @@ func TestMigrateIsIdempotentAndIndexesDeviceToken(t *testing.T) {
 // Repeated updates must leave exactly one blob file on disk (superseded
 // nonce-addressed blobs reclaimed) and the live blob must decrypt to the latest.
 func TestUpdatesReclaimSupersededBlobs(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "blobs@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -733,6 +750,7 @@ func TestUpdatesReclaimSupersededBlobs(t *testing.T) {
 // A data dir from the pre-pack build (a `chunks` table, no `objects`/`packs`) must
 // be rejected loudly at open, not limped along with a broken FK backstop.
 func TestLegacyChunkStoreFailsLoud(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	raw, err := sql.Open("sqlite", filepath.Join(dir, "aqt.db"))
 	if err != nil {
@@ -753,6 +771,7 @@ func TestLegacyChunkStoreFailsLoud(t *testing.T) {
 // A data dir from the even-older flat layout (resource_chunks without owner_handle)
 // must also be rejected loudly.
 func TestStaleResourceChunksSchemaFailsLoud(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	raw, err := sql.Open("sqlite", filepath.Join(dir, "aqt.db"))
 	if err != nil {
@@ -774,6 +793,7 @@ func TestStaleResourceChunksSchemaFailsLoud(t *testing.T) {
 // age guard is what keeps an in-flight push's packs alive until its manifest PUT
 // roots their objects. Only once aged and still unreferenced is it reaped.
 func TestFreshPackSurvivesAgeGuard(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "ageguard@example.com")
 	packID, data, _ := packOf("in flight")
@@ -796,6 +816,7 @@ func TestFreshPackSurvivesAgeGuard(t *testing.T) {
 // Re-uploading a stored pack stores no new objects but re-arms its age guard, so a
 // client that re-pushes a pack mid-sync (idempotent retry) keeps it alive.
 func TestPutPackIdempotentReArm(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "idem@example.com")
 	packID, data, _ := packOf("once", "twice")
@@ -823,6 +844,7 @@ func TestPutPackIdempotentReArm(t *testing.T) {
 // sum only the newly-stored rows. This crosses the objectInsertBatch boundary and then
 // re-uploads to confirm dedup counts nothing.
 func TestPutPackBatchesObjectInserts(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "batch@example.com")
 
@@ -848,6 +870,7 @@ func TestPutPackBatchesObjectInserts(t *testing.T) {
 // An object slice that escapes the object region (into the index trailer) is
 // rejected, so a crafted pack cannot smuggle an id that points at index bytes.
 func TestPutPackRejectsSliceOutOfRange(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "bounds@example.com")
 	packID, data, _ := packOf("real object")
@@ -878,6 +901,7 @@ func TestPutPackRejectsSliceOutOfRange(t *testing.T) {
 // A crafted pack whose index offset overflows int64 (off=MaxInt64, len=1) must be
 // rejected as a bad pack, not slip past the bounds check and panic the slice.
 func TestPutPackRejectsOverflowSlice(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "overflow@example.com")
 	obj := []byte("real object bytes")
@@ -899,6 +923,7 @@ func TestPutPackRejectsOverflowSlice(t *testing.T) {
 // Locating an object re-arms the age guard on its pack, so a concurrent GC cannot
 // reap a pack a download is mid-read of (the read-path analogue of the dedup touch).
 func TestLocateRearmsAgeGuard(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "locaterace@example.com")
 	packID, data, ids := packOf("download target")
@@ -925,6 +950,7 @@ func TestLocateRearmsAgeGuard(t *testing.T) {
 }
 
 func TestGCDoesNotCrossOwners(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "mine@example.com")
 	other := s.mustAccount(t, "theirs@example.com")
@@ -947,6 +973,7 @@ func TestGCDoesNotCrossOwners(t *testing.T) {
 // without its ChunkRefs would orphan the still-referenced objects for the next GC.
 // The store refuses it and leaves the resource untouched.
 func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "roots@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1000,6 +1027,7 @@ func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
 // exit before the commit deletes it while the committed row still names that nonce.
 // The store rejects the reuse instead, leaving the live blob untouched.
 func TestUpdateRejectsReusedBlobNonce(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "nonce@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1054,6 +1082,7 @@ func TestUpdateRejectsReusedBlobNonce(t *testing.T) {
 // match only UNIQUE violations. A NOT NULL or CHECK failure is a server bug and must
 // not be reported to the caller as a duplicate.
 func TestIsUniqueMatchesOnlyUniqueViolations(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if _, err := s.db.Exec(`CREATE TABLE probe(a TEXT UNIQUE, b TEXT NOT NULL, c INT CHECK (c > 0))`); err != nil {
 		t.Fatal(err)
@@ -1079,6 +1108,7 @@ func TestIsUniqueMatchesOnlyUniqueViolations(t *testing.T) {
 // legitimate `aqt private` on an inline file (which never had any ChunkRefs) still
 // replaces in place with none.
 func TestUpdateAllowsEmptyRootsWhenNoneExisted(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "inline@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1107,6 +1137,7 @@ func TestUpdateAllowsEmptyRootsWhenNoneExisted(t *testing.T) {
 // now-live new pack file, losing the live object. With it, the live object always
 // survives a burst of concurrent GCs.
 func TestConcurrentGCKeepsLivePack(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "racegc@example.com")
 	livePayload := "live-object-keep"
@@ -1200,6 +1231,7 @@ func (s *Store) assertPackCounters(t *testing.T, owner string) {
 // move an object or flip its rooted state: pack ingest, manifest create/supersede,
 // snapshot pin/unpin, resource delete, sweep, and repack.
 func TestPackCountersStayConsistent(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "counters@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1280,6 +1312,7 @@ func TestPackCountersStayConsistent(t *testing.T) {
 // read pool, not the single writer connection. Before the read pool existed this
 // deadlocked outright — the write tx held the store's only connection.
 func TestReadsProceedDuringOpenWriteTx(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "readpool@example.com")
 	id := s.rootResource(t, owner, nil)
@@ -1312,6 +1345,7 @@ func TestReadsProceedDuringOpenWriteTx(t *testing.T) {
 // The read pool must reject writes loudly (query_only), so a mutation routed to it
 // by mistake fails instead of racing the single writer to SQLITE_BUSY.
 func TestReadPoolRejectsWrites(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	if _, err := s.rdb.Exec(`INSERT INTO server_meta(key, value) VALUES('nope', x'00')`); err == nil {
 		t.Fatal("write on the read pool succeeded, want a query_only failure")
@@ -1321,6 +1355,7 @@ func TestReadPoolRejectsWrites(t *testing.T) {
 // Cached token resolutions must die with their device (revocation) and their epoch
 // (passphrase change) immediately, not at TTL expiry.
 func TestAuthCacheInvalidation(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "authcache@example.com")
 	devA, tokA, err := s.CreateDevice(owner, "keeper", 1, 0)
@@ -1359,7 +1394,7 @@ func TestAuthCacheInvalidation(t *testing.T) {
 	if _, _, err := s.AuthByToken(tokC); err != nil {
 		t.Fatal(err)
 	}
-	kdf, _ := crypto.NewKdfParams()
+	kdf := cryptotest.KdfParams(t)
 	if _, err := s.ChangePassphrase(owner, devA, kdf,
 		crypto.SealedBlob{Nonce: make([]byte, 1), Ciphertext: make([]byte, 1)},
 		make([]byte, 32), []byte("new-verifier"), 1); err != nil {
@@ -1376,6 +1411,7 @@ func TestAuthCacheInvalidation(t *testing.T) {
 // RunGCAll (the scheduled sweep's tick body) covers every owner, so an account
 // whose devices stopped syncing still gets its dead packs reclaimed.
 func TestRunGCAllSweepsAllOwners(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	a := s.mustAccount(t, "idle-a@example.com")
 	b := s.mustAccount(t, "idle-b@example.com")
@@ -1406,6 +1442,7 @@ func TestRunGCAllSweepsAllOwners(t *testing.T) {
 // StartGC's timer path end-to-end: an aged, unrooted pack is reclaimed without any
 // client triggering POST /v1/gc.
 func TestStartGCSweepsAgedPacksOnTimer(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "sched-gc@example.com")
 	packID, data, _ := packOf("orphaned by an idle account")
@@ -1438,6 +1475,7 @@ func TestStartGCSweepsAgedPacksOnTimer(t *testing.T) {
 // TestUpdateResourceMetadataOnly verifies rename's store primitive cannot alter
 // content, chunk roots, visibility, or link lifecycle and rejects stale writers.
 func TestUpdateResourceMetadataOnly(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "metadata-owner@example.com")
 	other := s.mustAccount(t, "metadata-other@example.com")
@@ -1499,6 +1537,7 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 }
 
 func TestCreationIdempotencyKeysReplayAndRejectPayloadReuse(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "idem.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1543,6 +1582,7 @@ func TestCreationIdempotencyKeysReplayAndRejectPayloadReuse(t *testing.T) {
 }
 
 func TestMutationsRejectStaleResourceVersions(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "cas.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1576,6 +1616,7 @@ func TestMutationsRejectStaleResourceVersions(t *testing.T) {
 // resource puts, and auto-snapshots, so a hard error would wedge the whole
 // account on one missing file.
 func TestAccountUsageToleratesMissingBlob(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "orphan@example.com")
 	ck, _ := crypto.GenerateContentKey()
@@ -1602,6 +1643,7 @@ func TestAccountUsageToleratesMissingBlob(t *testing.T) {
 // the modeled quota; otherwise a delete-heavy account sits over quota with no
 // way to recover.
 func TestAccountUsageExcludesReclaimedTombstones(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "tombstone@example.com")
 	base, err := s.AccountUsage(owner)
@@ -1636,6 +1678,7 @@ func TestAccountUsageExcludesReclaimedTombstones(t *testing.T) {
 // Recorded idempotency responses only matter for short-lived retries; GC must
 // reap rows past the TTL or the table grows without bound.
 func TestGCSweepsStaleIdempotencyKeys(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "idemgc@example.com")
 	ck, _ := crypto.GenerateContentKey()

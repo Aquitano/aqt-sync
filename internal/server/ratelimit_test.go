@@ -7,6 +7,7 @@ import (
 )
 
 func TestRateLimiterBurstThenRefill(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(0, 0)
 	l := newIPRateLimiter(1, 3) // burst 3, 1 token/sec
 	l.now = func() time.Time { return now }
@@ -34,6 +35,7 @@ func TestRateLimiterBurstThenRefill(t *testing.T) {
 }
 
 func TestRateLimiterPrunesIdleBuckets(t *testing.T) {
+	t.Parallel()
 	now := time.Unix(0, 0)
 	l := newIPRateLimiter(1, 1)
 	l.now = func() time.Time { return now }

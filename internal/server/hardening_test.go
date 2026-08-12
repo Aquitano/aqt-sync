@@ -14,6 +14,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 )
 
 // newHarnessCfg is newHarness with a non-default server config.
@@ -34,10 +35,7 @@ func newHarnessCfg(t *testing.T, cfg Config) *harness {
 // signups).
 func createReq(t *testing.T, email, passphrase string) api.CreateAccountRequest {
 	t.Helper()
-	kdf, err := crypto.NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	kdf := cryptotest.KdfParams(t)
 	mk, err := crypto.GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)
@@ -63,6 +61,7 @@ func createReq(t *testing.T, email, passphrase string) api.CreateAccountRequest 
 // --- 5.1: decoy bootstrap indistinguishability ---
 
 func TestDecoySaltInDistributionAndDeterministic(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 
 	b1 := h.bootstrap("ghost@example.com")
@@ -94,6 +93,7 @@ func TestDecoySaltInDistributionAndDeterministic(t *testing.T) {
 // --- 5.2: account-creation conflict is not an existence oracle ---
 
 func TestOpenRegistrationConflictIndistinguishable(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t) // default open registration
 
 	var first api.AuthResponse
@@ -127,6 +127,7 @@ func TestOpenRegistrationConflictIndistinguishable(t *testing.T) {
 }
 
 func TestInviteRegistration(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{Registration: RegistrationInvite, InviteTokens: []string{"good-invite"}})
 
 	req := createReq(t, "invite@example.com", "pass")
@@ -151,6 +152,7 @@ func TestInviteRegistration(t *testing.T) {
 // --- 5.5: authenticated rate limit ---
 
 func TestAuthedRateLimitReturns429(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{AuthedRatePerSec: 0.0001, AuthedBurst: 3})
 	token, _ := h.signup("rl@example.com", "pass")
 
@@ -181,6 +183,7 @@ func TestAuthedRateLimitReturns429(t *testing.T) {
 // --- 5.5: per-owner quotas (store level) ---
 
 func TestPackByteQuota(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "quota@example.com")
 
@@ -215,6 +218,7 @@ func TestPackByteQuota(t *testing.T) {
 }
 
 func TestPackByteCounterAcrossGCAndDelete(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "gc@example.com")
 
@@ -254,6 +258,7 @@ func TestPackByteCounterAcrossGCAndDelete(t *testing.T) {
 }
 
 func TestDeviceLimit(t *testing.T) {
+	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "devs@example.com")
 
@@ -275,6 +280,7 @@ func TestDeviceLimit(t *testing.T) {
 // --- 5.6: trusted-proxy config knob is accepted for every shape ---
 
 func TestTrustedProxyConfigAccepted(t *testing.T) {
+	t.Parallel()
 	cases := []Config{
 		{},                               // default: gin's loopback-only
 		Config{}.WithTrustedProxies(nil), // trust none
@@ -291,6 +297,7 @@ func TestTrustedProxyConfigAccepted(t *testing.T) {
 }
 
 func TestPhysicalQuotaCoversInlineBlobsAndRetainedSnapshots(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{})
 	token, mk := h.signup("physical-quota.com", "passphrase for quota")
 	ck, _ := crypto.GenerateContentKey()
@@ -329,6 +336,7 @@ func TestPhysicalQuotaCoversInlineBlobsAndRetainedSnapshots(t *testing.T) {
 }
 
 func TestResourceAndObjectCountCaps(t *testing.T) {
+	t.Parallel()
 	h := newHarnessCfg(t, Config{MaxResources: 1, MaxObjects: 1})
 	token, mk := h.signup("count-caps.com", "passphrase for caps")
 	ck, _ := crypto.GenerateContentKey()

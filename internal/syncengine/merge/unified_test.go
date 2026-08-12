@@ -7,6 +7,7 @@ import (
 )
 
 func TestUnified(t *testing.T) {
+	t.Parallel()
 	got := string(Unified("a/file.txt", "b/file.txt",
 		[]byte("one\ntwo\nthree\nfour\nfive\n"),
 		[]byte("one\nTWO\nthree\nfour\nFIVE\n")))
@@ -24,6 +25,7 @@ func TestUnified(t *testing.T) {
 }
 
 func TestUnifiedAdditionAndRemovalHeaders(t *testing.T) {
+	t.Parallel()
 	if got := string(Unified("/dev/null", "b/new.txt", nil, []byte("new\n"))); !strings.Contains(got, "@@ -0,0 +1 @@") {
 		t.Fatalf("addition header:\n%s", got)
 	}
@@ -33,6 +35,7 @@ func TestUnifiedAdditionAndRemovalHeaders(t *testing.T) {
 }
 
 func TestUnifiedNoTrailingNewline(t *testing.T) {
+	t.Parallel()
 	got := string(Unified("a/f", "b/f", []byte("old"), []byte("new")))
 	if strings.Count(got, "\\ No newline at end of file") != 2 {
 		t.Fatalf("missing newline markers:\n%s", got)
@@ -42,6 +45,7 @@ func TestUnifiedNoTrailingNewline(t *testing.T) {
 // Changes more than twice the context apart must produce two hunks, exercising
 // the second range's start offsets from prefixPositions/rangeStart.
 func TestUnifiedTwoSeparatedHunks(t *testing.T) {
+	t.Parallel()
 	oldData := []byte("l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nl12\n")
 	newData := []byte("L1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\nl10\nl11\nL12\n")
 	got := string(Unified("a/f.txt", "b/f.txt", oldData, newData))
@@ -56,12 +60,14 @@ func TestUnifiedTwoSeparatedHunks(t *testing.T) {
 }
 
 func TestUnifiedEqualIsEmpty(t *testing.T) {
+	t.Parallel()
 	if got := Unified("a/f", "b/f", []byte("same\n"), []byte("same\n")); got != nil {
 		t.Fatalf("equal diff = %q, want nil", got)
 	}
 }
 
 func TestUnifiedComplexDiffFallsBackToBinary(t *testing.T) {
+	t.Parallel()
 	oldData := bytes.Repeat([]byte("old\n"), maxEditDistance/2+1)
 	newData := bytes.Repeat([]byte("new\n"), maxEditDistance/2+1)
 	got := string(Unified("a/generated.csv", "b/generated.csv", oldData, newData))

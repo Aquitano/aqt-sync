@@ -16,6 +16,7 @@ func (m memSink) Add(ch crypto.Chunk, ct []byte) error {
 }
 
 func TestFileRootRoundTrip(t *testing.T) {
+	t.Parallel()
 	var conv crypto.ConvergenceKey
 	if _, err := rand.Read(conv[:]); err != nil {
 		t.Fatal(err)

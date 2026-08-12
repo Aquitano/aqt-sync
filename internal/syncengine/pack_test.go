@@ -12,6 +12,7 @@ import (
 )
 
 func TestPackBuilderSelfDescribing(t *testing.T) {
+	t.Parallel()
 	pb := NewPackBuilder()
 	objs := map[string][]byte{}
 	for _, s := range []string{"alpha", "bravo-bravo", "charlie chunk data"} {

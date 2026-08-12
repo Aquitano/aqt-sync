@@ -14,6 +14,7 @@ import (
 // that normalize or reject such names (APFS, NTFS) can't reproduce it, so the test
 // confirms the byte sequence survived on disk before asserting.
 func TestScanRejectsInvalidUTF8Path(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	bad := filepath.Join(dir, "caf\xe9.txt") // latin-1 'é' (0xe9), not valid UTF-8
 	if err := os.WriteFile(bad, []byte("x"), 0o600); err != nil {
@@ -44,6 +45,7 @@ func TestScanRejectsInvalidUTF8Path(t *testing.T) {
 // the scan. The UTF-8 guard runs after the ignore filter precisely so a non-UTF-8 name
 // in an ignored cache or build dir does not break every sync of the folder.
 func TestScanSkipsIgnoredInvalidUTF8Path(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, ".aqtignore"), []byte("*.tmp\n"), 0o600); err != nil {
 		t.Fatal(err)
