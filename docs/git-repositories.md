@@ -2,7 +2,7 @@
 
 Use an `aqt::` Git remote when the repository history itself belongs in aqt. The
 `git-remote-aqt` helper stores Git bundles as zero-knowledge encrypted resource
-segments, so Git—not folder sync—owns commits, refs, rebases, and merge conflicts.
+segments, so Git — not folder sync — owns commits, refs, rebases, and merge conflicts.
 The server sees ciphertext sizes, counts, and timing, but not repository paths, refs,
 commits, or object structure.
 
@@ -63,7 +63,7 @@ git clone aqt::notes
 
 The URL may use the encrypted name or resource id. It deliberately contains no
 server or credential; the helper uses the active aqt profile and cached unlocked
-session. Headless jobs must log in and retain a valid session first—the helper does
+session. Headless jobs must log in and retain a valid session first — the helper does
 not prompt when Git invokes it without a terminal.
 
 ## Daily operation
@@ -125,6 +125,6 @@ therefore ignores `.git/`; use `aqt::` for repository history and use `aqt sync`
 for non-Git folders or working-tree data that is intentionally independent of Git.
 
 Legacy folders may still re-include `!.git/` in `.aqtignore`, and the git-busy guard
-reduces the torn-write window, but that is a compatibility escape hatch—not the
+reduces the torn-write window, but that is a compatibility escape hatch — not the
 recommended repository backup design. If restoring such a legacy capture, run
 `git status` and `git fsck` before trusting it.

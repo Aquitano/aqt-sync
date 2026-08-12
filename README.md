@@ -1,8 +1,16 @@
-# aqt
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.svg">
+  <img alt="aqt — zero-knowledge encrypted file and folder sync" src="docs/assets/banner-light.svg">
+</picture>
 
-Zero-knowledge encrypted file and folder sync. The client encrypts everything
-before it leaves the machine; the server stores only ciphertext and opaque
-metadata and never sees a key, a filename, or a plaintext byte.
+[![linux](https://github.com/Aquitano/aqt-sync/actions/workflows/linux.yml/badge.svg)](https://github.com/Aquitano/aqt-sync/actions/workflows/linux.yml)
+[![windows](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml/badge.svg)](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml)
+[![release](https://img.shields.io/github/v/release/Aquitano/aqt-sync?color=1d1c19&labelColor=544e42)](https://github.com/Aquitano/aqt-sync/releases)
+[![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-1d1c19?labelColor=544e42)](LICENSE)
+
+Zero-knowledge encrypted file and folder sync. The client encrypts everything before
+it leaves the machine; the server stores only ciphertext and opaque metadata and never
+sees a key, a filename, or a plaintext byte.
 
 - **End-to-end encrypted** — XChaCha20-Poly1305 with role-separated AADs; keys are
   derived from a passphrase via calibrated Argon2id and never transmitted.
@@ -119,12 +127,13 @@ can never modify their copy. `aqt contacts` lists the accounts pinned on first u
 
 `aqt tui` opens a lazygit-style dashboard over the tracked folder you are in:
 local and incoming changes (kept live by file events), snapshots and checkpoints,
-and every pushed resource, with single-key actions — `s` sync, `c` checkpoint,
-`d` diff a snapshot against the live tree, `R` restore, `y` copy a ref or share
-link, `s` share with expiry/burn options, `?` for all keys. Actions run the
-corresponding `aqt` command and stream its output into a log pane, so everything
-the TUI does is reproducible at the shell. Outside a tracked folder the
-resources and snapshots panels still work account-wide.
+and every pushed resource. Single-key actions belong to the focused panel — files
+`s` sync and `c` checkpoint, snapshots `d` diff against the live tree and `R`
+restore, resources `y` copy a ref and `s` share with expiry/burn options — and `?`
+lists every key for wherever you are. Actions run the corresponding `aqt` command
+and stream its output into a log pane, so everything the TUI does is reproducible at
+the shell. Outside a tracked folder the resources and snapshots panels still work
+account-wide.
 
 `aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes,
 and `aqt restore <name>` brings it back (side-by-side by default; `--in-place` rolls
@@ -148,7 +157,9 @@ AQT_DATA_DIR=/var/lib/aqt-server AQT_ADDR=:443 \
   ./bin/aqt-server
 ```
 
-`GET /livez` is the liveness probe; `GET /readyz` admits traffic only while storage is available and the server is not shutting down. `/healthz` remains a liveness compatibility alias.
+`GET /livez` is the liveness probe; `GET /readyz` admits traffic only while storage is
+available and the server is not shutting down. `/healthz` remains a liveness
+compatibility alias.
 `AQT_METRICS_ADDR` exposes Prometheus metrics (request rates, GC activity,
 per-account storage) on a private listener, and `aqt usage` shows an account its
 own storage footprint.

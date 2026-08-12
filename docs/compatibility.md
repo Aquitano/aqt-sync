@@ -91,9 +91,14 @@ declared) and `Detail` (the sanitized server text).
 
 ### The missing-header rule
 
-Missing or malformed `X-Aqt-Capability` values are treated as capability **1** (baseline), not as v0.2. This deliberately ends header-less compatibility at the id-binding boundary: a legacy client trying to read a capability-2 or newer resource receives `426 Upgrade Required` before any ciphertext is served, rather than a downstream AEAD failure.
+Missing or malformed `X-Aqt-Capability` values are treated as capability **1**
+(baseline), not as v0.2. This deliberately ends header-less compatibility at the
+id-binding boundary: a legacy client trying to read a capability-2 or newer resource
+receives `426 Upgrade Required` before any ciphertext is served, rather than a
+downstream AEAD failure.
 
-This is a breaking server policy for header-less v0.2-era binaries. Upgrade every client before deploying it.
+This is a breaking server policy for header-less v0.2-era binaries. Upgrade every
+client before deploying it.
 
 ## Public-link lifecycle (no capability bump)
 
@@ -153,9 +158,10 @@ When a new write format lands that older releases cannot read:
 1. Add the new constant to `internal/api/caps.go` and set
    `ClientCapability` to it.
 2. At each sealing site that writes the new format, declare
-   `MinClient: api.Capability<New>` on the `PutResourceRequest` (see
-   `cmd/aqt/sync.go`, `cmd/aqt/pack.go`, `cmd/aqt/share.go`, `cmd/aqt/push.go`,
-   and `cmd/aqt/repo.go`).
+   `MinClient: api.Capability<New>` on the `PutResourceRequest`. `rg 'MinClient:'
+   cmd/aqt` lists them all; today they are `cmd/aqt/sync.go`, `cmd/aqt/pack.go`,
+   `cmd/aqt/share.go`, `cmd/aqt/push.go`, `cmd/aqt/repo.go`, and the two root flips
+   in `cmd/aqt/git_remote_helper.go`.
    Sites still writing an older format keep their lower declaration.
 3. Add a `### Breaking Changes` / `### Changed` note to `CHANGELOG.md` and extend the
    capability table above.

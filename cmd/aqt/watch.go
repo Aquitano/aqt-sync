@@ -23,7 +23,7 @@ const (
 	defaultInterval = 2 * time.Second
 	// maxWatchInterval caps the adaptive poll backoff: while a folder stays idle the
 	// watcher doubles its interval toward this, so a quiet tree is lstat-walked every
-	// ~30s instead of every 2s, cutting the O(tree) background scan (3.7). A change
+	// ~30s instead of every 2s, cutting the O(tree) background scan. A change
 	// snaps it back to the base interval.
 	maxWatchInterval = 30 * time.Second
 	// watchRescanInterval replaces maxWatchInterval as the idle cap when kernel file
