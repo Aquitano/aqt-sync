@@ -5,27 +5,26 @@ import { CopyCommand } from "@/components/copy-command";
 
 const shellCommand = "curl -fsSL https://web.sync.aquitano.me/install.sh | sh";
 
+const shellNote = "Installs to ~/.local/bin. Append -s -- --server for the server binary.";
+
 const targets = {
-  macos: {
-    label: "macOS",
-    command: shellCommand,
-    note: "Installs to ~/.local/bin. Append -s -- --server for the server binary.",
-  },
-  linux: {
-    label: "Linux",
-    command: shellCommand,
-    note: "Installs to ~/.local/bin. Append -s -- --server for the server binary.",
-  },
+  macos: { label: "macOS", prompt: "$", command: shellCommand, note: shellNote },
+  linux: { label: "Linux", prompt: "$", command: shellCommand, note: shellNote },
   windows: {
     label: "Windows",
+    prompt: ">",
     command: "iwr -useb https://web.sync.aquitano.me/install.ps1 | iex",
     note: "PowerShell. Installs to %LOCALAPPDATA%\\Programs\\aqt.",
   },
-} satisfies Record<string, { label: string; command: string; note: string }>;
+} satisfies Record<string, { label: string; prompt: string; command: string; note: string }>;
 
 type OsKey = keyof typeof targets;
 
 const order = ["macos", "linux", "windows"] as const satisfies readonly OsKey[];
+
+// Every distinct command is rendered into the same grid cell, so the box is always as
+// wide as the longest one and switching tabs moves nothing.
+const commands = [...new Map(order.map((key) => [targets[key].command, targets[key]])).values()];
 
 // Even a reduced user-agent string still carries its platform token, so it is the
 // one signal every browser agrees on.
@@ -72,12 +71,16 @@ export function InstallPicker() {
       </div>
 
       <div className="install-command">
-        <code>
-          <span className="prompt" aria-hidden="true">
-            {active === "windows" ? ">" : "$"}
-          </span>
-          {target.command}
-        </code>
+        <div className="command-stack">
+          {commands.map((entry) => (
+            <code key={entry.command} data-active={entry.command === target.command ? "" : undefined}>
+              <span className="prompt" aria-hidden="true">
+                {entry.prompt}
+              </span>
+              {entry.command}
+            </code>
+          ))}
+        </div>
         {/* Remount on switch so a stale "Copied" badge never sits beside a new command */}
         <CopyCommand key={active} command={target.command} />
       </div>
