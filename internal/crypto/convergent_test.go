@@ -14,10 +14,7 @@ import (
 
 func convKey(t *testing.T, pass string) ConvergenceKey {
 	t.Helper()
-	params, err := NewKdfParams()
-	if err != nil {
-		t.Fatal(err)
-	}
+	params := cheapKdf(t)
 	mk, err := DeriveMasterKey(pass, params)
 	if err != nil {
 		t.Fatal(err)

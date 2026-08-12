@@ -104,10 +104,14 @@ const (
 // has the salt, costs, and wrapped key and can brute-force offline — and link
 // passwords are typically weaker than account passphrases, so the gate is tuned
 // deliberately higher than the interactive account-unlock profile.
-const (
-	gatedTime    = 4
-	gatedMemory  = 256 * 1024 // 256 MiB
-	gatedThreads = 4
+//
+// Vars, not consts, only so crypto_test.go can shrink them for the fragment
+// round-trip tests, which drive this profile through EncodeFragment three times;
+// nothing outside a test assigns to them.
+var (
+	gatedTime    uint32 = 4
+	gatedMemory  uint32 = 256 * 1024 // 256 MiB
+	gatedThreads uint8  = 4
 )
 
 // Upper bounds on KDF parameters accepted by DeriveMasterKey. They cap the work
