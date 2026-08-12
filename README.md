@@ -119,12 +119,13 @@ can never modify their copy. `aqt contacts` lists the accounts pinned on first u
 
 `aqt tui` opens a lazygit-style dashboard over the tracked folder you are in:
 local and incoming changes (kept live by file events), snapshots and checkpoints,
-and every pushed resource, with single-key actions — `s` sync, `c` checkpoint,
-`d` diff a snapshot against the live tree, `R` restore, `y` copy a ref or share
-link, `s` share with expiry/burn options, `?` for all keys. Actions run the
-corresponding `aqt` command and stream its output into a log pane, so everything
-the TUI does is reproducible at the shell. Outside a tracked folder the
-resources and snapshots panels still work account-wide.
+and every pushed resource. Single-key actions belong to the focused panel — files
+`s` sync and `c` checkpoint, snapshots `d` diff against the live tree and `R`
+restore, resources `y` copy a ref and `s` share with expiry/burn options — and `?`
+lists every key for wherever you are. Actions run the corresponding `aqt` command
+and stream its output into a log pane, so everything the TUI does is reproducible at
+the shell. Outside a tracked folder the resources and snapshots panels still work
+account-wide.
 
 `aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes,
 and `aqt restore <name>` brings it back (side-by-side by default; `--in-place` rolls
@@ -148,7 +149,9 @@ AQT_DATA_DIR=/var/lib/aqt-server AQT_ADDR=:443 \
   ./bin/aqt-server
 ```
 
-`GET /livez` is the liveness probe; `GET /readyz` admits traffic only while storage is available and the server is not shutting down. `/healthz` remains a liveness compatibility alias.
+`GET /livez` is the liveness probe; `GET /readyz` admits traffic only while storage is
+available and the server is not shutting down. `/healthz` remains a liveness
+compatibility alias.
 `AQT_METRICS_ADDR` exposes Prometheus metrics (request rates, GC activity,
 per-account storage) on a private listener, and `aqt usage` shows an account its
 own storage footprint.

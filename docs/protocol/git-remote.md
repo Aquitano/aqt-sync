@@ -73,6 +73,3 @@ Every root PUT lists all live segment ids, so old chains become ordinary
 ## Not in v1
 
 Shallow clone, submodule recursion, sharing and grants, and the Git wire protocol.
-
-An implementation-level spec written during the build, including the migration and
-task ordering, is [`../specs/git-remote-aqt.md`](../specs/git-remote-aqt.md).

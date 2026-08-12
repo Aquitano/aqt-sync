@@ -210,9 +210,9 @@ docker run -d --name aqt-server \
   aqt-server
 ```
 
-`AQT_DATA_DIR` defaults to `/data` in the image; mount a volume there. The image
-has no shell, so define health checks in your orchestrator with `GET /livez` for liveness and `GET /readyz` for readiness
-rather than a container `HEALTHCHECK`.
+`AQT_DATA_DIR` defaults to `/data` in the image; mount a volume there. The image has
+no shell, so define health checks in your orchestrator with `GET /livez` for liveness
+and `GET /readyz` for readiness rather than a container `HEALTHCHECK`.
 
 `deploy/docker-compose.yml` wires the server to a Caddy sidecar that terminates TLS
 and auto-provisions a certificate. Before starting, copy `.env.example` to `.env`,
@@ -278,11 +278,12 @@ never exercised is not a backup:
 make restore-drill        # or: scripts/restore-drill.sh
 ```
 
-It builds all three binaries, pushes a realistic tree plus an encrypted Git remote,
-takes a cold backup, stands up a fresh server from the copy, recovers on a clean
-client config from email + passphrase, clones and diffs the folder, clones the Git
-remote, runs `git fsck`, and compares its branch/tag refs. `go test ./cmd/aqt -run
-TestFullBackupRestoreDrill` is the in-process twin that runs on every CI build.
+It builds `aqt` and `aqt-server` plus the `git-remote-aqt` link, pushes a realistic
+tree plus an encrypted Git remote, takes a cold backup, stands up a fresh server from
+the copy, recovers on a clean client config from email + passphrase, clones and diffs
+the folder, clones the Git remote, runs `git fsck`, and compares its branch/tag refs.
+`go test ./cmd/aqt -run TestFullBackupRestoreDrill` is the in-process twin that runs
+on every CI build.
 
 ## Managing accounts
 
@@ -364,7 +365,15 @@ against it immediately.
 
 ## Privacy boundary
 
-Resource content, filenames, directory structure, and snapshot labels are encrypted by clients before upload. The server does not receive their plaintext or live content keys. This is a content-confidentiality boundary, not a metadata-anonymity claim: account emails, opaque owner handles, device labels, request timing and peer addresses, public/private visibility, expiry/read-limit policy and counters, resource/snapshot/device/object counts, storage usage, grant relationships, and other lifecycle or relationship metadata can remain observable in live server state, logs, metrics, and backups. Protect the data directory, backups, metrics listener, and operator access accordingly.
+Resource content, filenames, directory structure, and snapshot labels are encrypted by
+clients before upload. The server does not receive their plaintext or live content
+keys. This is a content-confidentiality boundary, not a metadata-anonymity claim:
+account emails, opaque owner handles, device labels, request timing and peer
+addresses, public/private visibility, expiry/read-limit policy and counters,
+resource/snapshot/device/object counts, storage usage, grant relationships, and other
+lifecycle or relationship metadata can remain observable in live server state, logs,
+metrics, and backups. Protect the data directory, backups, metrics listener, and
+operator access accordingly.
 
 ## Monitoring
 
@@ -395,7 +404,9 @@ What you get:
   counts per route (expired-link `410`s and upgrade-required `426`s show up as
   status labels).
 - `aqt_pack_bytes_received_total` / `aqt_pack_bytes_served_total` /
-  `aqt_public_object_bytes_served_total` — transfer volume.
+  `aqt_public_object_bytes_served_total` / `aqt_grant_object_bytes_served_total` —
+  transfer volume, split by the path that served it.
+- `aqt_grant_writes_total` — account-to-account grant upserts.
 - `aqt_gc_runs_total{trigger}`, `aqt_gc_packs_deleted_total`,
   `aqt_gc_bytes_freed_total`, `aqt_gc_packs_repacked_total`,
   `aqt_gc_bytes_reclaimed_total` — reclamation activity.
@@ -410,12 +421,15 @@ via `aqt usage` (`GET /v1/account/usage`).
 
 ## Health checks and upgrades
 
-- **Liveness.** `GET /livez` (and the compatibility alias `/healthz`) returns `200` without touching storage.
-- **Readiness.** `GET /readyz` checks storage and returns `503` during shutdown or when storage is unavailable. Use it for traffic admission.
+- **Liveness.** `GET /livez` (and the compatibility alias `/healthz`) returns `200`
+  without touching storage.
+- **Readiness.** `GET /readyz` checks storage and returns `503` during shutdown or
+  when storage is unavailable. Use it for traffic admission.
 - **Upgrades.** Fetch the new binary (install script or a build from the checkout),
   replace it, and restart the service. `aqt update` is the client's self-update path
-  and does not touch a server install. The
-  graceful shutdown marks readiness false, stops new background work, and drains HTTP, metrics, snapshots, and GC, so a restart does not sever an
-  upload mid-write. Storage formats are versioned; a newer server reads older data.
+  and does not touch a server install. The graceful shutdown marks readiness false,
+  stops new background work, and drains HTTP, metrics, snapshots, and GC, so a
+  restart does not sever an upload mid-write. Storage formats are versioned; a newer
+  server reads older data.
 - **Scheduled jobs.** Snapshots and GC run on the server timers above; there is no
   external cron to configure. Set the intervals to `0` to disable either.
