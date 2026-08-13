@@ -40,12 +40,15 @@ jobs:
       # `go test ./...` covers internal/update, so the check-only update path is
       # exercised natively on Linux, macOS, and Windows. Its fixtures are local:
       # nothing here contacts GitHub or a live release.
+      # Both runs override go test's 10m per-package default: -race roughly triples
+      # the suite, and windows-latest is slow enough to blow 10m on cmd/aqt without
+      # anything being wrong. A timeout here blocks publishing a tag.
       - name: Test (race)
         if: runner.os != 'Windows'
-        run: go test -race ./...
+        run: go test -race -timeout 20m ./...
       - name: Test
         if: runner.os == 'Windows'
-        run: go test ./...
+        run: go test -timeout 20m ./...
 
   build:
     name: build
