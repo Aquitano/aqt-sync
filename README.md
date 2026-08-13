@@ -4,7 +4,7 @@
 </picture>
 
 [![linux](https://github.com/Aquitano/aqt-sync/actions/workflows/linux.yml/badge.svg)](https://github.com/Aquitano/aqt-sync/actions/workflows/linux.yml)
-[![windows](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml/badge.svg)](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml)
+[![windows](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml/badge.svg?event=pull_request)](https://github.com/Aquitano/aqt-sync/actions/workflows/windows.yml)
 [![release](https://img.shields.io/github/v/release/Aquitano/aqt-sync?color=1d1c19&labelColor=544e42)](https://github.com/Aquitano/aqt-sync/releases)
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-1d1c19?labelColor=544e42)](LICENSE)
 

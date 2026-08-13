@@ -1,8 +1,10 @@
 name: windows
 
+# Pull requests only. The push-to-main run was a re-test of a tree that had
+# already passed this same job on its PR, and windows-latest is slow enough that
+# it kept failing there on runner speed alone. Release tags still get a native
+# Windows run from the release workflow's native-test matrix.
 on:
-  push:
-    branches: [main]
   pull_request: {}
 
 permissions:
@@ -37,5 +39,8 @@ jobs:
         run: go vet ./...
       - name: Build
         run: go build ./cmd/...
+      # cmd/aqt runs ~200s here on a healthy runner and has hit 600s on a slow one,
+      # so go test's 10m per-package default leaves no headroom. timeout-minutes
+      # above still catches a real hang.
       - name: Test
-        run: go test ./...
+        run: go test -timeout 20m ./...
