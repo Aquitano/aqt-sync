@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -328,6 +329,25 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 	if got, ok := pins["bob@example.com"]; !ok || got.Handle != keys.Handle {
 		t.Fatalf("pin not stored: %+v", pins)
 	}
+
+	// Re-pinning is a no-op, and --json says so in the same shape rather than prose a
+	// script would fail to parse.
+	flagJSON = true
+	defer func() { flagJSON = false }()
+	out := captureStdout(t, func() {
+		repin := contactsPinCmd()
+		if err := repin.RunE(repin, []string{"bob@example.com"}); err != nil {
+			t.Fatalf("re-pin: %v", err)
+		}
+	})
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("re-pin --json emitted %q: %v", out, err)
+	}
+	if doc["alreadyPinned"] != true || doc["fingerprint"] != crypto.KeyFingerprint(keys.PublicKey) {
+		t.Fatalf("re-pin --json = %v", doc)
+	}
+	flagJSON = false
 
 	// With the contact pinned before any grant, sharing must not re-pin or complain.
 	id := pushSecretFile(t, "for-bob.txt", "hello")

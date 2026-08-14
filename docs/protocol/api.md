@@ -162,7 +162,8 @@ GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHa
 DELETE /v1/shares/:id                Grantee only (predicate: grantee_handle = caller). Declines one incoming
                                      grant → { ownerHandle, removed, blocked }. ?block=true also refuses that
                                      account's future grants (403 sender_blocked) and drops the shares it has
-                                     already sent. Never bumps resources.version: that is the owner's CAS token.
+                                     already sent; 400 block_limit when the caller's block list is full.
+                                     Never bumps resources.version: that is the owner's CAS token.
 GET    /v1/share-blocks              Accounts the caller refuses grants from: [{ ownerHandle, createdAt }]. Paginated.
 DELETE /v1/share-blocks/:owner       Lift one block.
 POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the public variant, gated on
@@ -228,9 +229,8 @@ Every distinct error condition carries a stable snake_case `code` in the
 `{ error, code }` body — `upgrade_required`, `version_conflict`,
 `idempotency_conflict`, `quota_exceeded`, `device_limit`, `bad_pack`, `gone`,
 `snapshot_anchored`, `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`,
-`invalid_policy`,
-`invalid_cursor`, `invalid_limit`, `rate_limited`, `account_exists`,
-`account_disabled`, `drops_roots` — so a client
+`block_limit`, `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
+`account_exists`, `account_disabled`, `drops_roots` — so a client
 branches on the code instead of matching prose, and the server never echoes a raw Go
 error whose text might carry internal detail. `426` additionally carries `minClient`.
 

@@ -143,6 +143,13 @@ func contactsPinCmd() *cobra.Command {
 			}
 			identityFP := crypto.KeyFingerprint(keys.PublicKey)
 			encFP := crypto.KeyFingerprint(keys.EncPublicKey)
+			// Both success paths report the same shape, so re-running a pin is a stable
+			// no-op for a script rather than a different document.
+			pinned := func(already bool) error {
+				return printJSON(map[string]any{
+					"email": email, "fingerprint": identityFP, "encFingerprint": encFP, "alreadyPinned": already,
+				})
+			}
 
 			// Fail closed on anything but the exact fingerprint that was verified
 			// out-of-band. This is the one check a hostile server (or a decoy for an
@@ -160,6 +167,9 @@ func contactsPinCmd() *cobra.Command {
 			if pin, ok := pins[email]; ok {
 				if pin.Handle == keys.Handle && bytes.Equal(pin.PublicKey, keys.PublicKey) &&
 					bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
+					if flagJSON {
+						return pinned(true)
+					}
 					fmt.Printf("%s is already pinned to these keys (%s)\n", email, identityFP)
 					return nil
 				}
@@ -167,7 +177,9 @@ func contactsPinCmd() *cobra.Command {
 					email, crypto.KeyFingerprint(pin.PublicKey), email, email)
 			}
 			if fingerprint == "" {
-				fmt.Printf("server reports for %s:\n  identity  %s\n  enc key   %s\n", email, identityFP, encFP)
+				// Advisory, so stderr: stdout carries the result, and under --json it
+				// carries a document a prompt preamble would corrupt.
+				fmt.Fprintf(os.Stderr, "server reports for %s:\n  identity  %s\n  enc key   %s\n", email, identityFP, encFP)
 				fmt.Fprintln(os.Stderr, "an unregistered email gets an indistinguishable decoy, so a pin made without comparing this fingerprint out-of-band proves nothing")
 				if err := confirmDestructive(fmt.Sprintf("Pin these keys for %s? [y/N] ", email), yes); err != nil {
 					return err
@@ -184,7 +196,7 @@ func contactsPinCmd() *cobra.Command {
 				return err
 			}
 			if flagJSON {
-				return printJSON(map[string]any{"email": email, "fingerprint": identityFP, "encFingerprint": encFP})
+				return pinned(false)
 			}
 			fmt.Printf("pinned %s (%s)\n", email, identityFP)
 			return nil

@@ -723,7 +723,7 @@ func (s *Server) deleteShare(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrBlockLimit) {
-		abort(c, http.StatusBadRequest, "block list is full; lift a block before adding another")
+		abortCode(c, http.StatusBadRequest, "block list is full; lift a block before adding another", api.ErrCodeBlockLimit)
 		return
 	}
 	if err != nil {
