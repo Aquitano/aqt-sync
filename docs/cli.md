@@ -73,6 +73,33 @@ Resource results may also include `snapshotsDeleted` or `snapshotsRemaining`.
 On preflight or execution failure the command exits non-zero after writing the full
 report, so scripts can use both the exit status and the per-item results.
 
+## Incoming shares
+
+`aqt shares` lists what other accounts granted this one. `--json` returns
+`[{ ref, name?, kind?, from, fromEmail?, fingerprint?, since, stale? }]`.
+
+`name` and `kind` are the *grantor's* plaintext, so both are stripped of control
+bytes and bounded before they are printed or returned — a sender cannot emit escape
+sequences into the recipient's terminal. `from` is the sender's opaque account handle;
+`fromEmail` and `fingerprint` appear only when a local contact pin matches that
+handle, and the human output says `unknown sender` when none does. Compare that
+fingerprint out-of-band (`aqt contacts verify <email>`) before acting on a share.
+
+Anyone with an account on the server can add a row here, so the recipient can remove
+one:
+
+- `aqt shares rm <ref-or-name>` drops the row. The resource is untouched and the
+  owner can grant it again. `--block` also refuses that account's future grants and
+  drops the shares it has already sent. `--json` returns
+  `{ ref, from, removed, blocked }`.
+- `aqt shares blocked` lists blocked senders (`[{ handle, email?, blocked }]`), and
+  `aqt shares unblock <email-or-handle>` lifts one. An email resolves through the
+  local contact pins.
+
+`aqt contacts pin <email> --fingerprint <fp>` pins a contact's keys *before* the
+first grant and fails closed unless the server presents that fingerprint. Without
+`--fingerprint` it prompts (or takes `-y`) and the pin is only trust-on-first-use.
+
 ## Four questions, four commands
 
 Comparison commands are easy to confuse, so each one names what it compares:

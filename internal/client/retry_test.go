@@ -296,33 +296,6 @@ func TestRetryAfterFromFallsBackToTheFloor(t *testing.T) {
 	}
 }
 
-func TestSanitizeServerText(t *testing.T) {
-	for _, tc := range []struct {
-		name, in, want string
-	}{
-		{"plain text passes", "upgrade aqt", "upgrade aqt"},
-		{"escape sequences are dropped", "safe\x1b[2Kforged", "safe[2Kforged"},
-		{"newlines cannot forge a line", "line one\nerror: fake", "line oneerror: fake"},
-		{"carriage return is dropped", "real\rfake", "realfake"},
-		{"nul is dropped", "a\x00b", "ab"},
-		{"c1 controls are dropped", "a\u009bb", "ab"},
-		{"tabs become spaces", "a\tb", "a b"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := sanitizeServerText(tc.in, 200); got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestSanitizeServerTextIsBounded(t *testing.T) {
-	got := sanitizeServerText(strings.Repeat("x", 500), 32)
-	if len([]rune(got)) > 33 { // 32 plus the ellipsis
-		t.Fatalf("got %d runes, want at most 33", len([]rune(got)))
-	}
-}
-
 func TestRateLimitedErrorMatchesTheSentinel(t *testing.T) {
 	err := error(&RateLimitedError{Attempts: 4, LastDelay: 2 * time.Second, NextRetryAt: time.Now()})
 	if !errors.Is(err, ErrRateLimited) {

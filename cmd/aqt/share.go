@@ -317,6 +317,11 @@ func runShareWith(idArg, email string) error {
 		return err
 	}
 	if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: contact.Handle, WrappedKey: wrap}); err != nil {
+		if errors.Is(err, client.ErrSenderBlocked) {
+			// A recipient-side block. Nothing about the grant can be fixed to get past it,
+			// so say who declined rather than leaving it as a bare 403.
+			return fmt.Errorf("%s is not accepting shares from your account: %w", email, err)
+		}
 		return err
 	}
 	if flagJSON {

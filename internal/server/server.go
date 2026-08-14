@@ -333,6 +333,13 @@ func (s *Server) Router() *gin.Engine {
 			authed.GET("/resources/:id/grants", s.listResourceGrants)
 			authed.DELETE("/resources/:id/grants/:grantee", s.deleteGrant)
 			authed.GET("/shares", s.listShares)
+			// The grantee side of revocation: the delete predicate is the caller's own
+			// grantee handle, and an optional block keeps the grantor from re-adding the
+			// row. Blocks live on their own path rather than under /shares/, whose :id
+			// wildcard would collide with a static segment.
+			authed.DELETE("/shares/:id", s.deleteShare)
+			authed.GET("/share-blocks", s.listShareBlocks)
+			authed.DELETE("/share-blocks/:owner", s.deleteShareBlock)
 			authed.POST("/resources/:id/objects", limitBody(maxChunkBody), s.grantObjects)
 
 			// Folder-sync packed object store: opaque, content-addressed,
@@ -1227,6 +1234,10 @@ func negotiateResourceResponse(header string) (resourceFormat, bool) {
 	return best, bestQ >= 0
 }
 
+// listResources is the owner's own inventory, and the one read path that does not
+// gate on the requester's capability: 426ing the whole listing because one row is
+// too new would hide every other resource the client can read. Each row carries its
+// min_client instead, so an under-capable client names the release a row needs.
 func (s *Server) listResources(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	page, ok := parsePage(c)

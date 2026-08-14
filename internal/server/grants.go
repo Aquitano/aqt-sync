@@ -34,9 +34,22 @@ const maxGrantsPerResource = 256
 // column from becoming a blob dump.
 const maxGrantWrapSize = 1024
 
+// maxShareBlocks bounds one account's block list. Blocking needs an incoming
+// grant to remove, so the list cannot grow faster than other accounts grant to
+// this one; the cap only keeps a pathological case from becoming a table dump.
+const maxShareBlocks = 1024
+
 // ErrGrantLimit is returned when a resource already carries maxGrantsPerResource
 // grants. Handlers map it to 400.
 var ErrGrantLimit = errors.New("grant limit reached for this resource")
+
+// ErrSenderBlocked is returned when the grantee has blocked incoming grants from
+// the granting account. Handlers map it to 403.
+var ErrSenderBlocked = errors.New("the recipient is not accepting shares from this account")
+
+// ErrBlockLimit is returned when an account's block list is full. Handlers map it
+// to 400.
+var ErrBlockLimit = errors.New("block list is full")
 
 // --- store ---
 
@@ -123,6 +136,15 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 	}
 	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
 		return ErrVersionConflict
+	}
+	var blocked int
+	if err := tx.QueryRow(
+		`SELECT count(*) FROM share_blocks WHERE grantee_handle = ? AND owner_handle = ?`, grantee, owner,
+	).Scan(&blocked); err != nil {
+		return err
+	}
+	if blocked > 0 {
+		return ErrSenderBlocked
 	}
 	var count int
 	if err := tx.QueryRow(`SELECT count(*) FROM grants WHERE resource_id = ?`, resourceID).Scan(&count); err != nil {
@@ -303,6 +325,139 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 	return out, next, nil
 }
 
+// DeleteShare drops one incoming grant on the caller's own behalf: the predicate is
+// grantee_handle, so it can only ever remove the caller's own row. block additionally
+// refuses that grantor's future grants — which is what makes the removal stick, since
+// they could otherwise re-add the row a second later — and clears their other shares
+// to this account in the same transaction; refusing new grants while leaving old ones
+// listed is a half-measure the recipient did not ask for. Returns the grantor's handle
+// and how many rows went.
+//
+// Deliberately does NOT bump resources.version, unlike the owner-side grant writes it
+// mirrors. Version is the owner's CAS token; letting a grantee move it would hand any
+// account that was ever granted anything a way to 409 the owner's writes at will.
+func (s *Store) DeleteShare(grantee, resourceID string, block bool) (string, int, error) {
+	defer s.resLocks.lock(resourceID)()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", 0, err
+	}
+	defer tx.Rollback()
+	var owner string
+	err = tx.QueryRow(
+		`SELECT owner_handle FROM grants WHERE resource_id = ? AND grantee_handle = ?`, resourceID, grantee,
+	).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", 0, ErrNotFound
+	}
+	if err != nil {
+		return "", 0, err
+	}
+	stmt, args := `DELETE FROM grants WHERE resource_id = ? AND grantee_handle = ?`, []any{resourceID, grantee}
+	if block {
+		if err := insertShareBlock(tx, grantee, owner); err != nil {
+			return "", 0, err
+		}
+		stmt, args = `DELETE FROM grants WHERE owner_handle = ? AND grantee_handle = ?`, []any{owner, grantee}
+	}
+	res, err := tx.Exec(stmt, args...)
+	if err != nil {
+		return "", 0, err
+	}
+	removed, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return "", 0, err
+	}
+	return owner, int(removed), nil
+}
+
+// insertShareBlock records a (grantee, grantor) block, enforcing the per-account cap.
+// Re-blocking an already-blocked grantor keeps the original timestamp.
+func insertShareBlock(tx *sql.Tx, grantee, owner string) error {
+	var count int
+	if err := tx.QueryRow(`SELECT count(*) FROM share_blocks WHERE grantee_handle = ?`, grantee).Scan(&count); err != nil {
+		return err
+	}
+	if count >= maxShareBlocks {
+		var exists int
+		if err := tx.QueryRow(
+			`SELECT count(*) FROM share_blocks WHERE grantee_handle = ? AND owner_handle = ?`, grantee, owner,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if exists == 0 {
+			return ErrBlockLimit
+		}
+	}
+	_, err := tx.Exec(
+		`INSERT INTO share_blocks(grantee_handle, owner_handle, created_at) VALUES(?,?,?)
+		 ON CONFLICT(grantee_handle, owner_handle) DO NOTHING`,
+		grantee, owner, time.Now().Unix(),
+	)
+	return err
+}
+
+// ListShareBlocks returns one page of the caller's blocked grantors, ordered by
+// (created_at, owner_handle), plus the cursor for the next page.
+func (s *Store) ListShareBlocks(grantee string, page pageParams) ([]api.ShareBlock, string, error) {
+	limit := page.effectiveLimit()
+	where := "grantee_handle = ?"
+	args := []any{grantee}
+	if page.cursor != "" {
+		parts, err := decodeCursor(page.cursor, 2)
+		if err != nil {
+			return nil, "", err
+		}
+		createdAt, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			return nil, "", errBadCursor
+		}
+		where += " AND (created_at > ? OR (created_at = ? AND owner_handle > ?))"
+		args = append(args, createdAt, createdAt, parts[1])
+	}
+	args = append(args, limit+1)
+	rows, err := s.rdb.Query(
+		`SELECT owner_handle, created_at FROM share_blocks WHERE `+where+`
+		 ORDER BY created_at, owner_handle LIMIT ?`, args...,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var out []api.ShareBlock
+	for rows.Next() {
+		var b api.ShareBlock
+		if err := rows.Scan(&b.OwnerHandle, &b.CreatedAt); err != nil {
+			return nil, "", err
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(out) > limit {
+		out = out[:limit]
+		last := out[len(out)-1]
+		next = encodeCursor(strconv.FormatInt(last.CreatedAt, 10), last.OwnerHandle)
+	}
+	return out, next, nil
+}
+
+// DeleteShareBlock lifts one block, so that account can share with the caller again.
+func (s *Store) DeleteShareBlock(grantee, owner string) error {
+	res, err := s.db.Exec(
+		`DELETE FROM share_blocks WHERE grantee_handle = ? AND owner_handle = ?`, grantee, owner,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // grantWrappedKey returns the wrap for (resource, grantee), if one exists.
 func (s *Store) grantWrappedKey(resourceID, grantee string) ([]byte, bool, error) {
 	var wrapped []byte
@@ -474,6 +629,10 @@ func (s *Server) createGrant(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, "grant limit reached for this resource", api.ErrCodeGrantLimit)
 		return
 	}
+	if errors.Is(err, ErrSenderBlocked) {
+		abortCode(c, http.StatusForbidden, ErrSenderBlocked.Error(), api.ErrCodeSenderBlocked)
+		return
+	}
 	if errors.Is(err, ErrGitRemotePolicy) {
 		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
 		return
@@ -549,6 +708,65 @@ func (s *Server) listShares(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.ListSharesResponse{Shares: shares, NextCursor: next})
+}
+
+// deleteShare drops one of the caller's incoming grants (DELETE /v1/shares/:id),
+// optionally blocking the account that made it (?block=true). The grantee side of
+// `unshare --with`: the owner could otherwise put a row in anyone's share list and
+// be the only one able to take it out.
+func (s *Server) deleteShare(c *gin.Context) {
+	grantee := c.GetString(ownerContextKey)
+	block := c.Query("block") == "true" || c.Query("block") == "1"
+	owner, removed, err := s.store.DeleteShare(grantee, c.Param("id"), block)
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if errors.Is(err, ErrBlockLimit) {
+		abort(c, http.StatusBadRequest, "block list is full; lift a block before adding another")
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	// The grantor's handle is the only address a later unblock can name, and the
+	// grantee has just seen it in their own share list either way.
+	c.JSON(http.StatusOK, api.RemoveShareResponse{OwnerHandle: owner, Removed: removed, Blocked: block})
+}
+
+// listShareBlocks lists the accounts the caller refuses grants from (GET /v1/share-blocks).
+func (s *Server) listShareBlocks(c *gin.Context) {
+	grantee := c.GetString(ownerContextKey)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	blocks, next, err := s.store.ListShareBlocks(grantee, page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "list failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ListShareBlocksResponse{Blocks: blocks, NextCursor: next})
+}
+
+// deleteShareBlock lifts one block (DELETE /v1/share-blocks/:owner).
+func (s *Server) deleteShareBlock(c *gin.Context) {
+	grantee := c.GetString(ownerContextKey)
+	err := s.store.DeleteShareBlock(grantee, c.Param("owner"))
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // grantObjects serves exact object slices of a granted (or owned) resource to an

@@ -633,7 +633,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 	}
 	args = append(args, limit+1) // one extra row tells us whether a next page exists
 	rows, err := s.rdb.Query(
-		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot, compact_at,
+		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot, compact_at, min_client,
 		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at
 		 FROM resources WHERE `+where+` ORDER BY id LIMIT ?`, args...,
 	)
@@ -651,7 +651,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 			wrappedJSON sql.NullString
 		)
 		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot, &item.CompactAt,
-			&item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.MinClient, &item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			return nil, "", err
 		}
 		item.Visibility = api.Visibility(vis)

@@ -75,6 +75,34 @@ func (c *Client) ListShares() ([]api.ShareItem, error) {
 	})
 }
 
+// RemoveShare drops one of the caller's incoming grants. With block, the account
+// that made it can no longer grant to the caller, and its other shares to the caller
+// go with it.
+func (c *Client) RemoveShare(resourceID string, block bool) (api.RemoveShareResponse, error) {
+	path := "/v1/shares/" + url.PathEscape(resourceID)
+	if block {
+		path += "?block=true"
+	}
+	var out api.RemoveShareResponse
+	err := c.do(http.MethodDelete, path, nil, &out)
+	return out, err
+}
+
+// ListShareBlocks lists the accounts the caller refuses incoming grants from,
+// following pagination transparently.
+func (c *Client) ListShareBlocks() ([]api.ShareBlock, error) {
+	return listAll("/v1/share-blocks", func(path string) ([]api.ShareBlock, string, error) {
+		var out api.ListShareBlocksResponse
+		err := c.do(http.MethodGet, path, nil, &out)
+		return out.Blocks, out.NextCursor, err
+	})
+}
+
+// UnblockSender lifts one block, letting that account share with the caller again.
+func (c *Client) UnblockSender(ownerHandle string) error {
+	return c.do(http.MethodDelete, "/v1/share-blocks/"+url.PathEscape(ownerHandle), nil, nil)
+}
+
 // ResourceObjects is the authenticated counterpart of PublicObjects: exact object
 // slices of a resource the caller owns or holds a grant on. Same positional
 // framing and per-frame cap.

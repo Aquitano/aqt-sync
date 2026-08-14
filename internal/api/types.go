@@ -129,6 +129,31 @@ type ListSharesResponse struct {
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
+// RemoveShareResponse reports what a grantee-side removal did: which account the
+// grant came from, and how many of its rows went — blocking clears every share from
+// that account, since refusing its future grants while keeping its old ones listed
+// would be a half-measure.
+type RemoveShareResponse struct {
+	OwnerHandle string `json:"ownerHandle"`
+	Removed     int    `json:"removed"`
+	Blocked     bool   `json:"blocked,omitempty"`
+}
+
+// ShareBlock is one account the caller refuses incoming grants from. Blocks are
+// grantee-side and name a grantor handle: dropping a share row is pointless if the
+// account that put it there can re-add it a second later.
+type ShareBlock struct {
+	OwnerHandle string `json:"ownerHandle"`
+	CreatedAt   int64  `json:"createdAt"`
+}
+
+type ListShareBlocksResponse struct {
+	Blocks []ShareBlock `json:"blocks"`
+	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
+	// empty on the last page. See ListResourcesResponse for the paging contract.
+	NextCursor string `json:"nextCursor,omitempty"`
+}
+
 // ChallengeRequest asks the server for a fresh nonce to sign when attaching a
 // device to an existing account.
 type ChallengeRequest struct {
@@ -487,6 +512,12 @@ type ResourceListItem struct {
 	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	Version       int                `json:"version"`
 	CompactAt     int                `json:"compactAt,omitempty"`
+	// MinClient is the lowest client capability that can read this resource's sealed
+	// formats. The list itself never gates on it — a listing that 426'd would hide the
+	// account's own resources — so it is echoed instead, and a client below the bar
+	// says which release the row needs rather than rendering it as unreadable. 0 from
+	// a server predating this field means "unknown" (treat as baseline).
+	MinClient int `json:"minClient,omitempty"`
 	// AutoSnapshot reports whether the server's scheduled snapshot job covers this
 	// resource, so `snapshot auto` can show coverage without a per-resource fetch.
 	AutoSnapshot bool `json:"autoSnapshot"`

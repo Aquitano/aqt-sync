@@ -104,11 +104,14 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 	if meta.Kind == api.KindFolder {
+		// The name is the link author's plaintext, not ours: sanitize before it reaches
+		// the terminal, or an escape sequence in it forges the rest of this line.
+		name := foreignText(meta.Name)
 		if fragment != "" {
-			return fmt.Errorf("%s is a folder: `aqt clone '<link>'` materializes it, and '<link>/<path>' pulls a single entry", meta.Name)
+			return fmt.Errorf("%s is a folder: `aqt clone '<link>'` materializes it, and '<link>/<path>' pulls a single entry", name)
 		}
 		return fmt.Errorf("%s is a folder: `aqt clone aqt://%s` materializes it, `aqt ls aqt://%s` lists it, "+
-			"and aqt://%s/<path> pulls a single entry", meta.Name, id, id, id)
+			"and aqt://%s/<path> pulls a single entry", name, id, id, id)
 	}
 	if meta.Streamed {
 		// A share link has no account token for the authed pack-locate path, and a

@@ -16,6 +16,45 @@ All notable changes to this project are documented in this file.
   the command instead. A running watch agent is refused, since it would keep syncing
   a folder whose control state had just been removed.
 
+- `aqt shares rm <ref>` declines an incoming share, and `--block` refuses that
+  account's future grants while dropping the shares it has already sent. Registration
+  is open by default and the handle lookup behind `aqt share --with` is unrestricted,
+  so any account on a server could append a row to any other account's share list and
+  was, until now, the only party able to take it out again. Blocks are grantee-scoped
+  (`aqt shares blocked`, `aqt shares unblock <email-or-handle>`), and a blocked sender
+  gets `403 sender_blocked` rather than a silently discarded grant — the one place a
+  grant write distinguishes a real account from a decoy, and only to the account the
+  recipient deliberately blocked.
+
+- `aqt shares` now names the sender: a grant carries an opaque handle, which is
+  reverse-resolved against the local contact pins and shown as the pinned email and
+  key fingerprint, or as `unknown sender` when nothing matches. That fingerprint is
+  the one to compare out-of-band, and `aqt contacts verify` covered only the outgoing
+  direction.
+
+- `aqt contacts pin <email>` pins another account's keys before the first grant.
+  `--fingerprint <fp>` fails closed unless the server presents that key, which makes
+  the out-of-band pinning the threat model names as the mitigation for the
+  placeholder-key hole actually reachable: previously a pin could only be created
+  implicitly by a first share, which is the moment it was supposed to precede.
+
+### Changed
+
+- Metadata authored by another account is rendered inert. A grantor picks the
+  plaintext name of a resource they share, and a link author picks the name a puller
+  sees; both landed unescaped in a terminal, where an ANSI escape can erase the line
+  and forge output that looks like aqt's own (a fake `aqt://` ref, a fake fingerprint
+  MATCH) and a newline can forge extra rows. `aqt shares`, `aqt info`, and the pull
+  paths now strip control bytes and bound the length, using the same sanitizer that
+  already guarded server prose (now `internal/safetext`).
+
+- `aqt ls` names the capability a row needs (`(needs aqt supporting capability 5)`)
+  instead of rendering it as `(unreadable)`. The resource listing is the one read path
+  that cannot answer `426` — refusing the whole list over one too-new row would hide
+  every resource the client can read — so each row now carries its `minClient` and the
+  client says which release the row wants. `(unreadable)` still means what it always
+  did: a metadata decryption that genuinely failed.
+
 ### Fixed
 
 - An interrupted pack-and-seal pull no longer destroys the intact remote folder. Such
@@ -48,6 +87,12 @@ All notable changes to this project are documented in this file.
   start` reported success and left an inactive unit with result `success` while the
   server was down. A drain that overruns `AQT_SHUTDOWN_GRACE`, and a store that fails
   to close cleanly, are failed exits too.
+
+- `confirmPinnedKeys` reaches its own diagnosis on the re-wrap path. It compared a pin
+  against a lookup that already errors on any disagreement, so its mismatch branch was
+  dead code and a grantee's routine root-key rotation surfaced in the words reserved
+  for a server substituting keys — the most alarming possible reading of an ordinary
+  event, which trains users to ignore the warning that matters.
 
 ## [v0.7.0] - 2026-08-11
 

@@ -131,6 +131,32 @@ An expiring link is a different operation from revoking one. Expiry can either
 link's fragment is dormant, not dead, because no key was rotated. See
 [`compatibility.md`](compatibility.md#what-expiry-does-to-the-resource-onexpiry).
 
+## Incoming shares are attacker-appendable
+
+Registration is open by default and the handle lookup behind `aqt share --with` is
+authenticated but unrestricted, so any account on a server can put a row into any
+other account's `aqt shares` list. Three properties keep that from being worse than
+noise:
+
+- **The name is another account's plaintext.** A grantor picks the metadata a
+  recipient's terminal renders, so control bytes in it could erase the line and forge
+  output that looks like aqt's own — a fake `aqt://` ref, a fake fingerprint MATCH.
+  Every foreign name and kind is stripped of control bytes and bounded before display
+  (`aqt shares`, `aqt info`, and the pull paths), so the worst case is an odd-looking
+  string on one line.
+- **The recipient can remove it.** `aqt shares rm <ref>` deletes the row under a
+  `grantee_handle = caller` predicate — it touches nobody else's access — and
+  `--block` additionally refuses that account's future grants and drops the shares it
+  has already sent. Blocks are listed by `aqt shares blocked` and lifted by
+  `aqt shares unblock`.
+- **The sender is named where it can be.** A grant carries an opaque handle. `aqt
+  shares` reverse-resolves it against the local contact pins and prints the pinned
+  email and key fingerprint on a match, `unknown sender` otherwise; the fingerprint is
+  the one to compare out-of-band before acting on a share.
+
+A block is the one place a grant write distinguishes a real account from a decoy, and
+only to the account the recipient deliberately blocked.
+
 ## Deliberate side channels
 
 **Lifecycle metadata.** Expiry timestamps and read counters are plaintext
@@ -267,7 +293,10 @@ you from":
   on first use, warns on stderr, and offers `aqt contacts verify <email>` for an
   out-of-band fingerprint comparison, so the exposure is trust-on-first-use, not a
   standing hole — but a first grant to a never-seen address is only as trustworthy as
-  that verification.
+  that verification. `aqt contacts pin <email> --fingerprint <fp>` closes it for a
+  contact who can read their fingerprint out over a separate channel: the pin lands
+  only if the server presents that key, which is a check no decoy passes. Without a
+  fingerprint to check against, the pin is still trust-on-first-use.
 - **Pre-migration plaintext residue.** Upgrading an old plaintext `.aqt/base.json`
   writes the sealed form through an atomic rename; the freed disk blocks holding the
   old plaintext are not scrubbed. Forensic-only, and local to that disk.

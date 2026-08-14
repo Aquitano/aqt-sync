@@ -18,15 +18,18 @@ import (
 
 // lsRow is one resource as shown by `aqt ls`, with metadata decrypted locally.
 type lsRow struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	Kind         string `json:"kind"`
-	Size         int64  `json:"size"`
-	Visibility   string `json:"visibility"`
-	AutoSnapshot bool   `json:"-"`
-	Version      int    `json:"version"`
-	CreatedAt    int64  `json:"createdAt,omitempty"`
-	UpdatedAt    int64  `json:"updatedAt,omitempty"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Kind       string `json:"kind"`
+	Size       int64  `json:"size"`
+	Visibility string `json:"visibility"`
+	// MinClient is set only when the row needs a newer release than this build, so a
+	// script can tell "too old to read" from a name that genuinely failed to decrypt.
+	MinClient    int   `json:"minClient,omitempty"`
+	AutoSnapshot bool  `json:"-"`
+	Version      int   `json:"version"`
+	CreatedAt    int64 `json:"createdAt,omitempty"`
+	UpdatedAt    int64 `json:"updatedAt,omitempty"`
 }
 
 type lsOptions struct {
@@ -126,7 +129,15 @@ func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 	for _, it := range items {
 		meta, ok := openMetadata(it, mk)
 		name, kind := meta.Name, meta.Kind
+		minClient := 0
 		switch {
+		// A resource another device wrote in a format this build cannot read fails to
+		// decrypt for a reason the user can act on. Saying so is the whole point of
+		// capability negotiation; "(unreadable)" here is indistinguishable from real
+		// corruption or a wrong passphrase.
+		case it.MinClient > api.ClientCapability:
+			minClient = it.MinClient
+			name, kind = fmt.Sprintf("(needs aqt supporting capability %d)", it.MinClient), "?"
 		case !ok:
 			name, kind = "(unreadable)", "?"
 		case name == "":
@@ -136,7 +147,7 @@ func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 			kind = api.KindFile
 		}
 		rows = append(rows, lsRow{
-			ID: it.ID, Name: name, Kind: kind, Size: meta.Size,
+			ID: it.ID, Name: name, Kind: kind, Size: meta.Size, MinClient: minClient,
 			Visibility: string(it.Visibility), AutoSnapshot: it.AutoSnapshot, Version: it.Version,
 			CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
 		})

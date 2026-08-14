@@ -56,6 +56,11 @@ serves or overwrites a root they cannot interpret.
   declaration stores `1` (a legacy writer never over-restricts a resource). An update
   *may* lower `min_client` — a capable client legitimately rewrites a resource in an
   older format, making it readable by older clients again.
+- `GET /v1/resources` never `426`s: refusing an account's whole listing over one
+  too-new row would hide everything else in it. Each row carries its `minClient`, and
+  `aqt ls` renders a row above this build's capability as
+  `(needs aqt supporting capability <n>)` — the same actionable answer a `426` gives,
+  in the one place the status code cannot be used.
 
 ### Recovering from a 426
 

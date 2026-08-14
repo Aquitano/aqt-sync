@@ -489,6 +489,18 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	`ALTER TABLE accounts ADD COLUMN quota_bytes INTEGER;
 	 ALTER TABLE accounts ADD COLUMN disabled_at INTEGER NOT NULL DEFAULT 0;
 	 ALTER TABLE accounts ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0;`,
+	// 19: grantee-side share blocks. Registration is open and the handle lookup is
+	// unrestricted, so any account can append a row to any other account's incoming
+	// shares; dropping that row only helps if the sender cannot re-add it. A block is
+	// one (grantee, grantor) pair, and PutGrant refuses against it. No FK on either
+	// handle: a block outlives the grant it came from, and a grant to a decoy handle
+	// must stay indistinguishable from a grant to a real one.
+	`CREATE TABLE IF NOT EXISTS share_blocks (
+	     grantee_handle TEXT NOT NULL,
+	     owner_handle   TEXT NOT NULL,
+	     created_at     INTEGER NOT NULL,
+	     PRIMARY KEY(grantee_handle, owner_handle)
+	 );`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
