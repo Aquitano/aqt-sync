@@ -102,11 +102,12 @@ func FileBytes(e Entry, fetch func(id string) ([]byte, error)) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// WriteFile writes an entry's in-memory bytes under dir at its relative path.
-func WriteFile(dir string, e Entry, data []byte) error {
+// WriteFile writes an entry's in-memory bytes under dir at its relative path, and
+// returns the mtime the file landed with (see materializeAt).
+func WriteFile(dir string, e Entry, data []byte) (int64, error) {
 	full, err := safeJoin(dir, e.Path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return materializeAt(full, entryMode(e), func() error { return refuseSymlinkParents(dir, full) },
 		func(w io.Writer) error { _, err := w.Write(data); return err })
@@ -114,11 +115,12 @@ func WriteFile(dir string, e Entry, data []byte) error {
 
 // MaterializeFile writes a chunked (or inline) entry under dir, streaming its
 // chunks straight to the destination file so the whole content is never held in
-// memory — the bounded-memory pull counterpart to the streaming push.
-func MaterializeFile(dir string, e Entry, fetch func(id string) ([]byte, error)) error {
+// memory — the bounded-memory pull counterpart to the streaming push. It returns the
+// mtime the file landed with (see materializeAt).
+func MaterializeFile(dir string, e Entry, fetch func(id string) ([]byte, error)) (int64, error) {
 	full, err := safeJoin(dir, e.Path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return materializeAt(full, entryMode(e), func() error { return refuseSymlinkParents(dir, full) },
 		func(w io.Writer) error { return WriteEntry(w, e, fetch) })
@@ -148,48 +150,63 @@ func entryMode(e Entry) os.FileMode {
 // following it, so a crash mid-write leaves the old file or the new one but never a
 // truncated mix, and a stale local symlink is overwritten rather than followed (a
 // plain write would write through it to a possibly out-of-tree target).
-func materializeAt(full string, mode os.FileMode, prepare func() error, write func(w io.Writer) error) error {
+//
+// It returns the mtime (UnixNano) the file carries once it is in place, so the caller
+// can record it on the entry it stores in the base manifest. A remote entry carries
+// no mtime — the DAG does not store one — and a base entry without one never matches
+// a stat, so every later scan would re-read and re-hash the whole file. The mtime is
+// read off the temp file, which neither chmod nor rename disturbs: a writer that
+// touches the path after the rename leaves a *newer* mtime, which fails the stat
+// check and forces the re-hash that catches it.
+func materializeAt(full string, mode os.FileMode, prepare func() error, write func(w io.Writer) error) (int64, error) {
 	if err := prepare(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := os.MkdirAll(filepath.Dir(full), 0o700); err != nil {
-		return err
+		return 0, err
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(full), ".aqt-tmp-*")
 	if err != nil {
-		return err
+		return 0, err
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName) // no-op once renamed; cleans up every failure path
 	bw := bufio.NewWriter(tmp)
 	if err := write(bw); err != nil {
 		tmp.Close()
-		return err
+		return 0, err
 	}
 	if err := bw.Flush(); err != nil {
 		tmp.Close()
-		return err
+		return 0, err
 	}
 	if err := tmp.Sync(); err != nil {
 		tmp.Close()
-		return err
+		return 0, err
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return 0, err
 	}
 	if err := os.Chmod(tmpName, mode); err != nil {
-		return err
+		return 0, err
+	}
+	fi, err := os.Stat(tmpName)
+	if err != nil {
+		return 0, err
 	}
 	// A remote directory->file replacement leaves an emptied directory at full once
 	// its children are deleted; Rename refuses to replace a directory (EISDIR/ENOTEMPTY)
 	// even an empty one, so drop it first. Only an empty directory is removed, so a
 	// directory still holding data is never silently destroyed.
-	if fi, err := os.Lstat(full); err == nil && fi.IsDir() {
+	if stale, err := os.Lstat(full); err == nil && stale.IsDir() {
 		if err := os.Remove(full); err != nil {
-			return err
+			return 0, err
 		}
 	}
-	return os.Rename(tmpName, full)
+	if err := os.Rename(tmpName, full); err != nil {
+		return 0, err
+	}
+	return fi.ModTime().UnixNano(), nil
 }
 
 // writeSymlinkAt runs prepare, creates parent dirs, and (re)creates the symlink at
@@ -223,10 +240,10 @@ func newTreeWriter(dir string) *treeWriter {
 	return &treeWriter{dir: dir, created: map[string]bool{}}
 }
 
-func (w *treeWriter) writeFile(e Entry, write func(w io.Writer) error) error {
+func (w *treeWriter) writeFile(e Entry, write func(w io.Writer) error) (int64, error) {
 	full, err := safeJoin(w.dir, e.Path)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	return materializeAt(full, entryMode(e), func() error { return w.prepareParents(full) }, write)
 }

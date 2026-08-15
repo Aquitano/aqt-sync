@@ -127,6 +127,7 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	if err != nil {
 		return err
 	}
+	warnSkipped(local.Skipped)
 
 	mk, err := unlockMaster(prof)
 	if err != nil {
@@ -191,6 +192,7 @@ func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filte
 	if err != nil {
 		return err
 	}
+	warnSkipped(local.Skipped)
 	if cfg.Pack {
 		tmp, err := os.MkdirTemp("", "aqt-line-diff-remote-*")
 		if err != nil {

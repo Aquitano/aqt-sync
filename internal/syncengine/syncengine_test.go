@@ -363,7 +363,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := WriteFile(out, e, data); err != nil {
+		if _, err := WriteFile(out, e, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -376,7 +376,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 func TestWriteFileRejectsPathEscape(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	if err := WriteFile(dir, Entry{Path: "../escape.txt", Mode: 0o600}, []byte("x")); err == nil {
+	if _, err := WriteFile(dir, Entry{Path: "../escape.txt", Mode: 0o600}, []byte("x")); err == nil {
 		t.Fatal("a path escaping the tracked root must be rejected")
 	}
 	if _, err := os.Stat(filepath.Join(filepath.Dir(dir), "escape.txt")); err == nil {
@@ -398,7 +398,7 @@ func TestWriteFileReplacesStaleSymlinkInsteadOfFollowing(t *testing.T) {
 	if err := os.Symlink(victim, link); err != nil {
 		t.Skipf("symlinks unsupported on this filesystem: %v", err)
 	}
-	if err := WriteFile(root, Entry{Path: "entry", Mode: 0o600}, []byte("new content")); err != nil {
+	if _, err := WriteFile(root, Entry{Path: "entry", Mode: 0o600}, []byte("new content")); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(victim); string(got) != "do not touch" {
@@ -424,7 +424,7 @@ func TestWriteFileReplacesEmptyDirectoryWithFile(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(root, "foo"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteFile(root, Entry{Path: "foo", Mode: 0o600}, []byte("now a file")); err != nil {
+	if _, err := WriteFile(root, Entry{Path: "foo", Mode: 0o600}, []byte("now a file")); err != nil {
 		t.Fatalf("write over empty dir: %v", err)
 	}
 	fi, err := os.Lstat(filepath.Join(root, "foo"))
@@ -442,7 +442,7 @@ func TestWriteFileReplacesEmptyDirectoryWithFile(t *testing.T) {
 func TestWriteFileLeavesNoTempBehind(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	if err := WriteFile(dir, Entry{Path: "nested/file.txt", Mode: 0o640}, []byte("payload")); err != nil {
+	if _, err := WriteFile(dir, Entry{Path: "nested/file.txt", Mode: 0o640}, []byte("payload")); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "nested/file.txt"))

@@ -35,6 +35,7 @@ func runPackSync(root string, opts syncOptions) error {
 	if err != nil {
 		return err
 	}
+	warnSkipped(local.Skipped)
 
 	c := packCtx{syncSession: sess, opts: opts, local: local, push: &packPushArtifacts{}}
 	// c's session holds a by-value copy of the master key that the deferred sess.Wipe

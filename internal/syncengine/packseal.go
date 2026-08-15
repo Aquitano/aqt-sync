@@ -151,10 +151,11 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 	}
 	tw := tar.NewWriter(zw)
 	var manifest Manifest
-	err = walkFiles(dir, func(n fileNode) error {
+	var skips skipList
+	err = walkFiles(dir, &skips, func(n fileNode) error {
 		e, err := writeTarEntry(tw, n)
 		if err != nil {
-			return err
+			return skips.tolerate(n.rel, n.path, err)
 		}
 		manifest.Entries = append(manifest.Entries, e)
 		return nil
@@ -174,6 +175,13 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 		manifest.Dirs = append(manifest.Dirs, d)
 		return nil
 	})
+	// The chunked path can skip an unreadable file and leave the remote's copy alone;
+	// this one cannot. The archive *is* the folder, so a file left out of it is a file
+	// deleted from the remote copy — refuse rather than drop it silently.
+	if err == nil && len(skips.paths) > 0 {
+		err = fmt.Errorf("cannot read %s: a pack-and-seal folder ships the whole tree at once, so a file left out would be dropped from the remote copy; fix its permissions or add it to .aqtignore",
+			namePaths(skips.paths))
+	}
 	if err != nil {
 		return PackRoot{}, Manifest{}, err
 	}
@@ -193,7 +201,9 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 
 // writeTarEntry writes one node with a content-only header (perms, but zeroed mtime
 // and no owner identity, so nothing about the host leaks) and returns its manifest
-// Entry, hashing a file's bytes as they stream so the result matches a Scan.
+// Entry, hashing a file's bytes as they stream so the result matches a Scan. A file
+// is opened before its header is written: the header commits the archive to a body,
+// so a file that vanished mid-walk has to fail before anything is emitted for it.
 func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	if n.symlink {
 		if err := tw.WriteHeader(&tar.Header{
@@ -207,6 +217,11 @@ func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 		}
 		return Entry{Path: n.rel, Size: int64(len(n.target)), Link: n.target, Hash: linkHash(n.target)}, nil
 	}
+	f, err := os.Open(n.path)
+	if err != nil {
+		return Entry{}, err
+	}
+	defer f.Close()
 	if err := tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
 		Name:     n.rel,
@@ -216,11 +231,6 @@ func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	}); err != nil {
 		return Entry{}, err
 	}
-	f, err := os.Open(n.path)
-	if err != nil {
-		return Entry{}, err
-	}
-	defer f.Close()
 	h := sha256.New()
 	written, err := io.Copy(tw, io.TeeReader(f, h))
 	if err != nil {
@@ -458,7 +468,9 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 			e := Entry{Path: hdr.Name, Mode: uint32(fs.FileMode(hdr.Mode).Perm()), Size: hdr.Size}
 			h := sha256.New()
 			if write {
-				err = w.writeFile(e, func(out io.Writer) error {
+				// The extracted file's own mtime, so the manifest this returns as the new
+				// base stat-matches the tree it just wrote instead of re-hashing all of it.
+				e.MTime, err = w.writeFile(e, func(out io.Writer) error {
 					_, err := io.Copy(out, io.TeeReader(tr, h))
 					return err
 				})

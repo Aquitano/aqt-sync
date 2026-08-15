@@ -119,6 +119,21 @@ packs, so push memory stays O(a few packs). Server-side, `PutPack` writes the pa
 object-index rows in batched multi-row INSERTs, which is the dominant SQLite cost of
 ingesting a pack of many small chunks.
 
+### What actually bounds sync memory
+
+Ciphertext is the bounded part; metadata is not. A push holds a few packs, and a pull
+holds one pack plus one batch of object locations — downloads locate and materialize
+in runs of ~50k chunks and drop each run's location index once that run's files land,
+rather than resolving the whole tree up front.
+
+The manifest itself does not shrink: every chunk carries a record (id, key, length)
+in memory for the whole sync, on the order of 150-200 bytes each. At the fine
+profile's ~8 KiB average that is roughly 25 MB of chunk records per GB of tracked
+content, so a tree in the tens of GB is where a normal machine starts to feel it. A
+folder of mostly large files costs far less per byte, since the `large` and `huge`
+profiles chunk at ~256 KiB and ~1 MiB — 32x and 128x fewer records for the same
+bytes — which is the other reason to pin a coarse `chunkProfile` on a media folder.
+
 ### Garbage collection
 
 **Mark-and-sweep at pack granularity, per owner.** Roots are the object references of
@@ -364,7 +379,9 @@ fresh nonce (so there is no chunk-level dedup), streamed through the same packs 
 file content. Only the sealed `PackRoot` — a compact segment-id list — rides in the
 resource blob, so the 64 MiB blob ceiling does not cap the tree by its byte size; the
 practical bound moves to the segment count, hundreds of thousands of 4 MiB segments,
-i.e. ~TB scale, the same segmented-manifest limit the chunked path has.
+i.e. ~TB scale. The chunked path's own bound is lower and different in kind — client
+memory for per-chunk records, see [What actually bounds sync
+memory](#what-actually-bounds-sync-memory).
 
 It leaks no per-file structure: the server sees only opaque, per-sync-unique
 segments. The costs are real, though. Any change re-ships the whole folder. `sync`
