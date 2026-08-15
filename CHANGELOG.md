@@ -38,6 +38,13 @@ All notable changes to this project are documented in this file.
   placeholder-key hole actually reachable: previously a pin could only be created
   implicitly by a first share, which is the moment it was supposed to precede.
 
+- `aqt init --git` / `--no-git` answer the "sync the .git directory too?" question up
+  front. It was a prompt with no flag, so a scripted init hung on it or silently took
+  the default, and the TUI — which drives every action by re-executing the CLI — had
+  to feed the child an `n` over stdin. The TUI now passes `--no-git`, which leaves
+  that stdin channel carrying nothing but a share password, the one secret that must
+  stay out of the process table.
+
 ### Changed
 
 - Text this client did not author is rendered inert. A grantor picks the plaintext
@@ -58,6 +65,16 @@ All notable changes to this project are documented in this file.
   every resource the client can read — so each row now carries its `minClient` and the
   client says which release the row wants. `(unreadable)` still means what it always
   did: a metadata decryption that genuinely failed.
+
+- `-q/--quiet` and `--progress` now behave like `--json`: a command that does not
+  implement one refuses it instead of accepting a flag that changes nothing. Both were
+  registered globally, but `-q` was read by `push`, `update` and `git setup` alone and
+  `--progress` promised a bar on commands that never draw one, so a script that piped
+  `aqt sync -q` got the full summary in its data and had no way to find out. `-q` is
+  now implemented where stdout mixed machine and human output — `init` prints the ref,
+  `snapshot create` and `checkpoint` the id, `restore` the directory it wrote, `share`
+  the link alone, and `sync` drops its per-file lines and summary while still printing
+  errors and the conflicts a blocked sync exits `4` with.
 
 ### Fixed
 
@@ -97,6 +114,31 @@ All notable changes to this project are documented in this file.
   dead code and a grantee's routine root-key rotation surfaced in the words reserved
   for a server substituting keys — the most alarming possible reading of an ordinary
   event, which trains users to ignore the warning that matters.
+
+- The quickstart names `aqt signup` for a new account. The README and both installers
+  printed `aqt login` under a comment promising it would create one, but `login`
+  bootstraps against an account that already exists — and because the server answers
+  an unknown email with an indistinguishable decoy, the very first command after
+  `curl … | sh` spent a full Argon2id derivation to fail with a message that could
+  name neither the problem nor the command that would have worked. That message now
+  names `aqt signup` as the recovery for the half of it the client can never rule out.
+
+- `aqt pull`, `aqt cat`, `aqt clone`, and `aqt ls <folder>` resolve the names `aqt ls`
+  prints. Only `info`, `rm`, `mv`, `share` and `unshare` did, so `aqt pull notes.txt`
+  sent "notes.txt" to the server as an id and reported the resource as missing — which
+  reads as "your file is gone", not "that is not an id". They now take the same branch
+  `info` does, only for refs carrying no fragment and no foreign host so a public link
+  stays opaque, and reuse one unlocked master key for both the lookup and the unwrap.
+  A `<name>/<path>` argument is still not split into a folder and an entry, so the
+  not-found errors name the forms that work.
+
+- Four flags that accepted what they could not honor. `--id` rejected the `aqt://`
+  refs the CLI itself prints, and now parses them; `watch --once -d` let `--once` win
+  in the dispatch and detached nothing without saying so, and is now refused;
+  `aqt account delete` derived a key from an empty piped passphrase and blamed the
+  result on a wrong one, and now reports the missing input; and the TUI, which set its
+  unlocked flag once and never cleared it, returns to its unlock view when an action
+  exits `3` instead of failing every later action until the user quits.
 
 ## [v0.7.0] - 2026-08-11
 
