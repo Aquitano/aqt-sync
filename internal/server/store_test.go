@@ -738,7 +738,9 @@ func seedSchemaAt(t *testing.T, dir string, k int) {
 
 // A data dir written by any older release migrates forward to the current schema.
 // The idempotency test above only re-opens an already-current dir, so it never
-// exercises a step running against the shape that preceded it.
+// exercises a step running against the shape that preceded it. This covers schema
+// shape only: the seeded dirs hold no rows, so a step's backfill UPDATE runs over an
+// empty table.
 func TestMigrateForwardFromEveryVersion(t *testing.T) {
 	t.Parallel()
 	for k := 0; k < len(migrations); k++ {
@@ -774,11 +776,10 @@ func TestFailedMigrationStepRollsBackWhole(t *testing.T) {
 	}
 	defer s.Close()
 
-	// Shaped like a real step: valid DDL first, then a statement that fails — the
-	// power-loss-in-the-middle case, only deterministic.
-	bad := `ALTER TABLE accounts ADD COLUMN wedge_probe INTEGER NOT NULL DEFAULT 0;
-	        ALTER TABLE accounts ADD COLUMN wedge_probe INTEGER NOT NULL DEFAULT 0;`
-	if err := s.applyMigration(len(migrations)+1, bad); err == nil {
+	// Shaped like a real step: an ALTER TABLE ADD COLUMN that succeeds, then a
+	// statement that does not — the power-loss-in-the-middle case, only deterministic.
+	step := "ALTER TABLE accounts ADD COLUMN wedge_probe INTEGER NOT NULL DEFAULT 0;"
+	if err := s.applyMigration(len(migrations)+1, step+"\nALTER TABLE no_such_table ADD COLUMN x INTEGER;"); err == nil {
 		t.Fatal("applyMigration accepted a step whose second statement is invalid")
 	}
 
@@ -789,13 +790,24 @@ func TestFailedMigrationStepRollsBackWhole(t *testing.T) {
 	if uv != len(migrations) {
 		t.Fatalf("user_version = %d after a failed step, want %d (bumped despite the failure)", uv, len(migrations))
 	}
-	// The column from the failed step's first statement must be gone, so a retry of
-	// the same step starts from the pre-step shape.
 	if _, err := s.db.Exec(`SELECT wedge_probe FROM accounts`); err == nil {
-		t.Fatal("the failed step's first statement survived; a retry would hit duplicate column name")
+		t.Fatal("the failed step's first statement survived the rollback")
 	}
-	if err := s.migrate(); err != nil {
-		t.Fatalf("re-migrate after a failed step: %v", err)
+
+	// The point of the rollback: with the transient cause gone, the step applies. If
+	// its first statement had survived, this is where the data dir wedges forever with
+	// `duplicate column name`.
+	if err := s.applyMigration(len(migrations)+1, step); err != nil {
+		t.Fatalf("retry of a rolled-back step: %v", err)
+	}
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations)+1 {
+		t.Fatalf("user_version = %d after the retry, want %d", uv, len(migrations)+1)
+	}
+	if _, err := s.db.Exec(`SELECT wedge_probe FROM accounts`); err != nil {
+		t.Fatalf("retry did not apply the step: %v", err)
 	}
 }
 

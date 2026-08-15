@@ -34,7 +34,7 @@ func main() {
 // and an exit code of 0 makes it treat a server that never came up as an intentional
 // stop and never restart it. Returning rather than calling log.Fatal also lets the
 // deferred store.Close run, so the SQLite WAL is checkpointed on the way out.
-func run() int {
+func run() (code int) {
 	dataDir := envOr("AQT_DATA_DIR", "./aqt-data")
 	addr := envOr("AQT_ADDR", "127.0.0.1:8080")
 
@@ -47,7 +47,17 @@ func run() int {
 		log.Printf("open store: %v", err)
 		return 1
 	}
-	defer store.Close()
+	// A close that fails is an unclean database shutdown — the WAL checkpoint did not
+	// land — which is exactly as invisible to a supervisor at exit 0 as the serve
+	// failure this function exists to report. It never downgrades an existing failure.
+	defer func() {
+		if err := store.Close(); err != nil {
+			log.Printf("close store: %v", err)
+			if code == 0 {
+				code = 1
+			}
+		}
+	}()
 
 	cfg, err := loadServerConfig()
 	if err != nil {
