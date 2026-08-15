@@ -22,9 +22,10 @@ than accepting it and behaving identically:
   `sync`, drops the per-file lines and the summary. Errors, and the conflict list a
   blocked sync exits `4` with, still print; so does `sync --dry-run`'s plan, which is
   the output that run was asked for.
-- `--progress`: `pull`, `sync`, `clone`, `watch`, and `agent start`, and only on a
-  terminal. Those are the commands that transfer enough at once to draw a bar
-  (a `pull` draws one for a subtree, `aqt://<id>/<dir>`).
+- `--progress`: `pull`, `sync`, `clone`, `watch`, `agent start`, and `restore`, and
+  only on a terminal. Those are the commands that transfer enough at once to draw a
+  bar — `pull` for a subtree (`aqt://<id>/<dir>`), `restore` for the re-sync
+  `--in-place` ends with.
 
 Every prompt has a flag that answers it ahead of time, so a scripted run neither
 blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive

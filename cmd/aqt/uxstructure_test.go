@@ -4,8 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
+
+	"github.com/spf13/cobra"
 )
 
 // The block-B restructure: `unshare` replaces `private` and `share --revoke`,
@@ -132,6 +136,40 @@ func TestQuietAndProgressGatesErrorOnUnsupported(t *testing.T) {
 		if err := root.Execute(); err != nil && strings.Contains(err.Error(), "does not support") {
 			t.Errorf("%v hit the gate: %v", args, err)
 		}
+	}
+}
+
+// docs/cli.md enumerates which commands implement -q and --progress, and the
+// annotations are that list, so pin both sets: a command that gains or loses one
+// without the doc moving too is the drift this contract keeps having.
+func TestQuietAndProgressCommandSets(t *testing.T) {
+	// `aqt` itself carries push's flags for the bare-path sugar, and `update policy`
+	// inherits update's; both are documented as part of those commands.
+	assertAnnotated(t, quietAnnotation, []string{
+		"aqt", "aqt checkpoint", "aqt git setup", "aqt init", "aqt push", "aqt restore",
+		"aqt share", "aqt snapshot create", "aqt sync", "aqt update", "aqt update policy",
+	})
+	assertAnnotated(t, progressAnnotation, []string{
+		"aqt agent start", "aqt clone", "aqt pull", "aqt restore", "aqt sync", "aqt watch",
+	})
+}
+
+func assertAnnotated(t *testing.T, annotation string, want []string) {
+	t.Helper()
+	var got []string
+	var walk func(*cobra.Command)
+	walk = func(c *cobra.Command) {
+		if c.Annotations[annotation] != "" {
+			got = append(got, c.CommandPath())
+		}
+		for _, sub := range c.Commands() {
+			walk(sub)
+		}
+	}
+	walk(rootCmd())
+	sort.Strings(got)
+	if !slices.Equal(got, want) {
+		t.Errorf("%s commands = %v, want %v (update docs/cli.md too)", annotation, got, want)
 	}
 }
 

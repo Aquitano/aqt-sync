@@ -171,6 +171,7 @@ func restoreCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the in-place confirmation prompt")
 	markJSONSupported(cmd)
 	markQuietSupported(cmd)
+	markProgressSupported(cmd) // --in-place re-syncs the rollback, bars and all
 	return cmd
 }
 
