@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"syscall"
@@ -221,7 +222,15 @@ func writeSymlinkAt(full, target string, prepare func() error) error {
 	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
 		return err
 	}
-	return os.Symlink(target, full)
+	if err := os.Symlink(target, full); err != nil {
+		if runtime.GOOS == "windows" {
+			// The raw Win32 text ("A required privilege is not held...") names
+			// neither the tracked path nor the fix.
+			return fmt.Errorf("create symlink %s: %w; on Windows, enable Developer Mode or use an elevated shell", full, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // treeWriter materializes a whole tree in a single pass (a pack-and-seal extraction).

@@ -281,9 +281,16 @@ func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.Conte
 // the new version rather than re-shipping the tree, since the segments are already on
 // the server.
 func pushPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
+	if err := refuseCaseCollisions(c.local.Entries, c.local.Dirs); err != nil {
+		return err
+	}
 	if !c.push.built {
+		var base *syncengine.Manifest
+		if c.baseExists {
+			base = &c.base
+		}
 		packer := newSegmentPacker(c.cl)
-		root, shipped, err := syncengine.TarAndSeal(c.root, ck, packer)
+		root, shipped, err := syncengine.TarAndSeal(c.root, ck, base, packer)
 		if err != nil {
 			return err
 		}
@@ -391,6 +398,7 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 		}
 		return err
 	}
+	warnSkipped(remote.Skipped)
 	remoteByPath := remote.ByPath()
 	for p, h := range held {
 		if e, ok := remoteByPath[p]; ok && e.Hash == h {

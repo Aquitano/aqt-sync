@@ -100,7 +100,7 @@ func (s *skipList) tolerate(rel, path string, err error) error {
 	// a directory between the listing and this read (HashOnDisk treats it the same).
 	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
 		return nil
-	case errors.Is(err, fs.ErrPermission):
+	case errors.Is(err, fs.ErrPermission), lockedByAnotherProcess(err):
 		s.paths = append(s.paths, SkippedPath{Path: rel, Err: pathErr.Err})
 		return nil
 	}
@@ -238,8 +238,10 @@ func Scan(dir string) (Manifest, error) {
 // content hash for the rare edit that preserves size, mode, and mtime.
 func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 	var reuse map[string]Entry
+	var reuseDirs map[string]DirEntry
 	if base != nil {
 		reuse = base.byPath()
+		reuseDirs = base.DirsByPath()
 	}
 	var m Manifest
 	var skips skipList
@@ -247,6 +249,7 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 		e := metaEntry(n)
 		if !n.symlink {
 			prev, inBase := reuse[n.rel]
+			e.Mode = scanFileMode(n.info, prev.Mode, inBase)
 			if inBase && !rehash && unchangedStat(prev, e) {
 				m.Entries = append(m.Entries, prev)
 				return nil
@@ -264,11 +267,13 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 		m.Entries = append(m.Entries, e)
 		return nil
 	}, func(rel string, info fs.FileInfo) error {
-		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
+		prev, inBase := reuseDirs[rel]
+		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: scanDirMode(info, prev.Mode, inBase)})
 		return nil
 	})
 	m.Skipped = skips.paths
 	keepUnreadable(&m, base)
+	keepUnsupportedLinks(&m, base, dir)
 	sortEntries(m.Entries)
 	sortDirs(m.Dirs)
 	return m, err
@@ -309,6 +314,38 @@ func keepUnreadable(m *Manifest, base *Manifest) {
 // underPath reports whether p is root itself or lies beneath it.
 func underPath(root, p string) bool {
 	return p == root || strings.HasPrefix(p, root+"/")
+}
+
+// keepUnsupportedLinks re-adds base's symlink entries the walk did not see when the
+// filesystem cannot create symlinks at all: there (Windows without Developer Mode)
+// their absence is inability, not intent, and reading it as a local delete would
+// remove every symlink from the server. The probe runs only when a base link is
+// actually missing, so ordinary scans never pay for it — and on a filesystem that
+// does support links, a genuinely deleted one still propagates as a delete.
+func keepUnsupportedLinks(m *Manifest, base *Manifest, dir string) {
+	m.Entries = append(m.Entries, unsupportedBaseLinks(m, base, dir)...)
+}
+
+// unsupportedBaseLinks returns base's symlink entries that m lacks, but only on a
+// filesystem where their absence means inability rather than deletion.
+func unsupportedBaseLinks(m *Manifest, base *Manifest, dir string) []Entry {
+	if base == nil {
+		return nil
+	}
+	have := make(map[string]bool, len(m.Entries))
+	for _, e := range m.Entries {
+		have[e.Path] = true
+	}
+	var missing []Entry
+	for _, e := range base.Entries {
+		if e.IsSymlink() && !have[e.Path] {
+			missing = append(missing, e)
+		}
+	}
+	if len(missing) == 0 || SymlinkSupport(dir) {
+		return nil
+	}
+	return missing
 }
 
 // namePaths renders skipped paths for a message, naming the first few and counting
@@ -387,8 +424,10 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 		sink = nopSink{}
 	}
 	var reuse map[string]Entry
+	var reuseDirs map[string]DirEntry
 	if base != nil {
 		reuse = base.byPath()
+		reuseDirs = base.DirsByPath()
 	}
 	var m Manifest
 	var skips skipList
@@ -409,7 +448,8 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 		m.Entries = append(m.Entries, e)
 		return nil
 	}, func(rel string, info fs.FileInfo) error {
-		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
+		prev, inBase := reuseDirs[rel]
+		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: scanDirMode(info, prev.Mode, inBase)})
 		return nil
 	})
 	if err != nil {
@@ -417,6 +457,7 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 	}
 	m.Skipped = skips.paths
 	keepUnreadable(&m, base)
+	keepUnsupportedLinks(&m, base, dir)
 	sortEntries(m.Entries)
 	sortDirs(m.Dirs)
 	return m, nil
@@ -428,6 +469,7 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 func snapshotFile(n fileNode, reuse map[string]Entry, conv crypto.ConvergenceKey, selector ChunkSelector, sink ChunkSink, rehash bool) (Entry, error) {
 	entry := metaEntry(n)
 	prev, inBase := reuse[n.rel]
+	entry.Mode = scanFileMode(n.info, prev.Mode, inBase)
 	size := n.info.Size()
 
 	// Stat fast-path: identical size, mode, and mtime means the content is unchanged,
