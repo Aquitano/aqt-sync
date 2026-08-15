@@ -10,6 +10,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/aquitano/aqt-sync/internal/compress"
@@ -64,6 +66,44 @@ type fileNode struct {
 	target  string
 }
 
+// SkippedPath is one tracked path a scan could not read. The scan records it and
+// moves on: one unreadable file (a root-owned file, a directory this user cannot
+// enter) is a per-file problem, not a reason to wedge the whole folder. The scan
+// keeps whatever the base manifest recorded for such a path, so nothing is deleted
+// for being unreadable; callers report the list so the skip is never silent.
+type SkippedPath struct {
+	Path string
+	// Err is the bare cause (the syscall error), not the wrapping fs.PathError: the
+	// path is already in Path, and repeating it absolute in every warning line is
+	// noise. It still matches errors.Is(err, fs.ErrPermission).
+	Err error
+}
+
+// skipList collects one walk's unreadable paths.
+type skipList struct{ paths []SkippedPath }
+
+// tolerate classifies a failure to read one tracked path. A vanished entry is churn
+// — the walk listed it and it was gone by the time we looked (an editor swap file, a
+// finished download renaming itself, a build cleaning up) — so it is skipped
+// silently and the next scan sees the tree as it then is. An unreadable one is
+// recorded and skipped. Anything else fails the walk, as does any error that is not
+// a filesystem error against this very path: a sealing or upload failure reaches the
+// same callback and must not be mistaken for churn.
+func (s *skipList) tolerate(rel, path string, err error) error {
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) || pathErr.Path != path {
+		return err
+	}
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return nil
+	case errors.Is(err, fs.ErrPermission):
+		s.paths = append(s.paths, SkippedPath{Path: rel, Err: pathErr.Err})
+		return nil
+	}
+	return err
+}
+
 // walkFiles invokes fn for every tracked symlink and regular file under dir, and
 // onDir (when non-nil) for every tracked directory. Ignored paths and other special
 // files (devices, sockets, fifos) are skipped. It loads each directory's .aqtignore
@@ -71,17 +111,25 @@ type fileNode struct {
 // consulted), so nested rules apply to their subtree. Symlinks are read with
 // Readlink — never followed — so a link into an ignored or out-of-tree location is
 // captured as its target.
-func walkFiles(dir string, fn func(fileNode) error, onDir func(rel string, info fs.FileInfo) error) error {
+//
+// A path the walk cannot read is passed to skips rather than aborting the tree; only
+// the tracked root itself is fatal, since there would be no tree left to describe.
+func walkFiles(dir string, skips *skipList, fn func(fileNode) error, onDir func(rel string, info fs.FileInfo) error) error {
 	ig := newIgnore()
-	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
+	return filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		rel, err := filepath.Rel(dir, path)
 		if err != nil {
 			return err
 		}
 		rel = filepath.ToSlash(rel)
+		if walkErr != nil {
+			// Only a directory whose listing failed reaches this (an ignored one returned
+			// SkipDir before it was read), plus the root itself when it cannot be statted.
+			if rel == "." {
+				return walkErr
+			}
+			return skips.tolerate(rel, path, walkErr)
+		}
 		if rel == "." {
 			ig.loadDir(dir, "")
 			return nil
@@ -94,7 +142,7 @@ func walkFiles(dir string, fn func(fileNode) error, onDir func(rel string, info 
 			if onDir != nil {
 				info, err := d.Info()
 				if err != nil {
-					return err
+					return skips.tolerate(rel, path, err)
 				}
 				if err := onDir(rel, info); err != nil {
 					return err
@@ -116,12 +164,12 @@ func walkFiles(dir string, fn func(fileNode) error, onDir func(rel string, info 
 		}
 		info, err := d.Info()
 		if err != nil {
-			return err
+			return skips.tolerate(rel, path, err)
 		}
 		if d.Type()&fs.ModeSymlink != 0 {
 			target, err := os.Readlink(path)
 			if err != nil {
-				return err
+				return skips.tolerate(rel, path, err)
 			}
 			return fn(fileNode{rel: rel, path: path, info: info, symlink: true, target: target})
 		}
@@ -191,7 +239,8 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 		reuse = base.byPath()
 	}
 	var m Manifest
-	err := walkFiles(dir, func(n fileNode) error {
+	var skips skipList
+	err := walkFiles(dir, &skips, func(n fileNode) error {
 		e := metaEntry(n)
 		if !n.symlink {
 			prev, inBase := reuse[n.rel]
@@ -201,7 +250,7 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 			}
 			h, err := streamHash(n.path)
 			if err != nil {
-				return err
+				return skips.tolerate(n.rel, n.path, err)
 			}
 			if inBase && h == prev.Hash {
 				m.Entries = append(m.Entries, touchedReuse(prev, e))
@@ -215,9 +264,63 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 		m.Dirs = append(m.Dirs, DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())})
 		return nil
 	})
+	m.Skipped = skips.paths
+	keepUnreadable(&m, base)
 	sortEntries(m.Entries)
 	sortDirs(m.Dirs)
 	return m, err
+}
+
+// keepUnreadable re-adds base's record of every path the scan could not read, so an
+// unreadable file — or the subtree under a directory the walk could not enter — reads
+// as unchanged rather than deleted. Without it a single `chmod 000` would plan a
+// remote delete for content that is still sitting on disk.
+func keepUnreadable(m *Manifest, base *Manifest) {
+	if len(m.Skipped) == 0 || base == nil {
+		return
+	}
+	haveEntry := make(map[string]bool, len(m.Entries))
+	for _, e := range m.Entries {
+		haveEntry[e.Path] = true
+	}
+	haveDir := make(map[string]bool, len(m.Dirs))
+	for _, d := range m.Dirs {
+		haveDir[d.Path] = true
+	}
+	for _, s := range m.Skipped {
+		for _, e := range base.Entries {
+			if !haveEntry[e.Path] && underPath(s.Path, e.Path) {
+				m.Entries = append(m.Entries, e)
+				haveEntry[e.Path] = true
+			}
+		}
+		for _, d := range base.Dirs {
+			if !haveDir[d.Path] && underPath(s.Path, d.Path) {
+				m.Dirs = append(m.Dirs, d)
+				haveDir[d.Path] = true
+			}
+		}
+	}
+}
+
+// underPath reports whether p is root itself or lies beneath it.
+func underPath(root, p string) bool {
+	return p == root || strings.HasPrefix(p, root+"/")
+}
+
+// namePaths renders skipped paths for a message, naming the first few and counting
+// the rest so one unreadable directory of ten thousand files stays one line.
+func namePaths(skipped []SkippedPath) string {
+	const show = 3
+	names := make([]string, 0, show)
+	for _, s := range skipped[:min(show, len(skipped))] {
+		names = append(names, strconv.Quote(s.Path))
+	}
+	out := strings.Join(names, ", ")
+	if rest := len(skipped) - len(names); rest > 0 {
+		out += fmt.Sprintf(" and %d more", rest)
+	}
+	return out
 }
 
 // ListPaths returns the relative slash path of every tracked file and symlink under
@@ -225,7 +328,8 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 // reads no file content, so it is cheap on a large tree.
 func ListPaths(dir string) ([]string, error) {
 	var paths []string
-	err := walkFiles(dir, func(n fileNode) error {
+	var skips skipList
+	err := walkFiles(dir, &skips, func(n fileNode) error {
 		paths = append(paths, n.rel)
 		return nil
 	}, nil)
@@ -236,7 +340,9 @@ func ListPaths(dir string) ([]string, error) {
 // mtime, mode, and symlink target — without reading any file contents. It is the
 // watch daemon's cheap change detector: one lstat per file instead of a full
 // read+hash, so a continuously-polling watcher does not re-read the whole tree
-// every tick. Honors nested .aqtignore exactly as Scan does.
+// every tick. It walks exactly what Scan walks, so the same .aqtignore rules apply
+// and the same churn is tolerated — the watcher fingerprints the busiest trees there
+// are, so one file vanishing mid-walk must not cost it a tick.
 //
 // The residual gap versus a content hash is an edit that preserves size, mode,
 // and mtime to the nanosecond — exceedingly rare, and caught on the next stat
@@ -244,48 +350,15 @@ func ListPaths(dir string) ([]string, error) {
 // sync actually runs.
 func Fingerprint(dir string) (string, error) {
 	h := sha256.New()
-	ig := newIgnore()
-	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(dir, path)
-		if err != nil {
-			return err
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == "." {
-			ig.loadDir(dir, "")
+	var skips skipList
+	err := walkFiles(dir, &skips, func(n fileNode) error {
+		if n.symlink {
+			fmt.Fprintf(h, "L\x00%s\x00%s\n", n.rel, n.target)
 			return nil
 		}
-		if d.IsDir() {
-			if ig.Match(rel, true) {
-				return filepath.SkipDir
-			}
-			ig.loadDir(path, rel)
-			return nil
-		}
-		if ig.Match(rel, false) {
-			return nil
-		}
-		if d.Type()&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(path)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(h, "L\x00%s\x00%s\n", rel, target)
-			return nil
-		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-		info, err := d.Info()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(h, "F\x00%s\x00%d\x00%d\x00%o\n", rel, info.Size(), info.ModTime().UnixNano(), info.Mode().Perm())
+		fmt.Fprintf(h, "F\x00%s\x00%d\x00%d\x00%o\n", n.rel, n.info.Size(), n.info.ModTime().UnixNano(), n.info.Mode().Perm())
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		return "", err
 	}
@@ -315,8 +388,9 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 		reuse = base.byPath()
 	}
 	var m Manifest
+	var skips skipList
 
-	err := walkFiles(dir, func(n fileNode) error {
+	err := walkFiles(dir, &skips, func(n fileNode) error {
 		if n.symlink {
 			e := metaEntry(n)
 			if prev, ok := reuse[n.rel]; ok && prev.Hash == e.Hash {
@@ -327,7 +401,7 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 		}
 		e, err := snapshotFile(n, reuse, conv, chunker, sink, rehash)
 		if err != nil {
-			return err
+			return skips.tolerate(n.rel, n.path, err)
 		}
 		m.Entries = append(m.Entries, e)
 		return nil
@@ -338,6 +412,8 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 	if err != nil {
 		return Manifest{}, err
 	}
+	m.Skipped = skips.paths
+	keepUnreadable(&m, base)
 	sortEntries(m.Entries)
 	sortDirs(m.Dirs)
 	return m, nil

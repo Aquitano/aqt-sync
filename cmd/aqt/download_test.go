@@ -141,8 +141,78 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 	entries := []syncengine.Entry{
 		{Path: "f.bin", Mode: 0o644, Size: 100, Hash: "h", Chunks: []crypto.Chunk{{ID: "a", Key: make([]byte, crypto.KeySize), Len: 100}}},
 	}
-	if err := runDownloads(cl, t.TempDir(), entries, nil); err == nil {
+	if _, err := runDownloads(cl, t.TempDir(), entries, nil); err == nil {
 		t.Fatal("runDownloads must fail when a pack fetch errors")
+	}
+}
+
+// A download resolves chunk locations in bounded batches so its index does not scale
+// with the whole tree. Batches never split a file — a file's chunks have to be located
+// together to materialize it — so one oversized file is simply its own batch.
+func TestBatchByChunks(t *testing.T) {
+	entry := func(path string, chunks int) syncengine.Entry {
+		e := syncengine.Entry{Path: path}
+		for i := 0; i < chunks; i++ {
+			e.Chunks = append(e.Chunks, crypto.Chunk{ID: path})
+		}
+		return e
+	}
+	entries := []syncengine.Entry{
+		entry("a", 2), entry("b", 2), // fills the first batch exactly
+		entry("c", 1), entry("d", 1),
+		entry("huge", 9), // over the bound on its own
+		entry("e", 1),
+	}
+	var got [][]string
+	for _, batch := range batchByChunks(entries, 4) {
+		var paths []string
+		for _, e := range batch {
+			paths = append(paths, e.Path)
+		}
+		got = append(got, paths)
+	}
+	want := [][]string{{"a", "b"}, {"c", "d"}, {"huge"}, {"e"}}
+	if len(got) != len(want) {
+		t.Fatalf("batches = %v, want %v", got, want)
+	}
+	for i := range want {
+		if strings.Join(got[i], ",") != strings.Join(want[i], ",") {
+			t.Fatalf("batch %d = %v, want %v", i, got[i], want[i])
+		}
+	}
+	if batchByChunks(nil, 4) != nil {
+		t.Fatal("no entries must produce no batches")
+	}
+	// A file with no chunks (inline content) needs no locate, so those never force a split.
+	if n := len(batchByChunks([]syncengine.Entry{entry("i", 0), entry("j", 0)}, 1)); n != 1 {
+		t.Fatalf("inline entries split into %d batches, want 1", n)
+	}
+}
+
+// Dropping a batch's location index must not drop the fetched bytes with it: a chunk
+// two batches share is located twice but fetched once, which is what keeps batching
+// from costing extra round-trips.
+func TestForgetLocationsKeepsFetchedSpans(t *testing.T) {
+	f := &fakePackServer{
+		packs:   map[string][]byte{"p1": []byte(strings.Repeat("A", 100))},
+		locs:    map[string]api.ObjectLocation{"a": {ID: "a", PackID: "p1", Off: 0, Len: 100}},
+		getHits: map[string]*int32{"p1": new(int32)},
+	}
+	src := newEmptyPackSource(newFakePackClient(t, f))
+	for i := 0; i < 2; i++ {
+		if err := src.locate([]string{"a"}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := src.get("a"); err != nil {
+			t.Fatal(err)
+		}
+		src.forgetLocations()
+		if len(src.locs) != 0 || len(src.objSpan) != 0 {
+			t.Fatal("forgetLocations must drop the per-chunk index")
+		}
+	}
+	if n := atomic.LoadInt32(f.getHits["p1"]); n != 1 {
+		t.Fatalf("pack fetched %d times across batches, want 1", n)
 	}
 }
 

@@ -273,6 +273,7 @@ func runStatus(dir string, opts statusOptions) error {
 	if err != nil {
 		return err
 	}
+	warnSkipped(local.Skipped)
 
 	// The local half is offline: it compares the working tree to the last synced
 	// manifest. Conflicts (both sides changed) still surface only during `sync`.
@@ -285,6 +286,7 @@ func runStatus(dir string, opts statusOptions) error {
 			"modified": nonNil(ch.modified),
 			"deleted":  nonNil(ch.deleted),
 			"renamed":  nonNilRenames(ch.renamed),
+			"skipped":  skippedPaths(local.Skipped),
 			// The buckets above flatten directories, mode edits, and type switches into
 			// the three names they have always carried; changes reports each one as what
 			// it is, so a caller never has to guess why a path is "modified".
@@ -309,6 +311,31 @@ func runStatus(dir string, opts statusOptions) error {
 	}
 	printIncomingReport(collectIncoming(root, base))
 	return nil
+}
+
+// warnSkipped names the tracked paths a scan could not read. Such a path keeps
+// whatever the base recorded for it, so it is neither uploaded nor deleted and the
+// command proceeds — but a file that has quietly stopped syncing is worth a line on
+// stderr. Only the first few are named; one unreadable directory stands in for its
+// whole subtree, so the list is short unless permissions are broken file by file.
+func warnSkipped(skipped []syncengine.SkippedPath) {
+	const show = 5
+	for _, s := range skipped[:min(show, len(skipped))] {
+		fmt.Fprintf(os.Stderr, "warning: skipped %s: %v; it stays as last synced (fix its permissions or add it to .aqtignore)\n", s.Path, s.Err)
+	}
+	if rest := len(skipped) - show; rest > 0 {
+		fmt.Fprintf(os.Stderr, "warning: and %d more unreadable path(s)\n", rest)
+	}
+}
+
+// skippedPaths renders a scan's unreadable paths for --json, where a name is all a
+// script can act on.
+func skippedPaths(skipped []syncengine.SkippedPath) []string {
+	paths := make([]string, len(skipped))
+	for i, s := range skipped {
+		paths[i] = s.Path
+	}
+	return paths
 }
 
 // computeLocalChanges classifies the working tree against the last-synced base
@@ -684,6 +711,7 @@ func runSync(dir string, opts syncOptions) error {
 		if err != nil {
 			return err
 		}
+		warnSkipped(local.Skipped)
 	} else {
 		// With --progress on a terminal, size the upload up front so the bar shows a real
 		// percentage. Chunked content streams during Take (below) before any plan exists,
@@ -714,6 +742,7 @@ func runSync(dir string, opts syncOptions) error {
 			return err
 		}
 		prog.finish(true)
+		warnSkipped(local.Skipped)
 	}
 
 	// Seal the base tree's node ciphertexts once, up front, and reuse them across every
@@ -1119,7 +1148,9 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		if copies := planConflictCopies(c.root, copyActions, remoteByPath, c.host, c.now, c.copyMemo); len(copies) > 0 {
 			entries := copyEntries(copies)
 			cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
-			cpErr := runDownloads(c.cl, c.root, entries, cpProg)
+			// A conflict copy lands at a fresh untracked path, so it has no base entry to
+			// stamp an mtime on; the next scan picks it up as a local add.
+			_, cpErr := runDownloads(c.cl, c.root, entries, cpProg)
 			cpProg.finish(cpErr == nil)
 			if cpErr != nil {
 				return cpErr
@@ -1175,9 +1206,12 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 			mergeConflicts = append(mergeConflicts, resolution.path)
 			continue
 		}
-		if err := syncengine.WriteFile(c.root, resolution.entry, resolution.data); err != nil {
+		mtime, err := syncengine.WriteFile(c.root, resolution.entry, resolution.data)
+		if err != nil {
 			return err
 		}
+		// A merged file is built in memory, so its entry carries no mtime either.
+		stampMTimes(newBase, map[string]int64{resolution.path: mtime})
 		landedMerges = append(landedMerges, resolution)
 	}
 
@@ -1199,11 +1233,12 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		}
 	}
 	dlProg := newProgressBar("downloading", entriesBytes(downloads))
-	dlErr := runDownloads(c.cl, c.root, downloads, dlProg)
+	dlMTimes, dlErr := runDownloads(c.cl, c.root, downloads, dlProg)
 	dlProg.finish(dlErr == nil)
 	if dlErr != nil {
 		return dlErr
 	}
+	stampMTimes(newBase, dlMTimes)
 	for _, p := range lateDeletes {
 		if err := syncengine.RemoveFile(c.root, p); err != nil {
 			return err
@@ -1471,7 +1506,8 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	}
 	if err := materializeStaged(abs, func(staging string) error {
 		prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
-		dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), staging, manifest.Entries, prog)
+		// No base is recorded for a read-only share, so its mtimes have nothing to stamp.
+		_, dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), staging, manifest.Entries, prog)
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
 			return dlErr
@@ -1582,7 +1618,7 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)
 	}
 	dlProg := newProgressBar("downloading", entriesBytes(manifest.Entries))
-	dlErr := runDownloads(cl, abs, manifest.Entries, dlProg)
+	mtimes, dlErr := runDownloads(cl, abs, manifest.Entries, dlProg)
 	dlProg.finish(dlErr == nil)
 	if dlErr != nil {
 		return syncengine.Manifest{}, dlErr
@@ -1590,7 +1626,20 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 	if err := syncengine.MaterializeDirs(abs, manifest.Dirs); err != nil {
 		return syncengine.Manifest{}, err
 	}
+	// Without this the fresh clone's base has no mtimes at all, so every later
+	// `aqt status` and TUI refresh re-reads and re-hashes the whole tree.
+	stampEntryMTimes(manifest.Entries, mtimes)
 	return manifest, nil
+}
+
+// stampEntryMTimes is stampMTimes over a manifest's entry slice, for the clone paths
+// that record the remote manifest itself as the new base.
+func stampEntryMTimes(entries []syncengine.Entry, mtimes map[string]int64) {
+	for i := range entries {
+		if mtime, ok := mtimes[entries[i].Path]; ok {
+			entries[i].MTime = mtime
+		}
+	}
 }
 
 // --- chunk transfer ---
@@ -1747,25 +1796,69 @@ func (u *packUploader) upload(cand []candidate) error {
 // correct — no file's bytes depend on another's.
 const downloadConcurrency = 6
 
+// locateBatchChunks bounds how many chunk locations one download resolves at a time.
+// The ciphertext a pull holds is O(one pack), but the location index is not: at the
+// default fine profile (~8 KiB average chunk) each located object costs a few hundred
+// bytes, so resolving a whole tree up front cost a gigabyte of index on a 20 GB clone
+// before a single byte was written. Files are located and materialized in batches of
+// about this many chunks and each batch's index is dropped once its files land, which
+// caps that at tens of megabytes; the pack LRU carries across batches, so a pack two
+// batches share is still fetched once.
+const locateBatchChunks = 50_000
+
 // runDownloads materializes each entry under root, streaming its chunks from the
 // packs that hold them. A pack-backed chunk source range-fetches packs on demand
 // and caches a few, so neither a whole file nor the whole tree is ever in memory.
 // Files are materialized by a bounded worker pool; the first error wins and is
-// returned, matching the upload pipeline's aggregation.
-func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, prog *progressBar) error {
-	src, err := newPackSource(cl, distinctChunkIDs(entries))
-	if err != nil {
-		return err
+// returned, matching the upload pipeline's aggregation. The returned map gives each
+// written file's resulting mtime, keyed by path, for the caller's base manifest.
+func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
+	src := newEmptyPackSource(cl)
+	mtimes := make(map[string]int64, len(entries))
+	for _, batch := range batchByChunks(entries, locateBatchChunks) {
+		// locate must not run while workers are calling get, which holds because each
+		// batch's downloads finish before the next batch is located.
+		if err := src.locate(distinctChunkIDs(batch)); err != nil {
+			return nil, err
+		}
+		batchMTimes, err := runDownloadsFrom(src.get, root, batch, prog)
+		if err != nil {
+			return nil, err
+		}
+		for path, mtime := range batchMTimes {
+			mtimes[path] = mtime
+		}
+		src.forgetLocations()
 	}
-	return runDownloadsFrom(src.get, root, entries, prog)
+	return mtimes, nil
+}
+
+// batchByChunks splits entries into runs of at most maxChunks chunk records, never
+// splitting a file: one file with more chunks than the bound is simply its own batch.
+func batchByChunks(entries []syncengine.Entry, maxChunks int) [][]syncengine.Entry {
+	var batches [][]syncengine.Entry
+	start, count := 0, 0
+	for i, e := range entries {
+		if count > 0 && count+len(e.Chunks) > maxChunks {
+			batches = append(batches, entries[start:i])
+			start, count = i, 0
+		}
+		count += len(e.Chunks)
+	}
+	if start < len(entries) {
+		batches = append(batches, entries[start:])
+	}
+	return batches
 }
 
 // runDownloadsFrom is runDownloads with the chunk source already chosen, so the
 // link-holder paths can materialize entries through the public object endpoint
 // with the same worker pool the authed pack path uses.
-func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries []syncengine.Entry, prog *progressBar) error {
+func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
 	var g errgroup.Group
 	g.SetLimit(syncTransferLimit(downloadConcurrency))
+	var mu sync.Mutex
+	mtimes := make(map[string]int64, len(entries))
 	for _, e := range entries {
 		e := e
 		g.Go(func() error {
@@ -1773,14 +1866,36 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 				if err := syncengine.WriteSymlink(root, e); err != nil {
 					return err
 				}
-			} else if err := syncengine.MaterializeFile(root, e, get); err != nil {
-				return err
+			} else {
+				mtime, err := syncengine.MaterializeFile(root, e, get)
+				if err != nil {
+					return err
+				}
+				mu.Lock()
+				mtimes[e.Path] = mtime
+				mu.Unlock()
 			}
 			prog.add(e.Size)
 			return nil
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return nil, err
+	}
+	return mtimes, nil
+}
+
+// stampMTimes records each freshly written file's mtime on its entry in byPath (the
+// map that becomes the new base). A remote entry has no mtime of its own, and a base
+// entry without one never matches a stat, so skipping this leaves `status`, the TUI,
+// and the next sync re-reading and re-hashing every file the pull just wrote.
+func stampMTimes(byPath map[string]syncengine.Entry, mtimes map[string]int64) {
+	for path, mtime := range mtimes {
+		if e, ok := byPath[path]; ok {
+			e.MTime = mtime
+			byPath[path] = e
+		}
+	}
 }
 
 // packSpan is a contiguous byte range of a pack covering a run of objects a download
@@ -1804,9 +1919,9 @@ const spanSplitGap = 256 << 10
 // a small LRU so a pack shared by several files is fetched once.
 //
 // It is safe for concurrent use by the download worker pool: locs and spans are
-// immutable once concurrent gets begin (locate runs before, see its comment), the
-// LRU is guarded by mu, and sf collapses a stampede of workers that all miss the
-// same pack into one GetPackRange.
+// immutable while concurrent gets run (locate and forgetLocations only ever run
+// between batches, see their comments), the LRU is guarded by mu, and sf collapses a
+// stampede of workers that all miss the same pack into one GetPackRange.
 type packSource struct {
 	cl   *client.Client
 	locs map[string]api.ObjectLocation
@@ -1832,6 +1947,15 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 	return s, nil
 }
 
+// forgetLocations drops the resolved object index once a batch of files has landed,
+// so a download's metadata stays bounded by the batch rather than by the whole tree.
+// The span list and the LRU deliberately survive: they are O(packs), not O(chunks),
+// and keeping them lets the next batch reuse a span already fetched.
+func (s *packSource) forgetLocations() {
+	s.locs = map[string]api.ObjectLocation{}
+	s.objSpan = map[string]packSpan{}
+}
+
 // newEmptyPackSource returns a source with no located objects yet, for callers
 // that locate incrementally (the level-batched tree walk) while keeping one LRU
 // across all their fetches.
@@ -1846,8 +1970,9 @@ func newEmptyPackSource(cl *client.Client) *packSource {
 }
 
 // locate resolves ids to pack spans and records them for get. It mutates locs and
-// objSpan, so it must not run concurrently with get — callers either locate once
-// up front (downloads) or interleave locate/get on a single goroutine (tree walk).
+// objSpan, so it must not run concurrently with get — callers either locate a whole
+// batch before its downloads start (runDownloads) or interleave locate/get on a
+// single goroutine (tree walk).
 func (s *packSource) locate(ids []string) error {
 	unseen := make([]string, 0, len(ids))
 	for _, id := range ids {

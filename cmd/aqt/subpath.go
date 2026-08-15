@@ -221,7 +221,9 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 	}
 	if err := materializeStaged(abs, func(staging string) error {
 		prog := newProgressBar("downloading", entriesBytes(m.Entries))
-		dlErr := runDownloadsFrom(get, staging, m.Entries, prog)
+		// A subpath pull writes into a plain directory, not a tracked folder, so there
+		// is no base manifest for its mtimes to feed.
+		_, dlErr := runDownloadsFrom(get, staging, m.Entries, prog)
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
 			return dlErr

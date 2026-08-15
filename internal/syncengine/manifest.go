@@ -49,6 +49,11 @@ type Manifest struct {
 	Version int        `json:"version"`
 	Entries []Entry    `json:"entries"`
 	Dirs    []DirEntry `json:"dirs,omitempty"`
+	// Skipped names the tracked paths a scan could not read. It is diagnostics for
+	// the caller to report, not part of the folder's description, so it never rides
+	// in the sealed blob or the on-disk base — the entries of an unreadable path are
+	// carried over from the base instead (see keepUnreadable).
+	Skipped []SkippedPath `json:"-"`
 }
 
 func (m *Manifest) dirsByPath() map[string]DirEntry {

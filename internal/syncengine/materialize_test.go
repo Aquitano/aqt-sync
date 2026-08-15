@@ -7,6 +7,41 @@ import (
 	"testing"
 )
 
+// A materialized file reports the mtime it landed with, and recording that on the
+// base entry is what lets the next scan stat-fast-path it. Entries coming from the
+// remote carry no mtime at all, so without this every command after a clone or a pull
+// re-reads and re-hashes the whole tree. The sentinel hash proves nothing was read:
+// only the fast path can produce it.
+func TestMaterializedEntryStatFastPaths(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	entry := Entry{Path: "pulled.txt", Mode: 0o644, Size: 5, Hash: "sentinel-not-a-real-hash"}
+	mtime, err := WriteFile(root, entry, []byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mtime == 0 {
+		t.Fatal("materialize must report the file's mtime")
+	}
+	fi, err := os.Stat(filepath.Join(root, "pulled.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mtime != fi.ModTime().UnixNano() {
+		t.Fatalf("reported mtime %d, on-disk %d", mtime, fi.ModTime().UnixNano())
+	}
+
+	entry.MTime = mtime
+	base := Manifest{Entries: []Entry{entry}}
+	got, err := ScanReusing(root, &base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := scanEntry(t, got, "pulled.txt").Hash; h != entry.Hash {
+		t.Fatalf("a freshly materialized file was re-hashed: hash = %q", h)
+	}
+}
+
 // TestMaterializeDirsAppliesModesLast pins the ordering a restrictive directory mode
 // forces: applying it on sight would leave nothing able to create the directories
 // underneath it, so every directory is created first and the modes come after.
