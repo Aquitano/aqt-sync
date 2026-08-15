@@ -168,5 +168,6 @@ esac
 
 echo
 echo "next:"
-echo "  aqt --server https://your-server login --email you@example.com"
+echo "  aqt --server https://your-server signup --email you@example.com   # new account"
+echo "  aqt --server https://your-server login --email you@example.com    # account you already have"
 echo "  aqt git setup    # only if you want encrypted Git remotes"

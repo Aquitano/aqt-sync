@@ -75,7 +75,10 @@ release build if you want self-updates.
 ## Client quickstart
 
 ```
-# Point at a server and create an account (or attach a new device to an existing one).
+# Point at a server and create an account.
+aqt --server https://aqt.example.com signup --email you@example.com
+
+# On every machine after the first, attach that device to the account instead.
 aqt --server https://aqt.example.com login --email you@example.com
 
 # Push a single file, privately (default) or as a public link.

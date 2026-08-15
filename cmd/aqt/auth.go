@@ -85,8 +85,11 @@ func (k kdfChoice) resolve() (crypto.KdfParams, error) {
 // errNoUnlock is returned when the bootstrap's wrapped root will not open with the
 // entered passphrase. Because the bootstrap endpoint returns an indistinguishable
 // decoy for an unknown email, this is genuinely ambiguous: either no account exists
-// for the email or the passphrase is wrong.
-var errNoUnlock = errors.New("could not unlock: no account exists for this email, or the passphrase is wrong")
+// for the email or the passphrase is wrong. Naming `aqt signup` matters for the
+// first case — `login` cannot create an account, and the decoy means the client
+// cannot say which half of the message applies.
+var errNoUnlock = errors.New("could not unlock: no account exists for this email, or the passphrase is wrong; " +
+	"`aqt signup --email <email>` creates a new account")
 
 func validateSessionTTL(ttl time.Duration) error {
 	if ttl < 0 {
