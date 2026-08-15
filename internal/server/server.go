@@ -213,10 +213,10 @@ func (s *Server) WaitWorkers(ctx context.Context) error {
 // A folder large enough to exceed maxResourceBody (hundreds of thousands of
 // entries) still needs a segmented manifest; that is the remaining half of A2.
 const (
-	maxControlBody  = 64 << 10 // 64 KiB: account/auth/visibility — a few small fields
-	maxChunkBody    = 32 << 20 // 32 MiB: a check/locate id list (client batches well under this)
+	maxControlBody  = 64 << 10         // 64 KiB: account/auth/visibility — a few small fields
+	maxChunkBody    = 32 << 20         // 32 MiB: a check/locate id list (client batches well under this)
 	maxPackBody     = api.MaxPackBytes // one raw pack; the client builders bound themselves by the same constant
-	maxResourceBody = 64 << 20 // 64 MiB: a file's ciphertext or a folder's sealed manifest
+	maxResourceBody = 64 << 20         // 64 MiB: a file's ciphertext or a folder's sealed manifest
 )
 
 // Router builds the Gin engine with all routes mounted.
