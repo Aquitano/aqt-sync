@@ -23,8 +23,6 @@ aqt git setup
 `aqt git setup` creates the link beside the running binary, reports where it put it,
 and warns if that directory is not on `PATH` or if another `git-remote-aqt` comes
 first. It is safe to re-run. Pass `--dir` to put the link somewhere else on `PATH`.
-It refuses to write into a directory a package manager owns, since a package that
-ships `aqt` would ship the link with it.
 
 On Windows the archive is a `.zip` carrying `aqt.exe`, and the link is
 `git-remote-aqt.exe`. A symlink there needs Developer Mode or an elevated shell, so

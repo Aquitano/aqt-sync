@@ -3,22 +3,15 @@
 package update
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"os/exec"
 	"strings"
 	"time"
 )
-
-// ErrGHUnavailable means the GitHub CLI is not installed or not usable. It is no
-// longer a prerequisite for the public repository — GHWebSource reads the same
-// assets over plain HTTPS — but a private fork still needs an authenticated client.
-var ErrGHUnavailable = errors.New("the GitHub CLI (gh) is required to check for updates")
 
 // ErrNoRelease means the channel has no published release yet.
 var ErrNoRelease = errors.New("no published release found for this channel")
@@ -38,117 +31,10 @@ type Source interface {
 }
 
 // ReleaseSource is one transport that can supply both halves of an update: the
-// channel metadata and the archive it names. Every implementation here satisfies
-// both, so FallbackSource can carry a single ordered list.
+// channel metadata and the archive it names.
 type ReleaseSource interface {
 	Source
 	ArtifactSource
-}
-
-// GHSource reads release metadata through the GitHub CLI, which carries the user's
-// own credentials. That is what lets a *private* repository publish updates at all.
-// This repository is public, so GHWebSource is the default and this is the fallback
-// that keeps a private fork or mirror working.
-type GHSource struct {
-	Repo string
-	// Run executes gh and returns its stdout, bounded to max bytes. Tests
-	// substitute it so no gh binary or network is involved.
-	Run func(ctx context.Context, max int64, args ...string) ([]byte, error)
-	// RunStream executes gh and pipes its stdout to w, for payloads too large to
-	// hold in memory. Tests substitute it for the same reason as Run.
-	RunStream func(ctx context.Context, w io.Writer, args ...string) error
-}
-
-func (g GHSource) Fetch(ctx context.Context, ch Channel) (Release, error) {
-	run := g.Run
-	if run == nil {
-		run = runGH
-	}
-	list := []string{"release", "list", "--repo", g.Repo, "--limit", "1", "--exclude-drafts", "--json", "tagName"}
-	if ch == ChannelStable {
-		// The newest release overall may be a prerelease; the stable channel must not
-		// see it. gh filters server-side, and the signed channel field is re-checked
-		// afterwards so this flag is a convenience, not the security boundary.
-		list = append(list, "--exclude-pre-releases")
-	}
-	out, err := run(ctx, 64<<10, list...)
-	if err != nil {
-		return Release{}, err
-	}
-	var releases []struct {
-		TagName string `json:"tagName"`
-	}
-	if err := json.Unmarshal(out, &releases); err != nil {
-		return Release{}, fmt.Errorf("gh release list: %w", err)
-	}
-	if len(releases) == 0 {
-		return Release{}, ErrNoRelease
-	}
-	tag := releases[0].TagName
-	if _, err := ParseVersion(tag); err != nil {
-		return Release{}, fmt.Errorf("release tag %q is not a version: %w", tag, err)
-	}
-
-	manifest, err := g.download(ctx, run, tag, ManifestAssetName, MaxManifestBytes)
-	if err != nil {
-		return Release{}, err
-	}
-	signature, err := g.download(ctx, run, tag, SignatureAssetName, MaxSignatureBytes)
-	if err != nil {
-		return Release{}, err
-	}
-	return Release{Manifest: manifest, Signature: signature}, nil
-}
-
-func (g GHSource) download(ctx context.Context, run func(context.Context, int64, ...string) ([]byte, error), tag, asset string, max int64) ([]byte, error) {
-	out, err := run(ctx, max, "release", "download", tag, "--repo", g.Repo, "--pattern", asset, "--output", "-")
-	if err != nil {
-		return nil, fmt.Errorf("downloading %s from %s: %w", asset, tag, err)
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("release %s publishes no %s", tag, asset)
-	}
-	return out, nil
-}
-
-// runGH invokes gh with a fixed argument vector (never a shell), a bounded stdout,
-// and no inherited stdin, so a hung or chatty child cannot stall or flood the CLI.
-func runGH(ctx context.Context, max int64, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "gh", args...)
-	stdout := &capWriter{max: max}
-	stderr := &capWriter{max: 4 << 10}
-	cmd.Stdout = stdout
-	cmd.Stderr = stderr
-	cmd.Stdin = nil
-	if err := cmd.Run(); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return nil, fmt.Errorf("%w: install it from https://cli.github.com and run `gh auth login`", ErrGHUnavailable)
-		}
-		if stdout.over {
-			return nil, fmt.Errorf("%w: gh returned more than %d bytes", ErrTooLarge, max)
-		}
-		if msg := strings.TrimSpace(stderr.buf.String()); msg != "" {
-			return nil, fmt.Errorf("gh %s: %v: %s", args[0], err, msg)
-		}
-		return nil, fmt.Errorf("gh %s: %w", args[0], err)
-	}
-	return stdout.buf.Bytes(), nil
-}
-
-// capWriter refuses to buffer more than max bytes, which stops a hostile or broken
-// child process from being read into memory without limit.
-type capWriter struct {
-	buf  bytes.Buffer
-	max  int64
-	over bool
-}
-
-func (w *capWriter) Write(p []byte) (int, error) {
-	if int64(w.buf.Len()+len(p)) > w.max {
-		w.over = true
-		return 0, ErrTooLarge
-	}
-	return w.buf.Write(p)
 }
 
 // GHWebSource reads release metadata from GitHub's public release endpoints with
@@ -229,65 +115,6 @@ func (g GHWebSource) latestTag(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("release tag %q is not a version: %w", tag, err)
 	}
 	return tag, nil
-}
-
-// FallbackSource tries its sources in order and returns the first that succeeds.
-// Every source is checked against the same signature and the same pinned URLs, so
-// the order decides reachability, never trust.
-type FallbackSource struct {
-	Sources []ReleaseSource
-}
-
-func (f FallbackSource) Fetch(ctx context.Context, ch Channel) (Release, error) {
-	var errs []error
-	for _, s := range f.Sources {
-		rel, err := s.Fetch(ctx, ch)
-		if err == nil {
-			return rel, nil
-		}
-		errs = append(errs, err)
-	}
-	if len(errs) == 0 {
-		return Release{}, errors.New("no update source configured")
-	}
-	return Release{}, errors.Join(errs...)
-}
-
-func (f FallbackSource) FetchArtifact(ctx context.Context, version string, a Artifact, w io.Writer) error {
-	var errs []error
-	for _, s := range f.Sources {
-		probe := &wroteAny{w: w}
-		err := s.FetchArtifact(ctx, version, a, probe)
-		if err == nil {
-			return nil
-		}
-		errs = append(errs, err)
-		// A source that failed mid-stream has already put bytes in the destination.
-		// Another attempt would append to them rather than replace them, so the only
-		// safe fallback is one that got nowhere. The size and hash checks would catch
-		// the damage regardless; stopping here reports the real error instead.
-		if probe.wrote {
-			break
-		}
-	}
-	if len(errs) == 0 {
-		return errors.New("no update source configured")
-	}
-	return errors.Join(errs...)
-}
-
-// wroteAny records whether anything reached the underlying writer.
-type wroteAny struct {
-	w     io.Writer
-	wrote bool
-}
-
-func (p *wroteAny) Write(b []byte) (int, error) {
-	n, err := p.w.Write(b)
-	if n > 0 {
-		p.wrote = true
-	}
-	return n, err
 }
 
 func orDefault(v, fallback string) string {

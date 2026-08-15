@@ -173,55 +173,14 @@ func TestStaleHelperLinkDetectsUnlinkedCopies(t *testing.T) {
 	}
 }
 
-// A package manager records every file it installs, so aqt must not add one to a
-// directory it does not own, and must say where the link can go instead. --dir is
-// the way out of that, not a way back into the same directory.
-func TestHelperDirRefusesPackageManagedInstalls(t *testing.T) {
+func TestHelperDirDefaultsBesideTheBinary(t *testing.T) {
 	exe := filepath.Join("/opt/aqt/bin", "aqt")
-
-	for _, owner := range []update.Owner{update.OwnerStandalone, update.OwnerSource} {
-		dir, err := helperDir("", exe, update.Install{Owner: owner})
-		if err != nil {
-			t.Errorf("helperDir(%s) = %v, want the binary's directory", owner, err)
-		}
-		if dir != filepath.Dir(exe) {
-			t.Errorf("helperDir(%s) = %q, want %q", owner, dir, filepath.Dir(exe))
-		}
-	}
-
-	in := update.Install{Owner: update.OwnerHomebrew, Dir: "/opt/homebrew/bin", UpgradeCommand: "brew upgrade aqt"}
-	_, err := helperDir("", exe, in)
-	if err == nil {
-		t.Fatal("helperDir accepted a Homebrew-owned install")
-	}
-	for _, want := range []string{"homebrew", in.Dir, "--dir"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Errorf("error %q does not mention %s", err, want)
-		}
+	if dir := helperDir("", exe); dir != filepath.Dir(exe) {
+		t.Errorf("helperDir = %q, want %q", dir, filepath.Dir(exe))
 	}
 
 	owned := t.TempDir()
-	if dir, err := helperDir(owned, exe, in); err != nil || dir != owned {
-		t.Errorf("helperDir(%q) = %q, %v; want the directory the user named", owned, dir, err)
-	}
-}
-
-// --dir naming the package's own directory is the same mistake spelled explicitly,
-// including by a path that only resolves to it.
-func TestHelperDirRefusesAnExplicitPackageDirectory(t *testing.T) {
-	packaged := t.TempDir()
-	in := update.Install{Owner: update.OwnerHomebrew, Dir: packaged, UpgradeCommand: "brew upgrade aqt"}
-	exe := filepath.Join(packaged, "aqt")
-
-	if _, err := helperDir(packaged, exe, in); err == nil {
-		t.Error("helperDir accepted the package's own directory")
-	}
-
-	alias := filepath.Join(t.TempDir(), "bin")
-	if err := os.Symlink(packaged, alias); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
-	}
-	if _, err := helperDir(alias, exe, in); err == nil {
-		t.Error("helperDir accepted a symlink to the package's own directory")
+	if dir := helperDir(owned, exe); dir != owned {
+		t.Errorf("helperDir(%q) = %q; want the directory the user named", owned, dir)
 	}
 }

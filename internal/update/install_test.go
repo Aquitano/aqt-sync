@@ -181,20 +181,28 @@ func TestApplyRollsBackAFailedPostInstallVerification(t *testing.T) {
 }
 
 func TestApplyRefusesAnInstallItDoesNotOwn(t *testing.T) {
-	for _, owner := range []Owner{OwnerHomebrew, OwnerScoop, OwnerWinGet, OwnerSource} {
-		t.Run(string(owner), func(t *testing.T) {
-			in := standaloneInstall(t, "old binary")
-			in.Owner = owner
-			in.UpgradeCommand = "brew upgrade aqt"
+	in := standaloneInstall(t, "old binary")
+	in.Owner = OwnerSource
 
-			_, err := applyFixture(t, in, "new binary", nil)
-			if !errors.Is(err, ErrNotReplaceable) {
-				t.Fatalf("got %v, want ErrNotReplaceable", err)
-			}
-			if got := mustRead(t, in.Path); got != "old binary" {
-				t.Fatalf("a %s install was modified", owner)
-			}
-		})
+	_, err := applyFixture(t, in, "new binary", nil)
+	if !errors.Is(err, ErrNotReplaceable) {
+		t.Fatalf("got %v, want ErrNotReplaceable", err)
+	}
+	if got := mustRead(t, in.Path); got != "old binary" {
+		t.Fatalf("a source build was modified")
+	}
+}
+
+func TestCapWriterRefusesToBufferBeyondItsLimit(t *testing.T) {
+	w := &capWriter{max: 8}
+	if _, err := w.Write([]byte("12345678")); err != nil {
+		t.Fatalf("write at the limit: %v", err)
+	}
+	if _, err := w.Write([]byte("9")); !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("got %v, want ErrTooLarge", err)
+	}
+	if !w.over {
+		t.Fatal("the overflow was not recorded")
 	}
 }
 

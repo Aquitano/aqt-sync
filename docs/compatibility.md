@@ -111,12 +111,10 @@ The recovery action names the command that upgrades *this* installation:
 | Install | Action in the message |
 | ------- | --------------------- |
 | standalone | ``run `aqt update` `` |
-| Homebrew / WinGet / Scoop | ``upgrade with `<manager command>` `` |
 | build from source | ``rebuild it with `make build` or install a release`` |
 
-`aqt update` only replaces a standalone copy, so pointing a package-managed install
-at it would name a command that refuses. The TUI shows the same routing condensed to
-one line on exit `6`.
+`aqt update` only replaces a published release copy. The TUI shows the same routing
+condensed to one line on exit `6`.
 
 A server reporting a `minClient` at or below the running capability is contradicting
 itself — it refused a client that clears the bar it named. The client reports the

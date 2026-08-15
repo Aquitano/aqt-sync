@@ -47,6 +47,13 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- The updater now supports the two installation paths this project actually ships:
+  standalone release binaries and source builds. Homebrew, WinGet, and Scoop receipt
+  detection and package-specific guidance have been removed. Update metadata now
+  comes directly from public GitHub release assets, or from the explicit
+  `AQT_UPDATE_BASE_URL` override; the unused GitHub CLI/private-fork fallback has
+  also been removed.
+
 - Text this client did not author is rendered inert. A grantor picks the plaintext
   name of a resource they share, a link author picks the name a puller sees, and the
   server picks the ids and account handles printed beside them; all of it landed

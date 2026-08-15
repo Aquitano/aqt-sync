@@ -165,8 +165,7 @@ func explainError(err error) error {
 	var upgrade *client.UpgradeRequiredError
 	if errors.As(err, &upgrade) {
 		// Detection failing is not worth failing the message over: fall back to the
-		// standalone route, whose action is `aqt update` — and that command explains
-		// the package-manager routing itself when it runs.
+		// standalone route, whose action is `aqt update`.
 		return errors.New(upgradeGuidance(upgrade, detectedInstall()))
 	}
 	return err
@@ -174,8 +173,7 @@ func explainError(err error) error {
 
 // detectedInstall classifies this binary for messaging. Detection failing is not
 // worth failing a message over: fall back to the standalone route, whose action is
-// `aqt update` — and that command explains the package-manager routing itself when
-// it runs.
+// `aqt update`.
 func detectedInstall() update.Install {
 	install, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
 	if err != nil {
@@ -184,16 +182,10 @@ func detectedInstall() update.Install {
 	return install
 }
 
-// upgradeAction names the command that upgrades *this* installation. Only a
-// standalone copy is `aqt update`'s to replace; anything else was put there by a
-// tool that keeps its own records, so the action routes to that tool rather than to
-// a command which would refuse.
+// upgradeAction names the command that upgrades this installation.
 func upgradeAction(install update.Install) string {
 	if install.Replaceable() {
 		return "run `aqt update`"
-	}
-	if install.UpgradeCommand != "" {
-		return fmt.Sprintf("upgrade with `%s` (%s installed this copy)", install.UpgradeCommand, install.Owner)
 	}
 	if why := install.Why(); why != "" {
 		return why
