@@ -213,6 +213,8 @@ cycle: build a realistic tree and an encrypted Git remote, take a cold copy of t
 data dir, start a fresh server from that copy, recover on a clean machine from nothing but
 an email address and a passphrase, then diff the result — bytes, modes, and symlinks for
 the folder, plus a Git clone, `git fsck`, and an exact branch and tag ref comparison.
+[What sync preserves](docs/protocol/folder-sync.md#what-sync-preserves) is the exact
+contract that diff checks against, including what is deliberately not carried across.
 
 - `make restore-drill` (or `scripts/restore-drill.sh`) runs it against real binaries.
 - `go test ./cmd/aqt -run TestFullBackupRestoreDrill` is the in-process folder-restore

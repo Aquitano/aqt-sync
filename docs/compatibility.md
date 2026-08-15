@@ -35,6 +35,38 @@ capability 4 is required for encrypted Git remote resources. `aqt repo create` d
 `minClient: 4`, so older clients receive `426 Upgrade Required` before the server
 serves or overwrites a root they cannot interpret.
 
+## Support policy
+
+aqt is pre-1.0 and has one maintainer. This is what that can actually keep, stated
+narrowly so it is not quietly broken later.
+
+- **The current capability level and the one below it stay readable.** A client at
+  `ClientCapability` reads everything sealed at `ClientCapability` or one level below.
+- **A format break lands only behind a capability bump.** Nothing changes an encrypted
+  format without incrementing `ClientCapability` and declaring the higher `min_client`
+  at the sealing site, so an under-capable client gets a `426` naming what to install
+  rather than a decrypt failure it cannot diagnose.
+- **A level stays readable for at least two minor releases, and is never dropped in a
+  patch release.** Dropping one is a `### Breaking Changes` entry in `CHANGELOG.md`,
+  announced at least one release before the one that does it.
+- **Servers are backward compatible over the same window.** Nothing server-side
+  refuses a client for being old except a resource's own `min_client`, so a current
+  server serves a client one capability behind.
+- **Nothing beyond that is promised.** There is no LTS line, no backport of fixes to
+  old tags, and no support for a fleet running mixed versions longer than an upgrade
+  takes. Fixes ship on `main` and in the next release.
+
+Two clean breaks predate this policy and are not covered by it: tree v2 (first-class
+directories and subtree dedup — folders written before it are not read at all) and
+the v2 AAD id binding (a folder synced by an id-binding client no longer opens on a
+client from before it). Both are recorded in `CHANGELOG.md`.
+
+Negotiation is one-directional: a client announces its capability in a header and no
+route reports back what the server supports, so every server-side feature that is not
+a sealed format needs its own
+[enforcement echo](#public-link-lifecycle-no-capability-bump) to probe for — a server
+capability discovery endpoint is an open item.
+
 ## Negotiation flow
 
 - Every client request carries `X-Aqt-Capability: <n>` (`api.CapabilityHeader`),

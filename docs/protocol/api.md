@@ -225,14 +225,21 @@ methods still return the whole slice to CLI callers.
 
 ## Error codes
 
-Every distinct error condition carries a stable snake_case `code` in the
-`{ error, code }` body — `upgrade_required`, `version_conflict`,
+These are the conditions a client can branch on. Each carries a stable snake_case
+`code` in the `{ error, code }` body — `upgrade_required`, `version_conflict`,
 `idempotency_conflict`, `quota_exceeded`, `device_limit`, `bad_pack`, `gone`,
 `snapshot_anchored`, `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`,
 `block_limit`, `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
-`account_exists`, `account_disabled`, `drops_roots` — so a client
-branches on the code instead of matching prose, and the server never echoes a raw Go
-error whose text might carry internal detail. `426` additionally carries `minClient`.
+`account_exists`, `account_disabled`, `drops_roots` — so a client that acts on one of
+them matches the code rather than the prose. A shipped code is never renamed or
+repurposed.
+
+Every other error carries prose and the HTTP status only: `code` is omitted, and the
+status is the whole machine-readable contract. A malformed body, a missing field, or
+an unreadable server-side state is a `400`/`500` with a message written for a human.
+Do not string-match those messages; they are not a contract. The server never echoes
+a raw Go error whose text might carry internal detail either way. `426` additionally
+carries `minClient`.
 
 ## Rate limiting
 

@@ -24,6 +24,59 @@ root types exist: `TreeRoot` for a chunked folder, `PackRoot` for
 [pack-and-seal](#pack-and-seal), and `FileRoot` for a
 [streamed single file](#streamed-single-files).
 
+## What sync preserves
+
+The full metadata contract, stated exactly. A backup tool that is vague here cannot
+be used to judge whether a restore is really a restore.
+
+**Recorded and restored on every device**
+
+- **Path and content.** Paths are POSIX and relative to the tracked root; content
+  round-trips byte for byte, verified against its hash on the way out and its content
+  address on the way back in.
+- **POSIX permission bits.** A file's and a directory's `Mode().Perm()` — the low nine
+  bits — ride in the manifest and are applied with `chmod` when the entry lands.
+  Directory modes are applied deepest-first once the pass finishes, so a directory
+  that ends up read-only does not block writing its own children. An entry carrying no
+  recorded mode lands at `0600` for a file and `0700` for a directory.
+- **Symlinks, as targets.** A symlink is stored as its literal target string and
+  recreated with `symlink`. It is **never** followed, so a link pointing outside the
+  tracked root ships as a name and not as the file it names. A symlink's own
+  permission bits are neither recorded nor applied — see
+  [Reconcile](#reconcile) for why comparing them would manufacture a difference no
+  side could resolve.
+- **Empty directories**, because a directory is a first-class manifest entry.
+
+On **Windows** a file mode is not nine bits: Go maps it onto the read-only attribute
+alone. An `0644`-versus-`0755` distinction therefore does not survive a round trip
+through a Windows device, and a mode-only edit made there is not a change any device
+sees. Content, paths, and symlink targets are unaffected.
+
+**Recorded, but local to each device**
+
+- **Modification time.** A file's mtime is recorded on the *local* manifest entry to
+  drive the stat fast path: an entry whose size, mode, and mtime all match the last
+  sync is taken as unchanged without re-reading it. It never crosses the wire — no
+  directory node carries an mtime, and change detection is content-hash based, not
+  timestamp based. A pulled file carries the time *this* machine wrote it, and the
+  base records exactly that so the next scan does not re-hash a tree it just
+  materialized. Two devices holding identical content will show different mtimes, and
+  that is not a change.
+
+**Not preserved**
+
+Ownership (uid/gid), extended attributes, POSIX ACLs, file flags such as immutable,
+and every timestamp other than the local mtime above — atime, ctime, and birth time
+are neither read nor set. Hard links are not detected: each link is scanned and
+restored as an independent file, so dedup keeps one copy on the server but the
+restore writes two files on disk. Sparse files are read and restored dense. Entries
+that are neither regular files, symlinks, nor directories — devices, FIFOs, sockets —
+are skipped by the scan entirely and never appear in a restore.
+
+[Pack-and-seal](#pack-and-seal) carries the same set through a tar archive, with one
+difference: every tar header is written at a fixed epoch so the archive stays
+deterministic, so a pack restore has no origin mtime to consider in the first place.
+
 ## Merkle DAG of directory nodes
 
 A chunked folder is a Merkle DAG. Each directory node lists its name-sorted children

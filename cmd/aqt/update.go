@@ -149,7 +149,7 @@ func runUpdate(opts updateOptions) error {
 	}
 	fmt.Printf("installed %s -> %s\n", applied.FromVersion, applied.ToVersion)
 	if applied.RollbackPath != "" && !flagQuiet {
-		fmt.Println("the previous binary is still open by this process; the next update removes it")
+		fmt.Println("the previous binary is still open by this process; the next update that installs removes it")
 	}
 	if link, stale := staleHelperLink(in); stale && !flagQuiet {
 		fmt.Printf("%s still points at the previous binary; run `aqt git setup` to relink it\n", link)

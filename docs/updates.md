@@ -176,9 +176,12 @@ A file named `.aqt-update-*` in the install directory is update debris:
 - `.aqt-update-*.new` — an extracted binary that was never installed.
 - `.aqt-update-previous.old` — the binary that was just replaced.
 
-All three are safe to delete. Every `aqt update` clears them before it starts, which
-is the only way the last one can go on Windows: the file is this process's own
-running image, and the OS keeps it locked until the process exits.
+All three are safe to delete. Every `aqt update` that actually installs clears them
+first, which is the only way the last one can go on Windows: the file is this
+process's own running image, and the OS keeps it locked until the process exits. A
+run that finds no newer release never reaches the install step, so it leaves the
+debris where it is — an interrupted update's leftovers survive until the next real
+install, or until you delete them by hand.
 
 If an update is interrupted, the installed binary is whichever of the two the last
 completed rename left in place — never a partial file, because the new binary is
