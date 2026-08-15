@@ -47,10 +47,14 @@ be used to judge whether a restore is really a restore.
   side could resolve.
 - **Empty directories**, because a directory is a first-class manifest entry.
 
-On **Windows** a file mode is not nine bits: Go maps it onto the read-only attribute
-alone. An `0644`-versus-`0755` distinction therefore does not survive a round trip
-through a Windows device, and a mode-only edit made there is not a change any device
-sees. Content, paths, and symlink targets are unaffected.
+On **Windows** a file mode is not nine bits: Go synthesizes one from the read-only
+attribute alone, so a Windows scan never records what is on disk — it carries the
+last-synced mode forward untouched (see [Portability guards](#reconcile)). An
+`0644`-versus-`0755` distinction authored elsewhere therefore *survives* a round
+trip through a Windows device; what Windows cannot do is originate one — a
+mode-only edit made there is not a change any device sees, and a path created there
+records the conventional `0644`/`0755`. Content, paths, and symlink targets are
+unaffected.
 
 **Recorded, but local to each device**
 
