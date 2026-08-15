@@ -5,6 +5,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/syncengine"
@@ -81,10 +82,21 @@ func TestEnsureDirsRecreatesOnlyMissing(t *testing.T) {
 	if err := syncengine.EnsureDirs(root, dirs); err != nil {
 		t.Fatal(err)
 	}
-	if fi, err := os.Stat(filepath.Join(root, "kept")); err != nil || fi.Mode().Perm() != 0o755 {
-		t.Errorf("existing dir touched: %v %v", fi.Mode(), err)
+	kept, err := os.Stat(filepath.Join(root, "kept"))
+	if err != nil || !kept.IsDir() {
+		t.Fatalf("existing dir: %v %v", kept, err)
 	}
-	if fi, err := os.Stat(filepath.Join(root, "pruned", "nested")); err != nil || fi.Mode().Perm() != 0o750 {
-		t.Errorf("missing dir not recreated with recorded mode: %v %v", fi, err)
+	nested, err := os.Stat(filepath.Join(root, "pruned", "nested"))
+	if err != nil || !nested.IsDir() {
+		t.Fatalf("missing dir not recreated: %v", err)
+	}
+	// Windows does not carry POSIX permission bits on directories.
+	if runtime.GOOS != "windows" {
+		if kept.Mode().Perm() != 0o755 {
+			t.Errorf("existing dir mode touched: %v", kept.Mode())
+		}
+		if nested.Mode().Perm() != 0o750 {
+			t.Errorf("recreated dir mode = %v, want 0750", nested.Mode())
+		}
 	}
 }
