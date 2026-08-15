@@ -19,6 +19,14 @@ func TestCleanDropsControlBytes(t *testing.T) {
 		{"c1 controls are dropped", "a\u009bb", "ab"},
 		{"tabs become spaces", "a\tb", "a b"},
 		{"non-ascii text survives", "Rechnung März.pdf", "Rechnung März.pdf"},
+		{"bidi override is dropped", "invoice\u202egpj.exe", "invoicegpj.exe"},
+		{"bidi isolates are dropped", "\u2066safe\u2069\u2068forged\u2069", "safeforged"},
+		{"right-to-left mark is dropped", "a\u200fb", "ab"},
+		{"zero-width space is dropped", "a\u200bb", "ab"},
+		{"line separator cannot forge a line", "one\u2028error: fake", "oneerror: fake"},
+		// The joiners are the two format controls Clean keeps: without them a family
+		// emoji falls apart into its members and Persian text loses its word breaks.
+		{"joiners survive", "\U0001f468\u200d\U0001f469\u200d\U0001f467", "\U0001f468\u200d\U0001f469\u200d\U0001f467"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

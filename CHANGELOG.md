@@ -40,13 +40,17 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- Metadata authored by another account is rendered inert. A grantor picks the
-  plaintext name of a resource they share, and a link author picks the name a puller
-  sees; both landed unescaped in a terminal, where an ANSI escape can erase the line
-  and forge output that looks like aqt's own (a fake `aqt://` ref, a fake fingerprint
-  MATCH) and a newline can forge extra rows. `aqt shares`, `aqt info`, and the pull
-  paths now strip control bytes and bound the length, using the same sanitizer that
-  already guarded server prose (now `internal/safetext`).
+- Text this client did not author is rendered inert. A grantor picks the plaintext
+  name of a resource they share, a link author picks the name a puller sees, and the
+  server picks the ids and account handles printed beside them; all of it landed
+  unescaped in a terminal, where an ANSI escape can erase the line and forge output
+  that looks like aqt's own (a fake `aqt://` ref, a fake fingerprint MATCH), a newline
+  can forge extra rows, and a bidi override can make what is left read as a different
+  string than it is. `aqt shares`, `aqt shares blocked`, `aqt info`, and the pull
+  paths now bound the length and strip the control bytes, the Unicode format controls
+  (bar the two joiners real scripts and emoji need), and the line and paragraph
+  separators, using the same sanitizer that already guarded server prose (now
+  `internal/safetext`).
 
 - `aqt ls` names the capability a row needs (`(needs aqt supporting capability 5)`)
   instead of rendering it as `(unreadable)`. The resource listing is the one read path

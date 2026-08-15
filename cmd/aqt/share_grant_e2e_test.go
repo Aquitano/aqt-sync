@@ -506,14 +506,7 @@ func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 			if !present {
 				body["grants"] = append(grants, map[string]any{"granteeHandle": handle, "createdAt": 1})
 			}
-			out, _ := json.Marshal(body)
-			for k := range rec.Header() {
-				if k != "Content-Length" {
-					w.Header().Set(k, rec.Header().Get(k))
-				}
-			}
-			w.WriteHeader(rec.Code)
-			w.Write(out)
+			replaceRecorded(w, rec, body)
 		default:
 			pass(w, r)
 		}
@@ -559,6 +552,20 @@ func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 	if _, ok := createGrantsFor.Load(carolKeys.Handle); ok {
 		t.Fatal("revoked grantee carol was re-wrapped onto the new key against a hostile server")
 	}
+}
+
+// replaceRecorded forwards a proxied response with a rewritten JSON body, which is
+// how a test plays a hostile server. The recorded Content-Length is left behind
+// because the rewrite changes the length.
+func replaceRecorded(w http.ResponseWriter, rec *httptest.ResponseRecorder, body any) {
+	out, _ := json.Marshal(body)
+	for k := range rec.Header() {
+		if k != "Content-Length" {
+			w.Header().Set(k, rec.Header().Get(k))
+		}
+	}
+	w.WriteHeader(rec.Code)
+	w.Write(out)
 }
 
 func copyRecorded(w http.ResponseWriter, rec *httptest.ResponseRecorder) {

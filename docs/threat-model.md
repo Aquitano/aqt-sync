@@ -138,12 +138,14 @@ authenticated but unrestricted, so any account on a server can put a row into an
 other account's `aqt shares` list. Three properties keep that from being worse than
 noise:
 
-- **The name is another account's plaintext.** A grantor picks the metadata a
-  recipient's terminal renders, so control bytes in it could erase the line and forge
-  output that looks like aqt's own — a fake `aqt://` ref, a fake fingerprint MATCH.
-  Every foreign name and kind is stripped of control bytes and bounded before display
-  (`aqt shares`, `aqt info`, and the pull paths), so the worst case is an odd-looking
-  string on one line.
+- **The row is somebody else's text.** A grantor picks the metadata a recipient's
+  terminal renders and the server picks the ids and handles beside it, so control
+  bytes in either could erase the line and forge output that looks like aqt's own — a
+  fake `aqt://` ref, a fake fingerprint MATCH. Every string the client did not author
+  is bounded before display (`aqt shares`, `aqt shares blocked`, `aqt info`, and the
+  pull paths) and stripped of the control bytes that rewrite a terminal and of the
+  Unicode bidi controls that reorder how the rest of it renders, so the worst case is
+  an odd-looking string on one line.
 - **The recipient can remove it.** `aqt shares rm <ref>` deletes the row under a
   `grantee_handle = caller` predicate — it touches nobody else's access — and
   `--block` additionally refuses that account's future grants and drops the shares it

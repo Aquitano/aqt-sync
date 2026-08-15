@@ -17,8 +17,11 @@ import (
 	"github.com/aquitano/aqt-sync/internal/safetext"
 )
 
-// shareRow is one incoming grant, as shown by `aqt shares`. Name and Kind are the
-// grantor's plaintext, so they are sanitized on the way in (see foreignText).
+// shareRow is one incoming grant, as shown by `aqt shares`. The strings somebody
+// else authored — Name and Kind by the grantor, Ref and From by the server — are
+// sanitized on the way in (see foreignText); FromEmail and Fingerprint come from
+// this device's own contact pins. The unexported id keeps the resource id exactly
+// as it arrived, since that one is also a value we hand back to the server.
 type shareRow struct {
 	Ref  string `json:"ref"`
 	Name string `json:"name,omitempty"`
@@ -30,6 +33,8 @@ type shareRow struct {
 	Fingerprint string `json:"fingerprint,omitempty"`
 	Since       string `json:"since"`
 	Stale       bool   `json:"stale,omitempty"` // the wrap no longer opens (owner rotated the key)
+
+	id string
 }
 
 // sender renders who a share came from: the pinned email and key fingerprint when
@@ -43,10 +48,11 @@ func (r shareRow) sender() string {
 	return fmt.Sprintf("%s (%s)", r.FromEmail, r.Fingerprint)
 }
 
-// foreignText bounds and strips control bytes from a string another account authored.
-// A grantor picks the plaintext of a shared resource's name, so without this they
-// pick bytes that reach this terminal — enough to erase the line and forge a
-// fingerprint MATCH or an aqt:// ref of their choosing.
+// foreignText bounds and strips control bytes from a string this client did not
+// author. A grantor picks the plaintext of a shared resource's name and the server
+// picks the handles and ids, so without this either of them picks bytes that reach
+// this terminal — enough to erase the line and forge a fingerprint MATCH or an
+// aqt:// ref of their choosing.
 func foreignText(s string) string { return safetext.Clean(s, safetext.DisplayMax) }
 
 func sharesCmd() *cobra.Command {
@@ -117,8 +123,9 @@ func collectShares() ([]shareRow, error) {
 	rows := make([]shareRow, 0, len(items))
 	for _, it := range items {
 		row := shareRow{
-			Ref:   "aqt://" + it.ResourceID,
-			From:  it.OwnerHandle,
+			id:    it.ResourceID,
+			Ref:   "aqt://" + foreignText(it.ResourceID),
+			From:  foreignText(it.OwnerHandle),
 			Since: time.Unix(it.CreatedAt, 0).Format("2006-01-02"),
 		}
 		if pin, ok := pinByHandle[it.OwnerHandle]; ok {
@@ -179,8 +186,7 @@ func runSharesRemove(ref string, block bool) error {
 	if err != nil {
 		return err
 	}
-	id := strings.TrimPrefix(row.Ref, "aqt://")
-	resp, err := cl.RemoveShare(id, block)
+	resp, err := cl.RemoveShare(row.id, block)
 	if errors.Is(err, client.ErrNotFound) {
 		return fmt.Errorf("no incoming share for %s", row.Ref)
 	}
@@ -189,7 +195,7 @@ func runSharesRemove(ref string, block bool) error {
 	}
 	if flagJSON {
 		return printJSON(map[string]any{
-			"ref": row.Ref, "from": resp.OwnerHandle, "removed": resp.Removed, "blocked": resp.Blocked,
+			"ref": row.Ref, "from": foreignText(resp.OwnerHandle), "removed": resp.Removed, "blocked": resp.Blocked,
 		})
 	}
 	fmt.Printf("removed %s from your incoming shares\n", row.Ref)
@@ -207,7 +213,7 @@ func runSharesRemove(ref string, block bool) error {
 func matchShare(rows []shareRow, ref string) (shareRow, error) {
 	id, _, _ := parseRef(ref)
 	for _, r := range rows {
-		if r.Ref == "aqt://"+id {
+		if r.id == id {
 			return r, nil
 		}
 	}
@@ -231,7 +237,9 @@ func matchShare(rows []shareRow, ref string) (shareRow, error) {
 	}
 }
 
-// blockRow is one blocked sender, as shown by `aqt shares blocked`.
+// blockRow is one blocked sender, as shown by `aqt shares blocked`. Handle is the
+// server's, so it is sanitized on the way in like any other foreign text; Email
+// comes from this device's own contact pins.
 type blockRow struct {
 	Handle  string `json:"handle"`
 	Email   string `json:"email,omitempty"`
@@ -261,7 +269,7 @@ func sharesBlockedCmd() *cobra.Command {
 			rows := make([]blockRow, 0, len(blocks))
 			for _, b := range blocks {
 				rows = append(rows, blockRow{
-					Handle:  b.OwnerHandle,
+					Handle:  foreignText(b.OwnerHandle),
 					Email:   emailByHandle[b.OwnerHandle],
 					Blocked: time.Unix(b.CreatedAt, 0).Format("2006-01-02"),
 				})

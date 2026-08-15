@@ -69,9 +69,10 @@ the running version, the capability this build declares, and the `minClient` the
 server reported — not by echoing the server's prose. A compromised or hostile server
 controls that prose, so treating it as the instruction would let it tell a user to
 run anything. The server's text is still shown, but quoted as `(server said: …)` and
-sanitized first: C0/C1 control bytes and DEL are stripped and the length is bounded,
-so it cannot emit escape sequences, rewrite the line, or forge what looks like a
-second line of aqt's own output.
+sanitized first: C0/C1 control bytes, DEL, and the Unicode format controls and
+separators are stripped and the length is bounded, so it cannot emit escape
+sequences, rewrite the line, reorder how the rest of it reads, or forge what looks
+like a second line of aqt's own output.
 
 The recovery action names the command that upgrades *this* installation:
 

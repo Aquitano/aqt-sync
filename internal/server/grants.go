@@ -337,6 +337,11 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 // mirrors. Version is the owner's CAS token; letting a grantee move it would hand any
 // account that was ever granted anything a way to 409 the owner's writes at will.
 func (s *Store) DeleteShare(grantee, resourceID string, block bool) (string, int, error) {
+	// The lock is resource-scoped while the block path's DELETE spans every resource
+	// of that owner, so it is not what keeps a concurrent PutGrant on a sibling
+	// resource from landing after the block: the single write connection is (see
+	// Store.db). This lock only orders this removal against the other mutations of
+	// the resource it names.
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
 	if err != nil {

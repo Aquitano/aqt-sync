@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -67,6 +69,65 @@ func TestIncomingShareNameIsRenderedInert(t *testing.T) {
 			}
 		}
 	})
+}
+
+// TestHostileServerCannotForgeShareRows covers the half of the display surface no
+// grantor controls: the resource ids and account handles in `aqt shares` and
+// `aqt shares blocked` are the server's strings, and the server is trusted no more
+// than the accounts it hosts. The proxy appends a row whose id and handle are made
+// of the same control bytes a grantor would use.
+func TestHostileServerCannotForgeShareRows(t *testing.T) {
+	const hostile = "safe\x1b[2K\rforged\naqt://deadbeef  MATCH"
+	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		listing := r.Method == http.MethodGet && (r.URL.Path == "/v1/shares" || r.URL.Path == "/v1/share-blocks")
+		if !listing {
+			pass(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		pass(rec, r)
+		var body map[string]any
+		if json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			copyRecorded(w, rec)
+			return
+		}
+		if r.URL.Path == "/v1/shares" {
+			rows, _ := body["shares"].([]any)
+			body["shares"] = append(rows, map[string]any{"resourceId": hostile, "ownerHandle": hostile, "createdAt": 1})
+		} else {
+			rows, _ := body["blocks"].([]any)
+			body["blocks"] = append(rows, map[string]any{"ownerHandle": hostile, "createdAt": 1})
+		}
+		replaceRecorded(w, rec, body)
+	})
+
+	for _, tc := range []struct {
+		name string
+		run  func() error
+	}{
+		{"shares", func() error { return sharesCmd().RunE(nil, nil) }},
+		{"shares blocked", func() error { return sharesBlockedCmd().RunE(nil, nil) }},
+	} {
+		out := captureStdout(t, func() {
+			if err := tc.run(); err != nil {
+				t.Fatalf("%s: %v", tc.name, err)
+			}
+		})
+		if strings.ContainsAny(out, "\x1b\r") {
+			t.Fatalf("%s printed raw control bytes from the server: %q", tc.name, out)
+		}
+		// The server's row has to stay one row: a forged second line is how it would
+		// pass off text of its own as ours.
+		lines := 0
+		for _, line := range strings.Split(out, "\n") {
+			if strings.Contains(line, "forged") || strings.Contains(line, "MATCH") {
+				lines++
+			}
+		}
+		if lines != 1 {
+			t.Fatalf("%s spread the server's row over %d lines: %q", tc.name, lines, out)
+		}
+	}
 }
 
 // TestIncomingShareNamesItsSender pins the attribution half: a share from a pinned
