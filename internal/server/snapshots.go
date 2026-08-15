@@ -320,11 +320,22 @@ func (s *Store) GetSnapshot(owner, snapshotID string) (api.GetSnapshotResponse, 
 // live resource or other snapshot still roots become unreferenced and are reclaimed
 // by a later GC sweep/repack; the snapshot's own blob copy is dropped here.
 func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	// Refuse in the store, not just the client: the anchor is the durable guarantee a
+	// checkpoint is not pruned, so it must hold against any caller, including a stale
+	// client that never learned the snapshot was anchored. Read inside the delete
+	// transaction — a check outside it races a concurrent anchor, and the prune would
+	// still delete the freshly anchored snapshot — with the DELETE below carrying the
+	// same predicate as a second line of defense.
 	var (
 		nonce    []byte
 		anchored bool
 	)
-	err := s.db.QueryRow(
+	err = tx.QueryRow(
 		`SELECT blob_nonce, anchored FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner,
 	).Scan(&nonce, &anchored)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -333,17 +344,9 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if err != nil {
 		return err
 	}
-	// Refuse in the store, not just the client: the anchor is the durable guarantee a
-	// checkpoint is not pruned, so it must hold against any caller, including a stale
-	// client that never learned the snapshot was anchored.
 	if anchored {
 		return ErrSnapshotAnchored
 	}
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	// Unpinning can flip objects dead (if no resource or other snapshot still roots
 	// them), so the affected packs' counters are recomputed in the same transaction.
 	dropped, err := snapshotChunkIDs(tx, snapshotID)
@@ -353,8 +356,12 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if _, err := tx.Exec(`DELETE FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`DELETE FROM snapshots WHERE snapshot_id = ? AND owner_handle = ?`, snapshotID, owner); err != nil {
+	res, err := tx.Exec(`DELETE FROM snapshots WHERE snapshot_id = ? AND owner_handle = ? AND anchored = 0`, snapshotID, owner)
+	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return ErrSnapshotAnchored
 	}
 	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
 		return err
@@ -610,6 +617,11 @@ func (s *Store) PruneAutoSnapshots(keepLast int) (int, error) {
 	var firstErr error
 	for _, r := range due {
 		if err := s.DeleteSnapshot(r.owner, r.id); err != nil {
+			// Anchored or deleted since the enumeration above: no longer due, not a
+			// prune failure.
+			if errors.Is(err, ErrSnapshotAnchored) || errors.Is(err, ErrNotFound) {
+				continue
+			}
 			if firstErr == nil {
 				firstErr = fmt.Errorf("prune snapshot %s: %w", r.id, err)
 			}
