@@ -47,23 +47,6 @@ func TestSyncRefusesCaseCollidingPush(t *testing.T) {
 	assertAbsent(t, replica, "notes.md")
 }
 
-func TestPackSyncRefusesCaseCollidingPush(t *testing.T) {
-	requireCaseSensitiveFS(t)
-	h := newE2E(t)
-	dir := t.TempDir()
-	writePackConfig(t, dir)
-	h.init(dir)
-	writeTree(t, dir, "Notes.md", "upper")
-	writeTree(t, dir, "notes.md", "lower")
-
-	if err := runSync(dir, syncOptions{}); err == nil || !strings.Contains(err.Error(), "case-colliding") {
-		t.Fatalf("pack push of case twins: %v", err)
-	}
-}
-
-// The pull-side guard: a remote tree holding case twins (written by a pre-guard
-// client) must be refused before the first byte lands on a case-folding
-// filesystem, not materialized last-writer-wins.
 func TestDownloadsRefuseCaseTwinsOnFoldingFS(t *testing.T) {
 	t.Setenv("AQT_TEST_CASE_INSENSITIVE", "1")
 	entries := []syncengine.Entry{{Path: "A.txt"}, {Path: "a.txt"}}
@@ -109,40 +92,5 @@ func TestSymlinksDegradeWithoutSupport(t *testing.T) {
 	}
 	if got := readTree(t, other, "b.txt"); got != "from replica" {
 		t.Fatalf("replica's edit did not propagate: %q", got)
-	}
-}
-
-// The same round trip for a pack-and-seal folder: the archive is the whole
-// folder, so a push from a linkless device must carry the base's links into the
-// tar rather than shipping a tree without them.
-func TestPackSymlinksSurviveLinklessDevice(t *testing.T) {
-	h := newE2E(t)
-	origin := t.TempDir()
-	writePackConfig(t, origin)
-	h.init(origin)
-	writeTree(t, origin, "a.txt", "v1")
-	if err := os.Symlink("a.txt", filepath.Join(origin, "link")); err != nil {
-		t.Skipf("symlinks unsupported: %v", err)
-	}
-	h.sync(origin)
-
-	t.Setenv("AQT_TEST_NO_SYMLINKS", "1")
-	replica := t.TempDir()
-	h.clone(h.folderID(origin), replica)
-	if _, err := os.Lstat(filepath.Join(replica, "link")); !os.IsNotExist(err) {
-		t.Fatalf("link materialized despite unsupported filesystem: %v", err)
-	}
-	writeTree(t, replica, "a.txt", "v2")
-	h.sync(replica) // whole-folder push from the linkless device
-
-	t.Setenv("AQT_TEST_NO_SYMLINKS", "")
-	other := t.TempDir()
-	h.clone(h.folderID(origin), other)
-	target, err := os.Readlink(filepath.Join(other, "link"))
-	if err != nil || target != "a.txt" {
-		t.Fatalf("pack push from a linkless device dropped the link: %v %q", err, target)
-	}
-	if got := readTree(t, other, "a.txt"); got != "v2" {
-		t.Fatalf("edit did not ship: %q", got)
 	}
 }

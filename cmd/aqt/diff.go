@@ -112,14 +112,6 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 		return runDiffRemote(cl, prof, root, filters, opts)
 	}
 
-	cfg, err := syncengine.LoadConfig(root)
-	if err != nil {
-		return err
-	}
-	if cfg.Pack && opts.against == "" {
-		return errors.New("aqt diff against the last-synced base requires a chunked folder; " +
-			"use --against with a snapshot id, or --against=remote, for pack-and-seal content")
-	}
 	var base, local syncengine.Manifest
 	if opts.against != "" {
 		local, err = syncengine.Scan(root)
@@ -167,10 +159,8 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 }
 
 // runDiffRemote compares the working tree with the folder's current remote state.
-// The path-level rendering answers from metadata alone, so a chunked folder costs a
-// few directory-node fetches; a unified text diff needs both sides' bytes, which for
-// a pack-and-seal folder means reconstructing it — the one mode that cannot stay in
-// memory, and the reason it lands in a temp dir rather than the working tree.
+// The path-level rendering answers from metadata alone, so it costs a few
+// directory-node fetches; a unified text diff streams both sides' bytes per entry.
 func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filters []string, opts diffOptions) error {
 	if opts.pathLevel() {
 		c, err := compareWorkingTreeToRemote(cl, prof, root)
@@ -193,30 +183,11 @@ func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filte
 	}
 	defer mk.Wipe()
 
-	cfg, err := syncengine.LoadConfig(root)
-	if err != nil {
-		return err
-	}
 	local, err := syncengine.Scan(root)
 	if err != nil {
 		return err
 	}
 	warnSkipped(local.Skipped)
-	if cfg.Pack {
-		tmp, err := os.MkdirTemp("", "aqt-line-diff-remote-*")
-		if err != nil {
-			return err
-		}
-		defer os.RemoveAll(tmp)
-		if _, err := materializeWithMaster(cl, mk, res, tmp); err != nil {
-			return fmt.Errorf("reconstruct remote %s: %w", res.ID, err)
-		}
-		remote, err := syncengine.Scan(tmp)
-		if err != nil {
-			return err
-		}
-		return renderManifestDiff(remote, local, filters, diskEntryReader(tmp), diskEntryReader(root))
-	}
 	base, err := loadBase(root)
 	if err != nil {
 		return err

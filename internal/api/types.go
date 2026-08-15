@@ -35,9 +35,10 @@ type Metadata struct {
 	// Streamed marks a file whose blob is a sealed FileRoot over chunk objects rather
 	// than the inline ciphertext, so pull reconstructs it from the objects.
 	Streamed bool `json:"streamed,omitempty"`
-	// Packed marks a pack-and-seal folder whose blob is a sealed PackRoot over a
-	// tarball of the whole tree (no chunk-level dedup), so sync/clone reconstruct it
-	// by untarring rather than per-file. A folder resource without this is chunked.
+	// Packed marks a folder written in the removed pack-and-seal format (one sealed
+	// tarball of the whole tree). Current clients refuse such resources with a
+	// recovery hint; the field survives so they can tell, and so old metadata still
+	// parses. Recover the data with an aqt release that still reads the format.
 	Packed bool `json:"packed,omitempty"`
 	// Tree marks a chunked folder whose blob is a sealed TreeRoot over a Merkle DAG of
 	// directory nodes (Phase 4), so a moved/copied subtree dedups and a diff can skip

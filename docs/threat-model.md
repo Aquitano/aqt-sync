@@ -186,14 +186,12 @@ own chunks would produce, which discriminate far better than raw boundaries beca
 compression spreads the lengths out instead of clustering them near the profile's
 normal size.
 
-Pack-and-seal (`pack: true` in `.aqtconfig`) exists precisely to avoid this: it tars
-the whole tree and seals it into fixed-size, per-sync-unique segments with no
-per-file boundary, so it leaks one number instead of a per-chunk profile. That number
-is the **compressed** total — the tar stream is zstd-compressed before it is
-segmented — so `pack: true` on a highly compressible tree reveals its compressibility
-rather than its size. The trade is that any change re-ships the whole folder and
-there is no per-file conflict resolution. See
-[folder sync](protocol/folder-sync.md#pack-and-seal).
+Pack-and-seal (`pack: true` in `.aqtconfig`) used to avoid this by tarring the whole
+tree into fixed-size segments with no per-file boundary, but the format has been
+removed: its costs (whole-folder re-uploads, no dedup, no per-file conflicts, and a
+parallel branch through every transfer path) outweighed the mitigation for a mode
+with no known users. The size-sequence side channel below is therefore currently
+unmitigated. See [folder sync](protocol/folder-sync.md#pack-and-seal-removed).
 
 **Timing and volume.** The server sees when a push happens, how many segments it
 carries, and how large they are. Nothing in the design hides that.
@@ -297,9 +295,9 @@ you from":
   chunk lengths, and those lengths are *post-compression*, so what an attacker
   matches against a candidate file is the compressibility of each of its chunks and
   not merely where the chunker cut them. Holding the candidate is enough to confirm
-  its presence without breaking anything. The mitigation that exists today is
-  choosing `pack: true`, which leaks one compressed total instead of a per-chunk
-  profile. Length-bucket padding would blunt it, but padding applied after
+  its presence without breaking anything. No mitigation exists today: pack-and-seal
+  (which leaked one compressed total instead of a per-chunk profile) was removed
+  with no known users. Length-bucket padding would blunt it, but padding applied after
   compression changes the sealed ciphertext length and therefore the content address,
   breaking dedup identity against every existing chunk — and buckets wide enough to
   hide a compression ratio are far coarser than buckets that would only hide a

@@ -27,7 +27,7 @@ keys.
 | --- | --- |
 | [threat-model.md](threat-model.md) | Key hierarchy, what the server sees, revocation guarantees, deliberate side channels, residual limits |
 | [protocol/api.md](protocol/api.md) | HTTP routes, wire representations, pagination, error codes, rate limiting, lifecycle enforcement |
-| [protocol/folder-sync.md](protocol/folder-sync.md) | Chunking, convergent encryption, the Merkle DAG, packs and GC, pack-and-seal, `.aqtignore`/`.aqtconfig`, conflicts, the watch daemon |
+| [protocol/folder-sync.md](protocol/folder-sync.md) | Chunking, convergent encryption, the Merkle DAG, packs and GC, `.aqtignore`/`.aqtconfig`, conflicts, the watch daemon |
 | [protocol/git-remote.md](protocol/git-remote.md) | `RefsRoot`, bundle chain, helper dispatch, compaction |
 | [compatibility.md](compatibility.md) | Capability negotiation policy, format rollout, the lifecycle enforcement echo |
 | [cli.md](cli.md) | Exit codes, `--json` envelopes, comparison-command semantics |

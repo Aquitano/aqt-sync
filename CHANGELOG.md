@@ -55,6 +55,21 @@ All notable changes to this project are documented in this file.
   that stdin channel carrying nothing but a share password, the one secret that must
   stay out of the process table.
 
+### Removed
+
+- Pack-and-seal folder sync (`"pack": true` in `.aqtconfig`) is gone. It existed
+  primarily to sync Git internals, which the encrypted Git remote now handles at the
+  protocol level; what remained was a narrow structure-hiding mode that re-uploaded
+  the entire folder on every change, deduplicated nothing, resolved conflicts
+  whole-folder last-writer-wins, and carried a parallel branch through sync, clone,
+  sharing, diff, and recovery. A packed resource — or a stale `pack: true` config —
+  is now refused with recovery guidance: clone with an aqt release that still reads
+  the format (v0.5.x or earlier), drop the setting, and push the tree again as a
+  normal chunked folder. This also retires the unsafe baseless resume of a torn
+  pack pull (#176): the path no longer exists, and a leftover
+  `.aqt/pull-in-progress` marker from an older build still keeps `status` and
+  `diff` from misreading the torn tree as local edits.
+
 ### Changed
 
 - The updater now supports the two installation paths this project actually ships:

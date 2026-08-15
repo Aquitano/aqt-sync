@@ -8,11 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"syscall"
 	"testing"
-
-	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // requireUnprivileged skips a test whose point is that a path cannot be read: root
@@ -144,21 +141,3 @@ func TestScanKeepsUnreadableDirSubtree(t *testing.T) {
 
 // Pack-and-seal ships the whole tree as one archive, so a file it cannot read would
 // be a file deleted from the remote copy. That one has to fail loudly, naming the path.
-func TestTarAndSealRefusesUnreadableFile(t *testing.T) {
-	requireUnprivileged(t)
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "secret.txt"), []byte("secret"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(filepath.Join(dir, "secret.txt"), 0); err != nil {
-		t.Fatal(err)
-	}
-	var ck crypto.ContentKey
-	_, _, err := TarAndSeal(dir, ck, nil, nil)
-	if err == nil {
-		t.Fatal("TarAndSeal must refuse to ship a tree it cannot read whole")
-	}
-	if !strings.Contains(err.Error(), "secret.txt") {
-		t.Fatalf("error must name the unreadable file, got %v", err)
-	}
-}

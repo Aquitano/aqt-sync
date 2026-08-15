@@ -272,8 +272,8 @@ func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
 }
 
 // TestSyncConflictCopyValidation covers the flag-combination guards: copy is
-// incompatible with --force, with the baseless --reconcile/--accept-rollback plans, and
-// with a pack-and-seal folder.
+// incompatible with --force and with the baseless --reconcile/--accept-rollback
+// plans.
 func TestSyncConflictCopyValidation(t *testing.T) {
 	h := newE2E(t)
 
@@ -286,20 +286,6 @@ func TestSyncConflictCopyValidation(t *testing.T) {
 	if err := runSync(dir, syncOptions{conflicts: "copy", reconcile: true}); err == nil ||
 		!strings.Contains(err.Error(), "three-way") {
 		t.Fatalf("copy+reconcile: got %v, want a three-way error", err)
-	}
-
-	packDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(packDir, ".aqtconfig"), []byte(`{"pack":true}`), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	h.init(packDir)
-	if err := runSync(packDir, syncOptions{conflicts: "copy"}); err == nil ||
-		!strings.Contains(err.Error(), "pack-and-seal") {
-		t.Fatalf("copy on a pack folder: got %v, want a pack error", err)
-	}
-	if err := runSync(packDir, syncOptions{conflicts: "merge"}); err == nil ||
-		!strings.Contains(err.Error(), "pack-and-seal") {
-		t.Fatalf("merge on a pack folder: got %v, want a pack error", err)
 	}
 }
 

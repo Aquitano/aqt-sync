@@ -164,17 +164,12 @@ only when it is itself a tracked root.
   instead of blocking on a prompt nobody would answer.
 
 Binary files (a NUL in the first 8 KiB) and files over 8 MiB emit one
-`Binary files <old> and <new> differ` line. Last-synced and incoming comparisons
-require a chunked folder; pack-and-seal folders can use the snapshot form.
+`Binary files <old> and <new> differ` line.
 
 `--name-status` lists classified paths instead of file content — `A` added,
 `M` modified, `P` permissions, `T` type, `D` deleted, `R` renamed — and is implied by
-`--json`. A chunked folder answers a remote comparison from directory-node metadata
-alone. A pack-and-seal folder has no per-file remote metadata, so its whole tree is
-streamed back and hashed in memory: a truthful per-entry answer that costs the
-folder's full download but writes nothing to disk. A unified text diff needs both
-sides' bytes, so a pack-and-seal folder is reconstructed into a temporary directory
-and removed again on exit; the working tree is still never written.
+`--json`. A remote comparison answers from directory-node metadata alone; a unified
+text diff streams both sides' bytes per entry. The working tree is never written.
 
 The same completeness fields appear in the human output as an explicit sentence, so
 an incomplete comparison is never mistaken for a clean one.
@@ -193,12 +188,13 @@ tracked and the command retryable rather than orphaning a resource. A running wa
 agent is refused (`aqt agent stop` first), since it would keep syncing a folder whose
 control state had just been removed.
 
-An interrupted pack-and-seal pull leaves `.aqt/pull-in-progress` behind. While it is
-there the working tree holds part of the new version and part of the old, so `sync`
-finishes the pull instead of reconciling: `--force` cannot turn that into a push,
-`--push-only` refuses and says why, and `status` prefixes its output with a warning
-(`--json` adds an `interruptedPull` object) so the half-applied version is not
-mistaken for local edits. Re-running `aqt sync` is the whole recovery.
+An interrupted pack-and-seal pull from an older release leaves
+`.aqt/pull-in-progress` behind, and the working tree holds part of the new version
+and part of the old. The format itself was removed, so a current build refuses to
+sync such a folder; `status` still warns (`--json` adds an `interruptedPull`
+object) so the half-applied version is not mistaken for local edits. Recover with
+an aqt release that still reads the format (v0.5.x or earlier), or restore the tree
+from a snapshot.
 
 ## Encrypted Git remotes
 

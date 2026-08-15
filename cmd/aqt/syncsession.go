@@ -13,17 +13,6 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-// syncFormat is the on-server folder format an adapter is prepared to reconcile.
-// The format guard is parameterized by it rather than shared verbatim: a pack folder
-// is created with Packed set and no Tree flag, so applying the chunked path's legacy
-// !Tree check to one would reject every pack folder.
-type syncFormat int
-
-const (
-	formatChunked syncFormat = iota
-	formatPacked
-)
-
 // syncSession is the prologue both sync adapters run once, before any planning: the
 // local state and base, an authenticated client, and the unlocked master key. Every
 // step is a safety guard (a missing base resurrects deletions; the wrong account
@@ -82,15 +71,15 @@ type remoteSync struct {
 }
 
 // openRemote fetches the folder resource and runs the per-attempt guards shared by
-// both adapters: rollback classification, key unwrap, metadata decode, and the
-// format check for the caller's mode. The caller owns the returned content key and
-// must defer Wipe; every error path here wipes it first.
+// every sync attempt: rollback classification, key unwrap, metadata decode, and
+// the format check. The caller owns the returned content key and must defer Wipe;
+// every error path here wipes it first.
 //
 // Rollback is classified before the metadata is decoded, so a server whose version
 // regressed reports that rather than a cross-mode format mismatch: a rollback is a
 // data-integrity signal about the server and must not be masked by a local
 // .aqtconfig typo.
-func (s *syncSession) openRemote(opts syncOptions, format syncFormat) (remoteSync, error) {
+func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 	res, err := s.cl.GetResource(s.st.ID)
 	if errors.Is(err, client.ErrNotFound) {
 		// Naming the recovery matters: this folder can never sync again, and nothing
@@ -130,7 +119,7 @@ func (s *syncSession) openRemote(opts syncOptions, format syncFormat) (remoteSyn
 		ck.Wipe()
 		return remoteSync{}, err
 	}
-	if err := checkSyncFormat(meta, format); err != nil {
+	if err := checkSyncFormat(meta); err != nil {
 		ck.Wipe()
 		return remoteSync{}, err
 	}
@@ -138,22 +127,12 @@ func (s *syncSession) openRemote(opts syncOptions, format syncFormat) (remoteSyn
 }
 
 // checkSyncFormat routes by the server's truth, not just local .aqtconfig: a
-// pack-and-seal folder reconciled as chunked would read an empty manifest and delete
-// the whole tree, and a chunked folder reconciled as a pack has no root to untar.
-// (AAD domain separation also makes those reads fail, but this gives the actionable
-// message.) Only the chunked side carries the legacy !Tree check — pack folders never
-// set Tree.
-func checkSyncFormat(meta api.Metadata, format syncFormat) error {
-	if format == formatPacked {
-		if !meta.Packed {
-			return errors.New(".aqtconfig sets pack=true but this folder was created chunked; " +
-				"remove pack=true, or re-init a fresh folder to use pack-and-seal")
-		}
-		return nil
-	}
+// pack-and-seal folder reconciled as chunked would read an empty manifest and
+// delete the whole tree. (AAD domain separation also makes that read fail, but
+// this gives the actionable message.)
+func checkSyncFormat(meta api.Metadata) error {
 	if meta.Packed {
-		return errors.New("this folder is pack-and-seal on the server but is being synced as chunked; " +
-			"set pack=true in .aqtconfig, or re-clone it")
+		return errPackRemoved
 	}
 	if !meta.Tree {
 		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")

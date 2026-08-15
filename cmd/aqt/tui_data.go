@@ -190,9 +190,8 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 		case st.RemoteVersion > 0 && res.Version == st.RemoteVersion:
 			return tuiRemoteMsg{note: "up to date with the server"}
 		}
-		// Server is ahead: entry-level breakdown when the folder is chunked (a
-		// pack-and-seal folder is one opaque blob with no per-file remote diff).
-		if cfg, cerr := syncengine.LoadConfig(ctx.root); cerr == nil && !cfg.Pack {
+		// Server is ahead: try the entry-level breakdown.
+		{
 			base, berr := loadBase(ctx.root)
 			if berr == nil {
 				if inc, ierr := incomingFiles(ctx.cl, res, base, ctx.mk); ierr == nil {

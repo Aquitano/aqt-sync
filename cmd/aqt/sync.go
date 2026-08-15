@@ -201,6 +201,10 @@ func runInit(dir string, gitChoice *bool) error {
 	if err != nil {
 		return err
 	}
+	if cfg.Pack {
+		return errPackRemoved
+	}
+	_ = cfg
 
 	// Stage the local control state before touching the server: creating .aqt and
 	// the starter ignore up front surfaces permission problems while there is still
@@ -221,25 +225,18 @@ func runInit(dir string, gitChoice *bool) error {
 		}
 	}
 
-	// Register an empty private folder resource; the first `sync` fills it. A
-	// pack-and-seal folder (.aqtconfig pack=true) is created with an empty PackRoot;
-	// the chunked default with an empty Merkle-DAG tree root.
+	// Register an empty private folder resource with an empty Merkle-DAG tree
+	// root; the first `sync` fills it.
 	ck, err := crypto.GenerateContentKey()
 	if err != nil {
 		cleanupLocal()
 		return err
 	}
 	defer ck.Wipe()
-	manifest := syncengine.Manifest{Version: 1}
-	var resp api.PutResourceResponse
-	if cfg.Pack {
-		resp, err = putPackFolderCreate(cl, syncengine.PackRoot{Version: syncengine.PackRootVersion}, ck, mk, abs)
-	} else {
-		manifest.Version = syncengine.TreeManifestVersion
-		conv := crypto.DeriveConvergenceKey(mk)
-		resp, err = putFolder(cl, conv, "", manifest, ck, mk, abs)
-		conv.Wipe()
-	}
+	manifest := syncengine.Manifest{Version: syncengine.TreeManifestVersion}
+	conv := crypto.DeriveConvergenceKey(mk)
+	resp, err := putFolder(cl, conv, "", manifest, ck, mk, abs)
+	conv.Wipe()
 	if err != nil {
 		cleanupLocal()
 		return err
@@ -467,9 +464,8 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 
 	// The server is ahead (or RemoteVersion predates version tracking). Try for a
 	// entry-level breakdown; it needs the folder key, available without a prompt only
-	// when a session is already unlocked, and only for a chunked folder — a pack-and-seal
-	// folder is one opaque blob with no per-file remote diff, so it stays version-level.
-	if cfg, cerr := syncengine.LoadConfig(root); cerr == nil && !cfg.Pack {
+	// when a session is already unlocked.
+	{
 		if mk, ok := identity.LoadSession(prof.Name); ok {
 			defer mk.Wipe()
 			if inc, ierr := incomingFiles(cl, res, base, mk); ierr == nil {
@@ -628,7 +624,16 @@ var errSyncNoBase = errors.New("no last-synced state found (.aqt/base.json missi
 // documented "sync conflict" exit code (4).
 var (
 	errConflictsRemain = errors.New("conflicts changed on both sides; resolve them or re-run with --force (local wins)")
-	errSyncRace        = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
+
+	// errPackRemoved explains the removed pack-and-seal format and how to recover
+	// data still stored in it. The encrypted Git remote replaced its main use case
+	// (syncing Git internals); the format's remaining cost — whole-folder
+	// re-uploads, no dedup, a parallel branch through sync/clone/share/diff — was
+	// not worth its narrow structure-hiding benefit.
+	errPackRemoved = errors.New("pack-and-seal folders are no longer supported: " +
+		"recover the data by cloning with an aqt release that still reads them (v0.5.x or earlier), " +
+		"remove \"pack\": true from .aqtconfig, and push the tree again as a normal chunked folder")
+	errSyncRace = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
 )
 
 // errRollback marks a remote whose version regressed below what this machine has
@@ -746,15 +751,14 @@ func runSync(dir string, opts syncOptions) error {
 	if err != nil {
 		return err
 	}
+	// A stray pack=true names the removed pack-and-seal format; refuse with the
+	// recovery hint rather than silently syncing the tree as chunked.
+	if cfg.Pack {
+		return errPackRemoved
+	}
 	mode, err := effectiveConflictMode(opts, cfg)
 	if err != nil {
 		return err
-	}
-	if cfg.Pack {
-		if mode == conflictCopy || mode == conflictMerge {
-			return fmt.Errorf("--conflicts=%s does not apply to a pack-and-seal folder: it reconciles the whole folder at once, so there is no per-file conflict to resolve", mode)
-		}
-		return runPackSync(root, opts)
 	}
 	if mode == conflictCopy || mode == conflictMerge {
 		if err := validateResolvingMode(opts, mode); err != nil {
@@ -851,7 +855,7 @@ func runSync(dir string, opts syncOptions) error {
 	// client.ErrConflict if another sync committed first; the loop below then
 	// re-plans against the new remote, so a concurrent write is never lost.
 	reconcile := func() error {
-		rs, err := sess.openRemote(opts, formatChunked)
+		rs, err := sess.openRemote(opts)
 		if err != nil {
 			return err
 		}
@@ -1686,15 +1690,14 @@ func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Me
 	if _, err := os.Stat(filepath.Join(abs, syncengine.ControlDir)); err == nil {
 		return errors.New("already a tracked folder")
 	}
-	// .aqtconfig is itself synced content, so an adopted copy may carry one. A local
-	// pack setting against this chunked remote would send runSync down the pack path
-	// and fail on an unrelated decrypt error; refuse up front instead.
+	// .aqtconfig is itself synced content, so an adopted copy may carry one; a
+	// stale pack=true names a removed format and is refused with the recovery hint.
 	cfg, err := syncengine.LoadConfig(abs)
 	if err != nil {
 		return err
 	}
 	if cfg.Pack {
-		return errors.New("this directory's .aqtconfig selects pack-and-seal, but the remote is a chunked folder; remove the pack setting to adopt it")
+		return errPackRemoved
 	}
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return err
@@ -1732,38 +1735,26 @@ func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Me
 // mis-flagged fails here rather than opening as an empty tree. A folder with neither
 // flag predates the v2 tree format and is no longer supported.
 func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, meta api.Metadata, resourceID string) error {
-	var err error
 	switch {
 	case meta.Packed:
-		_, err = syncengine.OpenPackRoot(blob, ck, resourceID)
+		return errPackRemoved
 	case meta.Tree:
-		_, err = syncengine.OpenTreeRoot(blob, ck, resourceID)
+		if _, err := syncengine.OpenTreeRoot(blob, ck, resourceID); err != nil {
+			return fmt.Errorf("decrypt folder root: %w", err)
+		}
+		return nil
 	default:
 		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 	}
-	if err != nil {
-		return fmt.Errorf("decrypt folder root: %w", err)
-	}
-	return nil
 }
 
 // materializeClone writes a freshly cloned folder's content under abs and returns
-// the manifest to record as its base. A pack-and-seal folder is untarred from its
-// sealed segments; the chunked default reassembles its Merkle DAG, streams each
+// the manifest to record as its base: it reassembles the Merkle DAG, streams each
 // file from its packs, and materializes (empty) directories with their modes.
+// Packed resources were refused by validateCloneRoot before this runs.
 func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse, ck crypto.ContentKey, meta api.Metadata) (syncengine.Manifest, error) {
 	if meta.Packed {
-		root, err := syncengine.OpenPackRoot(res.Blob, ck, res.ID)
-		if err != nil {
-			return syncengine.Manifest{}, fmt.Errorf("decrypt pack root: %w", err)
-		}
-		base, err := extractPack(cl, abs, root, ck, nil)
-		if err != nil {
-			return syncengine.Manifest{}, err
-		}
-		warnSkipped(base.Skipped)
-		base.Version = res.Version
-		return base, nil
+		return syncengine.Manifest{}, errPackRemoved
 	}
 	manifest, err := openRemoteTree(cl, res.Blob, ck, res.ID)
 	if err != nil {

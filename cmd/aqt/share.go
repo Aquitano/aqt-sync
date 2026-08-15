@@ -270,7 +270,7 @@ func checkShareableFolder(meta api.Metadata) error {
 		return nil
 	}
 	if meta.Packed {
-		return errors.New("cannot share a pack-and-seal folder: it stores no per-file objects, " +
+		return errors.New("cannot share a pack-and-seal folder (the format was removed): it stores no per-file objects, " +
 			"so a link holder or grantee could never walk it; re-create it as a chunked folder")
 	}
 	if !meta.Tree {
