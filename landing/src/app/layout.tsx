@@ -4,17 +4,32 @@ import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/600.css";
 import "@fontsource/pixelify-sans/600.css";
 import "./globals.css";
+import {
+  ogDescription,
+  ogTitle,
+  siteDescription,
+  siteName,
+  siteOrigin,
+  siteTitle,
+} from "./site";
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://aqt.sh"),
-  title: "aqt | Zero-knowledge encrypted sync",
-  description:
-    "End-to-end encrypted file and folder sync. The server stores only ciphertext and opaque metadata.",
+  metadataBase: new URL(siteOrigin),
+  title: siteTitle,
+  description: siteDescription,
+  // metadataBase alone sets no canonical link; without this the site emits none.
+  alternates: { canonical: "/" },
   openGraph: {
-    title: "aqt | Every file. Only yours.",
-    description:
-      "Zero-knowledge sync for files, folders, Git remotes, snapshots, and private links.",
+    title: ogTitle,
+    description: ogDescription,
     type: "website",
+    url: "/",
+    siteName,
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: ogTitle,
+    description: ogDescription,
   },
 };
 
