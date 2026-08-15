@@ -455,6 +455,36 @@ func dirMode(d DirEntry) os.FileMode {
 	return 0o700
 }
 
+// EnsureDirs recreates every tracked directory under dir that is missing, applying
+// recorded modes only to the ones it creates. It is the healing pass after the
+// destructive half of an apply: RemoveFile and RemoveDir prune now-empty parent
+// directories with no regard for the tracked set, so a delete that empties a
+// tracked directory takes the directory with it — and the next scan would read that
+// as a local delete and push it fleet-wide. Directories that already exist are left
+// untouched, so a mode this pass did not create is never clobbered.
+func EnsureDirs(dir string, dirs []DirEntry) error {
+	ordered := append([]DirEntry(nil), dirs...)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
+	var created []DirEntry
+	for _, d := range ordered {
+		full, err := safeJoin(dir, d.Path)
+		if err != nil {
+			return err
+		}
+		if _, err := os.Lstat(full); err == nil {
+			continue
+		}
+		if err := refuseSymlinkParents(dir, full); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(full, 0o700); err != nil {
+			return err
+		}
+		created = append(created, d)
+	}
+	return applyDirModes(dir, created)
+}
+
 // RemoveDir removes a tracked directory under dir only if it is empty, then prunes
 // now-empty parents up to (but not including) the tracked root. A directory still
 // holding entries (untracked files, or tracked ones not yet deleted) is left in

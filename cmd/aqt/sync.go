@@ -1336,6 +1336,15 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	if err := removeDirs(c.root, dirRemovals); err != nil {
 		return err
 	}
+	// The deletes above prune now-empty parents blind to the tracked set (RemoveFile
+	// and RemoveDir), so emptying a tracked directory takes the directory with it —
+	// and the next sync would read that as a local delete and push it fleet-wide.
+	// Recreate whatever the pruning took from the merged directory set.
+	if len(earlyDeletes)+len(lateDeletes)+len(dirRemovals) > 0 {
+		if err := syncengine.EnsureDirs(c.root, dirsFrom(newBaseDirs)); err != nil {
+			return err
+		}
+	}
 
 	newBaseManifest := manifestFrom(newBase, c.version+1)
 	newBaseManifest.Dirs = dirsFrom(newBaseDirs)

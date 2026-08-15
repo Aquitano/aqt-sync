@@ -450,6 +450,11 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 	if err := removeDirs(c.root, goneDirs); err != nil {
 		return err
 	}
+	// The prune above removes now-empty parents blind to the tracked set; recreate
+	// any tracked directory it took (the chunked apply runs the same healing pass).
+	if err := syncengine.EnsureDirs(c.root, remote.Dirs); err != nil {
+		return err
+	}
 	if err := savePackBase(c.root, remote, res.Version); err != nil {
 		return err
 	}
