@@ -362,10 +362,15 @@ func (w *watcher) step(st *watchState) error {
 	if fatal != nil {
 		return fatal
 	}
-	st.idle = 0 // a sync attempt is activity; keep polling at the base interval to follow up
 	if !ok {
-		return nil // deferred or failed: stay pending, retry next tick
+		// Deferred or failed over an unchanged tree: stay pending so the retry
+		// happens, but let the interval back off — a standing conflict would
+		// otherwise re-run a full failing sync at the base interval forever. Any
+		// tree change (e.g. the conflict being resolved) resets the streak above.
+		st.idle++
+		return nil
 	}
+	st.idle = 0 // a completed sync is activity; keep polling at the base interval to follow up
 	// Rebaseline against a fresh scan, but only declare convergence if the tree
 	// still matches what we just synced. An edit that landed *during* the sync (or
 	// files pulled from the remote) makes fresh != synced, so keep it pending and
