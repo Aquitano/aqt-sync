@@ -32,6 +32,10 @@ func TestMaterializedEntryStatFastPaths(t *testing.T) {
 	}
 
 	entry.MTime = mtime
+	// The stat check covers mode too, and Windows carries only the write bit, so a
+	// requested 0644 reads back as 0666 there. Take the mode from disk: what is under
+	// test is the mtime, not whether a Unix mode survives a Windows filesystem.
+	entry.Mode = uint32(fi.Mode().Perm())
 	base := Manifest{Entries: []Entry{entry}}
 	got, err := ScanReusing(root, &base, false)
 	if err != nil {
