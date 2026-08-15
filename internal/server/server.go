@@ -215,7 +215,7 @@ func (s *Server) WaitWorkers(ctx context.Context) error {
 const (
 	maxControlBody  = 64 << 10 // 64 KiB: account/auth/visibility — a few small fields
 	maxChunkBody    = 32 << 20 // 32 MiB: a check/locate id list (client batches well under this)
-	maxPackBody     = 32 << 20 // 32 MiB: one raw pack (client targets ~16 MiB, headroom for the index)
+	maxPackBody     = api.MaxPackBytes // one raw pack; the client builders bound themselves by the same constant
 	maxResourceBody = 64 << 20 // 64 MiB: a file's ciphertext or a folder's sealed manifest
 )
 

@@ -16,9 +16,9 @@ import (
 type conflictMode string
 
 const (
-	conflictBlock conflictMode = "block" // report the conflict and refuse (exit 4)
-	conflictCopy  conflictMode = "copy"  // keep local, preserve remote as a conflict-copy
-	conflictMerge conflictMode = "merge" // merge text, falling back to conflict-copy
+	conflictBlock conflictMode = syncengine.ConflictBlock // report the conflict and refuse (exit 4)
+	conflictCopy  conflictMode = syncengine.ConflictCopy  // keep local, preserve remote as a conflict-copy
+	conflictMerge conflictMode = syncengine.ConflictMerge // merge text, falling back to conflict-copy
 )
 
 // effectiveConflictMode resolves the mode from the flag (when set) falling back to
@@ -31,11 +31,11 @@ func effectiveConflictMode(opts syncOptions, cfg syncengine.Config) (conflictMod
 		v = cfg.Conflicts
 	}
 	switch v {
-	case "", "block":
+	case "", syncengine.ConflictBlock:
 		return conflictBlock, nil
-	case "copy":
+	case syncengine.ConflictCopy:
 		return conflictCopy, nil
-	case "merge":
+	case syncengine.ConflictMerge:
 		return conflictMerge, nil
 	default:
 		return "", fmt.Errorf("invalid --conflicts value %q (want \"block\", \"copy\", or \"merge\")", v)

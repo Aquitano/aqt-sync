@@ -43,6 +43,28 @@ func (p *PackBuilder) Add(id string, ciphertext []byte) {
 // written), so a caller can flush once it reaches DefaultPackTarget.
 func (p *PackBuilder) Size() int { return len(p.buf) }
 
+// Objects is the number of objects added so far, for FitsInPack's overhead bound.
+func (p *PackBuilder) Objects() int { return len(p.index) }
+
+// packEntryOverhead over-estimates one index entry's serialized JSON size (a 64-hex
+// id plus keys and two offsets), and packTrailerOverhead the fixed array/length
+// framing, so FitsInPack errs toward dispatching early rather than building a pack
+// the server rejects.
+const (
+	packEntryOverhead   = 160
+	packTrailerOverhead = 64
+)
+
+// FitsInPack reports whether adding one more object of addBytes to a pack already
+// holding entries objects over regionBytes keeps the serialized pack — including
+// its index trailer — within api.MaxPackBytes. Builders check this before
+// appending: the target-based flush runs after the append, so a large object (a
+// directory node may be MaxNodeBytes) on top of a near-target buffer could
+// otherwise assemble a pack the server rejects with a non-retryable 413.
+func FitsInPack(regionBytes, entries, addBytes int) bool {
+	return regionBytes+addBytes+(entries+1)*packEntryOverhead+packTrailerOverhead <= api.MaxPackBytes
+}
+
 // Empty reports whether no objects have been added.
 func (p *PackBuilder) Empty() bool { return len(p.index) == 0 }
 

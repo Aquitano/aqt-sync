@@ -23,6 +23,12 @@ import (
 // else in the header is a few hundred bytes.
 const maxWireHeader = 32 << 20
 
+// MaxPackBytes is the wire contract for one serialized pack — object region plus
+// index trailer. The server rejects a larger body outright (a non-retryable 413),
+// so every client-side pack builder must dispatch before an append would cross
+// it; both sides derive their bound from this one constant so they cannot drift.
+const MaxPackBytes = 32 << 20
+
 const (
 	ResourceJSONMediaType     = "application/vnd.aqt.resource+json; version=1"
 	ResourceEnvelopeMediaType = "application/vnd.aqt.resource+octet-stream; version=1"

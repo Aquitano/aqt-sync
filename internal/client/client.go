@@ -534,6 +534,11 @@ func (c *Client) LocateChunks(ids []string) ([]api.ObjectLocation, error) {
 // the server's per-pack body cap (an object slice is a sub-range of one pack).
 const maxPublicFrame = 32 << 20
 
+// maxResponseBytes bounds any single buffered response body (do's io.ReadAll):
+// the largest legitimate bodies are pack ranges and root blobs, both bounded by
+// api.MaxPackBytes, so 256 MiB is generous headroom rather than a tight fit.
+const maxResponseBytes = 256 << 20
+
 // PublicObjects fetches exact object slices for a public streamed resource over the
 // unauthenticated public endpoint — the share-link path, where the content key lives
 // in the caller's URL fragment, not here. It issues a single POST (the CLI caller
@@ -796,8 +801,15 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 		if err != nil {
 			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
 		}
-		data, readErr := io.ReadAll(&progressBody{rc: resp.Body, touch: guard.touch})
+		// Bounded against the client's own hostile-server posture: a server that
+		// streams forever must not buffer unbounded memory here. The cap leaves
+		// generous headroom over the largest legitimate body (a pack range or a
+		// root blob, both bounded by api.MaxPackBytes).
+		data, readErr := io.ReadAll(io.LimitReader(&progressBody{rc: resp.Body, touch: guard.touch}, maxResponseBytes+1))
 		resp.Body.Close()
+		if readErr == nil && len(data) > maxResponseBytes {
+			return 0, nil, fmt.Errorf("request %s %s: response exceeds %d bytes; refusing to buffer it", req.Method, path, maxResponseBytes)
+		}
 
 		if resp.StatusCode == http.StatusTooManyRequests {
 			// The server computes its wait from the bucket's own refill rate, so

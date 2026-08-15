@@ -624,6 +624,13 @@ func newSegmentPacker(cl *client.Client) *segmentPacker {
 }
 
 func (p *segmentPacker) Add(id string, object []byte) error {
+	// Same dispatch-before-append rule as packUploader.Add: never assemble a pack
+	// the server's body cap rejects.
+	if !p.pb.Empty() && !syncengine.FitsInPack(p.pb.Size(), p.pb.Objects(), len(object)) {
+		if err := p.flush(); err != nil {
+			return err
+		}
+	}
 	p.pb.Add(id, object)
 	if p.pb.Size() >= syncengine.DefaultPackTarget {
 		return p.flush()
