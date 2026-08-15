@@ -25,6 +25,13 @@ func TestParseRefExtractsOrigin(t *testing.T) {
 		{"https url with key", "https://example.com/x/" + id + "#k.abc", "k.abc", "https://example.com"},
 		{"http host:port with key", "http://127.0.0.1:18080/x/" + id + "#k.kDbZ", "k.kDbZ", "http://127.0.0.1:18080"},
 		{"https url no /x/ segment", "https://example.com/" + id, "", "https://example.com"},
+		// Subpath-bearing forms must resolve to the same id as the whole-link forms:
+		// info/share/clone all parse refs through this one function, and the old
+		// last-index scan read the subpath's tail as the id (issue #183).
+		{"https url with subpath", "https://example.com/x/" + id + "/sub/dir", "", "https://example.com"},
+		{"https url with subpath and key", "https://example.com/x/" + id + "/sub/dir#k.abc", "k.abc", "https://example.com"},
+		{"aqt scheme with subpath", "aqt://" + id + "/sub/dir", "", ""},
+		{"key with appended subpath", "https://example.com/x/" + id + "#k.abc/sub/dir", "k.abc", "https://example.com"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

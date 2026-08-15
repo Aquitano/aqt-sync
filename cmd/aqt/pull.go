@@ -348,6 +348,11 @@ func writeStreamAtomic(dest string, perm os.FileMode, fn func(*os.File) error) e
 // a bare id. origin is set only for an absolute http/https URL so a share link's
 // own host can be honored; aqt:// refs and bare ids yield an empty origin.
 func parseRef(ref string) (id, fragment, origin string) {
+	// One parser for every ref form: strip any subpath first (aqt://<id>/<sub> or
+	// .../x/<id>/<sub/path>), so a subpath-bearing link resolves to the same id
+	// here as in the pull path. The last-index scan below used to read the
+	// subpath's tail as the id, 404ing `info` on links `pull` accepted.
+	ref, _ = splitRefPath(ref)
 	if i := strings.Index(ref, "#"); i >= 0 {
 		fragment = ref[i+1:]
 		ref = ref[:i]
