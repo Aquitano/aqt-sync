@@ -937,7 +937,7 @@ func (h *e2eHarness) unlockSession() {
 
 func (h *e2eHarness) init(dir string) {
 	h.t.Helper()
-	if err := runInit(dir); err != nil {
+	if err := runInit(dir, nil); err != nil {
 		h.t.Fatalf("init %s: %v", dir, err)
 	}
 }

@@ -10,12 +10,33 @@ the argument contains a path separator; a bare word that names an existing file 
 for confirmation first, and errors as an unknown command without a terminal, so a
 typo'd subcommand never uploads a file.
 
-Global flags apply to every command: `--server <url>` (default
-`http://localhost:8080`), `--profile <name>`, `--json`, `-q/--quiet`, `--progress`
-(a live transfer bar on a terminal, for sync and clone), `-h/--help`, and
-`-v/--version`.
+`--server <url>` (default `http://localhost:8080`), `--profile <name>`, `-h/--help`,
+and `-v/--version` apply to every command. The three output flags apply only where
+they mean something, and a command that does not implement one refuses it rather
+than accepting it and behaving identically:
 
-Everyday resource arguments accept a unique name, an id, or a tracked path.
+- `--json`: every command whose `--help` documents a JSON shape.
+- `-q/--quiet`: `push`, `share`, `init`, `sync`, `snapshot create`, `checkpoint`,
+  `restore`, `update`, and `git setup`. It reduces stdout to the single value the
+  command produced — the ref, link, snapshot id, or restored directory — or, for
+  `sync`, drops the per-file lines and the summary. Errors, and the conflict list a
+  blocked sync exits `4` with, still print; so does `sync --dry-run`'s plan, which is
+  the output that run was asked for.
+- `--progress`: `pull`, `sync`, `clone`, `watch`, `agent start`, and `restore`, and
+  only on a terminal. Those are the commands that transfer enough at once to draw a
+  bar — `pull` for a subtree (`aqt://<id>/<dir>`), `restore` for the re-sync
+  `--in-place` ends with.
+
+Every prompt has a flag that answers it ahead of time, so a scripted run neither
+blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive
+confirmation, `--git/--no-git` for whether `aqt init` syncs a git repository inside
+the folder, and `-P/--password` with a value instead of the bare form that prompts.
+
+Everyday resource arguments accept a unique name, an id, or a tracked path:
+`info`, `pull`, `cat`, `clone`, `ls <folder>`, `rm`, `mv`, `share`, and `unshare`
+all resolve the name column `aqt ls` prints. Addressing one entry *inside* a folder
+still needs the ref form (`aqt://<id>/<path>`, or a share URL), since a name and a
+path inside it cannot be told apart in `<folder>/<path>`.
 
 ## Exit codes
 

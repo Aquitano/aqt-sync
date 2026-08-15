@@ -108,6 +108,42 @@ func TestPasswordFlagHelpIsPrintable(t *testing.T) {
 	}
 }
 
+// The CLI prints aqt:// refs, so a --id flag must accept one instead of sending it
+// to the server as a literal resource id.
+func TestResolveResourceIDAcceptsPrintedRefs(t *testing.T) {
+	for _, in := range []string{"abc123", "aqt://abc123", "https://aqt.example.com/x/abc123"} {
+		got, err := resolveResourceID(".", in)
+		if err != nil || got != "abc123" {
+			t.Errorf("resolveResourceID(%q) = %q, %v; want abc123", in, got, err)
+		}
+	}
+}
+
+// --once and -d contradict each other, and the dispatch takes --once, so -d used to
+// be accepted and then ignored: nothing detached and the caller never learned why.
+func TestWatchRejectsOnceWithDaemon(t *testing.T) {
+	root := rootCmd()
+	root.SetArgs([]string{"watch", t.TempDir(), "--once", "-d"})
+	err := root.Execute()
+	if err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("watch --once -d err = %v, want a mutual-exclusion error", err)
+	}
+}
+
+// init's .git question needs a scriptable answer — the TUI drives init through the
+// CLI and has no terminal to answer a prompt on.
+func TestInitGitFlags(t *testing.T) {
+	cmd := initCmd()
+	if cmd.Flags().Lookup("git") == nil || cmd.Flags().Lookup("no-git") == nil {
+		t.Fatal("init is missing --git/--no-git")
+	}
+	root := rootCmd()
+	root.SetArgs([]string{"init", t.TempDir(), "--git", "--no-git"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("init --git --no-git err = %v, want a mutual-exclusion error", err)
+	}
+}
+
 // push --help must render --name as a plain string flag: backticks in the usage
 // string are cobra's value-type syntax and turned it into `--name aqt ls`.
 func TestPushHelpRendersNameFlagType(t *testing.T) {

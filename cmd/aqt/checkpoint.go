@@ -67,12 +67,17 @@ func checkpointCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(info)
 			}
+			if flagQuiet {
+				fmt.Println(info.ID)
+				return nil
+			}
 			fmt.Printf("checkpoint %q saved as snapshot %s (anchored, version %d)\n", name, info.ID, info.Version)
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "checkpoint this resource id directly instead of a tracked dir")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	return cmd
 }
 
@@ -149,6 +154,12 @@ func restoreCmd() *cobra.Command {
 					"version": snap.Snapshot.Version, "out": abs,
 				})
 			}
+			// The restored directory is what a script does something with next, so it is
+			// the one line -q keeps; --in-place has no such path and prints nothing.
+			if flagQuiet {
+				fmt.Println(abs)
+				return nil
+			}
 			fmt.Printf("restored %q (version %d) into %s\n", meta.Name, snap.Snapshot.Version, abs)
 			return nil
 		},
@@ -159,6 +170,8 @@ func restoreCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&inPlace, "in-place", false, "roll the live tracked folder back and re-sync it to every device")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the in-place confirmation prompt")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
+	markProgressSupported(cmd) // --in-place re-syncs the rollback, bars and all
 	return cmd
 }
 

@@ -123,5 +123,6 @@ if (@($entries | ForEach-Object { $_.TrimEnd('\') }) -notcontains $Dir.TrimEnd('
 
 Write-Host ''
 Write-Host 'next:'
-Write-Host '  aqt --server https://your-server login --email you@example.com'
+Write-Host '  aqt --server https://your-server signup --email you@example.com   # new account'
+Write-Host '  aqt --server https://your-server login --email you@example.com    # account you already have'
 Write-Host '  aqt git setup    # only if you want encrypted Git remotes'

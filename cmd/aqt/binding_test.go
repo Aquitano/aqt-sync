@@ -247,7 +247,7 @@ func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { commitInitState = orig })
 
-	err := runInit(dir)
+	err := runInit(dir, nil)
 	if err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("init = %v, want the injected failure", err)
 	}
@@ -286,7 +286,7 @@ func TestInitPermissionFailureCreatesNoRemote(t *testing.T) {
 	}
 	t.Cleanup(func() { os.Chmod(dir, 0o755) })
 
-	if err := runInit(dir); err == nil {
+	if err := runInit(dir, nil); err == nil {
 		t.Fatal("init into an unwritable directory succeeded")
 	}
 	cl, _, err := authedClient()

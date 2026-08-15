@@ -72,12 +72,26 @@ const (
 // --- commands ---
 
 func initCmd() *cobra.Command {
-	return &cobra.Command{
+	var git, noGit bool
+	cmd := &cobra.Command{
 		Use:   "init [dir]",
 		Short: "Mark a folder as tracked for sync",
 		Args:  cobra.MaximumNArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return runInit(dirArg(args)) },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if git && noGit {
+				return errors.New("--git and --no-git are mutually exclusive")
+			}
+			var syncGit *bool
+			if git || noGit {
+				syncGit = &git
+			}
+			return runInit(dirArg(args), syncGit)
+		},
 	}
+	cmd.Flags().BoolVar(&git, "git", false, "track the .git directory too, instead of asking")
+	cmd.Flags().BoolVar(&noGit, "no-git", false, "leave .git ignored, instead of asking")
+	markQuietSupported(cmd)
+	return cmd
 }
 
 func statusCmd() *cobra.Command {
@@ -111,6 +125,8 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.acceptRollback, "accept-rollback", false, "proceed although the server reports an older version than previously seen (restored from backup): reconcile from scratch, one-sided differences become conflicts to review")
 	f.StringVar(&opts.conflicts, "conflicts", "", "conflict handling: block (default), copy, or merge (three-way text merge; falls back to copy)")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
+	markProgressSupported(cmd)
 	return cmd
 }
 
@@ -120,7 +136,7 @@ func cloneCmd() *cobra.Command {
 		pw    passwordFlags
 	)
 	cmd := &cobra.Command{
-		Use:   "clone <id|aqt://ref|share-url> [dir]",
+		Use:   "clone <name-or-id|tracked-path|share-url> [dir]",
 		Short: "Materialize a tracked folder (or a shared folder link) on this machine",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -139,12 +155,16 @@ func cloneCmd() *cobra.Command {
 		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
 	pw.bind(cmd, "password for a gated link")
 	markJSONSupported(cmd)
+	markProgressSupported(cmd)
 	return cmd
 }
 
 // --- init ---
 
-func runInit(dir string) error {
+// runInit tracks dir. gitChoice decides whether a git repository inside it is
+// synced too; nil asks (the interactive default), which is why --git/--no-git exist:
+// a scripted or TUI-driven init has nobody to answer the prompt.
+func runInit(dir string, gitChoice *bool) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -167,8 +187,9 @@ func runInit(dir string) error {
 	// aqt ignores .git by default; offer to track it when this tree holds a repo.
 	syncGit := false
 	if repo, ok := firstGitRepo(abs); ok {
-		syncGit, err = promptSyncGit(repo)
-		if err != nil {
+		if gitChoice != nil {
+			syncGit = *gitChoice
+		} else if syncGit, err = promptSyncGit(repo); err != nil {
 			return err
 		}
 	}
@@ -230,6 +251,10 @@ func runInit(dir string) error {
 			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %v; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
 		}
 		return err
+	}
+	if flagQuiet {
+		fmt.Printf("aqt://%s\n", resp.ID)
+		return nil
 	}
 	fmt.Printf("tracking %s\naqt://%s\n", abs, resp.ID)
 	fmt.Fprintln(os.Stderr, "run `aqt sync` to push the current contents")
@@ -1211,7 +1236,11 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 			// re-planned rather than memoized as done; a retry rewrites the same path.
 			for _, cp := range copies {
 				c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
-				// stderr under --json so the summary object stays the only stdout output.
+				// stderr under --json so the summary object stays the only stdout output;
+				// -q drops the line entirely, like every other per-file line.
+				if flagQuiet {
+					continue
+				}
 				out := os.Stdout
 				if flagJSON {
 					out = os.Stderr
@@ -1409,9 +1438,24 @@ func runClone(ref, dir string, adopt bool, password string) error {
 	if err != nil {
 		return err
 	}
+	// The master key unwraps the folder key below and resolves a name or tracked path
+	// to its id here, so it is unlocked once up front: a second unlockMaster would ask
+	// for the passphrase again whenever session caching is unavailable. A ref carrying
+	// its own host is a link, not a name, and is left as it is.
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	if origin == "" {
+		if id, err = resolveOwnedResourceID(cl, mk, ref); err != nil {
+			return err
+		}
+	}
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("folder %s not found (or not a private folder you own)", id)
+		return fmt.Errorf("folder %s not found: pass a unique name, an id, or an aqt:// ref "+
+			"(it may also be a folder you do not own)", id)
 	}
 	if err != nil {
 		return err
@@ -1423,7 +1467,7 @@ func runClone(ref, dir string, adopt bool, password string) error {
 			if adopt {
 				return errors.New("--adopt binds a directory to a folder you own; a granted folder is read-only, so there is nothing to sync with")
 			}
-			ck, err := contentKey(res, "", "", prof)
+			ck, err := contentKeyWithMaster(res, "", "", prof, &mk)
 			if err != nil {
 				return err
 			}
@@ -1432,11 +1476,6 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		}
 		return errors.New("not a private folder you own (no owner key)")
 	}
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		return err
-	}
-	defer mk.Wipe()
 	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)
@@ -3069,6 +3108,11 @@ func summarize(uploads, downloads []syncengine.Entry, localDeletes, merged []str
 			"downloaded": len(downloads), "downloadedBytes": entriesBytes(downloads),
 			"removedLocally": len(localDeletes), "merged": merged,
 		})
+		return
+	}
+	// A quiet sync says nothing about the work it did; what it could not do (the
+	// conflict list below, printed by the caller) still reaches the terminal.
+	if flagQuiet {
 		return
 	}
 	fmt.Printf("synced: %d up (%s), %d down (%s), %d removed locally\n",

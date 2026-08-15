@@ -185,7 +185,7 @@ func tuiExitNote(exit int) string {
 	case 0:
 		return "done"
 	case 3:
-		return "session locked — run `aqt login` and reopen the TUI"
+		return "session locked — enter your passphrase to unlock and retry"
 	case 4:
 		return "conflicts remain — resolve them or sync with conflicts=copy"
 	case 5:

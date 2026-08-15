@@ -43,9 +43,9 @@ func (m *tuiModel) pushDialog() tuiDialog {
 func (m *tuiModel) initDialog() tuiDialog {
 	return tuiNewInput("Init folder", "path to track", func(path string) tea.Cmd {
 		// If the folder contains a git repository, init asks whether .git should
-		// be included. The child cannot own the TUI's terminal, so choose the
-		// safe default (no); users can edit .aqtignore afterwards.
-		return tuiRequestExecStdin("n\n", "init", path)
+		// be included. The child cannot own the TUI's terminal, so it answers with
+		// the flag instead: the safe default (no); users can edit .aqtignore afterwards.
+		return tuiRequestExec("init", path, "--no-git")
 	})
 }
 

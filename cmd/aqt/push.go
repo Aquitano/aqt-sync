@@ -88,6 +88,7 @@ func pushCmd() *cobra.Command {
 	f.Int64Var(&maxReads, "max-reads", 0, "expire the public link after this many downloads")
 	f.BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	return cmd
 }
 

@@ -78,6 +78,18 @@ func TestAccountDeleteProofRejectsWrongPassphrase(t *testing.T) {
 	}
 }
 
+// A piped run with nothing on stdin supplied no passphrase; reporting it as an
+// incorrect one sends the caller hunting for a typo instead of the missing input.
+func TestAccountDeleteProofRejectsEmptyPassphrase(t *testing.T) {
+	prof := accountProfile(t, "owner@example.com", "correct horse battery staple")
+
+	withStdin(t, "")
+	_, err := accountDeleteProof(prof, true, &fakeAccountClient{})
+	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("empty passphrase err = %v, want a missing-passphrase error", err)
+	}
+}
+
 func TestAccountDeleteProofDerivesTheAuthVerifier(t *testing.T) {
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
