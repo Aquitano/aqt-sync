@@ -69,12 +69,19 @@ func reconcilePack(c packCtx) error {
 	}
 	defer rs.ck.Wipe()
 
+	// Read on every pass rather than once per run: a retry after a lost race has not
+	// completed a pull, so the marker it would clear is still the truth on disk.
+	torn, err := loadPullMarker(c.root)
+	if err != nil {
+		return err
+	}
+
 	// No base to trust — either none was recorded (--reconcile) or an accepted
 	// rollback invalidated it. Compare the actual trees instead: a rolled-back server
 	// read as "remote changed" would have decidePack pull the old tree over newer
 	// local files.
 	if !rs.trustBase {
-		return reconcilePackNoBase(c, rs.res, rs.ck)
+		return reconcilePackNoBase(c, rs.res, rs.ck, torn)
 	}
 
 	// Diff, not the file-only planner: a pack folder seals its tracked directories
@@ -84,6 +91,11 @@ func reconcilePack(c packCtx) error {
 	localChanged := !syncengine.Diff(c.base, c.local).Empty()
 	remoteChanged := rs.res.Version != c.base.Version
 	action := decidePack(localChanged, remoteChanged, c.opts)
+	if torn.present {
+		if action, err = resumeInterruptedPull(c.opts, torn); err != nil {
+			return err
+		}
+	}
 
 	if c.opts.dryRun {
 		printPackAction(action)
@@ -190,10 +202,23 @@ func printPackAction(a packDecision) {
 // reconcilePackNoBase handles --reconcile, where no last-synced state distinguishes
 // an add from a delete. One empty side is unambiguous; otherwise the trees are
 // compared and an actual difference is a conflict unless --force.
-func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) error {
+func reconcilePackNoBase(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey, torn pullMarker) error {
 	root, err := syncengine.OpenPackRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt remote pack root: %w", err)
+	}
+	// A torn tree is not evidence of anything the comparison below could read: half of
+	// it is already the remote's, the rest is stale. Finish the pull instead.
+	if torn.present {
+		action, err := resumeInterruptedPull(c.opts, torn)
+		if err != nil {
+			return err
+		}
+		if c.opts.dryRun {
+			printPackAction(action)
+			return nil
+		}
+		return pullPackFromRoot(c, res, ck, root)
 	}
 	remoteEmpty := root.Size == 0 || len(root.Segments) == 0
 	localEmpty := len(c.local.Entries) == 0
@@ -308,7 +333,17 @@ func pullPack(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey) erro
 // keeps its local bytes and is reported as a conflict instead of being clobbered.
 // The saved base still records the remote entry, so the next sync sees the kept
 // edit as a pending local change and pack-mode last-writer-wins resolves it.
+//
+// The whole extract-and-prune runs under a pull marker. A pack pull writes in place —
+// unlike clone, a directory pull, or a restore, which stage beside the destination
+// and rename — because it must not disturb the ignored files (build output, caches)
+// living alongside the tracked tree. That makes an interrupted pull a torn tree, and
+// nothing in a scan distinguishes one from deliberate local edits; the marker is what
+// tells the next run which it is.
 func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentKey, root syncengine.PackRoot) error {
+	if err := beginPullMarker(c.root, res.ID, res.Version); err != nil {
+		return err
+	}
 	localByPath := c.local.ByPath()
 	var conflicts []string
 	safe := func(path string) (bool, error) {
@@ -381,6 +416,11 @@ func pullPackFromRoot(c packCtx, res api.GetResourceResponse, ck crypto.ContentK
 	if err := savePackBase(c.root, remote, res.Version); err != nil {
 		return err
 	}
+	// Cleared before the conflict return below: a kept local edit is a completed pull
+	// whose base records the remote entry, not a torn tree.
+	if err := clearPullMarker(c.root); err != nil {
+		return err
+	}
 	recordRemoteVersion(c.root, res.Version)
 	sort.Strings(conflicts)
 	if flagJSON {
@@ -418,6 +458,71 @@ func remoteEqualsLocal(c packCtx, root syncengine.PackRoot, ck crypto.ContentKey
 func savePackBase(root string, m syncengine.Manifest, version int) error {
 	m.Version = version
 	return saveBase(root, m)
+}
+
+// pullMarker is .aqt/pull-in-progress: the record that a pack-and-seal pull started
+// writing into the working tree and has not finished. present is false when the file
+// is absent, which is the ordinary state.
+type pullMarker struct {
+	present bool
+	// Version and ID name what the interrupted pull was landing; they go in the
+	// message so the user can see which state the tree is stuck between.
+	Version int    `json:"version"`
+	ID      string `json:"id"`
+}
+
+const pullMarkerFile = "pull-in-progress"
+
+func beginPullMarker(root, id string, version int) error {
+	b, err := json.MarshalIndent(pullMarker{Version: version, ID: id}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(controlPath(root, pullMarkerFile), b, 0o600)
+}
+
+func clearPullMarker(root string) error {
+	if err := os.Remove(controlPath(root, pullMarkerFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// loadPullMarker reports whether a pull was interrupted here. A marker that will not
+// parse still counts as present: it was written by a pull that started, and the
+// version it names is only used for the message.
+func loadPullMarker(root string) (pullMarker, error) {
+	b, err := os.ReadFile(controlPath(root, pullMarkerFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return pullMarker{}, nil
+	}
+	if err != nil {
+		return pullMarker{}, err
+	}
+	m := pullMarker{present: true}
+	_ = json.Unmarshal(b, &m)
+	return m, nil
+}
+
+// resumeInterruptedPull overrides the decision for a tree a previous pull left torn.
+// Half of that tree is the remote's bytes and the rest is stale, and no scan can tell
+// it from deliberate local edits — decidePack reads it as "changed on both sides" and
+// offers `--force`, which maps to a push that would tar the torn tree and make it the
+// authoritative version, destroying the intact remote folder. Finishing the pull is
+// the only resolution that does not lose data, so --force cannot re-route it into a
+// push and --push-only refuses outright.
+func resumeInterruptedPull(opts syncOptions, m pullMarker) (packDecision, error) {
+	if opts.pushOnly {
+		return packNoop, fmt.Errorf("a pull of this folder was interrupted (version %d), so the "+
+			"working tree holds part of the remote version and part of the old one; pushing it "+
+			"would overwrite the intact remote folder with the torn tree. Run `aqt sync` to finish "+
+			"the pull first", m.Version)
+	}
+	if !flagJSON {
+		fmt.Fprintf(os.Stderr, "note: a previous pull was interrupted (version %d); "+
+			"the working tree is incomplete, so this sync finishes the pull\n", m.Version)
+	}
+	return packPull, nil
 }
 
 func putPackFolderCreate(cl *client.Client, root syncengine.PackRoot, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {

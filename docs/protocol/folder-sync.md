@@ -281,6 +281,17 @@ was. `init` stages the local `.aqt` control state before registering the remote
 resource and deletes the just-created resource if the local commit fails, so a failed
 init is side-effect-free on both ends.
 
+A pack-and-seal pull is the one transfer that writes into a live tree, deliberately —
+staging the whole root would take the ignored files with it. It is made recoverable
+rather than atomic; see [pack-and-seal](#pack-and-seal).
+
+**Untracking.** `aqt untrack [dir]` removes `.aqt` and leaves both the working tree
+and the server-side resource alone (`--delete-remote` opts into deleting the
+resource too). It is the way out of a folder whose resource was deleted — by `aqt rm`
+here, from another device, or by an operator — which otherwise fails every sync with
+"not found on the server" while `aqt init` refuses the directory for still having
+`.aqt`.
+
 ## `.aqtignore`
 
 A pragmatic gitignore subset: comments, anchored paths, `*`/`?`/`**` globs, and
@@ -378,6 +389,20 @@ the extract side rebuilds its manifest from the tar alone, so a directory left o
 the stream would lose its mode and — if empty — itself. An archive written before
 this carries no directory headers, so the first sync after upgrading re-ships such a
 folder once and then converges.
+
+**An interrupted pull is recognized, not guessed at.** A pack pull extracts in place
+rather than staging beside the root and renaming, because the root also holds ignored
+files — build output, caches — a swap would destroy. So an interrupted pull leaves a
+tree that is part new version and part old, and no scan can tell that from deliberate
+local edits: the next reconcile would read it as "changed on both sides" and offer
+`--force`, which means push, which would make the torn tree the authoritative version
+and destroy the intact remote folder. `.aqt/pull-in-progress` records the target
+version for the length of the extract and prune, and is cleared only once the base
+commits. While it exists, the folder pulls: `--force` cannot re-route that into a
+push, `--push-only` refuses with the reason, and `status` says the changes it is
+showing are a half-applied remote version. Finishing the pull converges, because the
+resumed extract re-verifies each target against a fresh scan exactly as the first one
+did.
 
 ## Watch daemon
 

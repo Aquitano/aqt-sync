@@ -115,7 +115,8 @@ git push -u origin main
 
 `aqt <path>` with no subcommand is shorthand for `aqt push <path>`. Run `aqt --help` for
 the full command set (`ls`, `find`, `cat`, `share`, `unshare`, `shares`, `contacts`,
-`snapshot`, `checkpoint`, `restore`, `watch`, `devices`, `passphrase`, and more).
+`snapshot`, `checkpoint`, `restore`, `untrack`, `watch`, `devices`, `passphrase`, and
+more).
 
 `aqt checkpoint <name>` saves a named, anchored snapshot that retention never prunes, and
 `aqt restore <name>` brings it back (side-by-side by default, or `--in-place` to roll the

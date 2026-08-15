@@ -520,6 +520,12 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
 	}
+	// The swap replaced the whole tree, so a tree an earlier interrupted pull had torn
+	// is whole again — and it is the snapshot's, not the remote's. Leaving the marker
+	// would send the sync below pulling the remote back over the restore.
+	if err := clearPullMarker(root); err != nil {
+		return err
+	}
 	if !flagJSON {
 		fmt.Fprintln(os.Stderr, "rolled back; syncing to propagate...")
 	}

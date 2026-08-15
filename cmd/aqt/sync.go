@@ -150,7 +150,9 @@ func runInit(dir string) error {
 		return err
 	}
 	if _, err := os.Stat(filepath.Join(abs, syncengine.ControlDir)); err == nil {
-		return errors.New("already a tracked folder")
+		return errors.New("already a tracked folder; to track it against a different resource, " +
+			"account, or server — or to recover one whose remote resource was deleted — run " +
+			"`aqt untrack` first (your files are left alone)")
 	}
 	cl, prof, err := authedClient()
 	if err != nil {
@@ -278,6 +280,14 @@ func runStatus(dir string, opts statusOptions) error {
 	// manifest. Conflicts (both sides changed) still surface only during `sync`.
 	ch := computeLocalChanges(local, base)
 
+	// An interrupted pack pull leaves a tree that is part remote and part stale, and
+	// the changes above render it as ordinary local edits. Say which it is, or the
+	// user acts on a diff that is not theirs.
+	torn, err := loadPullMarker(root)
+	if err != nil {
+		return err
+	}
+
 	if flagJSON {
 		out := map[string]any{
 			"clean":    ch.total() == 0,
@@ -290,6 +300,9 @@ func runStatus(dir string, opts statusOptions) error {
 			// it is, so a caller never has to guess why a path is "modified".
 			"changes": nonNilChanges(ch.changes),
 		}
+		if torn.present {
+			out["interruptedPull"] = map[string]any{"version": torn.Version}
+		}
 		if !opts.offline {
 			if rep := collectIncoming(root, base); rep != nil {
 				out["incoming"] = rep
@@ -298,6 +311,10 @@ func runStatus(dir string, opts statusOptions) error {
 		return printJSON(out)
 	}
 
+	if torn.present {
+		fmt.Fprintf(os.Stderr, "warning: a pull was interrupted here (version %d), so the changes "+
+			"below are a half-applied remote version, not local edits; `aqt sync` finishes the pull\n", torn.Version)
+	}
 	if ch.total() == 0 {
 		fmt.Println("clean (no local changes since last sync)")
 	} else {

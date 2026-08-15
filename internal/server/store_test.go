@@ -711,6 +711,117 @@ func TestMigrateIsIdempotentAndIndexesDeviceToken(t *testing.T) {
 	}
 }
 
+// seedSchemaAt builds a data dir holding exactly the first k migration steps — what
+// the release that shipped step k would have left behind — without going through
+// OpenStore, which would run the whole chain.
+func seedSchemaAt(t *testing.T, dir string, k int) {
+	t.Helper()
+	for _, d := range []string{"blobs", "packs"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "aqt.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for i := 0; i < k; i++ {
+		if _, err := db.Exec(migrations[i]); err != nil {
+			t.Fatalf("seed migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, k)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A data dir written by any older release migrates forward to the current schema.
+// The idempotency test above only re-opens an already-current dir, so it never
+// exercises a step running against the shape that preceded it.
+func TestMigrateForwardFromEveryVersion(t *testing.T) {
+	t.Parallel()
+	for k := 0; k < len(migrations); k++ {
+		t.Run(fmt.Sprintf("from_v%d", k), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			seedSchemaAt(t, dir, k)
+			s, err := OpenStore(dir)
+			if err != nil {
+				t.Fatalf("migrate forward from user_version %d: %v", k, err)
+			}
+			defer s.Close()
+			var uv int
+			if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+				t.Fatal(err)
+			}
+			if uv != len(migrations) {
+				t.Fatalf("user_version = %d after migrating from %d, want %d", uv, k, len(migrations))
+			}
+		})
+	}
+}
+
+// A step that fails partway must leave nothing behind: not its already-executed
+// statements, and not a user_version bump. Otherwise the next start replays the step
+// over its own half-applied output and fails forever with `duplicate column name`.
+func TestFailedMigrationStepRollsBackWhole(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Shaped like a real step: valid DDL first, then a statement that fails — the
+	// power-loss-in-the-middle case, only deterministic.
+	bad := `ALTER TABLE accounts ADD COLUMN wedge_probe INTEGER NOT NULL DEFAULT 0;
+	        ALTER TABLE accounts ADD COLUMN wedge_probe INTEGER NOT NULL DEFAULT 0;`
+	if err := s.applyMigration(len(migrations)+1, bad); err == nil {
+		t.Fatal("applyMigration accepted a step whose second statement is invalid")
+	}
+
+	var uv int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations) {
+		t.Fatalf("user_version = %d after a failed step, want %d (bumped despite the failure)", uv, len(migrations))
+	}
+	// The column from the failed step's first statement must be gone, so a retry of
+	// the same step starts from the pre-step shape.
+	if _, err := s.db.Exec(`SELECT wedge_probe FROM accounts`); err == nil {
+		t.Fatal("the failed step's first statement survived; a retry would hit duplicate column name")
+	}
+	if err := s.migrate(); err != nil {
+		t.Fatalf("re-migrate after a failed step: %v", err)
+	}
+}
+
+// A data dir a newer aqt-server has already migrated is refused, not served against
+// a schema this build does not understand.
+func TestMigrateRefusesNewerDataDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)+3)); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	_, err = OpenStore(dir)
+	if err == nil {
+		t.Fatal("OpenStore accepted a data dir migrated by a newer build")
+	}
+	if !strings.Contains(err.Error(), "newer aqt-server") {
+		t.Fatalf("error does not name the cause: %v", err)
+	}
+}
+
 // Repeated updates must leave exactly one blob file on disk (superseded
 // nonce-addressed blobs reclaimed) and the live blob must decrypt to the latest.
 func TestUpdatesReclaimSupersededBlobs(t *testing.T) {

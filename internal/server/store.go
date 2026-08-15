@@ -244,10 +244,14 @@ func (s *Store) Close() error {
 }
 
 // migrations are the forward-only schema steps, applied in order and tracked by
-// PRAGMA user_version. Append new steps; never edit or reorder a shipped one. Every
-// statement is IF NOT EXISTS, so re-running step 1 over a data dir created before
-// this scaffold (user_version still 0) is a harmless no-op that then lets the later
-// steps apply in place — no wipe-and-resync for additive changes.
+// PRAGMA user_version. Append new steps; never edit or reorder a shipped one.
+//
+// Step 1 creates every table with IF NOT EXISTS, so re-running it over a data dir
+// created before this scaffold (user_version still 0) is a harmless no-op that then
+// lets the later steps apply in place — no wipe-and-resync for additive changes.
+// Later steps are mostly ALTER TABLE ADD COLUMN, which is *not* idempotent; migrate
+// applies each step and its user_version bump in one transaction so a step never
+// half-lands and wedges the next start with `duplicate column name`.
 var migrations = []string{
 	// 1: v1 baseline.
 	`
@@ -494,6 +498,16 @@ func (s *Store) migrate() error {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&applied); err != nil {
 		return err
 	}
+	// A data dir a newer build already migrated must fail closed. Serving it would
+	// silently run today's queries against tomorrow's schema — writes skipping columns
+	// a newer release depends on, defaults applied where the newer server would have
+	// written a real value — and the damage only shows up after the operator rolls
+	// forward again. Downgrading is not supported; say so instead of limping.
+	if applied > len(migrations) {
+		return fmt.Errorf("server data dir was migrated by a newer aqt-server "+
+			"(schema version %d, this build understands %d); upgrade aqt-server, or restore "+
+			"the data dir from a backup taken before the upgrade", applied, len(migrations))
+	}
 	// A legacy layout must fail loud before any step touches it: migration 8's
 	// backfill reads resource_chunks.owner_handle, which the pre-pack layouts lack,
 	// so applying it there would surface as an opaque SQL error instead of
@@ -507,22 +521,43 @@ func (s *Store) migrate() error {
 		}
 	}
 	for i := applied; i < len(migrations); i++ {
-		if _, err := s.db.Exec(migrations[i]); err != nil {
-			return fmt.Errorf("apply migration %d: %w", i+1, err)
-		}
-		// PRAGMA takes no bound parameters; i+1 is a controlled integer, not user input.
-		if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, i+1)); err != nil {
+		if err := s.applyMigration(i+1, migrations[i]); err != nil {
 			return err
 		}
 	}
 	return s.checkSchema()
 }
 
-// checkSchema guards against a data dir created by an older build. CREATE TABLE IF
-// NOT EXISTS silently no-ops over a pre-existing table, so an old layout would
-// otherwise limp along with a wrong FK and opaque INSERT failures. There is no
-// versioned migration yet (this feature is pre-release), so fail loudly with a
-// recoverable instruction instead. Two cases:
+// applyMigration runs one step's statements and its user_version bump as a single
+// transaction. Most steps are multi-statement ALTER TABLE ADD COLUMN blocks, which
+// are not idempotent, so a crash between the DDL and the bump would leave the columns
+// added and the version behind — and every later start would replay the step and die
+// with `duplicate column name`, with no recovery short of deleting the data dir,
+// which on a zero-knowledge server is every account's only copy of its ciphertext.
+// SQLite journals user_version with the rest of the database, so setting it inside
+// the same transaction makes the pair atomic: the step lands whole or not at all.
+func (s *Store) applyMigration(version int, stmts string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(stmts); err != nil {
+		return fmt.Errorf("apply migration %d: %w", version, err)
+	}
+	// PRAGMA takes no bound parameters; version is a controlled integer, not user input.
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, version)); err != nil {
+		return fmt.Errorf("apply migration %d: %w", version, err)
+	}
+	return tx.Commit()
+}
+
+// checkSchema guards against the two pre-migration layouts, which predate
+// user_version and so look like a version-0 dir the steps could simply apply to.
+// CREATE TABLE IF NOT EXISTS silently no-ops over a pre-existing table, so such a dir
+// would otherwise limp along with a wrong FK and opaque INSERT failures. Neither
+// layout has a migration path, so fail loudly with a recoverable instruction. Two
+// cases:
 //
 //   - A legacy `chunks` table means the pre-pack object store (one row + one file
 //     per chunk). The new resource_chunks FK targets `objects`, which that data dir

@@ -25,7 +25,16 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "admin" {
 		os.Exit(runAdmin(os.Args[1:]))
 	}
+	os.Exit(run())
+}
 
+// run starts the server and returns the process exit code. Every failure to serve
+// returns non-zero: a supervisor (the systemd unit ships Restart=on-failure) must be
+// able to tell a port conflict or a lost CAP_NET_BIND_SERVICE from a clean shutdown,
+// and an exit code of 0 makes it treat a server that never came up as an intentional
+// stop and never restart it. Returning rather than calling log.Fatal also lets the
+// deferred store.Close run, so the SQLite WAL is checkpointed on the way out.
+func run() int {
 	dataDir := envOr("AQT_DATA_DIR", "./aqt-data")
 	addr := envOr("AQT_ADDR", "127.0.0.1:8080")
 
@@ -35,13 +44,15 @@ func main() {
 
 	store, err := server.OpenStore(dataDir)
 	if err != nil {
-		log.Fatalf("open store: %v", err)
+		log.Printf("open store: %v", err)
+		return 1
 	}
 	defer store.Close()
 
 	cfg, err := loadServerConfig()
 	if err != nil {
-		log.Fatalf("server config: %v", err)
+		log.Printf("server config: %v", err)
+		return 1
 	}
 	api := server.NewWithConfig(store, cfg)
 	workerStop := make(chan struct{})
@@ -53,11 +64,13 @@ func main() {
 	// never pruned.
 	interval, err := envDurationValue("AQT_SNAPSHOT_INTERVAL", "24h", true)
 	if err != nil {
-		log.Fatalf("%v", err)
+		log.Printf("%v", err)
+		return 1
 	}
 	keep, err := strconv.Atoi(envOr("AQT_SNAPSHOT_KEEP", "30"))
 	if err != nil || keep < 0 {
-		log.Fatalf("invalid AQT_SNAPSHOT_KEEP: %v", envOr("AQT_SNAPSHOT_KEEP", "30"))
+		log.Printf("invalid AQT_SNAPSHOT_KEEP: %v", envOr("AQT_SNAPSHOT_KEEP", "30"))
+		return 1
 	}
 	if interval > 0 {
 		log.Printf("scheduled snapshots every %s (keeping last %d per resource; 0 = all)", interval, keep)
@@ -69,7 +82,8 @@ func main() {
 	// timer covers that. AQT_GC_INTERVAL=0 disables it. Default 6h.
 	gcInterval, err := envDurationValue("AQT_GC_INTERVAL", "6h", true)
 	if err != nil {
-		log.Fatalf("%v", err)
+		log.Printf("%v", err)
+		return 1
 	}
 	if gcInterval > 0 {
 		log.Printf("scheduled gc every %s", gcInterval)
@@ -85,7 +99,8 @@ func main() {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", api.MetricsHandler())
 		if err := validateListenAddress(maddr, true, true); err != nil {
-			log.Fatalf("metrics address: %v", err)
+			log.Printf("metrics address: %v", err)
+			return 1
 		}
 		metricsServer = &http.Server{
 			Addr:              maddr,
@@ -103,20 +118,24 @@ func main() {
 
 	tlsSet, err := loadTLSSettings()
 	if err != nil {
-		log.Fatalf("tls config: %v", err)
+		log.Printf("tls config: %v", err)
+		return 1
 	}
 	tlsCfg, err := tlsSet.tlsConfig(dataDir)
 	if err != nil {
-		log.Fatalf("tls config: %v", err)
+		log.Printf("tls config: %v", err)
+		return 1
 	}
 	allowInsecure := os.Getenv("AQT_ALLOW_INSECURE_HTTP") == "1"
 	if err := validateListenAddress(addr, tlsCfg != nil, allowInsecure); err != nil {
-		log.Fatalf("listen address: %v", err)
+		log.Printf("listen address: %v", err)
+		return 1
 	}
 
 	grace, err := envDurationValue("AQT_SHUTDOWN_GRACE", shutdownGrace.String(), false)
 	if err != nil {
-		log.Fatalf("%v", err)
+		log.Printf("%v", err)
+		return 1
 	}
 
 	// No ReadTimeout/WriteTimeout: they span the full body transfer, capping a
@@ -159,11 +178,17 @@ func main() {
 	cancel()
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		log.Printf("server exited: %v", serveErr)
-		return
+		return 1
 	}
+	// A drain that did not finish inside AQT_SHUTDOWN_GRACE means background work was
+	// cut off mid-flight, so it is a failed exit too. systemd tracks stop-was-requested
+	// separately from the exit code, so this does not resurrect a `systemctl stop`; it
+	// only makes the unit report the truth.
 	if shutdownErr != nil {
 		log.Printf("shutdown: %v", shutdownErr)
+		return 1
 	}
+	return 0
 }
 
 // loadServerConfig builds the hardening config from env vars. Every knob has a safe

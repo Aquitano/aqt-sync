@@ -197,6 +197,12 @@ with `ReadOnlyPaths=` in a drop-in, or copy them under the state directory.
 On stop/restart, systemd sends `SIGTERM`; the server drains in-flight requests
 (up to `AQT_SHUTDOWN_GRACE`) and closes the store cleanly before exiting.
 
+Any failure to serve — a port already in use, a missing `CAP_NET_BIND_SERVICE`, a
+bad TLS path, an unreadable data dir — exits non-zero, so `Restart=on-failure` sees
+it and retries. A drain that does not finish inside `AQT_SHUTDOWN_GRACE` exits
+non-zero too; systemd tracks a requested stop separately from the exit code, so that
+reports the truth without resurrecting a `systemctl stop`.
+
 ## Docker
 
 The repository `Dockerfile` builds a static binary into a distroless image:
@@ -430,6 +436,11 @@ via `aqt usage` (`GET /v1/account/usage`).
   and does not touch a server install. The graceful shutdown marks readiness false,
   stops new background work, and drains HTTP, metrics, snapshots, and GC, so a
   restart does not sever an upload mid-write. Storage formats are versioned; a newer
-  server reads older data.
+  server reads older data, migrating the data dir forward on the first start. Each
+  migration step commits with its version bump in one transaction, so a crash, an OOM
+  kill, or a full disk mid-upgrade leaves the dir on the old version and the next
+  start simply retries. Downgrades are not supported: an older binary refuses a data
+  dir a newer one has migrated rather than serving it against a schema it does not
+  know. Take a backup before an upgrade if you need the option to roll back.
 - **Scheduled jobs.** Snapshots and GC run on the server timers above; there is no
   external cron to configure. Set the intervals to `0` to disable either.
