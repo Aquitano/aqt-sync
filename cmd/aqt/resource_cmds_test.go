@@ -277,3 +277,66 @@ func TestFriendlyNameMustBeUnique(t *testing.T) {
 		t.Fatalf("duplicate name err = %v, want ambiguity", err)
 	}
 }
+
+// The NAME column `aqt ls` prints is an argument too: pull, cat, clone, and the
+// folder form of ls resolve it, so a script never has to look an id up first.
+func TestPullCatCloneLsResolveNames(t *testing.T) {
+	h := newE2E(t)
+
+	const body = "API_KEY=xyz"
+	path := filepath.Join(t.TempDir(), "secret.env")
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := runPush(path, pushOptions{noClip: true, quiet: true}); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+	out := captureStdout(t, func() {
+		if err := runPull("secret.env", "", "", true, false); err != nil {
+			t.Fatalf("cat by name: %v", err)
+		}
+	})
+	if out != body {
+		t.Errorf("cat by name = %q, want %q", out, body)
+	}
+
+	// A tracked folder is named after its directory, so `vault` addresses it.
+	dir := filepath.Join(t.TempDir(), "vault")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.init(dir)
+	writeTree(t, dir, "notes.md", "hello")
+	h.sync(dir)
+
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, ok := identity.LoadSession(prof.Name)
+	if !ok {
+		t.Fatal("expected cached master key")
+	}
+	rows, err := collectFolderRows(cl, mk, "vault")
+	if err != nil {
+		t.Fatalf("ls by name: %v", err)
+	}
+	if len(rows) != 2 { // notes.md plus the starter .aqtignore
+		t.Errorf("ls by name rows = %+v, want notes.md and .aqtignore", rows)
+	}
+
+	dest := filepath.Join(t.TempDir(), "copy")
+	if err := runClone("vault", dest, false, ""); err != nil {
+		t.Fatalf("clone by name: %v", err)
+	}
+	if got := readTree(t, dest, "notes.md"); got != "hello" {
+		t.Errorf("cloned notes.md = %q, want hello", got)
+	}
+
+	// A name that matches nothing names the argument forms it accepts, instead of
+	// implying the resource exists and belongs to someone else.
+	err = runPull("no-such-resource", "", "", true, false)
+	if err == nil || !strings.Contains(err.Error(), "unique name") {
+		t.Errorf("pull of an unknown name err = %v, want the accepted-forms message", err)
+	}
+}

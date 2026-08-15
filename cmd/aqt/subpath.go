@@ -251,10 +251,17 @@ type folderLsRow struct {
 // names a file or symlink yields that single entry.
 func collectFolderRows(cl *client.Client, mk crypto.MasterKey, ref string) ([]folderLsRow, error) {
 	baseRef, sub := splitRefPath(ref)
-	id, _, _ := parseRef(baseRef)
+	// The listing this reads back is keyed by name, so the argument accepts one too
+	// (plus an id, a tracked path, or an aqt:// ref); the caller's master key is
+	// already unlocked, so the lookup costs one listing and no prompt.
+	id, err := resolveOwnedResourceID(cl, mk, baseRef)
+	if err != nil {
+		return nil, err
+	}
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
-		return nil, fmt.Errorf("folder %s not found (or not a private folder you own)", id)
+		return nil, fmt.Errorf("folder %s not found: pass a unique name, an id, or an aqt:// ref "+
+			"(it may also be a folder you do not own)", id)
 	}
 	if err != nil {
 		return nil, err

@@ -25,7 +25,7 @@ func pullCmd() *cobra.Command {
 		force bool
 	)
 	cmd := &cobra.Command{
-		Use:   "pull <url|id|aqt://ref>[/path]",
+		Use:   "pull <name-or-id|tracked-path|url>[/path]",
 		Short: "Fetch and decrypt a resource, or a single entry inside a folder",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -49,7 +49,7 @@ func pullCmd() *cobra.Command {
 func catCmd() *cobra.Command {
 	var pw passwordFlags
 	cmd := &cobra.Command{
-		Use:   "cat <url|id|aqt://ref>[/path]",
+		Use:   "cat <name-or-id|tracked-path|url>[/path]",
 		Short: "Decrypt a resource (or one file inside a folder) to stdout",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -77,10 +77,28 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	if err != nil {
 		return err
 	}
+	// An owned ref may be a name or a tracked path, which only the account can
+	// resolve; a link (fragment or foreign host) is opaque and stays untouched.
+	// Unlock the master key at most once per invocation: resolving by name and
+	// unwrapping the owner key below both need it, and a second unlockMaster would
+	// prompt for the passphrase again whenever session caching is unavailable.
+	var master *crypto.MasterKey
+	if origin == "" && fragment == "" && prof != nil {
+		mk, err := unlockMaster(prof)
+		if err != nil {
+			return err
+		}
+		defer mk.Wipe()
+		master = &mk
+		if id, err = resolveOwnedResourceID(cl, mk, baseRef); err != nil {
+			return err
+		}
+	}
 
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("resource %s not found (or private and you're not its owner)", id)
+		return fmt.Errorf("resource %s not found: pass a unique name, an id, or an aqt:// ref "+
+			"(it may also be private and not yours)", id)
 	}
 	if errors.Is(err, client.ErrGone) {
 		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
@@ -89,7 +107,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 
-	ck, err := contentKey(res, fragment, password, prof)
+	ck, err := contentKeyWithMaster(res, fragment, password, prof, master)
 	if err != nil {
 		return err
 	}

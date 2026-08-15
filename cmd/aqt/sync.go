@@ -124,7 +124,7 @@ func cloneCmd() *cobra.Command {
 		pw    passwordFlags
 	)
 	cmd := &cobra.Command{
-		Use:   "clone <id|aqt://ref|share-url> [dir]",
+		Use:   "clone <name-or-id|tracked-path|share-url> [dir]",
 		Short: "Materialize a tracked folder (or a shared folder link) on this machine",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1387,9 +1387,24 @@ func runClone(ref, dir string, adopt bool, password string) error {
 	if err != nil {
 		return err
 	}
+	// The master key unwraps the folder key below and resolves a name or tracked path
+	// to its id here, so it is unlocked once up front: a second unlockMaster would ask
+	// for the passphrase again whenever session caching is unavailable. A ref carrying
+	// its own host is a link, not a name, and is left as it is.
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		return err
+	}
+	defer mk.Wipe()
+	if origin == "" {
+		if id, err = resolveOwnedResourceID(cl, mk, ref); err != nil {
+			return err
+		}
+	}
 	res, err := cl.GetResource(id)
 	if errors.Is(err, client.ErrNotFound) {
-		return fmt.Errorf("folder %s not found (or not a private folder you own)", id)
+		return fmt.Errorf("folder %s not found: pass a unique name, an id, or an aqt:// ref "+
+			"(it may also be a folder you do not own)", id)
 	}
 	if err != nil {
 		return err
@@ -1401,7 +1416,7 @@ func runClone(ref, dir string, adopt bool, password string) error {
 			if adopt {
 				return errors.New("--adopt binds a directory to a folder you own; a granted folder is read-only, so there is nothing to sync with")
 			}
-			ck, err := contentKey(res, "", "", prof)
+			ck, err := contentKeyWithMaster(res, "", "", prof, &mk)
 			if err != nil {
 				return err
 			}
@@ -1410,11 +1425,6 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		}
 		return errors.New("not a private folder you own (no owner key)")
 	}
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		return err
-	}
-	defer mk.Wipe()
 	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
 	if err != nil {
 		return fmt.Errorf("unwrap folder key: %w", err)

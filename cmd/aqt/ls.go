@@ -44,13 +44,13 @@ type lsOptions struct {
 func lsCmd() *cobra.Command {
 	opts := lsOptions{sortBy: "name"}
 	cmd := &cobra.Command{
-		Use:   "ls [folder-ref[/path]]",
+		Use:   "ls [folder-name-or-ref[/path]]",
 		Short: "List resources, with filtering and sorting, or entries inside a folder",
 		Long: "Without arguments, lists every resource with its decrypted name and size.\n" +
 			"Use --filter, --kind, or --visibility to narrow the list; --sort accepts\n" +
 			"name, size, or date. Size/date sorts are newest/largest first by default.\n" +
-			"With a folder ref (aqt://<id>, optionally aqt://<id>/<path>), lists entries\n" +
-			"at that path without downloading the tree.",
+			"With a folder's name, id, or tracked path, lists its entries; a path inside\n" +
+			"it (aqt://<id>/<path>) lists that subtree, without downloading the tree.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 && opts != (lsOptions{sortBy: "name"}) {
