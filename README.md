@@ -220,12 +220,17 @@ contract that diff checks against, including what is deliberately not carried ac
 - `go test ./cmd/aqt -run TestFullBackupRestoreDrill` is the in-process folder-restore
   twin, run on every CI build.
 
+## Contributing
+
+Build, test, and commit conventions are in **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+
 ## License
 
 Copyright (C) 2026 Thomas Breindl.
 
 AGPL-3.0-or-later across the whole repository: the `aqt` client, `aqt-server`, and the
-landing site. Full text in [LICENSE](LICENSE).
+landing site, with every first-party source file carrying an `SPDX-License-Identifier`
+header. Full text in [LICENSE](LICENSE).
 
 Self-hosting a **modified** server entitles its users to your source. Set
 `AQT_SOURCE_URL=https://…` to replace the upstream link the share page offers. Unmodified
