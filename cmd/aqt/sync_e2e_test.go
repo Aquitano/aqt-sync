@@ -928,6 +928,26 @@ func (h *e2eHarness) folderID(dir string) string {
 	return st.ID
 }
 
+// resourceExists reports whether the account still owns a resource, for tests that
+// assert a command did (or did not) delete the server side.
+func (h *e2eHarness) resourceExists(id string) bool {
+	h.t.Helper()
+	cl, _, err := authedClient()
+	if err != nil {
+		h.t.Fatalf("authed client: %v", err)
+	}
+	items, err := cl.ListResources()
+	if err != nil {
+		h.t.Fatalf("list resources: %v", err)
+	}
+	for _, item := range items {
+		if item.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
 // --- tree helpers ---
 
 func writeTree(t *testing.T, root, rel, content string) {

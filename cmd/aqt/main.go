@@ -293,7 +293,7 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (sync/clone, on a terminal)")
 
 	root.AddCommand(signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), accountCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
-	root.AddCommand(initCmd(), statusCmd(), diffCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
+	root.AddCommand(initCmd(), untrackCmd(), statusCmd(), diffCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
 	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
 	root.AddCommand(sharesCmd(), contactsCmd())
 	root.AddCommand(repoCmd(), gitCmd())

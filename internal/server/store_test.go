@@ -711,6 +711,155 @@ func TestMigrateIsIdempotentAndIndexesDeviceToken(t *testing.T) {
 	}
 }
 
+// seedSchemaAt builds a data dir holding exactly the first k migration steps — what
+// the release that shipped step k would have left behind — without going through
+// OpenStore, which would run the whole chain.
+func seedSchemaAt(t *testing.T, dir string, k int) {
+	t.Helper()
+	for _, d := range []string{"blobs", "packs"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	db, err := sql.Open("sqlite", filepath.Join(dir, "aqt.db")+"?_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for i := 0; i < k; i++ {
+		if _, err := db.Exec(migrations[i]); err != nil {
+			t.Fatalf("seed migration %d: %v", i+1, err)
+		}
+	}
+	if _, err := db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, k)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A data dir written by any older release migrates forward to the current schema.
+// The idempotency test above only re-opens an already-current dir, so it never
+// exercises a step running against the shape that preceded it. This covers schema
+// shape only: the seeded dirs hold no rows, so a step's backfill UPDATE runs over an
+// empty table.
+func TestMigrateForwardFromEveryVersion(t *testing.T) {
+	t.Parallel()
+	for k := 0; k < len(migrations); k++ {
+		t.Run(fmt.Sprintf("from_v%d", k), func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			seedSchemaAt(t, dir, k)
+			s, err := OpenStore(dir)
+			if err != nil {
+				t.Fatalf("migrate forward from user_version %d: %v", k, err)
+			}
+			defer s.Close()
+			var uv int
+			if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+				t.Fatal(err)
+			}
+			if uv != len(migrations) {
+				t.Fatalf("user_version = %d after migrating from %d, want %d", uv, k, len(migrations))
+			}
+		})
+	}
+}
+
+// A step that fails partway must leave nothing behind: not its already-executed
+// statements, and not a user_version bump. Otherwise the next start replays the step
+// over its own half-applied output and fails forever with `duplicate column name`.
+func TestFailedMigrationStepRollsBackWhole(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	// Shaped like a real step: an ALTER TABLE ADD COLUMN that succeeds, then a
+	// statement that does not — the power-loss-in-the-middle case, only deterministic.
+	step := "ALTER TABLE accounts ADD COLUMN wedge_probe INTEGER NOT NULL DEFAULT 0;"
+	if err := s.applyMigration(len(migrations)+1, step+"\nALTER TABLE no_such_table ADD COLUMN x INTEGER;"); err == nil {
+		t.Fatal("applyMigration accepted a step whose second statement is invalid")
+	}
+
+	var uv int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations) {
+		t.Fatalf("user_version = %d after a failed step, want %d (bumped despite the failure)", uv, len(migrations))
+	}
+	if _, err := s.db.Exec(`SELECT wedge_probe FROM accounts`); err == nil {
+		t.Fatal("the failed step's first statement survived the rollback")
+	}
+
+	// The point of the rollback: with the transient cause gone, the step applies. If
+	// its first statement had survived, this is where the data dir wedges forever with
+	// `duplicate column name`.
+	if err := s.applyMigration(len(migrations)+1, step); err != nil {
+		t.Fatalf("retry of a rolled-back step: %v", err)
+	}
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations)+1 {
+		t.Fatalf("user_version = %d after the retry, want %d", uv, len(migrations)+1)
+	}
+	if _, err := s.db.Exec(`SELECT wedge_probe FROM accounts`); err != nil {
+		t.Fatalf("retry did not apply the step: %v", err)
+	}
+}
+
+// The crash-window guarantee rests on the driver journaling PRAGMA user_version with
+// the transaction: a bump inside a rolled-back tx must be undone, or an interrupted
+// migration leaves the version ahead of the schema. The rollback test above fails
+// before its bump runs, so this pins the driver behavior itself against upgrades.
+func TestUserVersionRollsBackWithTransaction(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)+7)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var uv int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations) {
+		t.Fatalf("user_version = %d after rollback, want %d: the driver no longer journals the pragma", uv, len(migrations))
+	}
+}
+
+// A data dir a newer aqt-server has already migrated is refused, not served against
+// a schema this build does not understand.
+func TestMigrateRefusesNewerDataDir(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)+3)); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	_, err = OpenStore(dir)
+	if err == nil {
+		t.Fatal("OpenStore accepted a data dir migrated by a newer build")
+	}
+	if !strings.Contains(err.Error(), "newer aqt-server") {
+		t.Fatalf("error does not name the cause: %v", err)
+	}
+}
+
 // Repeated updates must leave exactly one blob file on disk (superseded
 // nonce-addressed blobs reclaimed) and the live blob must decrypt to the latest.
 func TestUpdatesReclaimSupersededBlobs(t *testing.T) {

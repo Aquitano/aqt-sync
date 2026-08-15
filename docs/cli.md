@@ -128,6 +128,27 @@ and removed again on exit; the working tree is still never written.
 The same completeness fields appear in the human output as an explicit sentence, so
 an incomplete comparison is never mistaken for a clean one.
 
+## Getting a folder unstuck
+
+`aqt untrack [dir]` removes the folder's `.aqt` control directory after a
+confirmation. The working tree is never touched, and the server-side resource is kept
+unless `--delete-remote` is passed (`--keep-remote` states the default explicitly).
+Use it when the remote resource was deleted — by `aqt rm` here, from another device,
+or by an operator — which leaves every sync failing with "not found on the server"
+while `aqt init` refuses the directory for still having `.aqt`. It is also the
+step before re-tracking a directory against a different resource, account, or server.
+`--delete-remote` deletes the resource first, so a failure there leaves the folder
+tracked and the command retryable rather than orphaning a resource. A running watch
+agent is refused (`aqt agent stop` first), since it would keep syncing a folder whose
+control state had just been removed.
+
+An interrupted pack-and-seal pull leaves `.aqt/pull-in-progress` behind. While it is
+there the working tree holds part of the new version and part of the old, so `sync`
+finishes the pull instead of reconciling: `--force` cannot turn that into a push,
+`--push-only` refuses and says why, and `status` prefixes its output with a warning
+(`--json` adds an `interruptedPull` object) so the half-applied version is not
+mistaken for local edits. Re-running `aqt sync` is the whole recovery.
+
 ## Encrypted Git remotes
 
 `aqt repo create|ls|info|gc|restore|rm` manages private `gitremote` resources. `create`

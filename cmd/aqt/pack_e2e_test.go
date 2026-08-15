@@ -2,9 +2,12 @@ package main
 
 import (
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -460,5 +463,194 @@ func assertDir(t *testing.T, root, rel string) {
 	}
 	if !fi.IsDir() {
 		t.Fatalf("%s is not a directory", rel)
+	}
+}
+
+// An interrupted pack-and-seal pull leaves a tree that is part remote version and
+// part stale, which decidePack reads as "changed on both sides". Before the pull
+// marker, the printed hint pointed at --force, which maps to a push: the torn tree
+// was tarred and committed as the new authoritative version, destroying the intact
+// remote folder. A folder with a marker must pull instead, whatever --force says.
+func TestInterruptedPackPullResumesInsteadOfPushing(t *testing.T) {
+	h := newE2E(t)
+
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "v1")
+	writeTree(t, origin, "b.txt", "v1")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "a.txt", "v2")
+	writeTree(t, origin, "b.txt", "v2")
+	writeTree(t, origin, "c.txt", "v2")
+	h.sync(origin)
+
+	// The shape an interrupted pull leaves: a.txt already carries the new version,
+	// b.txt and c.txt do not, and the marker names the version being landed.
+	writeTree(t, replica, "a.txt", "v2")
+	if err := beginPullMarker(replica, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	// A push of a torn tree cannot be right, so --push-only says so rather than
+	// shipping it.
+	err := runSync(replica, syncOptions{pushOnly: true, force: true})
+	if err == nil {
+		t.Fatal("--push-only --force pushed a torn tree")
+	}
+	if !strings.Contains(err.Error(), "interrupted") {
+		t.Fatalf("error does not name the interrupted pull: %v", err)
+	}
+
+	// --force would otherwise resolve local-wins by pushing. It must finish the pull.
+	h.syncOpts(replica, syncOptions{force: true})
+	assertTreeEqual(t, origin, replica)
+	if got := readTree(t, replica, "c.txt"); got != "v2" {
+		t.Fatalf("resumed pull did not land the remote tree: c.txt = %q", got)
+	}
+	if _, err := os.Stat(controlPath(replica, pullMarkerFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker survived a completed pull: %v", err)
+	}
+
+	// The remote is untouched by the recovery: origin still holds its own tree and
+	// has nothing to pull back.
+	h.sync(origin)
+	if got := readTree(t, origin, "b.txt"); got != "v2" {
+		t.Fatalf("remote folder was overwritten by the torn tree: b.txt = %q", got)
+	}
+	assertTreeEqual(t, origin, replica)
+}
+
+// A resumed pull guards overwrites against the last-synced base, not the fresh scan:
+// the scan holds the half-applied version and any edit made since the interruption,
+// and cannot tell them apart. An edit or a new file created in the torn tree must
+// survive the resume as a conflict/local add, while half-applied files are finished
+// without being flagged.
+func TestResumedPullKeepsEditsMadeAfterTheInterruption(t *testing.T) {
+	h := newE2E(t)
+
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "v1")
+	writeTree(t, origin, "b.txt", "v1")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "a.txt", "v2")
+	writeTree(t, origin, "b.txt", "v2")
+	writeTree(t, origin, "c.txt", "v2")
+	h.sync(origin)
+
+	// The interrupted pull landed a.txt; then, before re-running sync, the user
+	// edited b.txt and created new.txt in the torn tree.
+	writeTree(t, replica, "a.txt", "v2")
+	if err := beginPullMarker(replica, 2); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, replica, "b.txt", "mine")
+	writeTree(t, replica, "new.txt", "kept")
+
+	if err := runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("resume over a post-interruption edit: want errConflictsRemain, got %v", err)
+	}
+	if got := readTree(t, replica, "b.txt"); got != "mine" {
+		t.Fatalf("resumed pull overwrote a post-interruption edit: b.txt = %q", got)
+	}
+	if got := readTree(t, replica, "new.txt"); got != "kept" {
+		t.Fatalf("resumed pull destroyed a post-interruption creation: new.txt = %q", got)
+	}
+	if got := readTree(t, replica, "c.txt"); got != "v2" {
+		t.Fatalf("resume did not finish the pull: c.txt = %q", got)
+	}
+	if _, err := os.Stat(controlPath(replica, pullMarkerFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker survived a completed resume: %v", err)
+	}
+	// The base records the remote entries, so the kept edit and the new file are
+	// ordinary pending local changes for the next sync.
+	h.syncOpts(replica, syncOptions{force: true})
+	h.sync(origin)
+	if got := readTree(t, origin, "b.txt"); got != "mine" {
+		t.Fatalf("kept edit did not resolve local-wins on the next sync: b.txt = %q", got)
+	}
+}
+
+// The marker is written before the extract and cleared only once the pull commits,
+// so a pull that fails partway is recognizable on the next run. A pull that succeeds
+// must leave nothing behind, or the folder would pull forever.
+func TestPackPullMarkerTracksTheTransfer(t *testing.T) {
+	var failPacks atomic.Bool
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if failPacks.Load() && r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v1/packs/") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		pass(w, r)
+	})
+
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "v1")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	if _, err := os.Stat(controlPath(replica, pullMarkerFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone left a pull marker: %v", err)
+	}
+
+	writeTree(t, origin, "a.txt", "v2")
+	h.sync(origin)
+
+	failPacks.Store(true)
+	if err := runSync(replica, syncOptions{}); err == nil {
+		t.Fatal("pull succeeded while every pack fetch was failing")
+	}
+	if _, err := os.Stat(controlPath(replica, pullMarkerFile)); err != nil {
+		t.Fatalf("a pull that failed mid-transfer left no marker: %v", err)
+	}
+
+	failPacks.Store(false)
+	h.sync(replica)
+	if got := readTree(t, replica, "a.txt"); got != "v2" {
+		t.Fatalf("retry did not land the remote tree: %q", got)
+	}
+	if _, err := os.Stat(controlPath(replica, pullMarkerFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker survived a completed pull: %v", err)
+	}
+}
+
+// An in-place restore replaces the whole tree, so a tree an earlier interrupted pull
+// had torn is whole again — and it is the snapshot's. The marker must not survive it,
+// or the sync that publishes the rollback pulls the remote back over it instead.
+func TestInPlaceRestoreClearsAnInterruptedPull(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	writePackConfig(t, dir)
+	h.init(dir)
+	writeTree(t, dir, "a.txt", "v1")
+	h.sync(dir)
+
+	runCmd(t, checkpointCmd(), "before", dir)
+
+	writeTree(t, dir, "a.txt", "v2")
+	h.sync(dir)
+	if err := beginPullMarker(dir, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	runCmd(t, restoreCmd(), "before", dir, "--in-place", "-y")
+	if got := readTree(t, dir, "a.txt"); got != "v1" {
+		t.Fatalf("restore was undone by a resumed pull: a.txt = %q", got)
+	}
+	if _, err := os.Stat(controlPath(dir, pullMarkerFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker survived an in-place restore: %v", err)
 	}
 }

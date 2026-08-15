@@ -91,7 +91,13 @@ type remoteSync struct {
 func (s *syncSession) openRemote(opts syncOptions, format syncFormat) (remoteSync, error) {
 	res, err := s.cl.GetResource(s.st.ID)
 	if errors.Is(err, client.ErrNotFound) {
-		return remoteSync{}, fmt.Errorf("folder resource %s not found on the server", s.st.ID)
+		// Naming the recovery matters: this folder can never sync again, and nothing
+		// else in the CLI reaches the state that fixes it (`aqt init` refuses a
+		// directory that already has .aqt).
+		return remoteSync{}, fmt.Errorf("folder resource %s not found on the server "+
+			"(deleted here with `aqt rm`, from another device, or by an operator); "+
+			"restore it from a snapshot with `aqt restore`, or stop tracking this folder "+
+			"with `aqt untrack` — your local files are left alone either way", s.st.ID)
 	}
 	if err != nil {
 		return remoteSync{}, err
