@@ -71,6 +71,13 @@ func Plan(local, base, remote Manifest) []Action {
 				actions = append(actions, Action{p, DeleteLocal})
 			}
 		default: // both changed
+			// Deleted on both sides is agreement, not conflict: there is exactly one
+			// possible outcome and both sides already reached it. Reporting it as a
+			// Conflict wedged every sync with exit 4 after a crash in the PUT->saveBase
+			// window, when the push had landed but the base still recorded the path.
+			if !lok && !rok {
+				break
+			}
 			// Mode is part of the comparison: hash-identical entries with divergent
 			// modes have not converged (entryDiffers counts a mode edit as a change,
 			// and PlanDirs compares its whole attribute set the same way).
@@ -131,7 +138,7 @@ func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 // directories keyed by path, where the only synced attribute is the mode (a
 // directory has no content). It lets empty directories and directory permission
 // changes propagate alongside files. A directory present in base but gone on both
-// sides is a Conflict, matching Plan's handling of a file deleted on both sides.
+// sides converged (like a file deleted on both sides) and needs no action.
 func PlanDirs(local, base, remote Manifest) []DirAction {
 	lp, bp, rp := local.dirsByPath(), base.dirsByPath(), remote.dirsByPath()
 	paths := map[string]struct{}{}
@@ -167,6 +174,9 @@ func PlanDirs(local, base, remote Manifest) []DirAction {
 				actions = append(actions, DirAction{p, DeleteLocal})
 			}
 		default:
+			if !lok && !rok {
+				break // deleted on both sides independently; converged (see Plan)
+			}
 			if lok && rok && l.Mode == r.Mode {
 				break
 			}
