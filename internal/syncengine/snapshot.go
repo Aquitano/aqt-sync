@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/aquitano/aqt-sync/internal/compress"
@@ -95,7 +96,9 @@ func (s *skipList) tolerate(rel, path string, err error) error {
 		return err
 	}
 	switch {
-	case errors.Is(err, fs.ErrNotExist):
+	// ENOTDIR is the directory flavor of vanished: a parent component stopped being
+	// a directory between the listing and this read (HashOnDisk treats it the same).
+	case errors.Is(err, fs.ErrNotExist), errors.Is(err, syscall.ENOTDIR):
 		return nil
 	case errors.Is(err, fs.ErrPermission):
 		s.paths = append(s.paths, SkippedPath{Path: rel, Err: pathErr.Err})

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -37,6 +38,7 @@ func TestTolerateClassifiesReadFailures(t *testing.T) {
 		recorded bool
 	}{
 		{"vanished mid-walk", &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}, false, false},
+		{"parent became a file", &fs.PathError{Op: "lstat", Path: path, Err: syscall.ENOTDIR}, false, false},
 		{"unreadable", &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}, false, true},
 		{"other filesystem error", &fs.PathError{Op: "read", Path: path, Err: errors.New("input/output error")}, true, false},
 		{"about another path", &fs.PathError{Op: "open", Path: "/tree/other", Err: fs.ErrNotExist}, true, false},

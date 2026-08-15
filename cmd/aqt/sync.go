@@ -1949,8 +1949,9 @@ func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
 
 // forgetLocations drops the resolved object index once a batch of files has landed,
 // so a download's metadata stays bounded by the batch rather than by the whole tree.
-// The span list and the LRU deliberately survive: they are O(packs), not O(chunks),
-// and keeping them lets the next batch reuse a span already fetched.
+// The span list and the LRU deliberately survive: spans coalesce contiguous needed
+// runs (16 bytes per run, one per chunk only in the sparsest pull) and the LRU is
+// O(packs), and keeping them lets the next batch reuse a span already fetched.
 func (s *packSource) forgetLocations() {
 	s.locs = map[string]api.ObjectLocation{}
 	s.objSpan = map[string]packSpan{}
