@@ -491,6 +491,41 @@ func RemoveDir(dir, relPath string) error {
 	return nil
 }
 
+// RenameCaseOnly moves dir/fromRel to dir/toRel, for paths that differ only by
+// case: on a case-folding filesystem both names resolve to one physical entry, so
+// the rename fixes its stored case in place instead of the caller deleting the
+// old name (which would destroy the survivor). A missing source is not an error —
+// on a genuinely case-sensitive filesystem (the test seam) an earlier ancestor
+// rename may already have moved it, so the source is retried under the target's
+// parent before giving up.
+func RenameCaseOnly(dir, fromRel, toRel string) error {
+	from, err := safeJoin(dir, fromRel)
+	if err != nil {
+		return err
+	}
+	to, err := safeJoin(dir, toRel)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Lstat(from); os.IsNotExist(statErr) {
+		alt := filepath.Join(filepath.Dir(to), filepath.Base(from))
+		if _, altErr := os.Lstat(alt); os.IsNotExist(altErr) {
+			return nil
+		}
+		from = alt
+	}
+	if from == to {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(to), 0o700); err != nil {
+		return err
+	}
+	if err := os.Rename(from, to); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // RemoveFile deletes dir/relPath, pruning now-empty parent directories up to (but
 // not including) the tracked root. A missing file is not an error.
 func RemoveFile(dir, relPath string) error {
