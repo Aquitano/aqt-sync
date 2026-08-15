@@ -1,6 +1,14 @@
 (function () {
   "use strict";
 
+  /* CLIENT_CAPABILITY is the sealed-format capability this page advertises in
+   * X-Aqt-Capability. It must track api.ClientCapability in internal/api/caps.go:
+   * these assets are served as static files with no build step that could inject
+   * the Go constant, so a bump there has to be repeated here or the browser starts
+   * claiming to be older than it is and takes a 426 it did not need. It is declared
+   * once, at the top, so the next bump finds it. */
+  var CLIENT_CAPABILITY = 4;
+
   /* Crypto boundary. libsodium supplies audited XChaCha20-Poly1305, hash-wasm
    * supplies Argon2id with the same lane count as Go's argon2.IDKey, and fzstd
    * supplies the zstd decoder for the one codec aqt seals chunks and directory
@@ -269,23 +277,136 @@
   // whole download budget on a manifest before any content is fetched.
   var maxChunkListBytes = 64 * 1024 * 1024;
 
+  /* ---------------- the 429 contract --------------------------------- */
+  /* This mirrors the client behavior specified in docs/protocol/api.md#rate-limiting,
+   * because a folder browse fires the same kind of bursty object requests a CLI pull
+   * does and trips the same bucket. Retry-After is authoritative, one cooldown is
+   * shared across every request this page makes, each waiter jitters above it so they
+   * do not all wake together, and the retrying is bounded so a server answering 429
+   * forever fails the page with a message instead of hanging it. */
+
+  var retryMinMs = 1000; // floor: always back off measurably, even on Retry-After: 0
+  var retryMaxMs = 30000; // cap on one advertised wait, so a hostile server cannot park the tab
+  var retryTotalMs = 60000; // cap on the summed waits of one request
+  var retryMaxAttempts = 3; // retries after the first 429, per request
+  var retryJitterMs = 750;
+
+  // cooldownUntil is the shared "do not send before" instant (epoch ms). Any 429
+  // publishes its deadline here and every other request observes it before sending.
+  var cooldownUntil = 0;
+
+  function clampDelay(ms) {
+    // Also catches NaN and an HTTP-date already in the past, both of which floor.
+    if (!(ms > retryMinMs)) return retryMinMs;
+    return ms > retryMaxMs ? retryMaxMs : ms;
+  }
+
+  // parseRetryAfter accepts both forms RFC 9110 defines: delay-seconds and an
+  // HTTP-date. Anything else — including a negative delay — returns null so the
+  // caller falls back to the body value rather than honoring a nonsense wait.
+  function parseRetryAfter(raw) {
+    if (!raw) return null;
+    var s = String(raw).trim();
+    if (/^\d+$/.test(s)) return clampDelay(Number(s) * 1000);
+    var when = Date.parse(s);
+    if (isNaN(when)) return null;
+    return clampDelay(when - Date.now());
+  }
+
+  // retryDelay reads the wait a 429 advertises. The header is authoritative whenever
+  // it parses; retryAfterSeconds in the body exists only as a fallback for an
+  // intermediary that strips unknown headers.
+  function retryDelay(res, bodyText) {
+    var header = parseRetryAfter(res.headers && res.headers.get("Retry-After"));
+    if (header !== null) return header;
+    try {
+      var body = JSON.parse(bodyText);
+      if (Number.isInteger(body.retryAfterSeconds) && body.retryAfterSeconds > 0) {
+        return clampDelay(body.retryAfterSeconds * 1000);
+      }
+    } catch (e) { /* not JSON, or carries no fallback */ }
+    return retryMinMs;
+  }
+
+  // awaitCooldown resolves once the shared deadline has passed, plus this waiter's
+  // own jitter. The deadline is re-read after each sleep: another request can extend
+  // it while this one is parked, and waking on the stale value would send straight
+  // into the burst the cooldown exists to prevent.
+  function awaitCooldown(jitter) {
+    var remaining = cooldownUntil - Date.now();
+    if (remaining <= 0) return Promise.resolve();
+    return new Promise(function (resolve) {
+      setTimeout(resolve, remaining + jitter);
+    }).then(function () { return awaitCooldown(jitter); });
+  }
+
+  // send runs one request under the shared cooldown and the documented budget, and
+  // resolves with the first response that is not a 429. Exhausting the budget throws
+  // "rate-limited" rather than returning the 429 to a caller that would report it as
+  // a bare status code.
+  function send(fire) {
+    var attempts = 0;
+    var spent = 0;
+    var jitter = Math.floor(Math.random() * (retryJitterMs + 1));
+
+    function attempt() {
+      return awaitCooldown(jitter).then(fire).then(function (res) {
+        if (res.status !== 429) return res;
+        if (attempts >= retryMaxAttempts) throw new Error("rate-limited");
+        return res.text().then(function (text) {
+          var wait = retryDelay(res, text);
+          if (spent + wait > retryTotalMs) throw new Error("rate-limited");
+          attempts++;
+          spent += wait;
+          // A later deadline always wins: an overlapping 429 advertising a shorter
+          // wait must not shorten a cooldown another request already established.
+          var deadline = Date.now() + wait;
+          if (deadline > cooldownUntil) cooldownUntil = deadline;
+          return attempt();
+        });
+      });
+    }
+    return attempt();
+  }
+
+  // upgradeRequired turns a 426 into an error carrying the minClient the server
+  // reported, so the page can name the capability instead of the status code.
+  function upgradeRequired(res) {
+    return res.text().then(function (text) {
+      var minClient = 0;
+      try {
+        var body = JSON.parse(text);
+        if (Number.isInteger(body.minClient)) minClient = body.minClient;
+      } catch (e) { /* the status is enough; minClient just stays unknown */ }
+      var err = new Error("upgrade-required");
+      err.minClient = minClient;
+      throw err;
+    });
+  }
+
   function fetchPreflight() {
-    return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/preflight", {
-      headers: { Accept: "application/json", "X-Aqt-Capability": "3" },
+    return send(function () {
+      return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/preflight", {
+        headers: { Accept: "application/json", "X-Aqt-Capability": String(CLIENT_CAPABILITY) },
+      });
     }).then(function (res) {
       if (res.status === 410) throw new Error("gone");
       if (res.status === 404) throw new Error("not-public");
+      if (res.status === 426) return upgradeRequired(res);
       if (!res.ok) throw new Error("The server answered " + res.status + ".");
       return res.json();
     });
   }
 
   function fetchResource() {
-    return fetchImpl("/v1/resources/" + encodeURIComponent(RES_ID), {
-      headers: { Accept: "application/json", "X-Aqt-Capability": "3" },
+    return send(function () {
+      return fetchImpl("/v1/resources/" + encodeURIComponent(RES_ID), {
+        headers: { Accept: "application/json", "X-Aqt-Capability": String(CLIENT_CAPABILITY) },
+      });
     }).then(function (res) {
       if (res.status === 410) throw new Error("gone");
       if (res.status === 404) throw new Error("not-public");
+      if (res.status === 426) return upgradeRequired(res);
       if (!res.ok) throw new Error("The server answered " + res.status + ".");
       return res.json();
     });
@@ -296,10 +417,12 @@
   // duplicate frames). These reads do not count against a link's --max-reads; only
   // the one resource fetch above does, so browsing a folder costs one read total.
   function fetchObjects(ids) {
-    return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/objects", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/vnd.aqt.object-frames; version=1" },
-      body: JSON.stringify({ ids: ids }),
+    return send(function () {
+      return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/objects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/vnd.aqt.object-frames; version=1" },
+        body: JSON.stringify({ ids: ids }),
+      });
     }).then(function (res) {
       if (res.status === 410) throw new Error("gone");
       if (res.status === 404) throw new Error("objects-unavailable");
@@ -467,9 +590,23 @@
   function noteEl(text) { var p = document.createElement("p"); p.className = "file-note"; p.textContent = text; return p; }
   function setFolderStatus(text) { $("folder-status").textContent = text; $("folder-status").hidden = !text; }
 
+  // upgradeText names the capability gap rather than the status code, so a reader
+  // who hits a 426 learns what would fix it. A server reporting a minClient at or
+  // below what this page declared is contradicting itself, so the next level up is
+  // reported instead of telling the reader to reach one they already have — the same
+  // rule the CLI applies in cmd/aqt/main.go.
+  function upgradeText(minClient) {
+    var need = minClient > CLIENT_CAPABILITY ? minClient : CLIENT_CAPABILITY + 1;
+    return "It is sealed for aqt capability " + need + " and this page reads up to " +
+      CLIENT_CAPABILITY + ", so the server hosting this link has to be upgraded before " +
+      "a browser can open it.";
+  }
+
   function browseErrorText(err) {
     var msg = String(err && err.message || err);
     if (msg === "gone") return "This link has expired or reached its read limit.";
+    if (msg === "rate-limited") return "The server is rate limiting this link. Wait a minute and try again.";
+    if (msg === "upgrade-required") return "This folder needs a newer aqt. " + upgradeText(err && err.minClient);
     if (msg === "objects-unavailable") return "The server is no longer serving this folder's contents.";
     if (msg === "object-corrupt") return "A folder node failed its integrity check. The link may be altered.";
     if (msg === "newer-format") return "This folder was written by a newer aqt. Use the CLI.";
@@ -683,6 +820,14 @@
       .then(keyPromise)
       .then(function (derivedKey) { key = derivedKey; return fetchPreflight(); })
       .then(function (preflight) {
+        // The preflight reports the resource's min_client and is uncounted, so a
+        // share this page cannot read is refused here rather than after the counted
+        // resource fetch has already spent one of the link's reads.
+        if (Number.isInteger(preflight.minClient) && preflight.minClient > CLIENT_CAPABILITY) {
+          var tooNew = new Error("upgrade-required");
+          tooNew.minClient = preflight.minClient;
+          throw tooNew;
+        }
         var metaPlain = openBound(preflight.encryptedMeta, key, "meta", RES_ID);
         if (metaPlain === null) throw new Error("wrong-key");
         var meta = JSON.parse(new TextDecoder().decode(metaPlain));
@@ -706,6 +851,11 @@
           fail("This link is closed.", "It has expired or reached its read limit.");
         } else if (msg === "not-public") {
           fail("This resource is not public.", "It may be private, deleted, or the link may be incomplete.");
+        } else if (msg === "rate-limited") {
+          fail("The server is rate limiting this link.",
+            "It kept answering 429 for longer than this page will retry; no read was consumed. Wait a minute and reload.");
+        } else if (msg === "upgrade-required") {
+          fail("This share needs a newer aqt.", upgradeText(err && err.minClient) + " No read was consumed.");
         } else if (msg === "unsupported:packed") {
           fail("This folder needs the CLI.", "Packed or legacy folders are inspected without consuming a read.");
         } else if (msg === "unsupported:large") {
@@ -776,6 +926,11 @@
           fail("This link is closed.", "It has expired or reached its read limit.");
         } else if (msg === "not-public") {
           fail("This resource is not public.", "It may be private, deleted, or the link may be incomplete.");
+        } else if (msg === "rate-limited") {
+          fail("The server is rate limiting this link.",
+            "It kept answering 429 for longer than this page will retry. Wait a minute and reload.");
+        } else if (msg === "upgrade-required") {
+          fail("This share needs a newer aqt.", upgradeText(err && err.minClient));
         } else if (msg.indexOf("unsupported:") === 0) {
           fail("This is a packed folder.", "In-browser decryption covers chunked folders, single files, and streamed files.");
         } else if (msg.indexOf("WebAssembly") !== -1 || msg.indexOf("crypto runtime") !== -1) {

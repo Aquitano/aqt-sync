@@ -2,6 +2,10 @@ package server
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -90,17 +94,24 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	for _, want := range []string{
 		"crypto_aead_xchacha20poly1305_ietf_decrypt",
 		"hashwasm.argon2id",
-		"aqt-treenode-v1",         // directory-node AAD, mirrors crypto.aadTreeNode
-		"/v1/public/resources/",   // the exact-slice objects endpoint
-		"fzstd.decompress",        // zstd path for compressed objects/nodes
-		"/preflight",              // uncounted metadata/policy inspection
-		`"X-Aqt-Capability": "3"`, // browser advertises sealed-format support
+		"aqt-treenode-v1",       // directory-node AAD, mirrors crypto.aadTreeNode
+		"/v1/public/resources/", // the exact-slice objects endpoint
+		"fzstd.decompress",      // zstd path for compressed objects/nodes
+		"/preflight",            // uncounted metadata/policy inspection
+		`"X-Aqt-Capability": String(CLIENT_CAPABILITY)`, // one declared capability, not a literal per call site
 		"INSPECTING ENCRYPTED METADATA",
 		"no read was consumed",
+		"Retry-After",   // the 429 contract's authoritative signal
+		"cooldownUntil", // shared across every request the page makes
+		"rate-limited",  // budget exhaustion has its own message
+		"upgradeText",   // a 426 names the capability gap, not the status code
 	} {
 		if !strings.Contains(script.Body.String(), want) {
 			t.Errorf("share.js missing %q", want)
 		}
+	}
+	if strings.Contains(script.Body.String(), `"X-Aqt-Capability": "`) {
+		t.Error("share.js hardcodes a capability string; it must derive from CLIENT_CAPABILITY")
 	}
 	if strings.Contains(body, "The server stores only ciphertext") {
 		t.Error("share page still contains the removed explanatory lede")
@@ -109,6 +120,29 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	// The error pages keep the same guarantees they had before the redesign.
 	if rec := h.get("/x/does-not-exist"); rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown /x: got %d, want 404", rec.Code)
+	}
+}
+
+// share.js declares its own capability constant because the assets are static files
+// with no build step that could inject api.ClientCapability. Nothing but this test
+// keeps the two in step, and a stale value makes the browser take a 426 it did not
+// need — so a capability bump that forgets share.js fails here.
+func TestShareScriptDeclaresCurrentCapability(t *testing.T) {
+	t.Parallel()
+	script, err := os.ReadFile(filepath.Join("webassets", "share.js"))
+	if err != nil {
+		t.Fatalf("read share.js: %v", err)
+	}
+	m := regexp.MustCompile(`CLIENT_CAPABILITY = (\d+);`).FindSubmatch(script)
+	if m == nil {
+		t.Fatal("share.js declares no CLIENT_CAPABILITY constant")
+	}
+	got, err := strconv.Atoi(string(m[1]))
+	if err != nil {
+		t.Fatalf("CLIENT_CAPABILITY = %q: %v", m[1], err)
+	}
+	if got != api.ClientCapability {
+		t.Errorf("share.js CLIENT_CAPABILITY = %d, api.ClientCapability = %d — bump the constant at the top of share.js", got, api.ClientCapability)
 	}
 }
 
