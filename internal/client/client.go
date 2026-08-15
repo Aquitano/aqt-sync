@@ -1008,7 +1008,7 @@ func statusError(status int, path string, body []byte) error {
 
 	switch e.Code {
 	case api.ErrCodeSnapshotAnchored:
-		return &SnapshotAnchoredError{Message: e.Error}
+		return &SnapshotAnchoredError{Message: safetext.Clean(e.Error, safetext.DisplayMax)}
 	case api.ErrCodeUpgradeRequired:
 		return upgradeRequired(e)
 	case api.ErrCodeGone:
@@ -1048,7 +1048,9 @@ func statusError(status int, path string, body []byte) error {
 		return upgradeRequired(e)
 	}
 	if e.Error != "" {
-		return fmt.Errorf("server: %s (%d)", e.Error, status)
+		// The fallback for any unmapped code prints server prose verbatim; a hostile
+		// server's bytes reach the terminal here just like a grantor's name does.
+		return fmt.Errorf("server: %s (%d)", safetext.Clean(e.Error, safetext.DisplayMax), status)
 	}
 	return fmt.Errorf("server returned %d for %s", status, path)
 }

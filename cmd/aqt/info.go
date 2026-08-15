@@ -101,7 +101,7 @@ func runInfo(ref, password string, asJSON bool) error {
 	// kind are another author's plaintext (see foreignText).
 	row := infoRow{
 		ID: res.ID, Name: foreignText(meta.Name), Kind: foreignText(kind), Size: meta.Size,
-		Visibility: string(res.Visibility), Version: res.Version,
+		Visibility: foreignText(string(res.Visibility)), Version: res.Version,
 		CreatedAt: res.CreatedAt, UpdatedAt: res.UpdatedAt,
 		ExpiresAt: res.ExpiresAt, Reads: res.Reads, MaxReads: res.MaxReads,
 	}
@@ -117,7 +117,7 @@ func runInfo(ref, password string, asJSON bool) error {
 		name = "(unnamed)"
 	}
 	fmt.Println(name)
-	fmt.Printf("%s · %s · %s · v%d · %s\n", row.Kind, sizeCell(kind, meta.Size), res.Visibility, res.Version, res.ID)
+	fmt.Printf("%s · %s · %s · v%d · %s\n", row.Kind, sizeCell(kind, meta.Size), row.Visibility, res.Version, res.ID)
 	if res.ExpiresAt > 0 {
 		until := time.Until(time.Unix(res.ExpiresAt, 0)).Round(time.Second)
 		fmt.Printf("link expires %s (%s remaining)\n", formatTime(res.ExpiresAt), until)

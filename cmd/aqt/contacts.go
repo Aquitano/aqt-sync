@@ -157,7 +157,7 @@ func contactsPinCmd() *cobra.Command {
 			// already-pinned branches below: answering "already pinned" to a command that
 			// named a fingerprint the server does not present would be a false all-clear.
 			if fingerprint != "" && !fingerprintMatches(fingerprint, identityFP) {
-				return fmt.Errorf("the server presents %s for %s, not %s; do not share with this account until that is explained",
+				return fmt.Errorf("the server presents %s for %s, not %s — if they have not registered yet, this is the decoy an unknown email always gets (retry once they have); otherwise do not share with this account until the difference is explained",
 					identityFP, email, fingerprint)
 			}
 			pins, err := identity.LoadContacts(prof.Name)

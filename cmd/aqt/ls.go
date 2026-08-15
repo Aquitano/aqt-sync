@@ -147,8 +147,10 @@ func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 			kind = api.KindFile
 		}
 		rows = append(rows, lsRow{
+			// Name and Kind are this account's own plaintext, but Visibility is the
+			// server's string: sanitize it like any other foreign text.
 			ID: it.ID, Name: name, Kind: kind, Size: meta.Size, MinClient: minClient,
-			Visibility: string(it.Visibility), AutoSnapshot: it.AutoSnapshot, Version: it.Version,
+			Visibility: foreignText(string(it.Visibility)), AutoSnapshot: it.AutoSnapshot, Version: it.Version,
 			CreatedAt: it.CreatedAt, UpdatedAt: it.UpdatedAt,
 		})
 	}

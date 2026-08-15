@@ -255,9 +255,12 @@ func borrowMaster(prof *identity.Profile, shared *crypto.MasterKey) (mk crypto.M
 
 // safeOutputName reduces an attacker-controlled metadata name to a bare basename
 // inside the current directory, so a malicious link cannot steer a default
-// destination to "../" or an absolute path and write outside CWD.
+// destination to "../" or an absolute path and write outside CWD. The name is
+// also the link author's plaintext and gets echoed in "wrote %s" and "%s already
+// exists": sanitize it (see foreignText) so no control byte reaches the terminal
+// or lands in the on-disk filename.
 func safeOutputName(name string) string {
-	base := filepath.Base(name)
+	base := filepath.Base(foreignText(name))
 	if base == "" || base == "." || base == ".." || base == string(filepath.Separator) || base == "stdin" {
 		return "aqt-download"
 	}

@@ -60,7 +60,7 @@ func sharesCmd() *cobra.Command {
 		Use:   "shares",
 		Short: "List resources other accounts granted you (read-only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			rows, err := collectShares()
+			_, rows, err := collectShares()
 			if err != nil {
 				return err
 			}
@@ -79,7 +79,9 @@ func sharesCmd() *cobra.Command {
 					fmt.Printf("%s  (stale grant — ask the owner to re-share)  from %s  since %s\n", r.Ref, r.sender(), r.Since)
 					continue
 				}
-				fmt.Printf("%s  %s  %s  from %s  since %s\n", r.Ref, r.Name, r.Kind, r.sender(), r.Since)
+				// The name is quoted so a grantor cannot embed a fake "from …" clause
+				// that reads as this row's real attribution.
+				fmt.Printf("%s  %q  %s  from %s  since %s\n", r.Ref, r.Name, r.Kind, r.sender(), r.Since)
 			}
 			fmt.Println("\npull with `aqt pull aqt://<id>`; folders: `aqt clone aqt://<id>` (read-only)")
 			fmt.Println("decline one with `aqt shares rm aqt://<id>`; add --block to refuse that account entirely")
@@ -92,22 +94,23 @@ func sharesCmd() *cobra.Command {
 }
 
 // collectShares decrypts each incoming grant's metadata and attributes it to a
-// pinned contact where one matches.
-func collectShares() ([]shareRow, error) {
+// pinned contact where one matches. It returns the authed client it built so a
+// caller acting on a row does not construct a second one.
+func collectShares() (*client.Client, []shareRow, error) {
 	cl, prof, err := authedClient()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	items, err := cl.ListShares()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(items) == 0 {
-		return nil, nil
+		return cl, nil, nil
 	}
 	mk, err := unlockMaster(prof)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer mk.Wipe()
 	// A grant names its owner by opaque handle. `aqt contacts verify` protects the
@@ -148,7 +151,7 @@ func collectShares() ([]shareRow, error) {
 		}
 		rows = append(rows, row)
 	}
-	return rows, nil
+	return cl, rows, nil
 }
 
 // sharesRmCmd is the grantee-side counterpart of `aqt unshare --with`: until it
@@ -174,15 +177,11 @@ func sharesRmCmd() *cobra.Command {
 }
 
 func runSharesRemove(ref string, block bool) error {
-	rows, err := collectShares()
+	cl, rows, err := collectShares()
 	if err != nil {
 		return err
 	}
 	row, err := matchShare(rows, ref)
-	if err != nil {
-		return err
-	}
-	cl, _, err := authedClient()
 	if err != nil {
 		return err
 	}

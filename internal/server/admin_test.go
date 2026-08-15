@@ -355,6 +355,14 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	resID := s.rootResource(t, owner, ids)
 	otherRes := s.rootResource(t, other, nil)
 
+	// One block in each direction: erasure must clear a block the account set and
+	// any block set against it.
+	for _, pair := range [][2]string{{owner, other}, {other, owner}} {
+		if _, err := s.db.Exec(`INSERT INTO share_blocks(grantee_handle, owner_handle, created_at) VALUES(?,?,1)`, pair[0], pair[1]); err != nil {
+			t.Fatalf("insert share block: %v", err)
+		}
+	}
+
 	before, err := s.AccountUsage(owner)
 	if err != nil {
 		t.Fatalf("usage: %v", err)
@@ -396,6 +404,13 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	}
 	if challenges != 0 {
 		t.Errorf("%d pending authentication challenge(s) retained the deleted email", challenges)
+	}
+	var blocks int
+	if err := s.db.QueryRow(`SELECT count(*) FROM share_blocks WHERE grantee_handle = ? OR owner_handle = ?`, owner, owner).Scan(&blocks); err != nil {
+		t.Fatal(err)
+	}
+	if blocks != 0 {
+		t.Errorf("%d share block(s) still reference the deleted account", blocks)
 	}
 
 	// A request authenticated just before deletion can reach the store afterwards.
