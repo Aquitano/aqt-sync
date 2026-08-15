@@ -147,6 +147,7 @@ func computeRemoteComparison(cl *client.Client, mk crypto.MasterKey, root string
 	if err != nil {
 		return comparison{}, err
 	}
+	warnSkipped(local.Skipped)
 	return newComparison(remoteSide(res), workingTreeSide, syncengine.Diff(remote, local)), nil
 }
 

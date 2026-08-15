@@ -175,15 +175,15 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 		manifest.Dirs = append(manifest.Dirs, d)
 		return nil
 	})
-	if err != nil {
-		return PackRoot{}, Manifest{}, err
-	}
 	// The chunked path can skip an unreadable file and leave the remote's copy alone;
 	// this one cannot. The archive *is* the folder, so a file left out of it is a file
 	// deleted from the remote copy — refuse rather than drop it silently.
-	if len(skips.paths) > 0 {
-		return PackRoot{}, Manifest{}, fmt.Errorf("cannot read %s: a pack-and-seal folder ships the whole tree at once, so a file left out would be dropped from the remote copy; fix its permissions or add it to .aqtignore",
+	if err == nil && len(skips.paths) > 0 {
+		err = fmt.Errorf("cannot read %s: a pack-and-seal folder ships the whole tree at once, so a file left out would be dropped from the remote copy; fix its permissions or add it to .aqtignore",
 			namePaths(skips.paths))
+	}
+	if err != nil {
+		return PackRoot{}, Manifest{}, err
 	}
 	if err := tw.Close(); err != nil { // flushes the archive trailer into zw
 		return PackRoot{}, Manifest{}, err
