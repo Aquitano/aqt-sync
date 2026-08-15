@@ -532,6 +532,11 @@ type ResourceListItem struct {
 	Reads     int64 `json:"reads,omitempty"`
 	CreatedAt int64 `json:"createdAt,omitempty"`
 	UpdatedAt int64 `json:"updatedAt,omitempty"`
+	// Reclaimed marks a link tombstone: the ciphertext is gone (every read 410s)
+	// and only `aqt rm` or a full content re-push can act on the id. Without this
+	// flag the state was invisible on the wire, so the row looked like a live
+	// resource that mysteriously failed every read.
+	Reclaimed bool `json:"reclaimed,omitempty"`
 }
 
 type ListResourcesResponse struct {

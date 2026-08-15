@@ -545,6 +545,10 @@ func (s *Server) accountSalt(c *gin.Context) {
 // to anyone without the passphrase, so a registered and an unregistered email look
 // identical on the wire.
 func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
+	// Derive from the normalized form: real accounts answer any casing of their
+	// email, so if the decoy varied by case, a case-stable salt would out an email
+	// as registered.
+	email = api.NormalizeEmail(email)
 	secret, err := s.store.ServerSecret()
 	if err != nil {
 		return api.SaltResponse{}, err
@@ -1301,6 +1305,11 @@ func (s *Server) setVisibility(c *gin.Context) {
 		return
 	}
 	version, err := s.store.SetVisibility(owner, c.Param("id"), req)
+	if errors.Is(err, ErrGone) {
+		// A reclaimed tombstone: nothing left to expose or hide.
+		abortGone(c)
+		return
+	}
 	if errors.Is(err, ErrVersionConflict) {
 		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the visibility change", api.ErrCodeVersionConflict)
 		return

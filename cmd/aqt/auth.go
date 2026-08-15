@@ -116,6 +116,7 @@ func runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
 		}
 		email = entered
 	}
+	email = api.NormalizeEmail(email)
 	if email == "" {
 		return errors.New("email is required")
 	}
@@ -165,6 +166,7 @@ func runLogin(email string, ttl time.Duration) error {
 		}
 		email = entered
 	}
+	email = api.NormalizeEmail(email)
 	if email == "" {
 		return errors.New("email is required")
 	}
