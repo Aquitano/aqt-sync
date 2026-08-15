@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package update reports whether a newer aqt release has been published. It
 // fetches a signed, canonical release manifest, verifies it against public keys
 // compiled into this build, and answers "is this binary current?". Nothing here

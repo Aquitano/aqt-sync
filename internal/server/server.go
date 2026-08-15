@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package server implements aqt's zero-knowledge HTTP API on top of Gin. Every
 // payload it handles is opaque ciphertext or key material it cannot read.
 package server

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package api defines the wire types shared by the aqt server and client.
 //
 // Everything the server receives is opaque: sealed blobs, encrypted metadata,

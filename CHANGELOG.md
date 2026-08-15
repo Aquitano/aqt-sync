@@ -76,6 +76,15 @@ All notable changes to this project are documented in this file.
   the link alone, and `sync` drops its per-file lines and summary while still printing
   errors and the conflicts a blocked sync exits `4` with.
 
+- Every first-party source file carries an `SPDX-License-Identifier:
+  AGPL-3.0-or-later` header. `README.md` asserted AGPL across the repository while no
+  file said so, so a license scanner reported "unknown license" — a worse answer than
+  AGPL, and the copyleft is what backs the source offer the server implements through
+  `AQT_SOURCE_URL`. The vendored MIT and ISC runtimes under
+  `internal/server/webassets` are untouched. `CONTRIBUTING.md` is new and states the
+  build, the test command, the commit convention, and what the license means for a
+  contribution.
+
 ### Fixed
 
 - Case-colliding paths no longer destroy data through a case-insensitive device. A
@@ -164,6 +173,35 @@ All notable changes to this project are documented in this file.
   result on a wrong one, and now reports the missing input; and the TUI, which set its
   unlocked flag once and never cleared it, returns to its unlock view when an action
   exits `3` instead of failing every later action until the user quits.
+
+- The browser share page implements the rate-limit contract the API specifies. A
+  folder browse fires the same bursty object requests a CLI pull does, against the
+  same bucket, and answered every `429` by giving up with "The server answered 429."
+  It now honors `Retry-After` (the header authoritative, the body value a fallback),
+  shares one cooldown across the preflight, resource, and object fetches so they do
+  not all resume on the same instant, jitters above it, and bounds the retrying at
+  three attempts, 30s per wait, and 60s in total before it says so in words.
+
+- A `426` on the share page names the capability instead of the status code. The page
+  already fetched the preflight that carries `minClient` and discarded it; it now
+  refuses a too-new share there, *before* the counted resource fetch spends one of the
+  link's reads, and says which capability the share wants and which the page has. The
+  capability the page advertised was also stale — `3`, against a current `4` — so it
+  was taking some `426`s it had no reason to take.
+
+### Security
+
+- The threat model understated the chunk-size side channel. Chunks are compressed
+  before they are sealed, so the observable per-chunk ciphertext length is
+  `min(len(raw), len(zstd(raw))) + 16` — a function of the chunk's entropy, not only
+  of where the chunker cut. That is a strictly stronger fingerprint than the boundary
+  sizes the document described: an observer can separate incompressible or media
+  content from source text inside a folder, and match a candidate file against
+  compressed lengths that vary far more than raw boundaries do. `pack: true` is
+  imprecise in the same direction — it leaks the compressed total, so choosing it for
+  a highly compressible tree reveals its compressibility rather than its size. No
+  behavior changed; what changed is that the document now says so, including in the
+  "Still open" padding trade-off, which had been reasoning about the wrong quantity.
 
 ## [v0.7.0] - 2026-08-11
 

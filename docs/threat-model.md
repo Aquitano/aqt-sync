@@ -174,10 +174,25 @@ candidate file, but not matching that size sequence — the classic
 content-defined-chunking leak. For a known target file an attacker can confirm its
 presence from the shapes alone.
 
+That length leaks more than the boundary, because a chunk is **compressed before it
+is sealed** (`compress.Encode`: zstd, kept only when it is strictly smaller than the
+raw bytes). The observable ciphertext length is therefore
+`min(len(raw), len(zstd(raw))) + 16` — a function of the chunk's *entropy*, not only
+of where the chunker cut. That is strictly stronger than a leak of the boundary sizes
+alone. An observer can separate already-encrypted or media content, which does not
+compress and so lands exactly at its boundary size, from source text, which lands
+well below it; and a candidate file is confirmed against the compressed lengths its
+own chunks would produce, which discriminate far better than raw boundaries because
+compression spreads the lengths out instead of clustering them near the profile's
+normal size.
+
 Pack-and-seal (`pack: true` in `.aqtconfig`) exists precisely to avoid this: it tars
 the whole tree and seals it into fixed-size, per-sync-unique segments with no
-per-file boundary, so it leaks only the total size. The trade is that any change
-re-ships the whole folder and there is no per-file conflict resolution. See
+per-file boundary, so it leaks one number instead of a per-chunk profile. That number
+is the **compressed** total — the tar stream is zstd-compressed before it is
+segmented — so `pack: true` on a highly compressible tree reveals its compressibility
+rather than its size. The trade is that any change re-ships the whole folder and
+there is no per-file conflict resolution. See
 [folder sync](protocol/folder-sync.md#pack-and-seal).
 
 **Timing and volume.** The server sees when a push happens, how many segments it
@@ -279,11 +294,17 @@ an unfinished task — they are the honest answer to "what does aqt still not pr
 you from":
 
 - **Chunk size-sequence fingerprint.** Chunked mode leaks the sequence of ciphertext
-  chunk lengths, so an attacker holding a candidate file can confirm its presence
-  without breaking anything. The mitigation that exists today is choosing
-  `pack: true`. Length-bucket padding would blunt it but changes the sealed
-  ciphertext length and therefore the content address, breaking dedup identity
-  against every existing chunk; deferred rather than folded into the seal path.
+  chunk lengths, and those lengths are *post-compression*, so what an attacker
+  matches against a candidate file is the compressibility of each of its chunks and
+  not merely where the chunker cut them. Holding the candidate is enough to confirm
+  its presence without breaking anything. The mitigation that exists today is
+  choosing `pack: true`, which leaks one compressed total instead of a per-chunk
+  profile. Length-bucket padding would blunt it, but padding applied after
+  compression changes the sealed ciphertext length and therefore the content address,
+  breaking dedup identity against every existing chunk — and buckets wide enough to
+  hide a compression ratio are far coarser than buckets that would only hide a
+  boundary, so the dedup cost is correspondingly larger. Deferred rather than folded
+  into the seal path.
 - **Same-user process reach.** The session cache and `.aqt/base.json` are sealed
   under a keychain-held per-profile key, which stops an off-machine copy but not a
   process running as the same user on the same machine. Closing it needs a

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package syncengine turns a directory into a sealed, deduplicated manifest and
 // reconciles a local tree against a remote one. It owns the on-the-wire shape of
 // a tracked folder; the crypto lives in internal/crypto.

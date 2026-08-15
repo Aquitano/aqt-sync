@@ -10,10 +10,13 @@ the argument contains a path separator; a bare word that names an existing file 
 for confirmation first, and errors as an unknown command without a terminal, so a
 typo'd subcommand never uploads a file.
 
-`--server <url>` (default `http://localhost:8080`), `--profile <name>`, `-h/--help`,
-and `-v/--version` apply to every command. The three output flags apply only where
-they mean something, and a command that does not implement one refuses it rather
-than accepting it and behaving identically:
+`--server <url>` (default `http://localhost:8080`), `--profile <name>`, and
+`-h/--help` apply to every command. `-v/--version` is registered on the root command
+alone: `aqt --version` prints the build, `aqt ls --version` is an unknown flag — it
+is deliberately not global, because promoting it would spend the `-v` short flag for
+every subcommand that ever wants it. The three output flags apply only where they
+mean something, and a command that does not implement one refuses it rather than
+accepting it and behaving identically:
 
 - `--json`: every command whose `--help` documents a JSON shape.
 - `-q/--quiet`: `push`, `share`, `init`, `sync`, `snapshot create`, `checkpoint`,

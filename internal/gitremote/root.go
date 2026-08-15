@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package gitremote implements the sealed client-side data model used by the
 // git-remote-aqt helper. The server stores these values opaquely.
 package gitremote

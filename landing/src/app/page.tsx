@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import Image from "next/image";
 import { InstallPicker } from "@/components/install-picker";
 import { MotionLayer } from "@/components/motion-layer";

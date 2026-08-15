@@ -56,7 +56,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | --- | --- | --- |
 | `AQT_DATA_DIR` | `./aqt-data` | Data directory (SQLite + `packs/` + `blobs/`). Back this up. |
 | `AQT_ADDR` | `127.0.0.1:8080` | Listen address. Use `:443` only with native TLS. |
-| `AQT_DEBUG` | unset | Any non-empty value enables Gin debug mode and verbose logging. |
+| `AQT_DEBUG` | unset | Any non-empty value leaves Gin in debug mode instead of switching it to release mode. That adds the route table and Gin's own startup warnings to stderr, and a request dump to the stack trace the recovery handler prints on a panic. It turns on nothing else: `aqt-server` logs no requests in any mode. |
 | `AQT_TLS_CERT` / `AQT_TLS_KEY` | unset | PEM certificate + private key for native TLS. Set both or neither. |
 | `AQT_TLS_AUTOCERT_DOMAINS` | unset | Comma-separated hostnames for automatic Let's Encrypt certificates. |
 | `AQT_TLS_AUTOCERT_CACHE` | `<data dir>/autocert` | Directory where autocert stores issued certificates. |

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package identity manages the local profile: server, account handle, device
 // token, and the KDF params needed to re-derive the master key from a passphrase.
 //

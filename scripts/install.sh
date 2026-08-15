@@ -1,4 +1,5 @@
 #!/bin/sh
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Install the aqt client (and optionally aqt-server) from a published GitHub release.
 #
 # The signed update manifest is the source of truth for what to download: it names

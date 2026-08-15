@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Command updatectl generates, signs, and verifies the release update manifest.
 // It is a build-time tool run by the release workflow and by whoever provisions
 // the signing key; it is never shipped to users.

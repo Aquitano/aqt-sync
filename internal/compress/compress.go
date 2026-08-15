@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package compress is aqt's single compression codec. Convergent chunk ids
 // depend on the compressor's exact output, so the codec is pinned: klauspost's
 // pure-Go zstd at SpeedDefault, CRC off (the AEAD tag already authenticates).
