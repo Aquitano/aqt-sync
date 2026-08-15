@@ -61,6 +61,31 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Case-colliding paths no longer destroy data through a case-insensitive device. A
+  Linux folder can legally hold `Notes.md` and `notes.md`; cloning it on macOS or
+  Windows collapsed both into one file, and that machine's next sync then uploaded
+  the survivor's bytes under both names — both copies gone, silently. A push now
+  refuses to commit case twins on every platform (naming them, since renaming one is
+  the fix), and a pull or clone onto a case-insensitive filesystem refuses such a
+  tree before writing anything.
+
+- Permission bits no longer round-trip destructively through a Windows device.
+  Windows has no POSIX modes — Go reports 0666/0777 synthesized from the read-only
+  flag — and a scan recorded that as a genuine change, so one sync from a Windows
+  box stripped `+x` from every executable and made the tree world-writable on every
+  other device. A Windows scan now carries the last-synced mode forward untouched
+  (new paths record 0644/0755), on both the chunked and pack-and-seal paths.
+
+- One symlink no longer makes a folder unusable on Windows. Creating a symlink
+  there needs a privilege that is off outside Developer Mode, and any tree with one
+  failed clone and wedged sync with a raw Win32 error. A filesystem that cannot
+  create symlinks now receives everything else, skips the links with a warning that
+  names the fix, and keeps their entries in the base so their absence is never read
+  as a deletion to push — a pack push from such a device carries them into the
+  archive from the base. Files another process holds exclusively open (Outlook's
+  .pst, a running .exe) are likewise skipped as unreadable instead of failing the
+  scan.
+
 - An interrupted pack-and-seal pull no longer destroys the intact remote folder. Such
   a pull extracts in place — staging the root and renaming would take the ignored
   files, build output and caches, with it — so an interruption leaves a tree that is

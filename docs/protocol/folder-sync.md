@@ -241,6 +241,22 @@ disagree about what counts as a change. A symlink's own permission bits are excl
 from that rule: a scan never records them and apply never sets them, so comparing
 them would manufacture a difference no side could resolve.
 
+**Portability guards.** Permission bits are a POSIX attribute. Windows synthesizes
+them from the read-only flag (0666/0444 for files, 0777 for directories), so a
+Windows scan carries the last-synced mode forward instead of recording the synthetic
+one — a folder authored on Linux keeps its `+x` bits through a Windows device — and
+a path created on Windows records the conventional 0644/0755. Symlinks need a
+privilege Windows leaves off outside Developer Mode: a filesystem that cannot create
+them still receives the rest of the folder, skips the links with a named warning,
+and keeps their entries in the base so the next sync reads their absence as
+inability rather than a deletion to push; a pack push from such a device carries
+them into the archive from the base for the same reason. Case-colliding paths
+(`Notes.md` and `notes.md`) are refused at push time on every platform — a
+case-insensitive clone would collapse them into one file, and its next sync would
+then overwrite both remote copies with the survivor's bytes — and a pull or clone
+onto a case-insensitive filesystem refuses such a tree by name before writing
+anything.
+
 **One prologue, two adapters.** Both sync adapters — chunked and pack-and-seal —
 enter through the same `syncSession`: it loads `state.json` and the last-synced base,
 refuses a missing base unless `--reconcile`, and acquires the authenticated client

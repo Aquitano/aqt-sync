@@ -338,11 +338,36 @@ func runStatus(dir string, opts statusOptions) error {
 func warnSkipped(skipped []syncengine.SkippedPath) {
 	const show = 5
 	for _, s := range skipped[:min(show, len(skipped))] {
-		fmt.Fprintf(os.Stderr, "warning: skipped %s: %v; it stays as last synced (fix its permissions or add it to .aqtignore)\n", s.Path, s.Err)
+		fmt.Fprintf(os.Stderr, "warning: skipped %s: %v; it stays as last synced (fix the cause or add it to .aqtignore)\n", s.Path, s.Err)
 	}
 	if rest := len(skipped) - show; rest > 0 {
-		fmt.Fprintf(os.Stderr, "warning: and %d more unreadable path(s)\n", rest)
+		fmt.Fprintf(os.Stderr, "warning: and %d more skipped path(s)\n", rest)
 	}
+}
+
+// refuseCaseCollisions fails an operation whose manifest holds paths that differ
+// only by case. Materializing them on a case-insensitive filesystem (the macOS and
+// Windows defaults) collapses them into one file, last writer wins, and the next
+// sync uploads the survivor's bytes under both names — so the collision destroys
+// both copies on the server, silently. Push refuses regardless of the local
+// filesystem: creating such a tree remotely arms the same trap for every other
+// device.
+func refuseCaseCollisions(entries []syncengine.Entry, dirs []syncengine.DirEntry) error {
+	groups := syncengine.CaseCollisions(entries, dirs)
+	if len(groups) == 0 {
+		return nil
+	}
+	const show = 3
+	names := make([]string, 0, show)
+	for _, g := range groups[:min(show, len(groups))] {
+		names = append(names, strings.Join(g, " / "))
+	}
+	suffix := ""
+	if rest := len(groups) - show; rest > 0 {
+		suffix = fmt.Sprintf(" and %d more", rest)
+	}
+	return fmt.Errorf("refusing to sync case-colliding paths (%s%s): a case-insensitive filesystem would collapse each group into one file and the next sync would destroy the others; rename or .aqtignore all but one of each",
+		strings.Join(names, "; "), suffix)
 }
 
 // skippedPaths renders a scan's unreadable paths for --json, where a name is all a
@@ -1147,6 +1172,16 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		}
 	}
 
+	// A push must not commit case-twins to the server — they arm a data-loss trap
+	// for every case-insensitive device — and a pull onto a case-folding filesystem
+	// must not land them locally. An inherited remote twin deliberately wedges the
+	// push too: renaming one member locally is the resolution, and the error says so.
+	if (push && remoteChanged) || syncengine.CaseInsensitiveDir(c.root) {
+		if err := refuseCaseCollisions(manifestFrom(merged, 0).Entries, dirsFrom(mergedDirs)); err != nil {
+			return err
+		}
+	}
+
 	// Copy mode: preserve the remote side of every content conflict as a local copy
 	// BEFORE any local-wins remote mutation runs, so the remote bytes survive on disk
 	// even if the push below dies mid-apply. The primary path is then resolved
@@ -1627,12 +1662,18 @@ func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse
 		if err != nil {
 			return syncengine.Manifest{}, err
 		}
+		warnSkipped(base.Skipped)
 		base.Version = res.Version
 		return base, nil
 	}
 	manifest, err := openRemoteTree(cl, res.Blob, ck, res.ID)
 	if err != nil {
 		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)
+	}
+	if syncengine.CaseInsensitiveDir(abs) {
+		if err := refuseCaseCollisions(manifest.Entries, manifest.Dirs); err != nil {
+			return syncengine.Manifest{}, err
+		}
 	}
 	dlProg := newProgressBar("downloading", entriesBytes(manifest.Entries))
 	mtimes, dlErr := runDownloads(cl, abs, manifest.Entries, dlProg)
@@ -1872,14 +1913,39 @@ func batchByChunks(entries []syncengine.Entry, maxChunks int) [][]syncengine.Ent
 // link-holder paths can materialize entries through the public object endpoint
 // with the same worker pool the authed pack path uses.
 func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
+	// Landing these entries on a case-folding filesystem would silently collapse
+	// case-twins into one file; refuse before the first write.
+	if syncengine.CaseInsensitiveDir(root) {
+		if err := refuseCaseCollisions(entries, nil); err != nil {
+			return nil, err
+		}
+	}
+	// One probe decides for all of this batch's symlinks. A skipped link is still
+	// recorded in the caller's base, and the scan reads its absence as inability
+	// rather than a delete (keepUnsupportedLinks), so the folder stays usable.
+	skipLinks := false
+	for _, e := range entries {
+		if e.IsSymlink() {
+			skipLinks = !syncengine.SymlinkSupport(root)
+			break
+		}
+	}
 	var g errgroup.Group
 	g.SetLimit(syncTransferLimit(downloadConcurrency))
 	var mu sync.Mutex
 	mtimes := make(map[string]int64, len(entries))
+	var skippedLinks []string
 	for _, e := range entries {
 		e := e
 		g.Go(func() error {
 			if e.IsSymlink() {
+				if skipLinks {
+					mu.Lock()
+					skippedLinks = append(skippedLinks, e.Path)
+					mu.Unlock()
+					prog.add(e.Size)
+					return nil
+				}
 				if err := syncengine.WriteSymlink(root, e); err != nil {
 					return err
 				}
@@ -1898,6 +1964,16 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+	if len(skippedLinks) > 0 {
+		sort.Strings(skippedLinks)
+		const show = 3
+		named := strings.Join(skippedLinks[:min(show, len(skippedLinks))], ", ")
+		if rest := len(skippedLinks) - show; rest > 0 {
+			named += fmt.Sprintf(" and %d more", rest)
+		}
+		fmt.Fprintf(os.Stderr, "warning: skipped %d symlink(s) this filesystem cannot create (on Windows, enable Developer Mode or use an elevated shell): %s\n",
+			len(skippedLinks), named)
 	}
 	return mtimes, nil
 }

@@ -139,10 +139,17 @@ func openSegment(object []byte, seg Segment, ck crypto.ContentKey) ([]byte, erro
 // symlink, and seals the stream into fixed-size segments fed to sink as they fill, so
 // the tree is never held in memory. Returns the root naming the segments in order and
 // the manifest of exactly what it tarred, so the caller's base matches the shipped
-// bytes rather than a separate scan. sink may be nil.
-func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Manifest, error) {
+// bytes rather than a separate scan. base supplies the recorded modes a Windows
+// scan carries forward (see scanFileMode); sink and base may be nil.
+func TarAndSeal(dir string, ck crypto.ContentKey, base *Manifest, sink ObjectSink) (PackRoot, Manifest, error) {
 	if sink == nil {
 		sink = nopObjectSink{}
+	}
+	var reuse map[string]Entry
+	var reuseDirs map[string]DirEntry
+	if base != nil {
+		reuse = base.byPath()
+		reuseDirs = base.DirsByPath()
 	}
 	ss := &segmentSink{ck: ck, sink: sink}
 	zw, err := compress.NewWriter(ss)
@@ -153,14 +160,16 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 	var manifest Manifest
 	var skips skipList
 	err = walkFiles(dir, &skips, func(n fileNode) error {
-		e, err := writeTarEntry(tw, n)
+		prev, inBase := reuse[n.rel]
+		e, err := writeTarEntry(tw, n, scanFileMode(n.info, prev.Mode, inBase))
 		if err != nil {
 			return skips.tolerate(n.rel, n.path, err)
 		}
 		manifest.Entries = append(manifest.Entries, e)
 		return nil
 	}, func(rel string, info fs.FileInfo) error {
-		d := DirEntry{Path: rel, Mode: uint32(info.Mode().Perm())}
+		prev, inBase := reuseDirs[rel]
+		d := DirEntry{Path: rel, Mode: scanDirMode(info, prev.Mode, inBase)}
 		// Directories go into the archive, not just the manifest: the extract side
 		// rebuilds its manifest from the tar alone, so a directory left out of the
 		// stream loses its mode and — if it is empty — the directory itself.
@@ -185,6 +194,21 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 	if err != nil {
 		return PackRoot{}, Manifest{}, err
 	}
+	// Same whole-tree rule for symlinks a linkless filesystem could never write:
+	// they are not on disk to walk, but leaving them out of the archive would
+	// delete them from the remote copy. The base knows their targets; carry them.
+	for _, e := range unsupportedBaseLinks(&manifest, base, dir) {
+		if err := tw.WriteHeader(&tar.Header{
+			Typeflag: tar.TypeSymlink,
+			Name:     e.Path,
+			Linkname: e.Link,
+			Mode:     0o777,
+			ModTime:  epoch,
+		}); err != nil {
+			return PackRoot{}, Manifest{}, err
+		}
+		manifest.Entries = append(manifest.Entries, e)
+	}
 	if err := tw.Close(); err != nil { // flushes the archive trailer into zw
 		return PackRoot{}, Manifest{}, err
 	}
@@ -201,10 +225,11 @@ func TarAndSeal(dir string, ck crypto.ContentKey, sink ObjectSink) (PackRoot, Ma
 
 // writeTarEntry writes one node with a content-only header (perms, but zeroed mtime
 // and no owner identity, so nothing about the host leaks) and returns its manifest
-// Entry, hashing a file's bytes as they stream so the result matches a Scan. A file
-// is opened before its header is written: the header commits the archive to a body,
-// so a file that vanished mid-walk has to fail before anything is emitted for it.
-func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
+// Entry, hashing a file's bytes as they stream so the result matches a Scan. mode is
+// the caller's resolved permission bits (base-carried on Windows). A file is opened
+// before its header is written: the header commits the archive to a body, so a file
+// that vanished mid-walk has to fail before anything is emitted for it.
+func writeTarEntry(tw *tar.Writer, n fileNode, mode uint32) (Entry, error) {
 	if n.symlink {
 		if err := tw.WriteHeader(&tar.Header{
 			Typeflag: tar.TypeSymlink,
@@ -225,7 +250,7 @@ func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	if err := tw.WriteHeader(&tar.Header{
 		Typeflag: tar.TypeReg,
 		Name:     n.rel,
-		Mode:     int64(n.info.Mode().Perm()),
+		Mode:     int64(mode),
 		Size:     n.info.Size(),
 		ModTime:  epoch,
 	}); err != nil {
@@ -241,7 +266,7 @@ func writeTarEntry(tw *tar.Writer, n fileNode) (Entry, error) {
 	if written != n.info.Size() {
 		return Entry{}, fmt.Errorf("file %s changed size during pack (%d != %d)", n.rel, written, n.info.Size())
 	}
-	return Entry{Path: n.rel, Mode: uint32(n.info.Mode().Perm()), Size: n.info.Size(), Hash: hex.EncodeToString(h.Sum(nil))}, nil
+	return Entry{Path: n.rel, Mode: mode, Size: n.info.Size(), Hash: hex.EncodeToString(h.Sum(nil))}, nil
 }
 
 // segmentSink is the io.Writer the tar streams into: it seals each segTarget-sized
@@ -429,6 +454,15 @@ func hashTar(r io.Reader) (Manifest, error) {
 // the children the archive lists after it.
 func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)) (Manifest, error) {
 	var m Manifest
+	// On a case-folding destination two archive paths differing only by case land
+	// on one file, last writer wins — detected before the second write so nothing
+	// is lost locally and the error can name both paths. The remote tree needs
+	// fixing from a case-sensitive device; nothing here can repair it.
+	var fold map[string]string
+	if CaseInsensitiveDir(w.dir) {
+		fold = map[string]string{}
+	}
+	linkOK, linkChecked := true, false
 	tr := tar.NewReader(r)
 	for {
 		hdr, err := tr.Next()
@@ -440,6 +474,13 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 		}
 		if err != nil {
 			return Manifest{}, err
+		}
+		if fold != nil && hdr.Typeflag != tar.TypeDir {
+			k := strings.ToLower(hdr.Name)
+			if first, dup := fold[k]; dup {
+				return Manifest{}, fmt.Errorf("this folder holds case-colliding paths (%q and %q) that this filesystem would collapse into one file; rename one of them on a case-sensitive device first", first, hdr.Name)
+			}
+			fold[k] = hdr.Name
 		}
 		write := true
 		if safe != nil && (hdr.Typeflag == tar.TypeSymlink || hdr.Typeflag == tar.TypeReg || hdr.Typeflag == tar.TypeDir) {
@@ -459,6 +500,17 @@ func extractTar(w *treeWriter, r io.Reader, safe func(path string) (bool, error)
 		case tar.TypeSymlink:
 			e := Entry{Path: hdr.Name, Size: int64(len(hdr.Linkname)), Link: hdr.Linkname, Hash: linkHash(hdr.Linkname)}
 			if write {
+				if !linkChecked {
+					linkOK, linkChecked = SymlinkSupport(w.dir), true
+				}
+				// An unwritable link is skipped but still recorded: the entry stays in
+				// the base, so the next scan reads its absence as inability (see
+				// keepUnsupportedLinks), not as a local delete to push.
+				if !linkOK {
+					m.Skipped = append(m.Skipped, SkippedPath{Path: e.Path, Err: errSymlinkUnsupported})
+					m.Entries = append(m.Entries, e)
+					continue
+				}
 				if err := w.writeSymlink(e); err != nil {
 					return Manifest{}, err
 				}

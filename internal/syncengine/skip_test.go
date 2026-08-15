@@ -152,7 +152,7 @@ func TestTarAndSealRefusesUnreadableFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	var ck crypto.ContentKey
-	_, _, err := TarAndSeal(dir, ck, nil)
+	_, _, err := TarAndSeal(dir, ck, nil, nil)
 	if err == nil {
 		t.Fatal("TarAndSeal must refuse to ship a tree it cannot read whole")
 	}

@@ -300,14 +300,7 @@ func TestDiffTreeRootsMatchesManifestDiff(t *testing.T) {
 	writeFile(t, curDir, "elsewhere/unique.txt", []byte("unique content"))
 	writeFile(t, curDir, "retyped/inner.txt", []byte("now a dir"))
 	writeFile(t, curDir, "mod.txt", []byte("v2"))
-	// Windows maps a file's mode onto the read-only attribute alone, so an 0o755 edit
-	// reads back unchanged there; clearing write is the one file-mode change both
-	// platforms represent, and the fixture needs a real one to be worth asserting.
-	permEdit := os.FileMode(0o755)
-	if runtime.GOOS == "windows" {
-		permEdit = 0o444
-	}
-	if err := os.Chmod(filepath.Join(curDir, "perm.sh"), permEdit); err != nil {
+	if err := os.Chmod(filepath.Join(curDir, "perm.sh"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Mkdir(filepath.Join(curDir, "empty"), 0o755); err != nil {
@@ -332,6 +325,17 @@ func TestDiffTreeRootsMatchesManifestDiff(t *testing.T) {
 	curScan, err := Scan(curDir)
 	if err != nil {
 		t.Fatal(err)
+	}
+	// A Windows scan never records disk modes (mode is a POSIX-only attribute,
+	// carried from the base), so no chmod can produce a mode change between two
+	// baseless scans there. The classification under test is platform-independent;
+	// hand the manifest the edit directly.
+	if runtime.GOOS == "windows" {
+		for i := range curScan.Entries {
+			if curScan.Entries[i].Path == "perm.sh" {
+				curScan.Entries[i].Mode = 0o755
+			}
+		}
 	}
 
 	conv := testConv(t)

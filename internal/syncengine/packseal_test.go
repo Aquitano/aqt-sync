@@ -60,7 +60,7 @@ func TestPackRoundTrip(t *testing.T) {
 
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, shipped, err := TarAndSeal(src, ck, store)
+	root, shipped, err := TarAndSeal(src, ck, nil, store)
 	if err != nil {
 		t.Fatalf("TarAndSeal: %v", err)
 	}
@@ -117,11 +117,11 @@ func TestPackNonConvergent(t *testing.T) {
 	writeFile(t, src, "a.txt", []byte("stable content"))
 	ck := testContentKey(t)
 
-	first, _, err := TarAndSeal(src, ck, memObjects{})
+	first, _, err := TarAndSeal(src, ck, nil, memObjects{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, _, err := TarAndSeal(src, ck, memObjects{})
+	second, _, err := TarAndSeal(src, ck, nil, memObjects{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +142,7 @@ func TestPackSegmentTamperRejected(t *testing.T) {
 	writeFile(t, src, "a.txt", []byte("trust but verify"))
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, _, err := TarAndSeal(src, ck, store)
+	root, _, err := TarAndSeal(src, ck, nil, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +160,7 @@ func TestPackWrongKeyRejected(t *testing.T) {
 	src := t.TempDir()
 	writeFile(t, src, "a.txt", []byte("secret"))
 	store := memObjects{}
-	root, _, err := TarAndSeal(src, testContentKey(t), store)
+	root, _, err := TarAndSeal(src, testContentKey(t), nil, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +319,7 @@ func TestPackTreeManifestMatchesScan(t *testing.T) {
 
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, _, err := TarAndSeal(src, ck, store)
+	root, _, err := TarAndSeal(src, ck, nil, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +345,7 @@ func TestExtractReplacesStaleParent(t *testing.T) {
 	writeFile(t, src, "data/inner.txt", []byte("hello"))
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, _, err := TarAndSeal(src, ck, store)
+	root, _, err := TarAndSeal(src, ck, nil, store)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -402,7 +402,7 @@ func TestExtractAppliesDirModesAfterContents(t *testing.T) {
 
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, _, err := TarAndSeal(src, ck, store)
+	root, _, err := TarAndSeal(src, ck, nil, store)
 	if err != nil {
 		t.Fatalf("TarAndSeal: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestExtractSafeSkipsVetoedEntry(t *testing.T) {
 
 	ck := testContentKey(t)
 	store := memObjects{}
-	root, _, err := TarAndSeal(src, ck, store)
+	root, _, err := TarAndSeal(src, ck, nil, store)
 	if err != nil {
 		t.Fatalf("TarAndSeal: %v", err)
 	}
