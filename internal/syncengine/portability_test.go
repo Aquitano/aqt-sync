@@ -32,6 +32,11 @@ func TestCaseCollisions(t *testing.T) {
 // case-folding destination, naming both paths — extracting it would collapse the
 // pair into one file with whichever content streamed last.
 func TestExtractRefusesCaseTwinsOnFoldingFS(t *testing.T) {
+	// The twins must first exist on disk to be archived, which needs a real
+	// case-sensitive filesystem; only the destination's folding is simulated.
+	if CaseInsensitiveDir(t.TempDir()) {
+		t.Skip("filesystem folds case; twins cannot be created here")
+	}
 	t.Setenv("AQT_TEST_CASE_INSENSITIVE", "1")
 	src := t.TempDir()
 	// Legal on the case-sensitive filesystem this test builds the archive on.
@@ -86,7 +91,7 @@ func TestExtractSkipsLinksWithoutSupport(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.Symlink("a.txt", filepath.Join(src, "link")); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unsupported: %v", err)
 	}
 	ck := testContentKey(t)
 	store := memObjects{}

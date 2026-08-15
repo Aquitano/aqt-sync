@@ -9,10 +9,20 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
+// requireCaseSensitiveFS skips a test that must author case-twin paths, which a
+// case-insensitive filesystem cannot hold in the first place.
+func requireCaseSensitiveFS(t *testing.T) {
+	t.Helper()
+	if syncengine.CaseInsensitiveDir(t.TempDir()) {
+		t.Skip("filesystem folds case; twins cannot be created here")
+	}
+}
+
 // Two paths differing only by case are legal here but collapse into one file on a
 // case-insensitive clone, whose next sync then uploads the survivor's bytes under
 // both names. The push is where the trap is armed, so the push is what refuses.
 func TestSyncRefusesCaseCollidingPush(t *testing.T) {
+	requireCaseSensitiveFS(t)
 	h := newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -36,6 +46,7 @@ func TestSyncRefusesCaseCollidingPush(t *testing.T) {
 }
 
 func TestPackSyncRefusesCaseCollidingPush(t *testing.T) {
+	requireCaseSensitiveFS(t)
 	h := newE2E(t)
 	dir := t.TempDir()
 	writePackConfig(t, dir)
@@ -70,7 +81,7 @@ func TestSymlinksDegradeWithoutSupport(t *testing.T) {
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "v1")
 	if err := os.Symlink("a.txt", filepath.Join(origin, "link")); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unsupported: %v", err)
 	}
 	h.sync(origin)
 
@@ -109,7 +120,7 @@ func TestPackSymlinksSurviveLinklessDevice(t *testing.T) {
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "v1")
 	if err := os.Symlink("a.txt", filepath.Join(origin, "link")); err != nil {
-		t.Fatal(err)
+		t.Skipf("symlinks unsupported: %v", err)
 	}
 	h.sync(origin)
 
