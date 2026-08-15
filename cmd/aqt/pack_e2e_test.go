@@ -492,7 +492,7 @@ func TestInterruptedPackPullResumesInsteadOfPushing(t *testing.T) {
 	// The shape an interrupted pull leaves: a.txt already carries the new version,
 	// b.txt and c.txt do not, and the marker names the version being landed.
 	writeTree(t, replica, "a.txt", "v2")
-	if err := beginPullMarker(replica, h.folderID(replica), 2); err != nil {
+	if err := beginPullMarker(replica, 2); err != nil {
 		t.Fatal(err)
 	}
 
@@ -523,6 +523,62 @@ func TestInterruptedPackPullResumesInsteadOfPushing(t *testing.T) {
 		t.Fatalf("remote folder was overwritten by the torn tree: b.txt = %q", got)
 	}
 	assertTreeEqual(t, origin, replica)
+}
+
+// A resumed pull guards overwrites against the last-synced base, not the fresh scan:
+// the scan holds the half-applied version and any edit made since the interruption,
+// and cannot tell them apart. An edit or a new file created in the torn tree must
+// survive the resume as a conflict/local add, while half-applied files are finished
+// without being flagged.
+func TestResumedPullKeepsEditsMadeAfterTheInterruption(t *testing.T) {
+	h := newE2E(t)
+
+	origin := t.TempDir()
+	writePackConfig(t, origin)
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "v1")
+	writeTree(t, origin, "b.txt", "v1")
+	h.sync(origin)
+
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "a.txt", "v2")
+	writeTree(t, origin, "b.txt", "v2")
+	writeTree(t, origin, "c.txt", "v2")
+	h.sync(origin)
+
+	// The interrupted pull landed a.txt; then, before re-running sync, the user
+	// edited b.txt and created new.txt in the torn tree.
+	writeTree(t, replica, "a.txt", "v2")
+	if err := beginPullMarker(replica, 2); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, replica, "b.txt", "mine")
+	writeTree(t, replica, "new.txt", "kept")
+
+	if err := runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
+		t.Fatalf("resume over a post-interruption edit: want errConflictsRemain, got %v", err)
+	}
+	if got := readTree(t, replica, "b.txt"); got != "mine" {
+		t.Fatalf("resumed pull overwrote a post-interruption edit: b.txt = %q", got)
+	}
+	if got := readTree(t, replica, "new.txt"); got != "kept" {
+		t.Fatalf("resumed pull destroyed a post-interruption creation: new.txt = %q", got)
+	}
+	if got := readTree(t, replica, "c.txt"); got != "v2" {
+		t.Fatalf("resume did not finish the pull: c.txt = %q", got)
+	}
+	if _, err := os.Stat(controlPath(replica, pullMarkerFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("marker survived a completed resume: %v", err)
+	}
+	// The base records the remote entries, so the kept edit and the new file are
+	// ordinary pending local changes for the next sync.
+	h.syncOpts(replica, syncOptions{force: true})
+	h.sync(origin)
+	if got := readTree(t, origin, "b.txt"); got != "mine" {
+		t.Fatalf("kept edit did not resolve local-wins on the next sync: b.txt = %q", got)
+	}
 }
 
 // The marker is written before the extract and cleared only once the pull commits,
@@ -586,7 +642,7 @@ func TestInPlaceRestoreClearsAnInterruptedPull(t *testing.T) {
 
 	writeTree(t, dir, "a.txt", "v2")
 	h.sync(dir)
-	if err := beginPullMarker(dir, h.folderID(dir), 2); err != nil {
+	if err := beginPullMarker(dir, 2); err != nil {
 		t.Fatal(err)
 	}
 

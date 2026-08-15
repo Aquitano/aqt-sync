@@ -811,6 +811,32 @@ func TestFailedMigrationStepRollsBackWhole(t *testing.T) {
 	}
 }
 
+// The crash-window guarantee rests on the driver journaling PRAGMA user_version with
+// the transaction: a bump inside a rolled-back tx must be undone, or an interrupted
+// migration leaves the version ahead of the schema. The rollback test above fails
+// before its bump runs, so this pins the driver behavior itself against upgrades.
+func TestUserVersionRollsBackWithTransaction(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	tx, err := s.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)+7)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var uv int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
+		t.Fatal(err)
+	}
+	if uv != len(migrations) {
+		t.Fatalf("user_version = %d after rollback, want %d: the driver no longer journals the pragma", uv, len(migrations))
+	}
+}
+
 // A data dir a newer aqt-server has already migrated is refused, not served against
 // a schema this build does not understand.
 func TestMigrateRefusesNewerDataDir(t *testing.T) {

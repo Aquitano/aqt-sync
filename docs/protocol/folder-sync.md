@@ -404,11 +404,14 @@ showing are a half-applied remote version. Re-running `sync` is the whole recove
 the resumed extract re-scans first, so paths already carrying the new version are
 re-verified and rewritten, and the prune still skips anything created since.
 
-The one thing the marker cannot protect is an edit made *after* the interruption. It
-lands in the same fresh scan as the half-applied version and is overwritten by the
-resumed pull — as a completed pull would have overwritten it, since pack-and-seal is
-whole-folder last-writer-wins and has no per-file conflict to resolve. That is why
-both `sync` and `status` say the tree is incomplete before acting on it.
+An edit or a new file created *after* the interruption lands in the same fresh scan
+as the half-applied version, so the resumed pull cannot use that scan to tell them
+apart. It guards against the last-synced base instead: a path unchanged since the
+last completed sync (or already carrying the incoming version) is overwritten, and
+anything else — a post-interruption edit or creation — keeps its local bytes and is
+reported as a conflict, exactly as an edit racing an uninterrupted pull would be. A
+file *deleted* in the torn tree is the one case the base cannot distinguish from a
+not-yet-extracted path, so the resume re-materializes it.
 
 ## Watch daemon
 
