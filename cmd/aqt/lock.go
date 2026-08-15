@@ -13,22 +13,21 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-// heldSyncLocks counts the sync locks this process holds, by folder. The lock is a
-// pid file, so a process that re-acquired one it already held would read its own
-// live pid and refuse. Counting makes it re-entrant, which lets a command that must
-// mutate the tree before syncing (in-place restore) hold the lock across both
-// instead of leaving the mutation unprotected.
+// heldSyncLocks counts the sync locks this process holds, by folder. The lock is
+// an OS file lock taken per open, so a process that re-acquired one it already
+// held would collide with itself. Counting makes it re-entrant, which lets a
+// command that must mutate the tree before syncing (in-place restore) hold the
+// lock across both instead of leaving the mutation unprotected.
 var heldSyncLocks = struct {
 	sync.Mutex
 	n map[string]int
 }{n: map[string]int{}}
 
 // acquireSyncLock takes an exclusive per-folder lock so two `aqt sync` runs in
-// the same directory cannot race on the manifest. The lock is an advisory file
-// in .aqt/ holding the holder's PID; a lock left behind by a process that is no
-// longer running is reclaimed, so a crash does not wedge the folder. Re-entrant
-// within one process: each acquire must be released, and the pid file goes away
-// with the last one.
+// the same directory cannot race on the manifest. The lock is an OS file lock on
+// .aqt/lock, which the kernel drops when the holding process exits, so a crash
+// never wedges the folder and there is no reclaim step to race. Re-entrant within
+// one process: each acquire must be released.
 func acquireSyncLock(root string) (release func(), err error) {
 	heldSyncLocks.Lock()
 	if heldSyncLocks.n[root] > 0 {
@@ -40,7 +39,7 @@ func acquireSyncLock(root string) (release func(), err error) {
 
 	path := filepath.Join(root, syncengine.ControlDir, "lock")
 	drop, err := acquirePIDFile(path, func(pid int) error {
-		return fmt.Errorf("another aqt sync is running here (pid %d); if not, delete %s", pid, path)
+		return fmt.Errorf("another aqt sync is running here (pid %d); wait for it to finish", pid)
 	})
 	if err != nil {
 		return nil, err
@@ -64,27 +63,34 @@ func releaseHeldSyncLock(root string, drop func()) {
 	}
 }
 
-// acquirePIDFile creates an exclusive pid file at path and returns a release that
-// removes it. A file left behind by a process that is no longer running is
-// reclaimed (so a crash never wedges the folder); a file still held by a live
-// process yields busyMsg(pid).
+// acquirePIDFile takes an exclusive OS lock (flock/LockFileEx) on the file at
+// path, creating it if needed, and returns a release. The kernel drops the lock
+// when the holding process exits, so a crashed holder frees it with no reclaim
+// step — the old pid-file dance (check the recorded pid, remove, recreate) was a
+// check-then-act that let two racing reclaimers both hold the lock. The recorded
+// pid is now informational only, for busyMsg; the lock itself is the OS lock.
 func acquirePIDFile(path string, busyMsg func(pid int) error) (release func(), err error) {
-	for attempt := 0; attempt < 2; attempt++ {
-		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-		if err == nil {
-			fmt.Fprintf(f, "%d\n", os.Getpid())
-			f.Close()
-			return func() { os.Remove(path) }, nil
-		}
-		if !os.IsExist(err) {
-			return nil, err
-		}
-		if pid, ok := readLockPID(path); ok && processAlive(pid) {
-			return nil, busyMsg(pid)
-		}
-		os.Remove(path) // holder is gone: clear the stale file and retry once
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("could not acquire lock at %s", path)
+	held, err := tryLockFile(f)
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !held {
+		pid, _ := readLockPID(path)
+		f.Close()
+		return nil, busyMsg(pid)
+	}
+	if err := f.Truncate(0); err == nil {
+		_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
+	}
+	// Close drops the lock. The file itself stays: removing it would reopen the
+	// unlink race (a waiter holding the old inode and a fresh creator would each
+	// hold "the" lock at once).
+	return func() { f.Close() }, nil
 }
 
 func readLockPID(path string) (int, bool) {
