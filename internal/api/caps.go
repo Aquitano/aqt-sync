@@ -69,6 +69,15 @@ const (
 	// ErrCodeGrantLimit accompanies a 400 when a resource already carries the maximum
 	// number of grants.
 	ErrCodeGrantLimit = "grant_limit"
+	// ErrCodeBlockLimit accompanies a 400 when an account's share-block list is full,
+	// so a client can tell "lift a block first" from a malformed request.
+	ErrCodeBlockLimit = "block_limit"
+	// ErrCodeSenderBlocked accompanies a 403 when the grantee has blocked incoming
+	// grants from the caller. It is the one place a grant write distinguishes a real
+	// account from a decoy, and only to the one account the grantee deliberately
+	// blocked; answering 201 and dropping the row would tell the owner their grant
+	// landed when nobody will ever see it.
+	ErrCodeSenderBlocked = "sender_blocked"
 	// ErrCodeAccountExists accompanies a 409 when a signup names an email that already
 	// has an account AND proves ownership of it, so confirming its existence leaks
 	// nothing. A signup that cannot prove ownership never sees this code.

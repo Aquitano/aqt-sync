@@ -20,6 +20,12 @@ func TestSafeOutputName(t *testing.T) {
 		"/etc/passwd":  "passwd",
 		"sub/dir/file": "file",
 		"report.txt":   "report.txt",
+		// A link author's name is hostile input: the control bytes that would let it
+		// rewrite the terminal (via "wrote %s") or land in the on-disk filename are
+		// stripped, leaving the now-inert printable remainder.
+		"x\x1b[1A\x1b[2K\rwrote report.pdf (12 B)": "x[1A[2Kwrote report.pdf (12 B)",
+		"a\nb.txt":   "ab.txt",
+		"\x1b\r\x07": "aqt-download",
 	}
 	for in, want := range cases {
 		if got := safeOutputName(in); got != want {

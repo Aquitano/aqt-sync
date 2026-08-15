@@ -25,6 +25,11 @@ no (or an unparseable) capability header fails closed to `1` (baseline). A decla
 `minClient` above the writer's own capability is rejected `400`; an omitted
 declaration stores the baseline.
 
+`GET /v1/resources` is the deliberate exception: the listing never `426`s, because
+refusing the whole list over one too-new row would hide every resource the client
+*can* read. Each item echoes its `minClient` instead, and a client below that bar
+names the release the row needs rather than rendering it as unreadable.
+
 **Media types.** Resource representations are explicit, versioned contracts:
 
 - JSON: `application/vnd.aqt.resource+json; version=1`
@@ -101,7 +106,8 @@ POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxRead
                                      Used by `share`/`unshare`; rotation just replaces the blob. Echoes the
                                      accepted policy; a private flip clears it.
 DELETE /v1/resources/:id
-GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility). Paginated
+GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility + minClient).
+                                     Never 426s (see the capability header above). Paginated
                                      (?limit=, ?cursor=) → { resources, nextCursor? }; see pagination below.
 PUT    /v1/resources/:id/metadata    Replace only the sealed metadata (a rename), leaving the blob
                                      and objects untouched. Owner only, `expectedVersion`-checked.
@@ -153,6 +159,13 @@ GET    /v1/resources/:id/grants      Owner only: [{ granteeHandle, createdAt }].
 DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
                                      (private resources) and re-wraps surviving grantees.
 GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHandle, wrap, sealed meta). Paginated.
+DELETE /v1/shares/:id                Grantee only (predicate: grantee_handle = caller). Declines one incoming
+                                     grant → { ownerHandle, removed, blocked }. ?block=true also refuses that
+                                     account's future grants (403 sender_blocked) and drops the shares it has
+                                     already sent; 400 block_limit when the caller's block list is full.
+                                     Never bumps resources.version: that is the owner's CAS token.
+GET    /v1/share-blocks              Accounts the caller refuses grants from: [{ ownerHandle, createdAt }]. Paginated.
+DELETE /v1/share-blocks/:owner       Lift one block.
 POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the public variant, gated on
                                      ownership OR a grant instead of visibility — a grantee reads exact
                                      membership-checked slices, never raw pack ranges (packs interleave
@@ -201,8 +214,8 @@ passphrase, and not through this route.
 
 ## Pagination
 
-Every list endpoint (`/v1/resources`, `/v1/shares`, `/v1/snapshots`, `/v1/devices`,
-`/v1/resources/:id/grants`) pages rather than buffering the whole set: `?limit=`
+Every list endpoint (`/v1/resources`, `/v1/shares`, `/v1/share-blocks`,
+`/v1/snapshots`, `/v1/devices`, `/v1/resources/:id/grants`) pages rather than buffering the whole set: `?limit=`
 (default 100, clamped to 1000) and an opaque `?cursor=`; the response keeps its items
 array and adds `nextCursor` (empty on the last page). Cursors are keyset seeks over
 each list's ordering key, so paging is stable under concurrent inserts. A
@@ -215,9 +228,9 @@ methods still return the whole slice to CLI callers.
 Every distinct error condition carries a stable snake_case `code` in the
 `{ error, code }` body — `upgrade_required`, `version_conflict`,
 `idempotency_conflict`, `quota_exceeded`, `device_limit`, `bad_pack`, `gone`,
-`snapshot_anchored`, `not_found`, `too_many_ids`, `grant_limit`, `invalid_policy`,
-`invalid_cursor`, `invalid_limit`, `rate_limited`, `account_exists`,
-`account_disabled`, `drops_roots` — so a client
+`snapshot_anchored`, `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`,
+`block_limit`, `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
+`account_exists`, `account_disabled`, `drops_roots` — so a client
 branches on the code instead of matching prose, and the server never echoes a raw Go
 error whose text might carry internal detail. `426` additionally carries `minClient`.
 

@@ -104,11 +104,14 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 	if meta.Kind == api.KindFolder {
+		// The name is the link author's plaintext, not ours: sanitize before it reaches
+		// the terminal, or an escape sequence in it forges the rest of this line.
+		name := foreignText(meta.Name)
 		if fragment != "" {
-			return fmt.Errorf("%s is a folder: `aqt clone '<link>'` materializes it, and '<link>/<path>' pulls a single entry", meta.Name)
+			return fmt.Errorf("%s is a folder: `aqt clone '<link>'` materializes it, and '<link>/<path>' pulls a single entry", name)
 		}
 		return fmt.Errorf("%s is a folder: `aqt clone aqt://%s` materializes it, `aqt ls aqt://%s` lists it, "+
-			"and aqt://%s/<path> pulls a single entry", meta.Name, id, id, id)
+			"and aqt://%s/<path> pulls a single entry", name, id, id, id)
 	}
 	if meta.Streamed {
 		// A share link has no account token for the authed pack-locate path, and a
@@ -252,9 +255,12 @@ func borrowMaster(prof *identity.Profile, shared *crypto.MasterKey) (mk crypto.M
 
 // safeOutputName reduces an attacker-controlled metadata name to a bare basename
 // inside the current directory, so a malicious link cannot steer a default
-// destination to "../" or an absolute path and write outside CWD.
+// destination to "../" or an absolute path and write outside CWD. The name is
+// also the link author's plaintext and gets echoed in "wrote %s" and "%s already
+// exists": sanitize it (see foreignText) so no control byte reaches the terminal
+// or lands in the on-disk filename.
 func safeOutputName(name string) string {
-	base := filepath.Base(name)
+	base := filepath.Base(foreignText(name))
 	if base == "" || base == "." || base == ".." || base == string(filepath.Separator) || base == "stdin" {
 		return "aqt-download"
 	}

@@ -22,6 +22,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/safetext"
 )
 
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
@@ -52,7 +53,7 @@ func mutationOutcome(operation string, err error) error {
 	}
 	// ErrRateLimited belongs here: the limiter middleware aborts before the handler
 	// runs, so a 429 means the mutation definitively did not happen.
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) || errors.Is(err, ErrRateLimited) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) || errors.Is(err, ErrSenderBlocked) || errors.Is(err, ErrRateLimited) {
 		return err
 	}
 	var upgrade *UpgradeRequiredError
@@ -73,6 +74,11 @@ var ErrQuotaExceeded = errors.New("storage quota exceeded; free space or ask the
 // ErrRateLimited means the server answered 429 and the request had already ridden
 // out its budget of Retry-After waits.
 var ErrRateLimited = errors.New("server rate limit exceeded; retry in a moment")
+
+// ErrSenderBlocked maps the sender_blocked code (a 403 on a grant write): the
+// grantee has blocked this account. The refusal is definitive, not a lost outcome,
+// and no retry or rewording of the grant changes it.
+var ErrSenderBlocked = errors.New("the recipient is not accepting shares from your account")
 
 // ErrDeviceLimit maps the device_limit code (a 403 on attach) so a caller can tell
 // "revoke a device first" apart from a generic authorization failure.
@@ -1002,7 +1008,7 @@ func statusError(status int, path string, body []byte) error {
 
 	switch e.Code {
 	case api.ErrCodeSnapshotAnchored:
-		return &SnapshotAnchoredError{Message: e.Error}
+		return &SnapshotAnchoredError{Message: safetext.Clean(e.Error, safetext.DisplayMax)}
 	case api.ErrCodeUpgradeRequired:
 		return upgradeRequired(e)
 	case api.ErrCodeGone:
@@ -1013,6 +1019,8 @@ func statusError(status int, path string, body []byte) error {
 		return ErrConflict
 	case api.ErrCodeDeviceLimit:
 		return ErrDeviceLimit
+	case api.ErrCodeSenderBlocked:
+		return ErrSenderBlocked
 	case api.ErrCodeBadPack:
 		return ErrBadPack
 	case api.ErrCodeNotFound:
@@ -1040,7 +1048,9 @@ func statusError(status int, path string, body []byte) error {
 		return upgradeRequired(e)
 	}
 	if e.Error != "" {
-		return fmt.Errorf("server: %s (%d)", e.Error, status)
+		// The fallback for any unmapped code prints server prose verbatim; a hostile
+		// server's bytes reach the terminal here just like a grantor's name does.
+		return fmt.Errorf("server: %s (%d)", safetext.Clean(e.Error, safetext.DisplayMax), status)
 	}
 	return fmt.Errorf("server returned %d for %s", status, path)
 }
@@ -1057,7 +1067,7 @@ func upgradeRequired(e api.ErrorResponse) *UpgradeRequiredError {
 	return &UpgradeRequiredError{
 		MinClient:  need,
 		Capability: api.ClientCapability,
-		Detail:     sanitizeServerText(e.Error, 200),
+		Detail:     safetext.Clean(e.Error, safetext.DisplayMax),
 	}
 }
 

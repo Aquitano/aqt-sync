@@ -570,6 +570,45 @@ func TestMixedVersionUpgradeRequired(t *testing.T) {
 	}
 }
 
+// TestLsNamesTheCapabilityGap is the listing half of the same promise: `aqt ls` runs
+// against the one endpoint that cannot 426 (a listing that did would hide the whole
+// account), so a row written by a newer device must name the release it needs rather
+// than render as "(unreadable)", which is what a corrupted blob or a wrong passphrase
+// looks like.
+func TestLsNamesTheCapabilityGap(t *testing.T) {
+	h := newE2E(t)
+	id := pushSecretFile(t, "future.txt", "written by a newer device")
+	if err := h.store.SetResourceMinClientForTest(id, api.ClientCapability+1); err != nil {
+		t.Fatalf("bump min_client: %v", err)
+	}
+
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	rows, err := collectResources(cl, mk)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	var row lsRow
+	for _, r := range rows {
+		if r.ID == id {
+			row = r
+		}
+	}
+	if row.MinClient != api.ClientCapability+1 {
+		t.Fatalf("row minClient = %d, want %d", row.MinClient, api.ClientCapability+1)
+	}
+	if !strings.Contains(row.Name, "capability") || strings.Contains(row.Name, "unreadable") {
+		t.Fatalf("row name = %q, want it to name the capability it needs", row.Name)
+	}
+}
+
 // A located-but-missing object surfaces client.ErrNotFound, which the reconcile
 // loop maps to a conflict-retry: a manifest whose objects were GC'd by a concurrent
 // supersede is re-read against the current version instead of hard-failing.

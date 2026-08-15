@@ -192,29 +192,3 @@ func retryAfterSeconds(secs int) time.Duration {
 func clampRetryAfter(d time.Duration) time.Duration {
 	return min(max(d, minRetryAfter), maxRetryAfter)
 }
-
-// sanitizeServerText makes remote-controlled prose safe to print. Server messages
-// reach a terminal, a TUI pane, and JSON output, so control bytes (which could
-// rewrite the line, hide text, or emit escape sequences) are dropped and the
-// result is bounded.
-func sanitizeServerText(s string, maxLen int) string {
-	var b strings.Builder
-	for _, r := range s {
-		switch {
-		case r == '\t' || r == ' ':
-			b.WriteRune(' ')
-		case r < 0x20 || r == 0x7f:
-			// Drop C0 and DEL outright; a newline would let a server forge what
-			// looks like a second line of our own output.
-		case r >= 0x80 && r <= 0x9f:
-			// C1 controls, reachable as real runes once decoded.
-		default:
-			b.WriteRune(r)
-		}
-	}
-	out := strings.TrimSpace(b.String())
-	if len(out) > maxLen {
-		out = strings.TrimSpace(out[:maxLen]) + "…"
-	}
-	return out
-}
