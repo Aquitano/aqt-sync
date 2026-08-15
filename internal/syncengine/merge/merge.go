@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package merge provides the line-oriented diff and three-way merge used by
 // folder conflict resolution and the aqt diff command.
 package merge

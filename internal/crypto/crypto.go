@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package crypto implements aqt's zero-knowledge key hierarchy and blob sealing.
 //
 // The hierarchy is: passphrase --Argon2id--> master key --wraps--> content key,

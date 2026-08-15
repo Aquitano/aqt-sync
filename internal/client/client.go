@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package client is a thin HTTP client for the aqt API. It carries the bearer
 // token and (de)serializes the api wire types; it performs no cryptography.
 package client

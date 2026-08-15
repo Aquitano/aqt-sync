@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package server
 
 import (
@@ -94,10 +96,10 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	for _, want := range []string{
 		"crypto_aead_xchacha20poly1305_ietf_decrypt",
 		"hashwasm.argon2id",
-		"aqt-treenode-v1",       // directory-node AAD, mirrors crypto.aadTreeNode
-		"/v1/public/resources/", // the exact-slice objects endpoint
-		"fzstd.decompress",      // zstd path for compressed objects/nodes
-		"/preflight",            // uncounted metadata/policy inspection
+		"aqt-treenode-v1",                               // directory-node AAD, mirrors crypto.aadTreeNode
+		"/v1/public/resources/",                         // the exact-slice objects endpoint
+		"fzstd.decompress",                              // zstd path for compressed objects/nodes
+		"/preflight",                                    // uncounted metadata/policy inspection
 		`"X-Aqt-Capability": String(CLIENT_CAPABILITY)`, // one declared capability, not a literal per call site
 		"INSPECTING ENCRYPTED METADATA",
 		"no read was consumed",

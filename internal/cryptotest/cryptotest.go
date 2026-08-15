@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package cryptotest supplies Argon2id parameters stripped to the cheapest cost
 // the validator accepts, for tests that need a derived key rather than an
 // expensive one.

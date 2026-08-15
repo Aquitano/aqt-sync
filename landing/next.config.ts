@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 import type { NextConfig } from "next";
 
 // The marketing site renders no untrusted data, but it is the public face of a

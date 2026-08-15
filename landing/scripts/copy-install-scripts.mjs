@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // The install scripts live in the repository's scripts/ directory, which is where
 // they are reviewed and tested. The landing site serves them, so copy them into
 // public/ at build time rather than keeping a second copy in git that can drift.

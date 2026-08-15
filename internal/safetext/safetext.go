@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // Package safetext makes text this client did not author safe to print. Server
 // prose, another account's resource names, and anything else that arrives over the
 // wire all reach a terminal, a TUI pane, and JSON output; a control byte in any of

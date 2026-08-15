@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 // The strings the document head and the generated OG card have to agree on. Both
 // read them from here, so a reworded tagline cannot end up saying one thing in a
 // link preview and another in search results.
