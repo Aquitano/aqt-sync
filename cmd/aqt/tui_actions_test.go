@@ -174,6 +174,19 @@ func TestTUIIssue92AccountMenu(t *testing.T) {
 	if got := strings.Join(tuiRequestArgs(t, cmd), " "); got != "clone aqt://folder /tmp/existing --adopt" {
 		t.Fatalf("adopt args = %q", got)
 	}
+
+	// init answers its .git question with a flag; faking "n" over stdin would leave
+	// the child prompting on a terminal the TUI owns.
+	initDialog := m.initDialog().(*tuiInput)
+	initDialog.input.SetValue("/tmp/vault")
+	cmd, _ = initDialog.Update(key("enter"))
+	req := cmd().(tuiExecRequestMsg)
+	if got := strings.Join(req.sub, " "); got != "init /tmp/vault --no-git" {
+		t.Fatalf("init args = %q", got)
+	}
+	if req.stdin != "" {
+		t.Fatalf("init feeds stdin %q; only the share password may", req.stdin)
+	}
 }
 
 func TestTUISharePasswordPreservesWhitespaceAndResultPersists(t *testing.T) {

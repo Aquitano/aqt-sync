@@ -1300,7 +1300,10 @@ func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetRe
 // id. An explicit id wins; otherwise the nearest .aqt root's recorded id is used.
 func resolveResourceID(dir, id string) (string, error) {
 	if id != "" {
-		return id, nil
+		// The CLI hands out aqt:// refs (push, find, shares), so --id accepts one
+		// rather than only the bare id inside it.
+		parsed, _, _ := parseRef(id)
+		return parsed, nil
 	}
 	root, err := trackedRoot(dir)
 	if err != nil {

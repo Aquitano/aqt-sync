@@ -94,6 +94,12 @@ func accountDeleteProof(prof *identity.Profile, assumeYes bool, cl accountDelete
 	if err != nil {
 		return nil, err
 	}
+	// A piped run with nothing on stdin reads an empty line, which is a missing
+	// passphrase, not a wrong one; deriving it would report "incorrect" and send the
+	// caller looking for a typo that is not there.
+	if pass == "" {
+		return nil, errors.New("passphrase must not be empty")
+	}
 	uk, err := crypto.DeriveUnlockKey(pass, prof.Kdf)
 	if err != nil {
 		return nil, err

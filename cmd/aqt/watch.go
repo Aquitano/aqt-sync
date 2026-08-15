@@ -111,6 +111,11 @@ func watchCmd() *cobra.Command {
 			"watch.gitGuard); --interval overrides them.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// The dispatch below takes --once first, so accepting both would detach
+			// nothing and exit after one sync — with -d silently doing nothing.
+			if opts.once && opts.daemon {
+				return errors.New("--once and -d/--daemon are mutually exclusive: --once syncs once in the foreground, -d watches in the background")
+			}
 			opts.intervalSet = cmd.Flags().Changed("interval")
 			return runWatch(dirArg(args), opts)
 		},

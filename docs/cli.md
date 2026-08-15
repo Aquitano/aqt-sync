@@ -26,6 +26,11 @@ than accepting it and behaving identically:
   terminal. Those are the commands that transfer enough at once to draw a bar
   (a `pull` draws one for a subtree, `aqt://<id>/<dir>`).
 
+Every prompt has a flag that answers it ahead of time, so a scripted run neither
+blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive
+confirmation, `--git/--no-git` for whether `aqt init` syncs a git repository inside
+the folder, and `-P/--password` with a value instead of the bare form that prompts.
+
 Everyday resource arguments accept a unique name, an id, or a tracked path:
 `info`, `pull`, `cat`, `clone`, `ls <folder>`, `rm`, `mv`, `share`, and `unshare`
 all resolve the name column `aqt ls` prints. Addressing one entry *inside* a folder

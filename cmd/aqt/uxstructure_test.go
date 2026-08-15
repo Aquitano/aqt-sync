@@ -320,7 +320,7 @@ func TestQuietInitAndSyncOutput(t *testing.T) {
 
 	withQuiet(t, func() {
 		out := captureStdout(t, func() {
-			if err := runInit(dir); err != nil {
+			if err := runInit(dir, nil); err != nil {
 				t.Fatalf("init -q: %v", err)
 			}
 		})

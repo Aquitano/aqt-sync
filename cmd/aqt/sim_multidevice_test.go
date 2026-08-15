@@ -247,7 +247,7 @@ func (s *sim) setup() {
 	url := s.fault.url
 	s.use(s.devs[0])
 	signupAt(t, url, email, pass)
-	if err := runInit(s.devs[0].dir); err != nil {
+	if err := runInit(s.devs[0].dir, nil); err != nil {
 		t.Fatalf("init device 0: %v", err)
 	}
 	seed := s.freshContent()

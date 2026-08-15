@@ -409,6 +409,17 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendLog(tuiStyleErr.Render("✗ "+note) + elapsed)
 			toast = m.toastErr(note)
+			// Exit 3 is the child reporting there is no unlocked session: the cached key
+			// expired, or `aqt lock` cleared it, while this TUI still held its own copy.
+			// Drop back to the unlock view rather than failing every action until quit.
+			if msg.exit == 3 {
+				m.ctx.unlocked = false
+				m.ctx.mk.Wipe()
+				m.unlockIn.SetValue("")
+				m.unlockErr = nil
+				m.refreshMain()
+				return m, tea.Batch(toast, textinput.Blink)
+			}
 		}
 		m.refreshMain()
 		return m, tea.Batch(toast, m.reloadPanels())

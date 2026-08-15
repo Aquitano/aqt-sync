@@ -531,6 +531,29 @@ func TestTUIQuitConfirmDoesNotCapturePid(t *testing.T) {
 	}
 }
 
+// A session that expires mid-session makes every action exit 3. The TUI has an
+// unlock view; it must re-enter it instead of failing every action until quit.
+func TestTUIExitThreeReturnsToUnlock(t *testing.T) {
+	m := testModel(t)
+	m.execBusy = true
+	m.execTitle = "aqt sync"
+
+	m.Update(tuiExecDoneMsg{title: m.execTitle, exit: 3})
+	if m.ctx.unlocked {
+		t.Fatal("exit 3 left the model unlocked; the unlock view is unreachable")
+	}
+	if _, cmd := m.handleKey(key("enter")); cmd != nil {
+		t.Fatal("an empty passphrase should not start an unlock")
+	}
+
+	// Any other failure keeps the session: a conflict is not an auth problem.
+	m = testModel(t)
+	m.Update(tuiExecDoneMsg{title: "aqt sync", exit: 4})
+	if !m.ctx.unlocked {
+		t.Fatal("exit 4 dropped the unlocked session")
+	}
+}
+
 func TestTUIAccordionHeights(t *testing.T) {
 	m := testModel(t) // 100x30
 

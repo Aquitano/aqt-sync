@@ -72,12 +72,24 @@ const (
 // --- commands ---
 
 func initCmd() *cobra.Command {
+	var git, noGit bool
 	cmd := &cobra.Command{
 		Use:   "init [dir]",
 		Short: "Mark a folder as tracked for sync",
 		Args:  cobra.MaximumNArgs(1),
-		RunE:  func(cmd *cobra.Command, args []string) error { return runInit(dirArg(args)) },
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if git && noGit {
+				return errors.New("--git and --no-git are mutually exclusive")
+			}
+			var syncGit *bool
+			if git || noGit {
+				syncGit = &git
+			}
+			return runInit(dirArg(args), syncGit)
+		},
 	}
+	cmd.Flags().BoolVar(&git, "git", false, "track the .git directory too, instead of asking")
+	cmd.Flags().BoolVar(&noGit, "no-git", false, "leave .git ignored, instead of asking")
 	markQuietSupported(cmd)
 	return cmd
 }
@@ -149,7 +161,10 @@ func cloneCmd() *cobra.Command {
 
 // --- init ---
 
-func runInit(dir string) error {
+// runInit tracks dir. gitChoice decides whether a git repository inside it is
+// synced too; nil asks (the interactive default), which is why --git/--no-git exist:
+// a scripted or TUI-driven init has nobody to answer the prompt.
+func runInit(dir string, gitChoice *bool) error {
 	abs, err := filepath.Abs(dir)
 	if err != nil {
 		return err
@@ -172,8 +187,9 @@ func runInit(dir string) error {
 	// aqt ignores .git by default; offer to track it when this tree holds a repo.
 	syncGit := false
 	if repo, ok := firstGitRepo(abs); ok {
-		syncGit, err = promptSyncGit(repo)
-		if err != nil {
+		if gitChoice != nil {
+			syncGit = *gitChoice
+		} else if syncGit, err = promptSyncGit(repo); err != nil {
 			return err
 		}
 	}

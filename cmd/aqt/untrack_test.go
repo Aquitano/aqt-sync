@@ -33,7 +33,7 @@ func TestUntrackRecoversAFolderWhoseResourceIsGone(t *testing.T) {
 	if !strings.Contains(err.Error(), "aqt untrack") {
 		t.Fatalf("sync error does not name the recovery: %v", err)
 	}
-	if err := runInit(dir); err == nil || !strings.Contains(err.Error(), "aqt untrack") {
+	if err := runInit(dir, nil); err == nil || !strings.Contains(err.Error(), "aqt untrack") {
 		t.Fatalf("init over a tracked folder does not name the recovery: %v", err)
 	}
 

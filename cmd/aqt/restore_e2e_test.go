@@ -58,7 +58,7 @@ func TestFullBackupRestoreDrill(t *testing.T) {
 	writeTree(t, origin, ".aqtignore", "!.git/\nnode_modules/\n")
 	hasSymlink := buildRealisticTree(t, origin)
 
-	if err := runInit(origin); err != nil {
+	if err := runInit(origin, nil); err != nil {
 		t.Fatalf("init: %v", err)
 	}
 	if err := runSync(origin, syncOptions{}); err != nil {
