@@ -354,16 +354,20 @@
     function attempt() {
       return awaitCooldown(jitter).then(fire).then(function (res) {
         if (res.status !== 429) return res;
-        if (attempts >= retryMaxAttempts) throw new Error("rate-limited");
         return res.text().then(function (text) {
           var wait = retryDelay(res, text);
-          if (spent + wait > retryTotalMs) throw new Error("rate-limited");
-          attempts++;
-          spent += wait;
-          // A later deadline always wins: an overlapping 429 advertising a shorter
-          // wait must not shorten a cooldown another request already established.
+          // Publish before deciding whether to retry, the way the Go client does: a
+          // request that is about to give up still learned how long the bucket needs,
+          // and every other request should observe that rather than walk into it. A
+          // later deadline always wins, so an overlapping 429 advertising a shorter
+          // wait cannot shorten a cooldown another request already established.
           var deadline = Date.now() + wait;
           if (deadline > cooldownUntil) cooldownUntil = deadline;
+          if (attempts >= retryMaxAttempts || spent + wait > retryTotalMs) {
+            throw new Error("rate-limited");
+          }
+          attempts++;
+          spent += wait;
           return attempt();
         });
       });
