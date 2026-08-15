@@ -2,6 +2,53 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Added
+
+- `aqt untrack [dir]` stops tracking a folder: it removes the `.aqt` control
+  directory behind a confirmation and touches neither the working tree nor the
+  server-side resource, which `--delete-remote` opts into deleting as well. It is the
+  way out of a folder whose resource was deleted — with `aqt rm` here, from another
+  device, or by an operator — which until now left every sync failing with "not found
+  on the server" while `aqt init` refused the directory for still having `.aqt`. The
+  only recovery was `rm -rf .aqt`, documented nowhere; both dead-end errors now name
+  the command instead. A running watch agent is refused, since it would keep syncing
+  a folder whose control state had just been removed.
+
+### Fixed
+
+- An interrupted pack-and-seal pull no longer destroys the intact remote folder. Such
+  a pull extracts in place — staging the root and renaming would take the ignored
+  files, build output and caches, with it — so an interruption leaves a tree that is
+  part new version and part old, and no scan tells that from deliberate local edits.
+  The next reconcile read it as "changed on both sides" and printed the `--force`
+  hint, which means push: the torn tree was tarred and committed as the new
+  authoritative version. A pull now records `.aqt/pull-in-progress` for the length of
+  the extract and prune and clears it only once the base commits. While it exists the
+  folder pulls — `--force` cannot re-route that into a push, `--push-only` refuses and
+  says why, and `status` warns that the changes it shows are a half-applied remote
+  version rather than local edits. Re-running `aqt sync` is the whole recovery.
+
+- An interrupted migration no longer wedges a server data directory permanently. Each
+  step ran as one statement batch with its `PRAGMA user_version` bump separate, and
+  most steps are `ALTER TABLE ADD COLUMN` blocks, which are not idempotent. A power
+  loss, OOM kill, or full disk during the first start after an upgrade left some
+  columns added and the version behind, and every later start replayed the step and
+  failed with `duplicate column name` — with no recovery but deleting the data
+  directory, which on a zero-knowledge server is every account's only copy of its
+  ciphertext. Each step and its version bump now commit in one transaction. An older
+  binary also refuses a data directory a newer one has migrated, rather than serving
+  it against a schema it does not know; take a backup before upgrading if you need
+  the option to roll back.
+
+- `aqt-server` exits non-zero when it fails to serve. A serve error was logged and
+  the process exited 0, so systemd with `Restart=on-failure` read a port conflict or
+  a lost `CAP_NET_BIND_SERVICE` as a clean stop and never restarted — `systemctl
+  start` reported success and left an inactive unit with result `success` while the
+  server was down. A drain that overruns `AQT_SHUTDOWN_GRACE`, and a store that fails
+  to close cleanly, are failed exits too.
+
 ## [v0.7.0] - 2026-08-11
 
 ### Added
