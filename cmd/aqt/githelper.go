@@ -88,6 +88,7 @@ nothing.`,
 	cmd.Flags().StringVar(&dir, "dir", "", "directory to create the link in (default: beside this binary)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "replace an existing git-remote-aqt without asking")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	return cmd
 }
 

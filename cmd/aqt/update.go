@@ -65,6 +65,7 @@ manifest promised; every failure puts it back.`,
 	cmd.Flags().BoolVar(&opts.prerelease, "prerelease", false, "use the beta channel, which includes prereleases")
 	cmd.Flags().BoolVarP(&opts.assumeYes, "yes", "y", false, "install without asking for confirmation")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	cmd.AddCommand(updatePolicyCmd())
 	return cmd
 }
@@ -266,5 +267,6 @@ changes the exit status of the command that triggered it.`,
 		},
 	}
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	return cmd
 }

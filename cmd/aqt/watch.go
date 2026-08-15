@@ -119,6 +119,7 @@ func watchCmd() *cobra.Command {
 	f.BoolVarP(&opts.daemon, "daemon", "d", false, "detach and watch in the background")
 	f.BoolVar(&opts.once, "once", false, "sync once and exit (cron-friendly)")
 	f.DurationVar(&opts.interval, "interval", defaultInterval, "debounce floor between syncs")
+	markProgressSupported(cmd) // every sync it runs draws the sync bars
 	return cmd
 }
 
@@ -530,6 +531,7 @@ func agentCmd() *cobra.Command {
 	}
 	start.Flags().DurationVar(&startOpts.interval, "interval", defaultInterval, "debounce floor between syncs")
 	start.Flags().BoolVar(&foreground, "foreground", false, "stay attached to this terminal instead of detaching")
+	markProgressSupported(start) // --foreground runs the same watch loop as `aqt watch`
 	cmd.AddCommand(start)
 	cmd.AddCommand(
 		&cobra.Command{

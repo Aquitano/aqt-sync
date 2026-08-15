@@ -153,6 +153,10 @@ func snapshotCreateCmd() *cobra.Command {
 			if flagJSON {
 				return printJSON(info)
 			}
+			if flagQuiet {
+				fmt.Println(info.ID)
+				return nil
+			}
 			fmt.Printf("snapshot %s of %s (version %d)\n", info.ID, resourceID, info.Version)
 			return nil
 		},
@@ -160,6 +164,7 @@ func snapshotCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "snapshot this resource id directly (e.g. a pushed file) instead of a tracked dir")
 	cmd.Flags().StringVarP(&label, "label", "l", "", "attach a label, encrypted on this machine before upload")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	return cmd
 }
 
@@ -526,7 +531,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err := clearPullMarker(root); err != nil {
 		return err
 	}
-	if !flagJSON {
+	if !flagJSON && !flagQuiet {
 		fmt.Fprintln(os.Stderr, "rolled back; syncing to propagate...")
 	}
 	return runSync(root, syncOptions{force: true})

@@ -72,12 +72,14 @@ const (
 // --- commands ---
 
 func initCmd() *cobra.Command {
-	return &cobra.Command{
+	cmd := &cobra.Command{
 		Use:   "init [dir]",
 		Short: "Mark a folder as tracked for sync",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  func(cmd *cobra.Command, args []string) error { return runInit(dirArg(args)) },
 	}
+	markQuietSupported(cmd)
+	return cmd
 }
 
 func statusCmd() *cobra.Command {
@@ -111,6 +113,8 @@ func syncCmd() *cobra.Command {
 	f.BoolVar(&opts.acceptRollback, "accept-rollback", false, "proceed although the server reports an older version than previously seen (restored from backup): reconcile from scratch, one-sided differences become conflicts to review")
 	f.StringVar(&opts.conflicts, "conflicts", "", "conflict handling: block (default), copy, or merge (three-way text merge; falls back to copy)")
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
+	markProgressSupported(cmd)
 	return cmd
 }
 
@@ -139,6 +143,7 @@ func cloneCmd() *cobra.Command {
 		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
 	pw.bind(cmd, "password for a gated link")
 	markJSONSupported(cmd)
+	markProgressSupported(cmd)
 	return cmd
 }
 
@@ -230,6 +235,10 @@ func runInit(dir string) error {
 			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %v; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
 		}
 		return err
+	}
+	if flagQuiet {
+		fmt.Printf("aqt://%s\n", resp.ID)
+		return nil
 	}
 	fmt.Printf("tracking %s\naqt://%s\n", abs, resp.ID)
 	fmt.Fprintln(os.Stderr, "run `aqt sync` to push the current contents")
@@ -1176,7 +1185,11 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 			// re-planned rather than memoized as done; a retry rewrites the same path.
 			for _, cp := range copies {
 				c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
-				// stderr under --json so the summary object stays the only stdout output.
+				// stderr under --json so the summary object stays the only stdout output;
+				// -q drops the line entirely, like every other per-file line.
+				if flagQuiet {
+					continue
+				}
 				out := os.Stdout
 				if flagJSON {
 					out = os.Stderr
@@ -2993,6 +3006,11 @@ func summarize(uploads, downloads []syncengine.Entry, localDeletes, merged []str
 			"downloaded": len(downloads), "downloadedBytes": entriesBytes(downloads),
 			"removedLocally": len(localDeletes), "merged": merged,
 		})
+		return
+	}
+	// A quiet sync says nothing about the work it did; what it could not do (the
+	// conflict list below, printed by the caller) still reaches the terminal.
+	if flagQuiet {
 		return
 	}
 	fmt.Printf("synced: %d up (%s), %d down (%s), %d removed locally\n",

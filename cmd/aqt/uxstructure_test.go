@@ -91,6 +91,50 @@ func TestJSONGateErrorsOnUnsupported(t *testing.T) {
 	}
 }
 
+// -q and --progress are global like --json, so a command that implements neither
+// must say so instead of accepting a flag that changes nothing.
+func TestQuietAndProgressGatesErrorOnUnsupported(t *testing.T) {
+	// Both flags live on package globals that cobra sets during parsing; a rejected
+	// run leaves them set for whatever runs next.
+	previousQuiet, previousProgress := flagQuiet, flagProgress
+	defer func() { flagQuiet, flagProgress = previousQuiet, previousProgress }()
+
+	unsupported := []struct {
+		args []string
+		want string
+	}{
+		{[]string{"ls", "-q"}, "does not support -q/--quiet"},
+		{[]string{"whoami", "--quiet"}, "does not support -q/--quiet"},
+		{[]string{"push", "note.txt", "--progress"}, "does not support --progress"},
+		{[]string{"ls", "--progress"}, "does not support --progress"},
+	}
+	for _, tc := range unsupported {
+		root := rootCmd()
+		root.SetArgs(tc.args)
+		err := root.Execute()
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%v err = %v, want %q", tc.args, err, tc.want)
+		}
+	}
+
+	// The commands that implement them pass the gate; each then fails on the missing
+	// profile or the untracked directory, which is what proves the gate let it through.
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	supported := [][]string{
+		{"init", t.TempDir(), "-q"},
+		{"sync", t.TempDir(), "--progress"},
+		{"push", filepath.Join(t.TempDir(), "note.txt"), "-q"},
+		{"pull", "someid", "--progress"},
+	}
+	for _, args := range supported {
+		root := rootCmd()
+		root.SetArgs(args)
+		if err := root.Execute(); err != nil && strings.Contains(err.Error(), "does not support") {
+			t.Errorf("%v hit the gate: %v", args, err)
+		}
+	}
+}
+
 func TestJSONGateRejectsRootWithoutPath(t *testing.T) {
 	previous := flagJSON
 	flagJSON = false
@@ -263,6 +307,45 @@ func TestStatusAndSyncJSON(t *testing.T) {
 			t.Fatalf("sync --json summary = %+v", sum)
 		}
 	})
+}
+
+// -q reduces stdout to the value a script consumes: init prints the ref and nothing
+// else, and a sync that had no trouble prints nothing at all.
+func TestQuietInitAndSyncOutput(t *testing.T) {
+	h := newE2E(t)
+	dir := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	withQuiet(t, func() {
+		out := captureStdout(t, func() {
+			if err := runInit(dir); err != nil {
+				t.Fatalf("init -q: %v", err)
+			}
+		})
+		if got, want := strings.TrimSpace(out), "aqt://"+h.folderID(dir); got != want {
+			t.Errorf("init -q printed %q, want %q", got, want)
+		}
+
+		writeTree(t, dir, "a.txt", "hello")
+		out = captureStdout(t, func() {
+			if err := runSync(dir, syncOptions{}); err != nil {
+				t.Fatalf("sync -q: %v", err)
+			}
+		})
+		if out != "" {
+			t.Errorf("sync -q printed %q, want nothing", out)
+		}
+	})
+}
+
+// withQuiet runs fn with the global -q flag set, restoring it afterwards.
+func withQuiet(t *testing.T, fn func()) {
+	t.Helper()
+	flagQuiet = true
+	defer func() { flagQuiet = false }()
+	fn()
 }
 
 // withJSON runs fn with the global --json flag set, restoring it afterwards.

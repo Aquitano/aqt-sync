@@ -265,11 +265,19 @@ func rootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		Args:          cobra.ArbitraryArgs,
-		// --json is a global flag, so a command that does not implement it must say
-		// so rather than silently print prose a script would try to parse.
+		// --json, -q and --progress are global flags, so a command that does not
+		// implement one must say so rather than accept it and behave identically:
+		// silently printing prose a script would try to parse, or promising a bar it
+		// never draws.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			if flagJSON && cmd.Annotations[jsonAnnotation] == "" {
 				return fmt.Errorf("%s does not support --json", cmd.CommandPath())
+			}
+			if flagQuiet && cmd.Annotations[quietAnnotation] == "" {
+				return fmt.Errorf("%s does not support -q/--quiet", cmd.CommandPath())
+			}
+			if flagProgress && cmd.Annotations[progressAnnotation] == "" {
+				return fmt.Errorf("%s does not support --progress", cmd.CommandPath())
 			}
 			return nil
 		},
@@ -300,7 +308,9 @@ func rootCmd() *cobra.Command {
 	root.AddCommand(gitRemoteHelperCmd())
 	root.AddCommand(tuiCmd(), updateCmd())
 
-	markJSONSupported(root) // the bare-path push sugar prints the push JSON
+	// The bare-path push sugar runs push's own printer, so root carries push's flags.
+	markJSONSupported(root)
+	markQuietSupported(root)
 
 	// root.Version makes cobra print the version when the flag is set; register the
 	// flag explicitly so it carries the conventional -v shorthand.
@@ -309,18 +319,31 @@ func rootCmd() *cobra.Command {
 	return root
 }
 
-// jsonAnnotation marks a command as implementing the global --json flag; the root
-// PersistentPreRunE refuses --json on any command without it.
-const jsonAnnotation = "supports-json"
+// These annotations mark a command as implementing one of the global output flags;
+// the root PersistentPreRunE refuses a flag on any command without its annotation.
+const (
+	jsonAnnotation     = "supports-json"
+	quietAnnotation    = "supports-quiet"
+	progressAnnotation = "supports-progress"
+)
 
 // markJSONSupported annotates commands (and `aqt help <cmd>`-visible subcommands
 // passed explicitly) as honoring --json.
-func markJSONSupported(cmds ...*cobra.Command) {
+func markJSONSupported(cmds ...*cobra.Command) { markSupported(jsonAnnotation, cmds...) }
+
+// markQuietSupported annotates commands whose output -q/--quiet reduces to the one
+// machine-readable line (a ref, an id, a path) or suppresses entirely.
+func markQuietSupported(cmds ...*cobra.Command) { markSupported(quietAnnotation, cmds...) }
+
+// markProgressSupported annotates commands that can draw a transfer bar.
+func markProgressSupported(cmds ...*cobra.Command) { markSupported(progressAnnotation, cmds...) }
+
+func markSupported(annotation string, cmds ...*cobra.Command) {
 	for _, c := range cmds {
 		if c.Annotations == nil {
 			c.Annotations = map[string]string{}
 		}
-		c.Annotations[jsonAnnotation] = "true"
+		c.Annotations[annotation] = "true"
 	}
 }
 

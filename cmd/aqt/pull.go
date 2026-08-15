@@ -40,6 +40,9 @@ func pullCmd() *cobra.Command {
 	pw.bind(cmd, "password for a gated link")
 	cmd.Flags().BoolVar(&force, "force", false, "overwrite the destination if it exists")
 	markJSONSupported(cmd)
+	// Only a subtree pull (aqt://<id>/<dir>) transfers enough entries to draw a bar,
+	// but that is this command's own path, so --progress belongs here.
+	markProgressSupported(cmd)
 	return cmd
 }
 

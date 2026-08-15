@@ -59,6 +59,7 @@ func shareCmd() *cobra.Command {
 	cmd.Flags().StringVar(&with, "with", "", "grant read-only access to a specific account by email (no public link)")
 	cmd.AddCommand(shareLsCmd())
 	markJSONSupported(cmd)
+	markQuietSupported(cmd)
 	return cmd
 }
 
@@ -327,6 +328,10 @@ func runShareWith(idArg, email string) error {
 	if flagJSON {
 		return printJSON(map[string]any{"id": id, "granted": email})
 	}
+	if flagQuiet {
+		fmt.Printf("aqt://%s\n", id)
+		return nil
+	}
 	fmt.Printf("granted %s read-only access to aqt://%s\n", email, id)
 	fmt.Fprintln(os.Stderr, "they will see it under `aqt shares` and can pull or clone it; they cannot modify it")
 	return nil
@@ -536,6 +541,11 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		return printJSON(out)
 	}
 	fmt.Println(ref)
+	// -q leaves the link as the only output, the way push's quiet path does: no
+	// clipboard detour, no lifecycle note.
+	if flagQuiet {
+		return nil
+	}
 	if !noClip && copyToClipboard(ref) {
 		fmt.Fprintln(os.Stderr, "(copied to clipboard)")
 	}
