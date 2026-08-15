@@ -524,6 +524,13 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 		return err
 	}
 	defer release()
+	// The marker turns a kill mid-swap from silent data loss into a refusal: a
+	// half-emptied root scans as mass deletion, and the next sync (or watch tick)
+	// would push those deletions fleet-wide. It covers only the swap — once the
+	// tree is whole again the marker comes off, before the propagation sync.
+	if err := beginRestoreMarker(root, snap.Snapshot.ID); err != nil {
+		return err
+	}
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
 	}
@@ -533,10 +540,56 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err := clearPullMarker(root); err != nil {
 		return err
 	}
+	if err := clearRestoreMarker(root); err != nil {
+		return err
+	}
 	if !flagJSON && !flagQuiet {
 		fmt.Fprintln(os.Stderr, "rolled back; syncing to propagate...")
 	}
-	return runSync(root, syncOptions{force: true})
+	// conflicts is pinned to block: the restored tree's own .aqtconfig may select
+	// copy or merge, which contradict --force — a wedge the user never caused, hit
+	// only after the tree was already swapped.
+	return runSync(root, syncOptions{force: true, conflicts: "block"})
+}
+
+// restoreMarkerFile is .aqt/restore-in-progress: written before swapTree moves the
+// live tree aside, removed once the swap completed. While present, the working tree
+// may be half-emptied, so syncs refuse instead of reading it as local deletions.
+const restoreMarkerFile = "restore-in-progress"
+
+type restoreMarker struct {
+	SnapshotID string `json:"snapshotId"`
+	present    bool
+}
+
+func beginRestoreMarker(root, snapshotID string) error {
+	b, err := json.MarshalIndent(restoreMarker{SnapshotID: snapshotID}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(controlPath(root, restoreMarkerFile), b, 0o600)
+}
+
+func clearRestoreMarker(root string) error {
+	if err := os.Remove(controlPath(root, restoreMarkerFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+// loadRestoreMarker reports whether an in-place restore was interrupted mid-swap. A
+// marker that will not parse still counts as present, like the pull marker.
+func loadRestoreMarker(root string) (restoreMarker, error) {
+	b, err := os.ReadFile(controlPath(root, restoreMarkerFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return restoreMarker{}, nil
+	}
+	if err != nil {
+		return restoreMarker{}, err
+	}
+	m := restoreMarker{present: true}
+	_ = json.Unmarshal(b, &m)
+	return m, nil
 }
 
 // swapTree replaces root's contents (everything but the .aqt control dir) with
