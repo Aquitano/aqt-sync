@@ -48,6 +48,14 @@ func runUntrack(dir string, deleteRemote, assumeYes bool) error {
 	if err != nil {
 		return err
 	}
+	// A live watcher outlives the control state it reads, so removing .aqt under one
+	// leaves it failing in the background against a folder that no longer exists. The
+	// sync lock below would not catch this: the daemon holds it only for the length of
+	// a sync, so untrack would usually slip through between two of them.
+	if pid, ok := readLockPID(controlPath(root, agentPIDFile)); ok && processAlive(pid) && looksLikeAqtProcess(pid) {
+		return fmt.Errorf("a watch agent is running here (pid %d); stop it with `aqt agent stop` first", pid)
+	}
+
 	// A folder worth untracking often has broken control state, so an unreadable
 	// state.json must not block the escape hatch — it only costs the prompt the
 	// resource id.

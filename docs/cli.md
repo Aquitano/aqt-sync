@@ -138,7 +138,9 @@ or by an operator — which leaves every sync failing with "not found on the ser
 while `aqt init` refuses the directory for still having `.aqt`. It is also the
 step before re-tracking a directory against a different resource, account, or server.
 `--delete-remote` deletes the resource first, so a failure there leaves the folder
-tracked and the command retryable rather than orphaning a resource.
+tracked and the command retryable rather than orphaning a resource. A running watch
+agent is refused (`aqt agent stop` first), since it would keep syncing a folder whose
+control state had just been removed.
 
 An interrupted pack-and-seal pull leaves `.aqt/pull-in-progress` behind. While it is
 there the working tree holds part of the new version and part of the old, so `sync`

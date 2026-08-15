@@ -400,9 +400,15 @@ and destroy the intact remote folder. `.aqt/pull-in-progress` records the target
 version for the length of the extract and prune, and is cleared only once the base
 commits. While it exists, the folder pulls: `--force` cannot re-route that into a
 push, `--push-only` refuses with the reason, and `status` says the changes it is
-showing are a half-applied remote version. Finishing the pull converges, because the
-resumed extract re-verifies each target against a fresh scan exactly as the first one
-did.
+showing are a half-applied remote version. Re-running `sync` is the whole recovery:
+the resumed extract re-scans first, so paths already carrying the new version are
+re-verified and rewritten, and the prune still skips anything created since.
+
+The one thing the marker cannot protect is an edit made *after* the interruption. It
+lands in the same fresh scan as the half-applied version and is overwritten by the
+resumed pull — as a completed pull would have overwritten it, since pack-and-seal is
+whole-folder last-writer-wins and has no per-file conflict to resolve. That is why
+both `sync` and `status` say the tree is incomplete before acting on it.
 
 ## Watch daemon
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +50,43 @@ func TestUntrackRecoversAFolderWhoseResourceIsGone(t *testing.T) {
 	// The folder is ordinary again, so it can be tracked afresh.
 	h.init(dir)
 	h.sync(dir)
+}
+
+// A watch agent reads the control state untrack removes, and holds the sync lock
+// only for the length of each sync — so untrack would slip between two of them and
+// leave the daemon failing in the background against a folder that no longer exists.
+func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
+	h := newE2E(t)
+	dir := t.TempDir()
+	h.init(dir)
+	writeTree(t, dir, "keep.txt", "data")
+	h.sync(dir)
+
+	// This test binary stands in for the daemon: it is alive, and its name satisfies
+	// the same recycled-PID check `aqt agent stop` uses.
+	pidFile := controlPath(dir, agentPIDFile)
+	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	err := runUntrack(dir, false, true)
+	if err == nil {
+		t.Fatal("untrack removed .aqt out from under a running watch agent")
+	}
+	if !strings.Contains(err.Error(), "aqt agent stop") {
+		t.Fatalf("error does not name the fix: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(dir, syncengine.ControlDir)); statErr != nil {
+		t.Fatalf(".aqt was removed despite the refusal: %v", statErr)
+	}
+
+	// With the agent gone, the folder untracks normally.
+	if err := os.Remove(pidFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := runUntrack(dir, false, true); err != nil {
+		t.Fatalf("untrack after the agent stopped: %v", err)
+	}
 }
 
 // Plain untrack is local-only: the server-side resource stays, and can still be
