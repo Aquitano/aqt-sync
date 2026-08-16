@@ -6,9 +6,9 @@ either reports what is available or installs it. `--check` keeps the whole path
 read-only.
 
 The transport is not trusted. Whoever serves the metadata — GitHub's public release
-assets, a static origin, or the GitHub CLI — can only make the check fail, never make
-it lie: the signature is what makes an answer usable, and every field is refused until
-it verifies.
+assets or an explicitly configured static origin — can only make the check fail,
+never make it lie: the signature is what makes an answer usable, and every field is
+refused until it verifies.
 
 ## Using it
 
@@ -32,14 +32,11 @@ non-prerelease, so a routine check makes no API call and cannot be rate limited.
 `--prerelease` additionally asks the public API for the newest release including
 prereleases, since no static URL exposes that.
 
-Two fallbacks exist for anyone not served by the default:
+One explicit override exists for anyone not served by the default:
 
 - `AQT_UPDATE_BASE_URL` fetches `<base>/stable.json` and `<base>/stable.json.sig`
   instead. That is how the tests run and how a mirror or self-hoster serves its own
   origin.
-- If the HTTPS read fails and the [GitHub CLI](https://cli.github.com) is already
-  installed, the check retries through `gh`, which carries the user's credentials.
-  That keeps a **private fork** updating; it is never required for this repository.
 
 Transport is not a trust decision. The manifest signature is checked against keys
 compiled into the binary whichever path supplied the bytes, and the artifact is
@@ -112,31 +109,20 @@ Installing a release archive is also what makes updating work at all: a `make bu
 or `go install` copy reports its version as `dev`, which names no release, so the
 updater reports it rather than replacing it.
 
-## Installation ownership
+## Installation kind
 
-`aqt update` replaces only an installation nothing else is tracking. Everything else
-is reported with the command its real owner expects, and is never overwritten:
-rewriting a file a package manager installed would leave that manager's records
-describing bytes that no longer match, and the next `brew upgrade` would quietly
-revert the update anyway. aqt is not published through any of these managers today —
-the install script produces a standalone copy — so the rows below exist to keep a
-third-party or future package from being clobbered.
+`aqt update` distinguishes only published release binaries from source builds.
+The install script produces a release binary and the updater may replace it. A
+`make build` or `go install` copy belongs to its source checkout, so the updater
+refuses and explains how to rebuild or install a release.
 
 | Owner | How it is recognized | What `aqt update` does |
 | --- | --- | --- |
-| standalone | none of the below | replaces it |
+| standalone release | `buildKind` is `release` | replaces it |
 | source | `buildKind` is not `release` | refuses; suggests `make build` or installing a release |
-| Homebrew | `…/Cellar/<formula>/<version>/` with `INSTALL_RECEIPT.json` | refuses; prints `brew upgrade <formula>` |
-| Scoop | `…/apps/<app>/<version>/` with a sibling `shims/` and an `install.json` | refuses; prints `scoop update <app>` |
-| WinGet | `…/Microsoft/WinGet/Packages/<PackageId>_…/` | refuses; prints `winget upgrade <PackageId>` |
 
-Detection resolves symlinks first and reads the receipts on disk, so a shim on
-`PATH` is classified by what it points at rather than by where it was found. A
-directory that merely looks like one of these layouts but carries no receipt stays
-standalone: the receipt is what distinguishes a real formula from a coincidence.
-
-aqt never invokes a package manager itself. Shelling out to `brew` from inside a
-binary brew owns is how an upgrade ends up half-applied.
+Release installs resolve symlinks before replacement so the updater writes the
+actual binary rather than replacing only a link.
 
 ## Installing
 

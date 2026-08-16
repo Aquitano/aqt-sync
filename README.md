@@ -187,10 +187,8 @@ and digest, and keeps the previous binary until the new one has run and reported
 version it should. `--check` changes nothing, `--yes` skips the prompt, `--prerelease`
 opts into the beta channel, and `--json` is machine-readable.
 
-Only a standalone install is replaced, which is what the install scripts produce. If the
-binary came from source or from a package manager, `aqt update` reports the command that
-owner expects and never overwrites the file. aqt is not published through Homebrew,
-WinGet, or Scoop; that detection exists so a third-party package would never be clobbered.
+Only a published release binary is replaced, which is what the install scripts produce.
+A source build reports how to rebuild or install a release and is never overwritten.
 
 Nothing checks for updates on its own by default. `aqt update policy notify` prints one
 line a day when a release is available, and `auto` also installs stable releases once no

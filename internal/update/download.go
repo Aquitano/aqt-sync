@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 )
@@ -104,30 +103,6 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 	n, err := b.w.Write(p)
 	b.n += int64(n)
 	return n, err
-}
-
-// FetchArtifact streams a release asset through the GitHub CLI. `gh release
-// download` writes to stdout, which is piped straight into w, so nothing is
-// buffered whole.
-func (g GHSource) FetchArtifact(ctx context.Context, version string, a Artifact, w io.Writer) error {
-	if g.RunStream != nil {
-		return g.RunStream(ctx, w, "release", "download", version, "--repo", g.Repo, "--pattern", a.Name, "--output", "-")
-	}
-	cmd := exec.CommandContext(ctx, "gh", "release", "download", version, "--repo", g.Repo, "--pattern", a.Name, "--output", "-")
-	stderr := &capWriter{max: 4 << 10}
-	cmd.Stdout = w
-	cmd.Stderr = stderr
-	cmd.Stdin = nil
-	if err := cmd.Run(); err != nil {
-		if errors.Is(err, exec.ErrNotFound) {
-			return fmt.Errorf("%w: install it from https://cli.github.com and run `gh auth login`", ErrGHUnavailable)
-		}
-		if msg := strings.TrimSpace(stderr.buf.String()); msg != "" {
-			return fmt.Errorf("downloading %s: %v: %s", a.Name, err, msg)
-		}
-		return fmt.Errorf("downloading %s: %w", a.Name, err)
-	}
-	return nil
 }
 
 // FetchArtifact streams a release asset over HTTPS. The URL comes from the signed

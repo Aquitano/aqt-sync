@@ -3,6 +3,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -28,6 +29,22 @@ var (
 	// the installation is exactly as it was before.
 	ErrRolledBack = errors.New("the update was rolled back")
 )
+
+// capWriter refuses to buffer more than max bytes, which stops a broken child
+// process from being read into memory without limit.
+type capWriter struct {
+	buf  bytes.Buffer
+	max  int64
+	over bool
+}
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if int64(w.buf.Len()+len(p)) > w.max {
+		w.over = true
+		return 0, ErrTooLarge
+	}
+	return w.buf.Write(p)
+}
 
 // ApplyOptions describes one replacement.
 type ApplyOptions struct {

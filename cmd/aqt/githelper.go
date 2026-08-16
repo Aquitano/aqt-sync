@@ -77,8 +77,7 @@ func gitSetupCmd() *cobra.Command {
 Git discovers a remote helper by exec'ing a program named git-remote-<transport>,
 and aqt answers to that name itself, so the link is the entire integration: one
 binary, nothing to upgrade separately. The link is created beside the running
-binary unless --dir says otherwise, and an install owned by Homebrew, WinGet, or
-Scoop is left alone because its own package provides the link.
+binary unless --dir says otherwise.
 
 Re-running this is safe; it reports a link that is already correct and changes
 nothing.`,
@@ -108,14 +107,7 @@ func runGitSetup(dir string, assumeYes bool) error {
 	if err != nil {
 		return fmt.Errorf("locating the running executable: %w", err)
 	}
-	in, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
-	if err != nil {
-		return err
-	}
-	dir, err = helperDir(dir, exe, in)
-	if err != nil {
-		return err
-	}
+	dir = helperDir(dir, exe)
 	info, err := os.Stat(dir)
 	if err != nil {
 		return err
@@ -165,26 +157,12 @@ func runGitSetup(dir string, assumeYes bool) error {
 	return nil
 }
 
-// helperDir resolves where the link goes. A package manager records every file it
-// installs, so a sibling dropped into its tree leaves it describing a directory it
-// no longer matches; its own packaging is what should create the link. --dir is the
-// way out of that, but not a way back into the same directory.
-func helperDir(dir, exe string, in update.Install) (string, error) {
-	packageOwned := in.Owner != update.OwnerStandalone && in.Owner != update.OwnerSource
+// helperDir resolves where the link goes.
+func helperDir(dir, exe string) string {
 	if dir == "" {
-		if packageOwned {
-			return "", packageOwnedDirErr(in, "pass --dir to create one in a directory you own")
-		}
-		return filepath.Dir(exe), nil
+		return filepath.Dir(exe)
 	}
-	if packageOwned && samePath(dir, in.Dir) {
-		return "", packageOwnedDirErr(in, "name a directory you own instead")
-	}
-	return dir, nil
-}
-
-func packageOwnedDirErr(in update.Install, hint string) error {
-	return fmt.Errorf("%s owns %s and provides the %s link in its own package; %s", in.Owner, in.Dir, helperName, hint)
+	return dir
 }
 
 // linkHelper points link at exe by the cheapest mechanism that works and reports

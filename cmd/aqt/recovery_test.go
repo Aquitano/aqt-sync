@@ -58,21 +58,6 @@ func TestUpgradeGuidanceNamesVersionCapabilityAndAction(t *testing.T) {
 	}
 }
 
-// A package-managed copy is not `aqt update`'s to replace, so the recovery action
-// must route to the manager that owns it rather than to a command that would refuse.
-func TestUpgradeGuidanceRoutesPackageManagedInstalls(t *testing.T) {
-	got := upgradeGuidance(
-		&client.UpgradeRequiredError{MinClient: 9, Capability: api.ClientCapability},
-		update.Install{Owner: update.OwnerHomebrew, Package: "aqt", UpgradeCommand: "brew upgrade aqt"},
-	)
-	if !strings.Contains(got, "brew upgrade aqt") {
-		t.Errorf("guidance %q does not name the owning manager's command", got)
-	}
-	if strings.Contains(got, "run `aqt update`") {
-		t.Errorf("guidance %q points a homebrew install at `aqt update`", got)
-	}
-}
-
 // A source build has no upgrade command at all; it must still say something
 // actionable rather than falling back to a command that will refuse.
 func TestUpgradeGuidanceExplainsSourceBuilds(t *testing.T) {
@@ -138,7 +123,7 @@ func TestTUIUpgradeNoteNamesTheUpdateCommand(t *testing.T) {
 }
 
 // Both the CLI message and the TUI note read the action from one place, so a
-// package-managed or source install is never pointed at a command that would refuse.
+// source install is never pointed at a command that would refuse.
 func TestUpgradeActionRoutesByInstallOwner(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
@@ -146,7 +131,6 @@ func TestUpgradeActionRoutesByInstallOwner(t *testing.T) {
 		want    string
 	}{
 		{"standalone", update.Install{Owner: update.OwnerStandalone}, "aqt update"},
-		{"homebrew", update.Install{Owner: update.OwnerHomebrew, Package: "aqt", UpgradeCommand: "brew upgrade aqt"}, "brew upgrade aqt"},
 		{"source", update.Install{Owner: update.OwnerSource}, "make build"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"runtime"
 	"time"
 
@@ -52,8 +51,8 @@ func updateCmd() *cobra.Command {
 
 The check verifies a signed release manifest against the signing keys compiled
 into this build before it trusts any of its contents. Installing replaces only a
-standalone binary: an installation owned by Homebrew, WinGet, or Scoop, or a build
-from source, reports the command to run instead and is never overwritten.
+published release binary. A build from source reports how to rebuild instead and
+is never overwritten.
 
 The previous binary is kept until the new one has run and reported the version the
 manifest promised; every failure puts it back.`,
@@ -124,8 +123,8 @@ func runUpdate(opts updateOptions) error {
 		return nil
 	}
 
-	// A binary someone else installed is reported, never replaced: overwriting it
-	// would leave its owner's records describing a file that no longer matches.
+	// A source build is reported, never replaced: its checkout is the source of
+	// truth and its version does not identify a published artifact safely.
 	if !in.Replaceable() {
 		return fmt.Errorf("%s -> %s is available, but %s", res.CurrentVersion, res.AvailableVersion, in.Why())
 	}
@@ -200,21 +199,13 @@ func printAvailable(res update.Result) {
 	}
 }
 
-// updateSource picks how release metadata is fetched. The repository is public, so
-// the default is a plain HTTPS read of the release assets, which needs no tool and
-// no credentials. `gh` is tried only after that fails, and only when it is already
-// installed, so a private fork or mirror still updates. The manifest signature is
-// checked against the compiled trust roots whichever transport wins, so this order
-// decides reachability, not trust.
+// updateSource fetches public GitHub release assets over HTTPS. Tests and
+// self-hosted release origins can override that endpoint explicitly.
 func updateSource() update.ReleaseSource {
 	if base := os.Getenv(updateBaseURLEnv); base != "" {
 		return update.HTTPSource{BaseURL: base}
 	}
-	sources := []update.ReleaseSource{update.GHWebSource{Repo: update.DefaultRepo}}
-	if _, err := exec.LookPath("gh"); err == nil {
-		sources = append(sources, update.GHSource{Repo: update.DefaultRepo})
-	}
-	return update.FallbackSource{Sources: sources}
+	return update.GHWebSource{Repo: update.DefaultRepo}
 }
 
 // updateArtifactSource fetches the archive itself, over the same transports as the
