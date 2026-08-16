@@ -203,23 +203,22 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	const setContent = `visibility=?, encrypted_meta=?, wrapped_key=?, blob_nonce=?, blob_size=?, version=?, min_client=?, compact_at=?, updated_at=unixepoch()`
 	replacePolicy := req.Visibility != api.Public || req.ExpireSeconds > 0 || req.MaxReads > 0 || reclaimed
 
-	var res sql.Result
-	if replacePolicy {
-		res, err = tx.Exec(
-			`UPDATE resources SET `+setContent+`,
-			   expires_at=?, max_reads=?, on_expiry=?, reads=0, exhausted_at=NULL, reclaimed=0
-			 WHERE id=? AND owner_handle=? AND version=?`,
-			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), compactAt,
-			expiresAt, maxReads, onExpiry, req.ID, owner, current,
-		)
-	} else {
-		res, err = tx.Exec(
-			`UPDATE resources SET `+setContent+`
-			 WHERE id=? AND owner_handle=? AND version=?`,
-			string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), compactAt,
-			req.ID, owner, current,
-		)
+	set := setContent
+	args := []any{
+		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), compactAt,
 	}
+	if replacePolicy {
+		set += `,
+		   expires_at=?, max_reads=?, on_expiry=?, reads=0, exhausted_at=NULL, reclaimed=0`
+		args = append(args, expiresAt, maxReads, onExpiry)
+	}
+	args = append(args, req.ID, owner, current)
+
+	res, err := tx.Exec(
+		`UPDATE resources SET `+set+`
+		 WHERE id=? AND owner_handle=? AND version=?`,
+		args...,
+	)
 	if err != nil {
 		return "", 0, err
 	}
