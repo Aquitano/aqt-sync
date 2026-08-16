@@ -74,6 +74,50 @@ func TestCheckRefusesARollback(t *testing.T) {
 	}
 }
 
+// The floor catches what ErrRollback cannot: a manifest newer than the running
+// build but older than the newest release this machine ever authenticated — a
+// replayed signed manifest pinning a client at an intermediate release.
+func TestCheckRefusesAManifestBelowTheFloor(t *testing.T) {
+	key := fixtureKey(t, seedA)
+	src := sourceFor(t, fixtureManifest("v0.4.0", ChannelStable), key)
+
+	_, err := Check(context.Background(), Options{
+		Build:    releaseBuild("v0.3.0"),
+		Channel:  ChannelStable,
+		Source:   src,
+		Roots:    rootsOf(key),
+		Platform: linuxAMD64,
+		Floor:    "v0.5.0",
+	})
+	if !errors.Is(err, ErrStaleManifest) {
+		t.Fatalf("got %v, want ErrStaleManifest", err)
+	}
+}
+
+// A manifest at the floor is by definition the one that set it; refusing it
+// would wedge every re-check. And an unparseable floor fails open like the rest
+// of a corrupt state file — the signature checks still stand on their own.
+func TestCheckFloorEdgeCases(t *testing.T) {
+	key := fixtureKey(t, seedA)
+	for _, floor := range []string{"v0.4.0", "not-a-version", ""} {
+		src := sourceFor(t, fixtureManifest("v0.4.0", ChannelStable), key)
+		res, err := Check(context.Background(), Options{
+			Build:    releaseBuild("v0.3.0"),
+			Channel:  ChannelStable,
+			Source:   src,
+			Roots:    rootsOf(key),
+			Platform: linuxAMD64,
+			Floor:    floor,
+		})
+		if err != nil {
+			t.Fatalf("floor %q: %v", floor, err)
+		}
+		if res.Status != StatusUpdateAvailable {
+			t.Fatalf("floor %q: status = %q", floor, res.Status)
+		}
+	}
+}
+
 func TestCheckRefusesTamperedMetadata(t *testing.T) {
 	key := fixtureKey(t, seedA)
 	src := sourceFor(t, fixtureManifest("v0.4.0", ChannelStable), key)

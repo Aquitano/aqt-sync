@@ -159,12 +159,46 @@ func captureStderr(t *testing.T, fn func()) string {
 // downloads tens of megabytes, so deriving its context from the check's would
 // leave it whatever remains of five seconds — on an ordinary connection, never
 // enough, and the update would fail the same way every day forever.
+// A pending deferral bypasses the daily interval, and a stale origin fails the
+// check deterministically — the combination would silently re-run a doomed
+// 5-second network check after every command, forever. The deferral must die
+// with the stale check.
+func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
+	store := withUpdateStore(t)
+	withTerminal(t, true)
+	withFlags(t, false, false)
+	serveUpdateManifest(t, "v9.9.8")
+	withBuild(t, "v0.3.0", update.KindRelease)
+
+	st := update.State{Policy: update.PolicyAuto, DeferredVersion: "v9.9.9"}
+	st.RaiseCeiling(update.ChannelStable, "v9.9.9")
+	st.MarkChecked(time.Now()) // not due: only the deferral lets this check run
+	if err := store.Save(st); err != nil {
+		t.Fatal(err)
+	}
+
+	captureStderr(t, func() {
+		maybeBackgroundUpdate(subcommand(t, rootCmd(), "status"))
+	})
+
+	got, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.DeferredVersion != "" {
+		t.Fatalf("deferral survived a stale origin: %q", got.DeferredVersion)
+	}
+	if got.Ceiling(update.ChannelStable) != "v9.9.9" {
+		t.Fatalf("ceiling moved on a failed check: %q", got.Ceiling(update.ChannelStable))
+	}
+}
+
 func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 	requirePublishedPlatform(t)
 	store := withUpdateStore(t)
 	withTerminal(t, true)
 	withFlags(t, false, false)
-	serveUpdateFixture(t, "v9.9.9")
+	serveUpdateManifest(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
 	if err := store.SetPolicy(update.PolicyAuto); err != nil {
 		t.Fatal(err)
