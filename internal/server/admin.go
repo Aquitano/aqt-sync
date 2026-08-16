@@ -98,7 +98,7 @@ func (s *Store) AdminAccountByRef(ref string) (AdminAccount, error) {
 	}
 	row := s.rdb.QueryRow(
 		`SELECT owner_handle, email, created_at, disabled_at, quota_bytes
-		 FROM accounts WHERE email = ? OR owner_handle = ?`, ref, ref)
+		 FROM accounts WHERE email = ? COLLATE NOCASE OR owner_handle = ?`, ref, ref)
 	a, err := scanAdminAccount(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		if a, err = s.adminAccountByPrefix(ref); err != nil {

@@ -92,7 +92,7 @@ func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error
 		encSig []byte
 	)
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, public_key, enc_public_key, enc_key_sig FROM accounts WHERE email = ?`, email,
+		`SELECT owner_handle, public_key, enc_public_key, enc_key_sig FROM accounts WHERE email = ? COLLATE NOCASE`, email,
 	).Scan(&out.Handle, &out.PublicKey, &encPub, &encSig)
 	if errors.Is(err, sql.ErrNoRows) {
 		return api.AccountKeysResponse{}, ErrNotFound
@@ -528,7 +528,10 @@ func (s *Store) ResourceObjectSlices(resourceID, caller string, ids []string) (s
 // from the server secret, self-signed like a genuine one, so the response is
 // indistinguishable on the wire and a grant wrapped to it simply never decrypts.
 func (s *Server) accountKeys(c *gin.Context) {
-	email := c.Query("email")
+	// Normalize before both the real lookup and the decoy derivation: if only
+	// the lookup folded case, "X@a.com" and "x@a.com" would agree for real
+	// accounts but produce two different decoys — a case-probe oracle.
+	email := api.NormalizeEmail(c.Query("email"))
 	if email == "" {
 		abort(c, http.StatusBadRequest, "email query param required")
 		return

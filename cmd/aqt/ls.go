@@ -133,6 +133,11 @@ func collectResources(cl *client.Client, mk crypto.MasterKey) ([]lsRow, error) {
 		name, kind := meta.Name, meta.Kind
 		minClient := 0
 		switch {
+		// A reclaimed tombstone's ciphertext (and its wrapped key) is gone, so its
+		// name is unknowable and every read 410s; without this label it rendered as
+		// "(unreadable)", indistinguishable from corruption. `aqt rm` clears it.
+		case it.Reclaimed:
+			name, kind = "(reclaimed link; `aqt rm` to clear)", "?"
 		// A resource another device wrote in a format this build cannot read fails to
 		// decrypt for a reason the user can act on. Saying so is the whole point of
 		// capability negotiation; "(unreadable)" here is indistinguishable from real

@@ -29,6 +29,7 @@ type Account struct {
 // the optional published X25519 key and its identity self-signature (empty from a
 // pre-grants client; the caller validates the signature before storing).
 func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier, encPublicKey, encKeySig []byte) (Account, error) {
+	email = api.NormalizeEmail(email)
 	handle := newID(12)
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
@@ -42,6 +43,16 @@ func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []by
 	var encPub, encSig any
 	if len(encPublicKey) > 0 {
 		encPub, encSig = encPublicKey, encKeySig
+	}
+	// The UNIQUE(email) index is binary, so a row written before emails were
+	// normalized would not block a lower-cased twin of the same mailbox; check
+	// case-insensitively first. Concurrent signups of the same normalized email
+	// still serialize on the unique index below.
+	var exists int
+	if err := s.db.QueryRow(`SELECT 1 FROM accounts WHERE email = ? COLLATE NOCASE`, email).Scan(&exists); err == nil {
+		return Account{}, ErrConflict
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Account{}, err
 	}
 	_, err = s.db.Exec(
 		`INSERT INTO accounts(owner_handle, email, kdf, public_key, wrapped_root, auth_verifier, auth_epoch, enc_public_key, enc_key_sig, created_at)
@@ -64,8 +75,10 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 		acc               Account
 		kdfJSON, rootJSON string
 	)
+	// COLLATE NOCASE serves rows written before emails were normalized; new rows
+	// are stored lower-cased, and the unique index keeps twins from being created.
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, email, kdf, wrapped_root FROM accounts WHERE email = ?`, email,
+		`SELECT owner_handle, email, kdf, wrapped_root FROM accounts WHERE email = ? COLLATE NOCASE`, api.NormalizeEmail(email),
 	).Scan(&acc.OwnerHandle, &acc.Email, &kdfJSON, &rootJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
@@ -90,7 +103,7 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 // epoch (which the new device's token is tagged with). ErrNotFound if no account.
 func (s *Store) AccountForAuth(email string) (ownerHandle string, publicKey, verifierHash []byte, epoch int, err error) {
 	err = s.rdb.QueryRow(
-		`SELECT owner_handle, public_key, auth_verifier, auth_epoch FROM accounts WHERE email = ?`, email,
+		`SELECT owner_handle, public_key, auth_verifier, auth_epoch FROM accounts WHERE email = ? COLLATE NOCASE`, api.NormalizeEmail(email),
 	).Scan(&ownerHandle, &publicKey, &verifierHash, &epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil, nil, 0, ErrNotFound
@@ -352,6 +365,7 @@ const challengeTTL = 2 * time.Minute
 // CreateChallenge issues a one-time nonce for email to sign. It is stored with a
 // short expiry and consumed on use, so it cannot be replayed.
 func (s *Store) CreateChallenge(email string) (id string, nonce []byte, err error) {
+	email = api.NormalizeEmail(email)
 	id = newID(16)
 	nonce = randomBytes(32)
 	now := time.Now()
@@ -378,7 +392,7 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 		expiresAt int64
 	)
 	err := s.db.QueryRow(
-		`SELECT nonce, expires_at FROM challenges WHERE id = ? AND email = ?`, id, email,
+		`SELECT nonce, expires_at FROM challenges WHERE id = ? AND email = ?`, id, api.NormalizeEmail(email),
 	).Scan(&nonce, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound

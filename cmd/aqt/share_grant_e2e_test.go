@@ -316,6 +316,24 @@ func TestAccountKeysDecoy(t *testing.T) {
 	if ghost1.Handle == real.Handle || bytes.Equal(ghost1.EncPublicKey, real.EncPublicKey) {
 		t.Fatal("decoy collided with a real account")
 	}
+	// Emails are one mailbox regardless of casing, on both sides of the oracle:
+	// a cased lookup of a real account must not fall through to the decoy (the
+	// grant would silently never decrypt), and a cased lookup of an unknown one
+	// must produce the same decoy — differing decoys would out real accounts.
+	casedReal, err := cl.AccountKeys("REAL@Example.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if casedReal.Handle != real.Handle || !bytes.Equal(casedReal.EncPublicKey, real.EncPublicKey) {
+		t.Fatal("cased lookup of a real account got the decoy")
+	}
+	casedGhost, err := cl.AccountKeys("GhOsT@Example.COM")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if casedGhost.Handle != ghost1.Handle || !bytes.Equal(casedGhost.EncPublicKey, ghost1.EncPublicKey) {
+		t.Fatal("decoy differs by email casing")
+	}
 	// An account that never published an enc key gets the decoy too — the lookup
 	// must not reveal that the account exists but predates grants.
 	legacyKdf := cryptotest.KdfParams(t)

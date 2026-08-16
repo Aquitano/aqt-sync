@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"time"
 
@@ -299,6 +300,26 @@ func (s *Store) CountResourceRead(id string) error {
 // request it goes on to refuse (too old a client, no acceptable representation)
 // cannot burn a link the intended recipient never received.
 func (s *Store) GetResourceUncounted(id, requireOwner string) (api.GetResourceResponse, bool, error) {
+	out, countRead, err := s.getResourceUncounted(id, requireOwner)
+	// An update unlinks the superseded blob only after its row commits, so a read
+	// that loaded the old row can find the file already gone. The row now names the
+	// new nonce; re-read instead of failing a live resource with a transient 404.
+	if errors.Is(err, errStaleBlob) {
+		out, countRead, err = s.getResourceUncounted(id, requireOwner)
+	}
+	if errors.Is(err, errStaleBlob) {
+		// Twice in a row is no longer the unlink race; surface it as the internal
+		// inconsistency it is rather than a 404 for a resource whose row exists.
+		err = fmt.Errorf("resource %s: row names a blob that does not exist", id)
+	}
+	return out, countRead, err
+}
+
+// errStaleBlob marks a row whose blob file is missing: either the read raced an
+// update's unlink of the superseded blob (retryable) or the store is inconsistent.
+var errStaleBlob = errors.New("resource blob missing for stored nonce")
+
+func (s *Store) getResourceUncounted(id, requireOwner string) (api.GetResourceResponse, bool, error) {
 	var (
 		out         api.GetResourceResponse
 		owner       string
@@ -369,6 +390,9 @@ func (s *Store) GetResourceUncounted(id, requireOwner string) (api.GetResourceRe
 	}
 
 	ciphertext, err := s.readBlob(id, nonce)
+	if errors.Is(err, ErrNotFound) {
+		return out, false, errStaleBlob
+	}
 	if err != nil {
 		return out, false, err
 	}
@@ -550,12 +574,20 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	}
 	defer s.resLocks.lock(id)()
 	var current, compactAt int
-	err = s.db.QueryRow(`SELECT version, compact_at FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current, &compactAt)
+	var reclaimed bool
+	err = s.db.QueryRow(`SELECT version, compact_at, reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current, &compactAt, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, ErrNotFound
 	}
 	if err != nil {
 		return 0, err
+	}
+	// A reclaimed tombstone has no ciphertext to expose; flipping its visibility
+	// (and resetting its read counters) would fabricate a live-looking link over
+	// nothing. Only a full content re-push resurrects it — the guard the update
+	// path already enforces.
+	if reclaimed {
+		return 0, ErrGone
 	}
 	if compactAt > 0 && req.Visibility != api.Private {
 		return 0, ErrGitRemotePolicy
@@ -566,7 +598,7 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	res, err := s.db.Exec(
 		`UPDATE resources SET visibility = ?, version = version + 1, updated_at = unixepoch(),
 		   expires_at = ?, max_reads = ?, on_expiry = ?, reads = 0, exhausted_at = NULL
-		 WHERE id = ? AND owner_handle = ?`,
+		 WHERE id = ? AND owner_handle = ? AND reclaimed = 0`,
 		string(req.Visibility), expiresAt, maxReadsCol, onExpiry, id, owner,
 	)
 	if err != nil {
@@ -643,7 +675,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 	args = append(args, limit+1) // one extra row tells us whether a next page exists
 	rows, err := s.rdb.Query(
 		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot, compact_at, min_client,
-		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at
+		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at, reclaimed
 		 FROM resources WHERE `+where+` ORDER BY id LIMIT ?`, args...,
 	)
 	if err != nil {
@@ -660,7 +692,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 			wrappedJSON sql.NullString
 		)
 		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot, &item.CompactAt,
-			&item.MinClient, &item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt); err != nil {
+			&item.MinClient, &item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt, &item.Reclaimed); err != nil {
 			return nil, "", err
 		}
 		item.Visibility = api.Visibility(vis)
