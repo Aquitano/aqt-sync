@@ -996,6 +996,10 @@ func (s *Server) putResource(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss", api.ErrCodeDropsRoots)
 		return
 	}
+	if errors.Is(err, ErrDanglingRefs) {
+		abortCode(c, http.StatusBadRequest, "manifest references chunks the server no longer stores (they were garbage-collected before this push committed); re-run sync to re-upload them", api.ErrCodeMissingChunks)
+		return
+	}
 	if errors.Is(err, ErrNonceReuse) {
 		abort(c, http.StatusBadRequest, "blob nonce matches the stored one; every reseal must draw a fresh nonce")
 		return

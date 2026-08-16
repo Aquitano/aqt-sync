@@ -789,6 +789,7 @@ func runSync(dir string, opts syncOptions) error {
 	// packs the server lacks as we go, so memory stays O(one pack) regardless of
 	// tree size; the manifest we later PUT references those objects. A pull-only or
 	// dry-run pass uploads nothing, so a metadata+hash scan is enough to plan.
+	pushStart := time.Now()
 	var local syncengine.Manifest
 	if opts.pullOnly || opts.dryRun {
 		var scanBase *syncengine.Manifest
@@ -917,7 +918,7 @@ func runSync(dir string, opts syncOptions) error {
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: rs.ck, mk: sess.mk, meta: rs.res.EncryptedMeta,
 			visibility: rs.res.Visibility, version: rs.res.Version, id: sess.st.ID,
-			mode: mode, host: copyHost, now: syncStart, copyMemo: copyMemo, selector: selector,
+			mode: mode, host: copyHost, now: syncStart, pushStart: pushStart, copyMemo: copyMemo, selector: selector,
 		}, actions, dirActions)
 	}
 
@@ -959,6 +960,7 @@ type applyCtx struct {
 	mode       conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
 	host       string           // sanitized hostname stamped into conflict-copy names (copy mode)
 	now        time.Time        // sync wall-clock, stamped into conflict-copy names (copy mode)
+	pushStart  time.Time        // when the snapshot upload pass began; arms the pre-PUT chunk re-check on long pushes
 	copyMemo   conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
 	selector   syncengine.ChunkSelector
 }
@@ -1298,6 +1300,9 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	if push && remoteChanged {
 		manifest := manifestFrom(merged, c.version+1)
 		manifest.Dirs = dirsFrom(mergedDirs)
+		if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
+			return err
+		}
 		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
 		if err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
@@ -2582,6 +2587,33 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 		// unbound and the first putFolderUpdate re-seals them id-bound.
 		MinClient: minClientForID(id),
 	})
+}
+
+// gcRearmThreshold is how long a push may run before the pre-PUT chunk re-check
+// fires. The server keeps an uploaded-but-unrooted pack alive for a fixed grace
+// period (one hour); a push that has consumed a substantial fraction of it risks
+// GC sweeping its earliest packs before the manifest PUT roots them.
+const gcRearmThreshold = 15 * time.Minute
+
+// rearmUploadedChunks re-checks a long push's chunk ids against the server just
+// before the manifest PUT. The server-side check bumps the age guard of every pack
+// still holding a present id, so packs uploaded early in a multi-hour push cannot
+// be swept in the moments before the PUT roots them. Ids already swept mean GC won
+// the race outright: fail with the recovery path (a re-run re-uploads exactly the
+// missing chunks) instead of letting the PUT bounce off the server's foreign-key
+// backstop. Short pushes — the overwhelmingly common case — skip the round trip.
+func rearmUploadedChunks(check func([]string) ([]string, error), ids []string, started time.Time) error {
+	if started.IsZero() || time.Since(started) < gcRearmThreshold {
+		return nil
+	}
+	missing, err := check(ids)
+	if err != nil {
+		return err
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("%d uploaded chunk(s) were garbage-collected before this push could commit; re-run `aqt sync` to re-upload them", len(missing))
+	}
+	return nil
 }
 
 // putFolderUpdate replaces an existing folder's manifest, conditional on the

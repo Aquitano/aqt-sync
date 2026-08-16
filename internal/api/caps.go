@@ -99,6 +99,11 @@ const (
 	// ErrCodeDropsRoots accompanies a 400 when a replace would clear every chunk root
 	// of an object-backed resource.
 	ErrCodeDropsRoots = "drops_roots"
+	// ErrCodeMissingChunks accompanies a 400 when a manifest's chunk refs name objects
+	// the server no longer stores: GC swept an uploaded-but-unrooted pack because the
+	// push outlived the age guard. Re-running sync re-uploads exactly the missing
+	// chunks.
+	ErrCodeMissingChunks = "missing_chunks"
 	// ErrCodeAccountDisabled accompanies a 403 when an operator has suspended the
 	// account. Distinct from a 401 so the client stops rather than looping through
 	// re-authentication that cannot succeed.

@@ -1970,3 +1970,58 @@ func TestDeleteShareIsGranteeScoped(t *testing.T) {
 		t.Fatalf("ListShareBlocks = (%+v, %v), want no block recorded", blocks, err)
 	}
 }
+
+// A manifest PUT whose refs name objects a GC sweep already reaped fails with the
+// named ErrDanglingRefs (the 400 missing_chunks mapping) and rolls back whole,
+// rather than committing dangling refs or surfacing an opaque constraint error —
+// the slow-push/GC race (#177).
+func TestPutResourceWithSweptRefsFailsNamed(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "sweptpush@example.com")
+	pack, data, ids := packOf("slow push chunk")
+	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	// The push stalls past the age guard; an owner-wide sweep reaps the unrooted pack.
+	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 1 {
+		t.Fatalf("gc deleted %d err=%v, want the unrooted pack swept", deleted, err)
+	}
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("sealed manifest"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"folder","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	_, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+		ChunkRefs: ids,
+	})
+	if !errors.Is(err, ErrDanglingRefs) {
+		t.Fatalf("put with swept refs = %v, want ErrDanglingRefs", err)
+	}
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM resources WHERE owner_handle = ?`, owner).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("failed create left %d resource row(s), want a whole rollback", n)
+	}
+
+	// The update path shares the same backstop: a healthy resource cannot be moved
+	// onto swept refs.
+	live, liveData, liveIDs := packOf("healthy chunk")
+	if _, err := s.PutPack(owner, live, liveData, 0); err != nil {
+		t.Fatal(err)
+	}
+	id := s.rootResource(t, owner, liveIDs)
+	blob2, _ := crypto.Seal([]byte("sealed manifest v2"), ck, crypto.AADBlob)
+	_, _, err = s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+		ID: id, Visibility: api.Private, Blob: blob2, EncryptedMeta: meta, WrappedKey: &wrapped,
+		ChunkRefs: ids, ExpectedVersion: 1,
+	})
+	if !errors.Is(err, ErrDanglingRefs) {
+		t.Fatalf("update with swept refs = %v, want ErrDanglingRefs", err)
+	}
+	if missing, err := s.MissingChunks(owner, liveIDs); err != nil || len(missing) != 0 {
+		t.Fatalf("live refs after failed update: missing=%v err=%v, want the old roots intact", missing, err)
+	}
+}
