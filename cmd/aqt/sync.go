@@ -1198,6 +1198,23 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 			newBase[p] = le
 		}
 	}
+	// The deletion counterpart of the fold above: a path gone on both sides plans no
+	// action (agreement, not conflict), so nothing removes its base record. Drop it
+	// here, or it reads as a forever-pending local delete.
+	for p := range newBase {
+		_, l := localByPath[p]
+		_, r := remoteByPath[p]
+		if !l && !r {
+			delete(newBase, p)
+		}
+	}
+	for p := range newBaseDirs {
+		_, l := localDirs[p]
+		_, r := remoteDirs[p]
+		if !l && !r {
+			delete(newBaseDirs, p)
+		}
+	}
 
 	// A push must not commit case-twins to the server — they arm a data-loss trap
 	// for every case-insensitive device — and a pull onto a case-folding filesystem

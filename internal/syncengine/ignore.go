@@ -34,9 +34,16 @@ type ignoreRule struct {
 	dirOnly bool
 }
 
-// newIgnore seeds a matcher that always excludes the control directory and .git.
+// newIgnore seeds a matcher that always excludes the control directory, .git, and
+// this tool's own transient artifacts: materialize temp files (.aqt-tmp-*, left
+// behind by a crash mid-write) and filesystem probes (.aqt-CaseProbe-*,
+// .aqt-linkprobe). Without these a leftover or a scan racing a probe reads as a
+// local add and is pushed fleet-wide. A later `!` rule may re-include, like any
+// other default.
 func newIgnore() *Ignore {
-	return &Ignore{scopes: []ignoreScope{{dir: "", rules: compileRules([]string{ControlDir + "/", ".git/"})}}}
+	return &Ignore{scopes: []ignoreScope{{dir: "", rules: compileRules([]string{
+		ControlDir + "/", ".git/", ".aqt-tmp-*", ".aqt-CaseProbe-*", ".aqt-linkprobe",
+	})}}}
 }
 
 // loadDir adds the rules from absDir/.aqtignore, scoped to relDir. A directory
