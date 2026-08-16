@@ -514,18 +514,25 @@ func (s *Store) ResourceVisibility(id string) (vis api.Visibility, gone bool, er
 	var (
 		visStr    string
 		expiresAt sql.NullInt64
+		maxReads  sql.NullInt64
+		reads     int64
 		reclaimed bool
 	)
 	err = s.rdb.QueryRow(
-		`SELECT visibility, expires_at, reclaimed FROM resources WHERE id = ?`, id,
-	).Scan(&visStr, &expiresAt, &reclaimed)
+		`SELECT visibility, expires_at, max_reads, reads, reclaimed FROM resources WHERE id = ?`, id,
+	).Scan(&visStr, &expiresAt, &maxReads, &reads, &reclaimed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", false, ErrNotFound
 	}
 	if err != nil {
 		return "", false, err
 	}
-	gone = reclaimed || (expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64)
+	// The same exhaustion predicate PublicResourcePreflight applies: a burned or
+	// read-exhausted link is gone the moment its last permit is spent, not when the
+	// GC sweep tombstones it hours later.
+	gone = reclaimed ||
+		(expiresAt.Valid && time.Now().Unix() >= expiresAt.Int64) ||
+		(maxReads.Valid && reads >= maxReads.Int64)
 	return api.Visibility(visStr), gone, nil
 }
 
