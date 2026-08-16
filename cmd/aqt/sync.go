@@ -1662,7 +1662,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	if err := materializeStaged(abs, func(staging string) error {
 		prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
 		// No base is recorded for a read-only share, so its mtimes have nothing to stamp.
-		// Batched: the object index stays O(batch), not O(tree) (issue #183).
+		// Batched: the object index stays O(batch), not O(tree).
 		_, dlErr := runPublicDownloads(fetch, staging, manifest.Entries, prog)
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
@@ -2938,7 +2938,7 @@ func materializeStaged(dest string, fn func(staging string) error) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging) // no-op once renamed; cleans up every failure path
+	defer os.RemoveAll(staging)
 	if err := fn(staging); err != nil {
 		return err
 	}

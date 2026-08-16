@@ -1071,7 +1071,7 @@ type repackCand struct {
 // pack into a fresh dense pack, re-points them, and drops the old pack with its dead
 // bytes. Candidates are older than minAge (so an in-flight upload's packs are not
 // disturbed) and at most repackMaxLiveFraction live; at most repackBudgetBytes of
-// live data moves per call. Returns the packs rewritten and the bytes reclaimed.
+// live data moves per call.
 //
 // Planning (the SELECTs and the slow pack-file reads) runs outside any transaction;
 // the swap re-validates the pack's age and live set inside one, so a concurrent root

@@ -110,8 +110,7 @@ type GrantEntry struct {
 
 type ListGrantsResponse struct {
 	Grants []GrantEntry `json:"grants"`
-	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
-	// empty on the last page. See ListResourcesResponse for the paging contract.
+	// NextCursor: see ListResourcesResponse.
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
@@ -127,8 +126,7 @@ type ShareItem struct {
 
 type ListSharesResponse struct {
 	Shares []ShareItem `json:"shares"`
-	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
-	// empty on the last page. See ListResourcesResponse for the paging contract.
+	// NextCursor: see ListResourcesResponse.
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
@@ -152,8 +150,7 @@ type ShareBlock struct {
 
 type ListShareBlocksResponse struct {
 	Blocks []ShareBlock `json:"blocks"`
-	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
-	// empty on the last page. See ListResourcesResponse for the paging contract.
+	// NextCursor: see ListResourcesResponse.
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
@@ -559,8 +556,7 @@ type Device struct {
 
 type ListDevicesResponse struct {
 	Devices []Device `json:"devices"`
-	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
-	// empty on the last page. See ListResourcesResponse for the paging contract.
+	// NextCursor: see ListResourcesResponse.
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 
@@ -633,8 +629,7 @@ type SetSnapshotAnchorRequest struct {
 
 type ListSnapshotsResponse struct {
 	Snapshots []SnapshotInfo `json:"snapshots"`
-	// NextCursor is the opaque cursor to pass as ?cursor= for the following page;
-	// empty on the last page. See ListResourcesResponse for the paging contract.
+	// NextCursor: see ListResourcesResponse.
 	NextCursor string `json:"nextCursor,omitempty"`
 }
 

@@ -146,7 +146,6 @@ func keychainStoreToken(name, token string) bool {
 	return keyringSet(keychainService, tokenID(name), token) == nil
 }
 
-// keychainLoadToken returns the device token from the keychain if present.
 func keychainLoadToken(name string) (string, bool) {
 	if keychainDisabled() {
 		return "", false

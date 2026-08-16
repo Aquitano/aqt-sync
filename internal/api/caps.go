@@ -125,24 +125,16 @@ const (
 // Status-bucket codes: the generic Code an error carries when the HTTP status is
 // the whole distinction a client needs. Every error response carries a Code — a
 // condition a client branches on more finely than the status gets one of the
-// condition codes above; everything else gets the bucket for its status. Bucket
-// codes are as stable as condition codes: never renamed or repurposed.
+// condition codes above; everything else gets the bucket for its status. Each name
+// is the status it buckets, and bucket codes are as stable as condition codes: never
+// renamed or repurposed.
 const (
-	// ErrCodeInvalidRequest is the bucket for any 400 without a more specific code:
-	// a malformed body, a missing or out-of-range field.
-	ErrCodeInvalidRequest = "invalid_request"
-	// ErrCodeUnauthorized is the bucket for a 401 without a more specific code: a
-	// missing, invalid, or expired bearer token.
-	ErrCodeUnauthorized = "unauthorized"
-	// ErrCodeForbidden is the bucket for a 403 without a more specific code.
-	ErrCodeForbidden = "forbidden"
-	// ErrCodeNotAcceptable is the bucket for a 406 content-negotiation failure.
-	ErrCodeNotAcceptable = "not_acceptable"
-	// ErrCodePayloadTooLarge is the bucket for a 413 body-size rejection.
-	ErrCodePayloadTooLarge = "payload_too_large"
-	// ErrCodeUnsupportedMedia is the bucket for a 415 Content-Type rejection.
+	ErrCodeInvalidRequest   = "invalid_request"
+	ErrCodeUnauthorized     = "unauthorized"
+	ErrCodeForbidden        = "forbidden"
+	ErrCodeNotAcceptable    = "not_acceptable"
+	ErrCodePayloadTooLarge  = "payload_too_large"
 	ErrCodeUnsupportedMedia = "unsupported_media_type"
-	// ErrCodeInternal is the bucket for any 5xx: server-side state the request
-	// could not read or write. The message never carries internal detail.
+	// ErrCodeInternal buckets every 5xx; its message never carries internal detail.
 	ErrCodeInternal = "internal"
 )

@@ -35,7 +35,23 @@ Before you open a pull request, `gofmt -l .` should print nothing and
   the change and passes after it. Not a smoke test for every branch it touches.
 - **Comments where something is genuinely non-obvious**, in full sentences, saying
   why rather than what. If a comment is explaining something confusing, consider
-  whether the code should stop being confusing instead.
+  whether the code should stop being confusing instead. A comment's length is bought
+  by consequence, not by completeness:
+  - If getting the code wrong breaks an invariant, a race, a crypto binding, or a
+    wire contract, write as much as it takes. If it breaks nothing, write one line,
+    or none.
+  - Exported symbols get the conventional one-sentence doc line. A second sentence
+    only for a contract or a caveat the signature cannot show. A trivial unexported
+    helper needs no comment at all.
+  - Never write "was": no "previously", "used to", or "older build" narration —
+    unless the old behavior still arrives as input, because old on-disk state and old
+    wire formats are current contracts and those comments stay. Refactor history and
+    ticket ids live in git history and PR descriptions.
+  - Shared contract text is stated once, at the type or function that owns it; every
+    other site points to it or says nothing. The same comment in three places means
+    a pointer or a helper is missing.
+  - Grouped constants share one banner comment. An individual entry gets its own line
+    only when its value alone would mislead.
 - **Documentation is part of the change.** `docs/` states contracts the code is
   expected to keep; a change that alters one updates it in the same PR. A claim in
   `docs/` that the code does not deliver is treated as a bug.

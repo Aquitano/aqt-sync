@@ -20,8 +20,8 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// Account-to-account grants (issue #79). A grant row is one resource's content
-// key HPKE-wrapped to one grantee, sealed entirely client-side; the server
+// Account-to-account grants. A grant row is one resource's content key
+// HPKE-wrapped to one grantee, sealed entirely client-side; the server
 // stores and serves it opaquely, so zero-knowledge is unchanged. Grants confer
 // READ access only: the read paths below accept a grantee where they would
 // accept the owner, while every mutation keeps its owner-scoped predicate.
