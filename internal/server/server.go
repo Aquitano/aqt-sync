@@ -959,7 +959,7 @@ func (s *Server) putResource(c *gin.Context) {
 	// charged too; it replaces the resource's current bytes rather than adding to
 	// them, so only the difference counts, and it adds no row (no count check).
 	// A replayed create is already stored and must not be charged again.
-	if !s.store.ResourceCreateReplayed(owner, req) {
+	if !s.store.ResourceCreateKeyRecorded(owner, req) {
 		defer s.accountLimits.lock(owner)()
 		added, kind := estimatedResourceBytes(req), "resources"
 		if req.ID != "" {

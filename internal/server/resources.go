@@ -48,15 +48,20 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
-	digest, err := idempotencyDigest(req)
-	if err != nil {
-		return "", 0, err
-	}
+	// The digest covers the complete request, blob included, so it is only worth
+	// computing when a key makes it usable; this is the single hash for the whole
+	// create (the quota preflight probes key existence without one).
+	var digest []byte
 	var prior api.PutResourceResponse
-	if found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
-		return "", 0, err
-	} else if found {
-		return prior.ID, prior.Version, nil
+	if req.IdempotencyKey != "" {
+		if digest, err = idempotencyDigest(req); err != nil {
+			return "", 0, err
+		}
+		if found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
+			return "", 0, err
+		} else if found {
+			return prior.ID, prior.Version, nil
+		}
 	}
 	id := newID(8)
 	const version = 1
