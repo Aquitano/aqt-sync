@@ -825,25 +825,40 @@ func (s *Server) effectiveQuota(owner string) (int64, error) {
 // or past the row cap for kind ("resources", "snapshots", "objects"). An empty kind
 // checks bytes only, for a write that replaces an existing row rather than adding one.
 func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
-	u, err := s.store.AccountUsage(owner)
+	quota, err := s.effectiveQuota(owner)
 	if err != nil {
 		return err
 	}
-	quota, err := s.effectiveQuota(owner)
+	var limit int64
+	switch kind {
+	case "resources":
+		limit = int64(s.cfg.MaxResources)
+	case "snapshots":
+		limit = int64(s.cfg.MaxSnapshots)
+	case "objects":
+		limit = int64(s.cfg.MaxObjects)
+	}
+	// With no quota and no row cap configured there is nothing to enforce; skip the
+	// usage scan, which sums every owner-scoped table and runs under the per-owner
+	// lock on every quota-checked write.
+	if quota <= 0 && limit <= 0 {
+		return nil
+	}
+	u, err := s.store.AccountUsage(owner)
 	if err != nil {
 		return err
 	}
 	if quota > 0 && u.StorageBytes+addedBytes > quota {
 		return &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota}
 	}
-	var current, limit int64
+	var current int64
 	switch kind {
 	case "resources":
-		current, limit = u.Resources, int64(s.cfg.MaxResources)
+		current = u.Resources
 	case "snapshots":
-		current, limit = u.Snapshots, int64(s.cfg.MaxSnapshots)
+		current = u.Snapshots
 	case "objects":
-		current, limit = u.Objects, int64(s.cfg.MaxObjects)
+		current = u.Objects
 	}
 	if limit > 0 && current >= limit {
 		return &LimitExceededError{Kind: kind, Current: current, Limit: limit}

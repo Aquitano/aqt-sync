@@ -503,6 +503,15 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	     created_at     INTEGER NOT NULL,
 	     PRIMARY KEY(grantee_handle, owner_handle)
 	 );`,
+	// 20: indexes for the per-owner scans the hot paths run. Usage accounting sums
+	// resources, grants, and devices by owner on every quota-checked write; none of
+	// the three had an owner-leading index, so each check scanned the whole table.
+	// The auto-snapshot due query probes snapshots by (resource_id, version_captured)
+	// per candidate resource, which idx_snapshots_owner cannot serve.
+	`CREATE INDEX IF NOT EXISTS idx_resources_owner ON resources(owner_handle);
+	 CREATE INDEX IF NOT EXISTS idx_grants_owner ON grants(owner_handle);
+	 CREATE INDEX IF NOT EXISTS idx_devices_owner ON devices(owner_handle);
+	 CREATE INDEX IF NOT EXISTS idx_snapshots_resource_version ON snapshots(resource_id, version_captured);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
