@@ -96,27 +96,116 @@ func TestShareLsFetchesGrantsOnlyWhereTheyExist(t *testing.T) {
 	private := pushSecretFile(t, "private.txt", "p")
 	public := pushSecretFile(t, "public.txt", "pub")
 	granted := pushSecretFile(t, "granted.txt", "g")
+	pubGranted := pushSecretFile(t, "pubgranted.txt", "pg")
 	if err := runShare(public, "", true, linkPolicy{}); err != nil {
 		t.Fatalf("share public: %v", err)
 	}
-	if err := runShareWith(granted, "count-grantee@example.com"); err != nil {
+	if err := runShare(pubGranted, "", true, linkPolicy{}); err != nil {
+		t.Fatalf("share public+granted: %v", err)
+	}
+	for _, id := range []string{granted, pubGranted} {
+		if err := runShareWith(id, "count-grantee@example.com"); err != nil {
+			t.Fatalf("share --with %s: %v", id, err)
+		}
+	}
+
+	grantGets.Store(0)
+	rows := shareListRows(t)
+	if _, ok := rows[private]; ok {
+		t.Fatalf("share ls lists the private, ungranted resource: %v", rows)
+	}
+	for id, wantGrantees := range map[string]int{public: 0, granted: 1, pubGranted: 1} {
+		row, ok := rows[id]
+		if !ok {
+			t.Fatalf("share ls misses %s: %v", id, rows)
+		}
+		if len(row.Grantees) != wantGrantees {
+			t.Fatalf("%s grantees = %v, want %d", id, row.Grantees, wantGrantees)
+		}
+	}
+	// One fetch per resource with grants — the private and the grant-less public
+	// resource cost nothing.
+	if got := grantGets.Load(); got != 2 {
+		t.Fatalf("share ls made %d grant fetches, want exactly 2 (the granted resources)", got)
+	}
+}
+
+// shareListRows runs `share ls --json` and indexes the rows by resource id.
+func shareListRows(t *testing.T) map[string]shareListRow {
+	t.Helper()
+	var out string
+	withJSON(t, func() {
+		out = captureStdout(t, func() {
+			if err := runShareList(""); err != nil {
+				t.Fatalf("share ls --json: %v", err)
+			}
+		})
+	})
+	var rows []shareListRow
+	if err := json.Unmarshal([]byte(out), &rows); err != nil {
+		t.Fatalf("share ls --json is not valid JSON: %v\n%s", err, out)
+	}
+	byID := make(map[string]shareListRow, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	return byID
+}
+
+// Against a server that predates the grantCount echo the field is absent, and
+// the client must fall back to fetching grants per resource — a bare zero would
+// be indistinguishable from absent and silently hide every granted resource.
+// The proxy strips grantCount from list responses to stand in for that server.
+func TestShareLsFallsBackWhenTheServerOmitsGrantCounts(t *testing.T) {
+	var grantGets atomic.Int64
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/grants") {
+			grantGets.Add(1)
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/v1/resources" {
+			rec := httptest.NewRecorder()
+			pass(rec, r)
+			body := rec.Body.Bytes()
+			var payload map[string]any
+			if json.Unmarshal(body, &payload) == nil {
+				if resources, ok := payload["resources"].([]any); ok {
+					for _, it := range resources {
+						if m, ok := it.(map[string]any); ok {
+							delete(m, "grantCount")
+						}
+					}
+					if stripped, err := json.Marshal(payload); err == nil {
+						body = stripped
+					}
+				}
+			}
+			w.Header().Set("Content-Type", rec.Header().Get("Content-Type"))
+			w.WriteHeader(rec.Code)
+			w.Write(body)
+			return
+		}
+		pass(w, r)
+	})
+	grantSignup(t, h, "old-grantee@example.com", "old-grantee", "another passphrase")
+
+	private := pushSecretFile(t, "private.txt", "p")
+	granted := pushSecretFile(t, "granted.txt", "g")
+	if err := runShareWith(granted, "old-grantee@example.com"); err != nil {
 		t.Fatalf("share --with: %v", err)
 	}
 
 	grantGets.Store(0)
-	out := captureStdout(t, func() {
-		if err := runShareList(""); err != nil {
-			t.Fatalf("share ls: %v", err)
-		}
-	})
-	if strings.Contains(out, private) {
-		t.Fatalf("share ls lists the private, ungranted resource:\n%s", out)
+	rows := shareListRows(t)
+	if _, ok := rows[private]; ok {
+		t.Fatalf("private resource listed: %v", rows)
 	}
-	if !strings.Contains(out, public) || !strings.Contains(out, granted) {
-		t.Fatalf("share ls misses a shared resource:\n%s", out)
+	row, ok := rows[granted]
+	if !ok || len(row.Grantees) != 1 {
+		t.Fatalf("granted resource missing or grantee-less against an old server: %v", rows)
 	}
-	if got := grantGets.Load(); got != 1 {
-		t.Fatalf("share ls made %d grant fetches, want exactly 1 (the granted resource)", got)
+	// Without counts nothing can be skipped: one fetch per listed resource.
+	if got := grantGets.Load(); got != 2 {
+		t.Fatalf("old-server fallback made %d grant fetches, want 2 (every resource)", got)
 	}
 }
 
