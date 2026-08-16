@@ -47,13 +47,22 @@ type Config struct {
 	// debounce and guard behavior in-tree (like .aqtignore) rather than per-run.
 	Watch WatchConfig `json:"watch"`
 
-	// Conflicts selects how a two-sided change is resolved: "block" (default)
-	// reports the conflict and refuses the sync, "copy" keeps the local version and
-	// writes the remote one alongside as <name>.conflict-<suffix>, and "merge" first
-	// attempts a three-way text merge before falling back to copy. Empty means block.
-	// The `--conflicts` flag overrides this per run.
+	// Conflicts selects how a two-sided change is resolved: ConflictBlock (default)
+	// reports the conflict and refuses the sync, ConflictCopy keeps the local
+	// version and writes the remote one alongside as <name>.conflict-<suffix>, and
+	// ConflictMerge first attempts a three-way text merge before falling back to
+	// copy. Empty means block. The `--conflicts` flag overrides this per run.
 	Conflicts string `json:"conflicts"`
 }
+
+// The closed set of conflict-resolution modes. Config validation and the CLI's
+// flag layer both derive from these, so the two sides of the package boundary
+// cannot drift.
+const (
+	ConflictBlock = "block"
+	ConflictCopy  = "copy"
+	ConflictMerge = "merge"
+)
 
 // ChunkSizes are explicit content-defined chunking bounds in bytes. min doubles as
 // the inline cutoff (files this small skip chunking).
@@ -241,9 +250,9 @@ func (c Config) Validate() error {
 		return fmt.Errorf("unsupported config version %d (this aqt understands version 1; upgrade aqt to use this folder's config)", c.Version)
 	}
 	switch c.Conflicts {
-	case "", "block", "copy", "merge":
+	case "", ConflictBlock, ConflictCopy, ConflictMerge:
 	default:
-		return fmt.Errorf("invalid conflicts %q (want \"block\", \"copy\", or \"merge\")", c.Conflicts)
+		return fmt.Errorf("invalid conflicts %q (want %q, %q, or %q)", c.Conflicts, ConflictBlock, ConflictCopy, ConflictMerge)
 	}
 	if _, ok := namedChunkProfiles[c.ChunkProfile]; !ok {
 		return fmt.Errorf("unknown chunkProfile %q (want \"default\", \"large\", or \"huge\")", c.ChunkProfile)

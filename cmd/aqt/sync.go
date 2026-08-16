@@ -1863,6 +1863,14 @@ func (u *packUploader) Add(ch crypto.Chunk, ciphertext []byte) error {
 		return nil
 	}
 	u.seen[ch.ID] = true
+	// Dispatch-before-append when this object would push the assembled pack past
+	// the wire cap (see syncengine.FitsInPack); the target flush below runs after
+	// the append and cannot catch that case.
+	if u.candSize > 0 && !syncengine.FitsInPack(u.candSize, len(u.cand), len(ciphertext)) {
+		if err := u.dispatch(); err != nil {
+			return err
+		}
+	}
 	u.cand = append(u.cand, candidate{id: ch.ID, ct: ciphertext, size: ch.Len})
 	u.candSize += len(ciphertext)
 	if u.candSize >= u.target {
