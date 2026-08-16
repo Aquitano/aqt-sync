@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
 func TestSafeOutputName(t *testing.T) {
@@ -88,14 +89,14 @@ func TestWriteStreamAtomicLeavesOriginalOnFailure(t *testing.T) {
 	}
 
 	streamErr := errors.New("simulated mid-write network failure")
-	err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+	err := fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
 		if _, err := f.Write([]byte("partial")); err != nil {
 			return err
 		}
 		return streamErr
 	})
 	if !errors.Is(err, streamErr) {
-		t.Fatalf("writeStreamAtomic err = %v, want streamErr", err)
+		t.Fatalf("fsatomic.WriteStream err = %v, want streamErr", err)
 	}
 
 	got, err := os.ReadFile(dest)
@@ -125,11 +126,11 @@ func TestWriteStreamAtomicRenamesOnSuccess(t *testing.T) {
 	}
 
 	want := []byte("brand new contents")
-	if err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+	if err := fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
 		_, err := f.Write(want)
 		return err
 	}); err != nil {
-		t.Fatalf("writeStreamAtomic: %v", err)
+		t.Fatalf("fsatomic.WriteStream: %v", err)
 	}
 
 	got, err := os.ReadFile(dest)

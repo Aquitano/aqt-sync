@@ -32,8 +32,6 @@ type pushOptions struct {
 	password string
 	name     string
 	noClip   bool
-	quiet    bool
-	json     bool
 	policy   linkPolicy
 }
 
@@ -356,13 +354,11 @@ func buildPushJSON(id, link, name string, size int64, vis api.Visibility) pushJS
 }
 
 func printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) {
-	// The global --json/-q drive the CLI; the opts fields keep programmatic callers
-	// (the bare-path push, tests) able to request them directly.
-	if flagJSON || opts.json {
+	if flagJSON {
 		printJSON(buildPushJSON(id, ref, name, size, vis))
 		return
 	}
-	if flagQuiet || opts.quiet {
+	if flagQuiet {
 		fmt.Println(ref)
 		return
 	}

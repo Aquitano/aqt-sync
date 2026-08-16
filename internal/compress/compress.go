@@ -11,7 +11,6 @@ package compress
 import (
 	"errors"
 	"fmt"
-	"io"
 	"runtime"
 
 	"github.com/klauspost/compress/zstd"
@@ -74,9 +73,9 @@ func Encode(raw []byte) ([]byte, string) {
 	return c, Zstd
 }
 
-// Decode reverses Encode for a payload sealed under alg. rawLen >= 0 pins the
-// exact expected output length (the tamper check callers previously applied to
-// the decrypted bytes directly); rawLen < 0 leaves only the global cap.
+// Decode reverses Encode for a payload sealed under alg. rawLen >= 0 pins the exact
+// expected output length, which is the caller's tamper check; rawLen < 0 leaves only
+// the global cap.
 func Decode(payload []byte, alg string, rawLen int) ([]byte, error) {
 	switch alg {
 	case "":
@@ -100,16 +99,4 @@ func Decode(payload []byte, alg string, rawLen int) ([]byte, error) {
 	default:
 		return nil, fmt.Errorf("unknown compression algorithm %q", alg)
 	}
-}
-
-// NewWriter returns a streaming zstd writer over w with the pinned level, for
-// stream-shaped payloads (the pack-and-seal tarball). Concurrency 1 keeps an
-// abandoned writer from leaking goroutines; Close flushes the frame.
-func NewWriter(w io.Writer) (*zstd.Encoder, error) {
-	return zstd.NewWriter(w, encoderOpts(1)...)
-}
-
-// NewReader returns a streaming zstd reader over r; callers must Close it.
-func NewReader(r io.Reader) (*zstd.Decoder, error) {
-	return zstd.NewReader(r, decoderOpts()...)
 }

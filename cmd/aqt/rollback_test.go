@@ -49,7 +49,7 @@ func (h *e2eHarness) restoreServer(dataDir string) {
 		h.t.Fatalf("open restored store: %v", err)
 	}
 	h.t.Cleanup(func() { store.Close() })
-	ts := httptest.NewServer(server.New(store).Router())
+	ts := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	h.t.Cleanup(ts.Close)
 	prof, err := identity.Load(identity.DefaultProfile)
 	if err != nil {

@@ -8,6 +8,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
 // Contact is a trust-on-first-use pin of another account's published keys. The
@@ -64,5 +66,5 @@ func SaveContacts(profile string, contacts map[string]Contact) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, data, 0o600)
+	return fsatomic.WriteFile(path, data, 0o600)
 }

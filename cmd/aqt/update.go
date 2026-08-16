@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/update"
 )
 
@@ -195,7 +196,7 @@ func printAvailable(res update.Result) {
 	}
 	fmt.Printf("release: %s\n", res.ReleaseURL)
 	if res.Artifact != nil {
-		fmt.Printf("asset:   %s (%s)\n", res.Artifact.Name, humanBytes(res.Artifact.Size))
+		fmt.Printf("asset:   %s (%s)\n", res.Artifact.Name, cliutil.HumanBytes(res.Artifact.Size))
 	}
 }
 

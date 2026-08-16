@@ -222,7 +222,7 @@ func TestShareLsAndUnshare(t *testing.T) {
 	if err := os.WriteFile(fpath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(fpath, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	id := onlyResourceID(t)
@@ -272,7 +272,7 @@ func TestShareLsShowsLinkPolicy(t *testing.T) {
 	if err := os.WriteFile(fpath, []byte("hello"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(fpath, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	id := onlyResourceID(t)

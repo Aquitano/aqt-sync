@@ -87,7 +87,7 @@ func pushSecretFile(t *testing.T, name, content string) string {
 	if err := os.WriteFile(fpath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(fpath, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	cl, prof, err := authedClient()
@@ -154,8 +154,8 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		if _, err := cl.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Public}); !errors.Is(err, client.ErrNotFound) {
 			t.Fatalf("grantee SetVisibility: got %v, want ErrNotFound", err)
 		}
-		if err := cl.DeleteResource(id); !errors.Is(err, client.ErrNotFound) {
-			t.Fatalf("grantee DeleteResource: got %v, want ErrNotFound", err)
+		if err := cl.DeleteResourceVersion(id, 1); !errors.Is(err, client.ErrNotFound) {
+			t.Fatalf("grantee delete: got %v, want ErrNotFound", err)
 		}
 		if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: "mallory", WrappedKey: []byte("x")}); !errors.Is(err, client.ErrNotFound) {
 			t.Fatalf("grantee CreateGrant: got %v, want ErrNotFound", err)

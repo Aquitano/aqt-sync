@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"golang.org/x/term"
+
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 )
 
 // progressBar renders a single-line transfer bar to stderr while bytes move. It is
@@ -103,5 +105,5 @@ func (p *progressBar) line() string {
 	filled := int(pct * width)
 	bar := strings.Repeat("=", filled) + strings.Repeat(" ", width-filled)
 	return fmt.Sprintf("%s [%s] %3d%%  %s / %s  (%s left)",
-		p.label, bar, int(pct*100), humanBytes(done), humanBytes(total), humanBytes(total-done))
+		p.label, bar, int(pct*100), cliutil.HumanBytes(done), cliutil.HumanBytes(total), cliutil.HumanBytes(total-done))
 }

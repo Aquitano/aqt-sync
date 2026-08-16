@@ -390,7 +390,7 @@ func (s *Store) deleteAccount(owner string, authVerifier []byte) (DeletedAccount
 // accountBlobIDs lists every resource and snapshot id belonging to the account.
 // The caller supplies its delete transaction so a concurrent file-before-row write
 // cannot land between enumeration and erasure.
-func accountBlobIDs(q rowQueryer, owner string) ([]string, error) {
+func accountBlobIDs(q queryer, owner string) ([]string, error) {
 	rows, err := q.Query(
 		`SELECT id FROM resources WHERE owner_handle = ?
 		 UNION

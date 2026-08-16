@@ -25,6 +25,22 @@ func (s mapSink) get(id string) ([]byte, error) {
 	return ct, nil
 }
 
+// openTreeSingle reads a tree through OpenTreeBatched with a fetcher that resolves one
+// id at a time, so a test can count individual node fetches.
+func openTreeSingle(root TreeRoot, fetch func(id string) ([]byte, error)) (Manifest, error) {
+	return OpenTreeBatched(root, func(ids []string) (map[string][]byte, error) {
+		out := make(map[string][]byte, len(ids))
+		for _, id := range ids {
+			ct, err := fetch(id)
+			if err != nil {
+				return nil, err
+			}
+			out[id] = ct
+		}
+		return out, nil
+	})
+}
+
 func normalize(m Manifest) Manifest {
 	sortEntries(m.Entries)
 	sortDirs(m.Dirs)
@@ -55,7 +71,7 @@ func TestSealOpenTreeRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := OpenTree(root, sink.get)
+	got, err := openTreeSingle(root, sink.get)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +211,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	full, err := OpenTree(root, server.get)
+	full, err := openTreeSingle(root, server.get)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -212,7 +228,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 		fetched++
 		return server.get(id)
 	}
-	got, err := OpenTree(root, hybrid)
+	got, err := openTreeSingle(root, hybrid)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +247,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	fetched = 0
-	if _, err := OpenTree(sameRoot, hybrid); err != nil {
+	if _, err := openTreeSingle(sameRoot, hybrid); err != nil {
 		t.Fatal(err)
 	}
 	if fetched != 0 {
@@ -241,7 +257,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 
 // TestOpenTreeBatchedOneFetchPerLevel proves the level-batched walk collapses a
 // tree's node fetches to one batch per depth level (the fix for 2.4's 2-RTT-per-node
-// cost), and reconstructs exactly the manifest the depth-first OpenTree does.
+// cost), and reconstructs exactly the manifest that was sealed.
 func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
 	t.Parallel()
 	conv := testConv(t)
@@ -276,12 +292,8 @@ func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	full, err := OpenTree(root, sink.get)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(normalize(full), normalize(got)) {
-		t.Fatalf("batched read != depth-first read:\n full %+v\n got  %+v", full, got)
+	if want := normalize(in); !reflect.DeepEqual(want, normalize(got)) {
+		t.Fatalf("batched read != sealed manifest:\n want %+v\n got  %+v", want, got)
 	}
 	// root level (1 node), then {a,b} (2), then {a/sub,b/sub} (2): three batches,
 	// each one locate round-trip, instead of five separate 2-RTT node fetches.
@@ -293,8 +305,8 @@ func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
 
 // A file with too many chunk records is stored with an indirect chunk list (ChunksRef),
 // and a compressed inline file carries InlineAlg. The batched reader must reconstruct
-// both exactly like the depth-first OpenTree: earlier it dropped ChunksRef (restoring
-// the file with zero chunks) and InlineAlg (writing raw compressed bytes as plaintext).
+// both exactly as sealed: earlier it dropped ChunksRef (restoring the file with zero
+// chunks) and InlineAlg (writing raw compressed bytes as plaintext).
 func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
 	t.Parallel()
 	conv := testConv(t)
@@ -329,12 +341,8 @@ func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	full, err := OpenTree(root, sink.get)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(normalize(full), normalize(got)) {
-		t.Fatalf("batched read != depth-first read:\n full %+v\n got  %+v", full, got)
+	if want := normalize(in); !reflect.DeepEqual(want, normalize(got)) {
+		t.Fatalf("batched read != sealed manifest:\n want %+v\n got  %+v", want, got)
 	}
 	if big := got.ByPath()["big.bin"]; len(big.Chunks) != len(bigChunks) {
 		t.Fatalf("indirect chunk list dropped: got %d chunks, want %d", len(big.Chunks), len(bigChunks))

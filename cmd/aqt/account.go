@@ -7,12 +7,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"text/tabwriter"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
@@ -124,7 +125,7 @@ func accountDeleteProof(prof *identity.Profile, assumeYes bool, cl accountDelete
 func confirmAccountDelete(email string, cl accountDeleteClient) error {
 	if u, err := cl.Usage(); err == nil {
 		fmt.Fprintf(os.Stderr, "%s holds %s across %d resources and %d snapshots on %d devices.\n",
-			email, humanBytes(u.StorageBytes), u.Resources, u.Snapshots, u.Devices)
+			email, cliutil.HumanBytes(u.StorageBytes), u.Resources, u.Snapshots, u.Devices)
 	}
 	fmt.Fprintln(os.Stderr, "Deleting the account erases all of it. There is no backup and no undo.")
 	fmt.Fprintln(os.Stderr, "Shares you granted stop resolving, and grants others made to you are dropped.")
@@ -151,19 +152,21 @@ func printAccountDeleteReceipt(out, errOut io.Writer, r api.DeleteAccountRespons
 	} else {
 		fmt.Fprintf(errOut, "%s deleted on the server\n", email)
 	}
-	w := tabwriter.NewWriter(out, 0, 4, 2, ' ', 0)
+	var rows [][]string
 	// An absent total means the server could not read one, not that nothing was
 	// stored; printing 0 would be a claim it did not make.
 	if r.Bytes != nil {
-		fmt.Fprintf(w, "storage freed\t%s\n", humanBytes(*r.Bytes))
+		rows = append(rows, []string{"storage freed", cliutil.HumanBytes(*r.Bytes)})
 	}
-	fmt.Fprintf(w, "resources\t%d\n", r.Resources)
-	fmt.Fprintf(w, "snapshots\t%d\n", r.Snapshots)
-	fmt.Fprintf(w, "packs\t%d\n", r.Packs)
-	fmt.Fprintf(w, "objects\t%d\n", r.Objects)
-	fmt.Fprintf(w, "grants\t%d\n", r.Grants)
-	fmt.Fprintf(w, "devices\t%d\n", r.Devices)
-	if err := w.Flush(); err != nil {
+	rows = append(rows,
+		[]string{"resources", strconv.FormatInt(r.Resources, 10)},
+		[]string{"snapshots", strconv.FormatInt(r.Snapshots, 10)},
+		[]string{"packs", strconv.FormatInt(r.Packs, 10)},
+		[]string{"objects", strconv.FormatInt(r.Objects, 10)},
+		[]string{"grants", strconv.FormatInt(r.Grants, 10)},
+		[]string{"devices", strconv.FormatInt(r.Devices, 10)},
+	)
+	if err := printTable(out, nil, rows); err != nil {
 		return err
 	}
 	// The account is gone either way, but its ciphertext is not, and the person who

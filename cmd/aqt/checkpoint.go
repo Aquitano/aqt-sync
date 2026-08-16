@@ -12,6 +12,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -259,7 +260,7 @@ func ambiguousCheckpointError(name string, cands []api.SnapshotInfo) error {
 		if s.Anchored {
 			anchor = "  (anchored)"
 		}
-		fmt.Fprintf(&b, "\n  %s  %s%s", s.ID, formatTime(s.CreatedAt), anchor)
+		fmt.Fprintf(&b, "\n  %s  %s%s", s.ID, cliutil.FormatUnix(s.CreatedAt), anchor)
 	}
 	return errors.New(b.String())
 }

@@ -18,9 +18,17 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-// pushStreamedFile writes data to a temp file, pushes it with opts, and returns the
-// resource id and the ref printed to stdout. opts must set quiet so the printed line is
-// just the ref.
+// pushQuiet pushes path with opts while the global quiet flag is set, so stdout holds
+// only the ref. The flag is restored before returning.
+func pushQuiet(path string, opts pushOptions) error {
+	orig := flagQuiet
+	flagQuiet = true
+	defer func() { flagQuiet = orig }()
+	return runPush(path, opts)
+}
+
+// pushStreamedFile writes data to a temp file, pushes it, and returns the resource id
+// and the ref printed to stdout.
 func pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, printed string) {
 	t.Helper()
 	src := filepath.Join(t.TempDir(), "data.bin")
@@ -28,7 +36,7 @@ func pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, p
 		t.Fatal(err)
 	}
 	printed = strings.TrimSpace(captureStdout(t, func() {
-		if err := runPush(src, opts); err != nil {
+		if err := pushQuiet(src, opts); err != nil {
 			t.Fatalf("push: %v", err)
 		}
 	}))
@@ -39,9 +47,8 @@ func pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, p
 	return id, printed
 }
 
-// pushRandomStreamedFile writes size random bytes, pushes them with opts, and returns
-// the resource id, the plaintext, and the ref printed to stdout. opts must set quiet so
-// the printed line is just the ref.
+// pushRandomStreamedFile writes size random bytes, pushes them, and returns the
+// resource id, the plaintext, and the ref printed to stdout.
 func pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string, data []byte, printed string) {
 	t.Helper()
 	data = make([]byte, size)
@@ -143,7 +150,7 @@ func ownerFileRoot(t *testing.T, id string) syncengine.FileRoot {
 func TestShareStreamedLinkPull(t *testing.T) {
 	newE2E(t)
 
-	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true, quiet: true})
+	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 
 	link := strings.TrimSpace(captureStdout(t, func() {
 		if err := runShare(id, "", true, linkPolicy{}); err != nil {
@@ -174,7 +181,7 @@ func TestShareStreamedIndirectLinkPull(t *testing.T) {
 	if _, err := mrand.New(mrand.NewSource(0x5eaf00d)).Read(data); err != nil {
 		t.Fatal(err)
 	}
-	id, _ := pushStreamedFile(t, data, pushOptions{noClip: true, quiet: true})
+	id, _ := pushStreamedFile(t, data, pushOptions{noClip: true})
 
 	// The stored root must be indirect, else the test does not exercise segment reads.
 	root := ownerFileRoot(t, id)
@@ -199,7 +206,7 @@ func TestShareStreamedIndirectLinkPull(t *testing.T) {
 func TestPrivateRotatesStreamedLink(t *testing.T) {
 	h := newE2E(t)
 
-	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true, quiet: true})
+	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 
 	// Grab a real content-object id (referenced by the resource) for the public-read
 	// assertion after rotation.
@@ -255,7 +262,7 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 func TestPublicStreamedPushLinkPull(t *testing.T) {
 	newE2E(t)
 
-	_, data, printed := pushRandomStreamedFile(t, 9<<20, pushOptions{public: true, noClip: true, quiet: true})
+	_, data, printed := pushRandomStreamedFile(t, 9<<20, pushOptions{public: true, noClip: true})
 	if !strings.Contains(printed, "#k.") {
 		t.Fatalf("public push output %q missing key fragment", printed)
 	}
@@ -271,7 +278,7 @@ func TestGatedStreamedShareLinkPull(t *testing.T) {
 	newE2E(t)
 
 	const password = "hunter2 correct horse"
-	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true, quiet: true})
+	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 
 	link := strings.TrimSpace(captureStdout(t, func() {
 		if err := runShare(id, password, true, linkPolicy{}); err != nil {

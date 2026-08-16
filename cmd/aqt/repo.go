@@ -9,12 +9,13 @@ import (
 	"os"
 	"os/exec"
 	"sort"
-	"text/tabwriter"
+	"strconv"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/gitremote"
 )
@@ -272,12 +273,14 @@ func runRepoList(asJSON bool) error {
 		fmt.Fprintln(os.Stderr, "no git remotes yet")
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tBUNDLES\tSIZE\tVERSION\tID")
+	cells := make([][]string, 0, len(rows))
 	for _, row := range rows {
-		fmt.Fprintf(w, "%s\t%d\t%s\tv%d\t%s\n", row.Name, row.Bundles, humanBytes(row.Size), row.Version, row.ID)
+		cells = append(cells, []string{
+			row.Name, strconv.Itoa(row.Bundles), cliutil.HumanBytes(row.Size),
+			fmt.Sprintf("v%d", row.Version), row.ID,
+		})
 	}
-	return w.Flush()
+	return printTable(os.Stdout, []string{"NAME", "BUNDLES", "SIZE", "VERSION", "ID"}, cells)
 }
 
 func runRepoInfo(ref string, asJSON bool) error {
@@ -325,7 +328,7 @@ func runRepoInfo(ref string, asJSON bool) error {
 	}
 	fmt.Printf("%s · %s\n", row.Name, row.ID)
 	fmt.Printf("bundles %d · size %s · generation %d · version %d · compact at %d\n",
-		row.Bundles, humanBytes(row.Size), row.Generation, row.Version, row.CompactAt)
+		row.Bundles, cliutil.HumanBytes(row.Size), row.Generation, row.Version, row.CompactAt)
 	if root.Head != "" {
 		fmt.Printf("HEAD -> %s\n", root.Head)
 	}

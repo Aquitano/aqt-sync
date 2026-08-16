@@ -442,14 +442,6 @@ func withCursor(path, cursor string) string {
 	return path + sep + "cursor=" + url.QueryEscape(cursor)
 }
 
-func (c *Client) DeleteResource(id string) error {
-	version, err := c.versionToPin(id)
-	if err != nil {
-		return err
-	}
-	return c.DeleteResourceVersion(id, version)
-}
-
 // versionToPin resolves the version a read-modify-write should pin itself to. A
 // reclaimed tombstone answers 410 and has no content left to race over, so it pins
 // nothing (the server treats 0 as unpinned) rather than failing — otherwise the row

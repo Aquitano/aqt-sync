@@ -1611,7 +1611,7 @@ func TestStartGCSweepsAgedPacksOnTimer(t *testing.T) {
 
 	stop := make(chan struct{})
 	defer close(stop)
-	New(s).StartGC(5*time.Millisecond, stop)
+	NewWithConfig(s, Config{}).StartGC(5*time.Millisecond, stop)
 
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {

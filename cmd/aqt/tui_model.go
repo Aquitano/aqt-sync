@@ -18,6 +18,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -70,7 +71,7 @@ type tuiModel struct {
 	folderID  string
 	local     changeSet
 	conflicts []string
-	torn      pullMarker // an interrupted pack pull left the tree part remote, part stale
+	torn      marker[interruptedPull] // an interrupted pack pull left the tree part remote, part stale
 	remote    tuiRemoteMsg
 	remoteOK  bool
 	resources []lsRow
@@ -1195,8 +1196,8 @@ func (m *tuiModel) statusVerdict() (string, lipgloss.Style) {
 	// A torn tree outranks everything: half of it is already the remote's, so the
 	// local-change counts below are not the user's edits (the CLI's status makes
 	// the same call).
-	if m.torn.present {
-		return fmt.Sprintf("! interrupted pull (version %d) — sync to finish it", m.torn.Version), tuiStyleErr
+	if m.torn.Present {
+		return fmt.Sprintf("! interrupted pull (version %d) — sync to finish it", m.torn.Payload.Version), tuiStyleErr
 	}
 
 	if conflictN > 0 {
@@ -1414,7 +1415,7 @@ func (m *tuiModel) rebuildResourcesPanel() {
 		if r.Kind == api.KindFolder {
 			mark, markStyle = "/", tuiStyleAccent
 		} else {
-			size = "  " + humanBytes(r.Size)
+			size = "  " + cliutil.HumanBytes(r.Size)
 			if r.Visibility == string(api.Public) {
 				mark, markStyle = "●", tuiStylePublic
 			}

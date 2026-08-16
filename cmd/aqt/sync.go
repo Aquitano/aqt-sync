@@ -21,7 +21,9 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
@@ -309,7 +311,7 @@ func runStatus(dir string, opts statusOptions) error {
 	// An interrupted pack pull leaves a tree that is part remote and part stale, and
 	// the changes above render it as ordinary local edits. Say which it is, or the
 	// user acts on a diff that is not theirs.
-	torn, err := loadPullMarker(root)
+	torn, err := loadMarker[interruptedPull](root, pullMarkerFile)
 	if err != nil {
 		return err
 	}
@@ -327,8 +329,8 @@ func runStatus(dir string, opts statusOptions) error {
 			// it is, so a caller never has to guess why a path is "modified".
 			"changes": nonNilChanges(ch.changes),
 		}
-		if torn.present {
-			out["interruptedPull"] = map[string]any{"version": torn.Version}
+		if torn.Present {
+			out["interruptedPull"] = map[string]any{"version": torn.Payload.Version}
 		}
 		if !opts.offline {
 			if rep := collectIncoming(root, base); rep != nil {
@@ -338,9 +340,9 @@ func runStatus(dir string, opts statusOptions) error {
 		return printJSON(out)
 	}
 
-	if torn.present {
+	if torn.Present {
 		fmt.Fprintf(os.Stderr, "warning: a pull was interrupted here (version %d), so the changes "+
-			"below are a half-applied remote version, not local edits; `aqt sync` finishes the pull\n", torn.Version)
+			"below are a half-applied remote version, not local edits; `aqt sync` finishes the pull\n", torn.Payload.Version)
 	}
 	if ch.total() == 0 {
 		fmt.Println("clean (no local changes since last sync)")
@@ -741,13 +743,13 @@ func runSync(dir string, opts syncOptions) error {
 	}
 	// A kill mid-swap during an in-place restore leaves a half-emptied root that
 	// scans as mass deletion; syncing it would push those deletions fleet-wide.
-	if torn, err := loadRestoreMarker(root); err != nil {
+	if torn, err := loadMarker[interruptedRestore](root, restoreMarkerFile); err != nil {
 		return err
-	} else if torn.present {
+	} else if torn.Present {
 		return fmt.Errorf("an in-place restore of this folder (snapshot %s) was interrupted mid-swap, so the "+
 			"working tree may be incomplete; re-run `aqt restore %s --in-place` to finish it, or move the "+
 			"original contents back from the .aqt-backup-* directory beside this folder and then remove "+
-			".aqt/%s", torn.SnapshotID, torn.SnapshotID, restoreMarkerFile)
+			".aqt/%s", torn.Payload.SnapshotID, torn.Payload.SnapshotID, restoreMarkerFile)
 	}
 	cfg, err := syncengine.LoadConfig(root)
 	if err != nil {
@@ -1076,7 +1078,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 	if len(deferred) > 0 {
 		fmt.Fprintf(os.Stderr,
 			"note: merged %s of conflicting text, the per-sync limit; %d further conflict(s) kept both versions instead. Re-run `aqt sync` to merge them.\n",
-			humanBytes(int64(held)), len(deferred))
+			cliutil.HumanBytes(int64(held)), len(deferred))
 	}
 	return clean, fallback, nil
 }
@@ -1660,7 +1662,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	if err := materializeStaged(abs, func(staging string) error {
 		prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
 		// No base is recorded for a read-only share, so its mtimes have nothing to stamp.
-		// Batched: the object index stays O(batch), not O(tree) (issue #183).
+		// Batched: the object index stays O(batch), not O(tree).
 		_, dlErr := runPublicDownloads(fetch, staging, manifest.Entries, prog)
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
@@ -2682,16 +2684,6 @@ func controlPath(root, name string) string {
 	return filepath.Join(root, syncengine.ControlDir, name)
 }
 
-// writeFileAtomic writes data to a temp file in path's directory, fsyncs it, and
-// renames it over path, so a crash mid-write leaves the old control-state file
-// intact rather than a torn one that wedges future syncs.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	return writeStreamAtomic(path, perm, func(f *os.File) error {
-		_, err := f.Write(data)
-		return err
-	})
-}
-
 // recordRemoteVersion pins the freshness guard to the version this sync observed or
 // just committed — including a lower one after an accepted rollback, so subsequent
 // syncs stop tripping the guard. Best-effort like reclaimPacks (the sync itself
@@ -2712,7 +2704,7 @@ func saveState(root string, st folderState) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(controlPath(root, stateFile), b, 0o600)
+	return fsatomic.WriteFile(controlPath(root, stateFile), b, 0o600)
 }
 
 func loadState(root string) (folderState, error) {
@@ -2746,7 +2738,7 @@ func saveBase(root string, m syncengine.Manifest) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(controlPath(root, baseFile), b, 0o600)
+	return fsatomic.WriteFile(controlPath(root, baseFile), b, 0o600)
 }
 
 // decodeBase unmarshals base.json bytes into m, transparently opening a sealed
@@ -2946,7 +2938,7 @@ func materializeStaged(dest string, fn func(staging string) error) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging) // no-op once renamed; cleans up every failure path
+	defer os.RemoveAll(staging)
 	if err := fn(staging); err != nil {
 		return err
 	}
@@ -3223,8 +3215,8 @@ func summarize(uploads, downloads []syncengine.Entry, localDeletes, merged []str
 		return
 	}
 	fmt.Printf("synced: %d up (%s), %d down (%s), %d removed locally\n",
-		len(uploads), humanBytes(entriesBytes(uploads)),
-		len(downloads), humanBytes(entriesBytes(downloads)), len(localDeletes))
+		len(uploads), cliutil.HumanBytes(entriesBytes(uploads)),
+		len(downloads), cliutil.HumanBytes(entriesBytes(downloads)), len(localDeletes))
 	for _, path := range merged {
 		fmt.Printf("~ merged %s\n", path)
 	}

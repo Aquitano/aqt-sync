@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/identity"
@@ -203,7 +204,7 @@ func TestAccountDeleteRefusesUnconfirmableRun(t *testing.T) {
 	if err == nil {
 		t.Fatal("a non-interactive run without --yes was allowed to proceed")
 	}
-	if !errors.Is(err, errNotConfirmable) {
+	if !errors.Is(err, cliutil.ErrNotConfirmable) {
 		t.Fatalf("error = %v, want the not-confirmable refusal", err)
 	}
 }

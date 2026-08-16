@@ -37,7 +37,7 @@ type RegistrationMode string
 const (
 	// RegistrationOpen (the default) lets anyone sign up. A signup for an email that
 	// already has an account returns the same success shape as a fresh one instead of
-	// a 409, so the endpoint is no longer an existence oracle; the duplicate creates
+	// a 409, so the endpoint is not an existence oracle; the duplicate creates
 	// nothing and the caller's next authenticated call fails, matching the
 	// wrong-passphrase ambiguity the decoy salt already presents.
 	RegistrationOpen RegistrationMode = "open"
@@ -166,8 +166,6 @@ type Server struct {
 	accountLimits *keyedMutex
 }
 
-func New(store *Store) *Server { return NewWithConfig(store, Config{}) }
-
 func NewWithConfig(store *Store, cfg Config) *Server {
 	rps, burst := cfg.AuthedRatePerSec, cfg.AuthedBurst
 	if rps <= 0 {
@@ -204,14 +202,13 @@ func (s *Server) WaitWorkers(ctx context.Context) error {
 	}
 }
 
-// Per-route request-body caps. A single global cap previously coupled three
-// unrelated concerns — a small JSON control request, a chunk batch, and a folder's
-// whole sealed manifest — so the tightest reasonable limit for one became a
-// structural ceiling for the others (A2). Each route now gets a cap matched to
-// what it legitimately carries.
+// Per-route request-body caps, each matched to what its route legitimately carries.
+// A small JSON control request, a chunk batch, and a folder's whole sealed manifest
+// are unrelated concerns; one shared cap would make the tightest reasonable limit for
+// any of them a structural ceiling for the rest.
 //
-// A folder large enough to exceed maxResourceBody (hundreds of thousands of
-// entries) still needs a segmented manifest; that is the remaining half of A2.
+// A folder large enough to exceed maxResourceBody (hundreds of thousands of entries)
+// needs a segmented manifest, which does not exist yet.
 const (
 	maxControlBody  = 64 << 10         // 64 KiB: account/auth/visibility — a few small fields
 	maxChunkBody    = 32 << 20         // 32 MiB: a check/locate id list (client batches well under this)
@@ -1578,7 +1575,7 @@ func (s *Server) StartAutoSnapshot(interval time.Duration, keepLast int, stop <-
 
 // StartGC runs the scheduled GC sweep every interval until stop is closed (a
 // non-positive interval disables it). Client-triggered POST /v1/gc stays available
-// as a manual path, but reclamation no longer depends on a device syncing: an
+// as a manual path, but reclamation does not depend on a device syncing: an
 // account whose devices go quiet still gets its dead packs swept. Both paths use
 // the same age guard, and the store's per-owner lock serializes them if they
 // collide.

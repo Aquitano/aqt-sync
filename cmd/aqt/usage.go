@@ -5,9 +5,11 @@ package main
 import (
 	"fmt"
 	"os"
-	"text/tabwriter"
+	"strconv"
 
 	"github.com/spf13/cobra"
+
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 )
 
 func usageCmd() *cobra.Command {
@@ -33,17 +35,17 @@ func runUsage(asJSON bool) error {
 	if asJSON {
 		return printJSON(u)
 	}
-	storage := humanBytes(u.StorageBytes)
+	storage := cliutil.HumanBytes(u.StorageBytes)
 	if u.QuotaBytes > 0 {
 		storage = fmt.Sprintf("%s of %s (%.0f%%)",
-			storage, humanBytes(u.QuotaBytes), 100*float64(u.StorageBytes)/float64(u.QuotaBytes))
+			storage, cliutil.HumanBytes(u.QuotaBytes), 100*float64(u.StorageBytes)/float64(u.QuotaBytes))
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintf(w, "storage\t%s\n", storage)
-	fmt.Fprintf(w, "resources\t%d\n", u.Resources)
-	fmt.Fprintf(w, "snapshots\t%d\n", u.Snapshots)
-	fmt.Fprintf(w, "packs\t%d\n", u.Packs)
-	fmt.Fprintf(w, "objects\t%d\n", u.Objects)
-	fmt.Fprintf(w, "devices\t%d\n", u.Devices)
-	return w.Flush()
+	return printTable(os.Stdout, nil, [][]string{
+		{"storage", storage},
+		{"resources", strconv.FormatInt(u.Resources, 10)},
+		{"snapshots", strconv.FormatInt(u.Snapshots, 10)},
+		{"packs", strconv.FormatInt(u.Packs, 10)},
+		{"objects", strconv.FormatInt(u.Objects, 10)},
+		{"devices", strconv.FormatInt(u.Devices, 10)},
+	})
 }

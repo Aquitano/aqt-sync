@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 )
 
 // Detail builders for the main pane. Each returns plain multi-line text (with
@@ -42,7 +43,7 @@ func tuiFileDetail(it tuiFileItem, root string) string {
 		// stat and a rename's body is an arrow, not a path.
 		if !it.dir && (it.kind == "new" || it.kind == "modified") {
 			if fi, err := os.Stat(filepath.Join(root, filepath.FromSlash(it.path))); err == nil {
-				b.WriteString(tuiField("size", humanBytes(fi.Size())))
+				b.WriteString(tuiField("size", cliutil.HumanBytes(fi.Size())))
 				b.WriteString(tuiField("modified", fi.ModTime().Format("2006-01-02 15:04:05")))
 			}
 		}
@@ -141,7 +142,7 @@ func tuiResourceDetail(r lsRow) string {
 	b.WriteString(tuiStyleTitle.Render(r.Name) + "\n\n")
 	b.WriteString(tuiField("kind", r.Kind))
 	if r.Kind != api.KindFolder {
-		b.WriteString(tuiField("size", humanBytes(r.Size)))
+		b.WriteString(tuiField("size", cliutil.HumanBytes(r.Size)))
 	}
 	vis := r.Visibility
 	if vis == string(api.Public) {

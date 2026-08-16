@@ -16,6 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -198,7 +199,7 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 			return fmt.Errorf("%s already exists (use --force to overwrite)", dest)
 		}
 	}
-	if err := writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+	if err := fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
 		return syncengine.WriteFileRoot(f, chunks, fetch)
 	}); err != nil {
 		return err
@@ -303,7 +304,7 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 			return fmt.Errorf("%s already exists (use --force to overwrite)", out)
 		}
 	}
-	if err := writeFileAtomic(out, plaintext, 0o600); err != nil {
+	if err := fsatomic.WriteFile(out, plaintext, 0o600); err != nil {
 		return err
 	}
 	if flagJSON {
@@ -313,36 +314,6 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 	return nil
 }
 
-// writeStreamAtomic writes to a sibling temp file via fn, fsyncs it, then renames
-// it over dest, so a failure or crash mid-write leaves any existing dest untouched
-// rather than truncating it. fn gets the open temp file and may stream into it
-// without holding the whole payload in memory (pullStream); writeFileAtomic wraps
-// this for the in-memory case.
-func writeStreamAtomic(dest string, perm os.FileMode, fn func(*os.File) error) error {
-	f, err := os.CreateTemp(filepath.Dir(dest), ".aqt-tmp-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if err := fn(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, dest)
-}
-
 // parseRef extracts the resource id, optional fragment, and origin (scheme://host)
 // from any ref form: a full http(s) URL (.../x/<id>#<frag>), an aqt://<id> ref, or
 // a bare id. origin is set only for an absolute http/https URL so a share link's
@@ -350,8 +321,8 @@ func writeStreamAtomic(dest string, perm os.FileMode, fn func(*os.File) error) e
 func parseRef(ref string) (id, fragment, origin string) {
 	// One parser for every ref form: strip any subpath first (aqt://<id>/<sub> or
 	// .../x/<id>/<sub/path>), so a subpath-bearing link resolves to the same id
-	// here as in the pull path. The last-index scan below used to read the
-	// subpath's tail as the id, 404ing `info` on links `pull` accepted.
+	// here as in the pull path (the last-index scan below would otherwise read the
+	// subpath's tail as the id).
 	ref, _ = splitRefPath(ref)
 	if i := strings.Index(ref, "#"); i >= 0 {
 		fragment = ref[i+1:]

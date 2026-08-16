@@ -9,12 +9,12 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
@@ -105,20 +105,20 @@ func listResources(cl *client.Client, mk crypto.MasterKey, opts lsOptions) error
 		fmt.Fprintln(os.Stderr, emptyMessage)
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	header := []string{"NAME", "KIND", "SIZE", "VISIBILITY", "ID"}
 	if opts.long {
-		fmt.Fprintln(w, "NAME\tKIND\tSIZE\tVISIBILITY\tUPDATED\tVERSION\tID")
-		for _, r := range rows {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\tv%d\t%s\n",
-				r.Name, r.Kind, sizeCell(r.Kind, r.Size), r.Visibility, formatTime(r.UpdatedAt), r.Version, r.ID)
-		}
-	} else {
-		fmt.Fprintln(w, "NAME\tKIND\tSIZE\tVISIBILITY\tID")
-		for _, r := range rows {
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", r.Name, r.Kind, sizeCell(r.Kind, r.Size), r.Visibility, r.ID)
-		}
+		header = []string{"NAME", "KIND", "SIZE", "VISIBILITY", "UPDATED", "VERSION", "ID"}
 	}
-	return w.Flush()
+	cells := make([][]string, 0, len(rows))
+	for _, r := range rows {
+		cell := []string{r.Name, r.Kind, sizeCell(r.Kind, r.Size), r.Visibility}
+		if opts.long {
+			cell = append(cell, cliutil.FormatUnix(r.UpdatedAt), fmt.Sprintf("v%d", r.Version))
+		}
+		cell = append(cell, r.ID)
+		cells = append(cells, cell)
+	}
+	return printTable(os.Stdout, header, cells)
 }
 
 // collectResources decrypts owner-only metadata and returns a stable name sort.
@@ -227,5 +227,5 @@ func sizeCell(kind string, size int64) string {
 	if kind == api.KindFolder {
 		return "-"
 	}
-	return humanBytes(size)
+	return cliutil.HumanBytes(size)
 }

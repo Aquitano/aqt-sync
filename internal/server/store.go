@@ -79,8 +79,8 @@ var ErrBadPolicy = errors.New("lifecycle policy values must be non-negative")
 // git-remote resource. Git remotes are private-only in v1 and cannot carry grants.
 var ErrGitRemotePolicy = errors.New("git remote resources are private and cannot be shared")
 
-// ErrDeviceLimit is returned when attaching a device would exceed an account's
-// configured device cap. Handlers map it to 403.
+// ErrDeviceLimit is returned when a device attach hits the account's cap. Handlers
+// map it to 403.
 var ErrDeviceLimit = errors.New("device limit reached")
 
 // UpgradeRequiredError is returned when a write targets a resource whose stored
@@ -155,6 +155,13 @@ func resolvePolicy(vis api.Visibility, expireSeconds, maxReads int64, onExpiry a
 		max = sql.NullInt64{Int64: maxReads, Valid: true}
 	}
 	return expiresAt, max, action, nil
+}
+
+// queryer is the read subset shared by *sql.DB and *sql.Tx, so a query helper runs
+// unchanged inside or outside a write transaction.
+type queryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
 }
 
 // Store persists accounts, devices, and resource metadata in SQLite, with the

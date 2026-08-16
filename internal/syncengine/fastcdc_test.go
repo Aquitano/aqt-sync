@@ -19,7 +19,7 @@ func deterministicData(seed int64, n int) []byte {
 
 func TestSplitCoversInputInOrder(t *testing.T) {
 	t.Parallel()
-	c := DefaultChunker()
+	c := testChunker()
 	data := deterministicData(1, 200<<10)
 
 	chunks := c.Split(data)
@@ -39,7 +39,7 @@ func TestSplitCoversInputInOrder(t *testing.T) {
 
 func TestSplitIsDeterministic(t *testing.T) {
 	t.Parallel()
-	c := DefaultChunker()
+	c := testChunker()
 	data := deterministicData(2, 128<<10)
 	a := c.Split(data)
 	b := c.Split(data)
@@ -57,7 +57,7 @@ func TestSplitIsDeterministic(t *testing.T) {
 // past the edit should be preserved (the point of content-defined chunking).
 func TestSplitBoundariesStableUnderInsert(t *testing.T) {
 	t.Parallel()
-	c := DefaultChunker()
+	c := testChunker()
 	data := deterministicData(3, 256<<10)
 	base := c.Split(data)
 
@@ -83,7 +83,7 @@ func TestSplitBoundariesStableUnderInsert(t *testing.T) {
 
 func TestSplitSmallInputIsOneChunk(t *testing.T) {
 	t.Parallel()
-	c := DefaultChunker()
+	c := testChunker()
 	data := []byte("tiny")
 	chunks := c.Split(data)
 	if len(chunks) != 1 || !bytes.Equal(chunks[0], data) {

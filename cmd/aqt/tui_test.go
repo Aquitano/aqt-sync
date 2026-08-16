@@ -220,7 +220,7 @@ func TestTUIStatusVerdictTornPull(t *testing.T) {
 	m := testModel(t)
 	m.local = testChanges([]string{"a"}, nil)
 	m.conflicts = []string{"x.conflict-h-1"}
-	m.torn = pullMarker{Version: 7, present: true}
+	m.torn = marker[interruptedPull]{Payload: interruptedPull{Version: 7}, Present: true}
 	txt, style := m.statusVerdict()
 	if !strings.Contains(txt, "interrupted pull") || !strings.Contains(txt, "7") {
 		t.Fatalf("torn verdict = %q", txt)
