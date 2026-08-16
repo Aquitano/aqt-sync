@@ -29,10 +29,15 @@ func BenchmarkSplitStream(b *testing.B) {
 		{"zeros", func(n int) []byte { return make([]byte, n) }},
 	}
 	const size = 32 << 20
+	// Materialize each pattern once; the profiles chunk identical bytes.
+	inputs := make(map[string][]byte, len(patterns))
+	for _, pat := range patterns {
+		inputs[pat.name] = pat.data(size)
+	}
 	for _, p := range profiles {
 		c := NewChunker(p.min, p.normal, p.max)
 		for _, pat := range patterns {
-			data := pat.data(size)
+			data := inputs[pat.name]
 			b.Run(p.name+"/"+pat.name, func(b *testing.B) {
 				b.SetBytes(size)
 				b.ReportAllocs()

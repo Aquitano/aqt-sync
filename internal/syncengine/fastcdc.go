@@ -96,6 +96,11 @@ func (c *Chunker) Split(data []byte) [][]byte {
 func (c *Chunker) SplitStream(r io.Reader, emit func(chunk []byte) error) error {
 	wp := c.bufs.Get().(*[]byte)
 	defer c.bufs.Put(wp)
+	// buf is only ever re-sliced within the pooled array's capacity — never
+	// appended past it — so Put returns the same array and the pool actually
+	// reuses it. The loop guard guarantees the read slice below is non-empty:
+	// compaction leaves len < Max with cap 2*Max, and a full buffer with
+	// start == 0 means a >= Max window, which exits the refill loop instead.
 	buf := (*wp)[:0]
 	start := 0 // window of unconsumed bytes is buf[start:]
 	eof := false
@@ -112,7 +117,9 @@ func (c *Chunker) SplitStream(r io.Reader, emit func(chunk []byte) error) error 
 				start = 0
 			}
 			n, err := r.Read(buf[len(buf):cap(buf)])
-			buf = buf[:len(buf)+n]
+			if n > 0 { // guard a contract-violating negative n from corrupting the window
+				buf = buf[:len(buf)+n]
+			}
 			if err == io.EOF {
 				eof = true
 			} else if err != nil {

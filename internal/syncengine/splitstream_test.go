@@ -4,6 +4,7 @@ package syncengine
 
 import (
 	"bytes"
+	"errors"
 	"io"
 	"testing"
 )
@@ -38,15 +39,20 @@ func TestSplitStreamMatchesSplit(t *testing.T) {
 	}
 }
 
-// shortReader hands out at most step bytes per Read, forcing many refills per
-// window. bytes.Reader satisfies each refill in one call, so only this reader
-// exercises the incremental-fill and window-compaction paths.
+// shortReader hands out at most step bytes per Read, forcing many partial reads
+// per refill. bytes.Reader tops the window up in a single call, so only this
+// reader exercises the incremental-fill path (compaction fires either way).
 type shortReader struct {
 	data []byte
 	step int
 }
 
 func (s *shortReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		// A zero-length read slice would loop forever; fail loudly instead so a
+		// regression surfaces as a named error, not a test timeout.
+		return 0, errors.New("zero-length read slice")
+	}
 	if len(s.data) == 0 {
 		return 0, io.EOF
 	}
