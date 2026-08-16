@@ -82,12 +82,12 @@ type publicChunkSource struct {
 	cache *packCache
 }
 
-func newPublicChunkSource(fetch sliceFetch, chunks []crypto.Chunk) *publicChunkSource {
+func newPublicChunkSource(fetch sliceFetch, chunks []crypto.Chunk, cache *packCache) *publicChunkSource {
 	s := &publicChunkSource{
 		fetch: fetch,
 		idx:   make(map[string]int),
 		lens:  make(map[string]int),
-		cache: newPackCache(packCacheBytes),
+		cache: cache,
 	}
 	for _, ch := range chunks {
 		if _, seen := s.idx[ch.ID]; seen {
@@ -227,16 +227,35 @@ func newPublicBatchFetcher(fetch sliceFetch) func([]string) (map[string][]byte, 
 // concurrent download pool over the public endpoint. publicChunkSource is built for a
 // single sequential reader, so a mutex serializes lookup+fetch; decryption and file
 // writes still overlap across the pool's workers.
-func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry) func(id string) ([]byte, error) {
+func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry, cache *packCache) func(id string) ([]byte, error) {
 	var chunks []crypto.Chunk
 	for _, e := range entries {
 		chunks = append(chunks, e.Chunks...)
 	}
-	src := newPublicChunkSource(fetch, chunks)
+	src := newPublicChunkSource(fetch, chunks, cache)
 	var mu sync.Mutex
 	return func(id string) ([]byte, error) {
 		mu.Lock()
 		defer mu.Unlock()
 		return src.get(id)
 	}
+}
+
+// runPublicDownloads is runDownloads for the exact-slice transports (share link or
+// grant): entries are materialized in chunk-bounded batches so the object index
+// stays O(batch) rather than O(tree) — the same bound the authed pack path applies —
+// while one shared LRU carries fetched objects across batches.
+func runPublicDownloads(fetch sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
+	cache := newPackCache(packCacheBytes)
+	mtimes := make(map[string]int64, len(entries))
+	for _, batch := range batchByChunks(entries, locateBatchChunks) {
+		batchMTimes, err := runDownloadsFrom(newPublicEntrySource(fetch, batch, cache), root, batch, prog)
+		if err != nil {
+			return nil, err
+		}
+		for path, mtime := range batchMTimes {
+			mtimes[path] = mtime
+		}
+	}
+	return mtimes, nil
 }

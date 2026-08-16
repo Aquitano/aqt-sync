@@ -158,7 +158,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	}
 	var get func(string) ([]byte, error)
 	if slices != nil {
-		get = newPublicEntrySource(slices, []syncengine.Entry{e})
+		get = newPublicEntrySource(slices, []syncengine.Entry{e}, newPackCache(packCacheBytes))
 	} else {
 		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
 		if err != nil {
@@ -212,9 +212,7 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		return err
 	}
 	var get func(string) ([]byte, error)
-	if slices != nil {
-		get = newPublicEntrySource(slices, m.Entries)
-	} else {
+	if slices == nil {
 		src, err := newPackSource(cl, distinctChunkIDs(m.Entries))
 		if err != nil {
 			return err
@@ -225,7 +223,13 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		prog := newProgressBar("downloading", entriesBytes(m.Entries))
 		// A subpath pull writes into a plain directory, not a tracked folder, so there
 		// is no base manifest for its mtimes to feed.
-		_, dlErr := runDownloadsFrom(get, staging, m.Entries, prog)
+		var dlErr error
+		if slices != nil {
+			// Batched: the object index stays O(batch), not O(subtree) (issue #183).
+			_, dlErr = runPublicDownloads(slices, staging, m.Entries, prog)
+		} else {
+			_, dlErr = runDownloadsFrom(get, staging, m.Entries, prog)
+		}
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
 			return dlErr

@@ -163,7 +163,7 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	// authed pack-locate path.
 	get := func(chunks []crypto.Chunk) (func(id string) ([]byte, error), error) {
 		if slices != nil {
-			return newPublicChunkSource(slices, chunks).get, nil
+			return newPublicChunkSource(slices, chunks, newPackCache(packCacheBytes)).get, nil
 		}
 		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 		if err != nil {

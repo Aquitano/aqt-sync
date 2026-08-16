@@ -3,6 +3,7 @@
 package main
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -1653,7 +1654,8 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	if err := materializeStaged(abs, func(staging string) error {
 		prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
 		// No base is recorded for a read-only share, so its mtimes have nothing to stamp.
-		_, dlErr := runDownloadsFrom(newPublicEntrySource(fetch, manifest.Entries), staging, manifest.Entries, prog)
+		// Batched: the object index stays O(batch), not O(tree) (issue #183).
+		_, dlErr := runPublicDownloads(fetch, staging, manifest.Entries, prog)
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
 			return dlErr
@@ -2307,55 +2309,53 @@ func (s *packSource) fetchSpan(packID string, span packSpan) ([]byte, error) {
 type packCache struct {
 	capBytes int
 	bytes    int
-	data     map[string][]byte
-	order    []string // least-recently-used first
+	data     map[string]*list.Element
+	order    *list.List // front = least recently used; element value is packCacheEntry
+}
+
+type packCacheEntry struct {
+	id string
+	b  []byte
 }
 
 func newPackCache(capBytes int) *packCache {
-	return &packCache{capBytes: capBytes, data: map[string][]byte{}}
+	return &packCache{capBytes: capBytes, data: map[string]*list.Element{}, order: list.New()}
 }
 
 func (c *packCache) get(id string) ([]byte, bool) {
-	b, ok := c.data[id]
-	if ok {
-		c.touch(id)
+	el, ok := c.data[id]
+	if !ok {
+		return nil, false
 	}
-	return b, ok
+	// O(1): the share-link path caches per-chunk entries, so a linear-scan touch
+	// turned every hit into a walk of the whole recency list.
+	c.order.MoveToBack(el)
+	return el.Value.(packCacheEntry).b, true
 }
 
 func (c *packCache) put(id string, b []byte) {
-	if old, ok := c.data[id]; ok {
-		c.bytes += len(b) - len(old)
-		c.data[id] = b
-		c.touch(id)
+	if el, ok := c.data[id]; ok {
+		c.bytes += len(b) - len(el.Value.(packCacheEntry).b)
+		el.Value = packCacheEntry{id: id, b: b}
+		c.order.MoveToBack(el)
 		c.evict()
 		return
 	}
-	c.data[id] = b
+	c.data[id] = c.order.PushBack(packCacheEntry{id: id, b: b})
 	c.bytes += len(b)
-	c.order = append(c.order, id)
 	c.evict()
 }
 
 // evict drops least-recently-used packs until the cache fits its byte budget, always
 // keeping the most-recently-used entry so get can serve the pack just fetched.
 func (c *packCache) evict() {
-	for c.bytes > c.capBytes && len(c.order) > 1 {
-		victim := c.order[0]
-		c.order = c.order[1:]
-		c.bytes -= len(c.data[victim])
-		delete(c.data, victim)
+	for c.bytes > c.capBytes && c.order.Len() > 1 {
+		el := c.order.Front()
+		victim := el.Value.(packCacheEntry)
+		c.order.Remove(el)
+		c.bytes -= len(victim.b)
+		delete(c.data, victim.id)
 	}
-}
-
-func (c *packCache) touch(id string) {
-	for i, v := range c.order {
-		if v == id {
-			c.order = append(c.order[:i], c.order[i+1:]...)
-			break
-		}
-	}
-	c.order = append(c.order, id)
 }
 
 // partitionDeletesByDownload splits local deletes into those a download must clear

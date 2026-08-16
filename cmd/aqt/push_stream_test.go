@@ -22,9 +22,11 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 	newE2E(t)
 
 	src := filepath.Join(t.TempDir(), "huge.bin")
-	// ~40 MiB is >128 chunks at the large profile's 256K average, so the chunk list
-	// crosses the indirection threshold.
-	data := make([]byte, 40<<20)
+	// 64 MiB is ~256 chunks at the large profile's 256K average, comfortably past
+	// the 128-record indirection threshold. 40 MiB sat right on the boundary:
+	// content-defined chunking of random data landed at 127 chunks on one CI run,
+	// making the "must be indirect" assertion flaky.
+	data := make([]byte, 64<<20)
 	if _, err := rand.Read(data); err != nil {
 		t.Fatal(err)
 	}
