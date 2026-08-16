@@ -37,7 +37,10 @@ func WriteStream(path string, perm os.FileMode, fn func(*os.File) error) error {
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	return syncDir(filepath.Dir(path))
 }
 
 // WriteFile atomically replaces path with data.
