@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 
@@ -22,6 +23,13 @@ import (
 // root), so the bound matches the server's chunk-batch body cap; everything
 // else in the header is a few hundred bytes.
 const maxWireHeader = 32 << 20
+
+// ErrHeaderTooLarge means an envelope's declared header length exceeds
+// maxWireHeader. It is its own sentinel rather than one more malformed-body error
+// because ChunkRefs is what crosses the bound in practice: a folder whose chunk
+// count outgrows the cap fails here, and both ends need to name that cause instead
+// of reporting a corrupt envelope.
+var ErrHeaderTooLarge = errors.New("resource envelope: header exceeds the 32 MiB wire cap")
 
 // MaxPackBytes is the wire contract for one serialized pack — object region plus
 // index trailer. The server rejects a larger body outright (a non-retryable 413),
@@ -184,7 +192,10 @@ func decodeEnvelope(r io.Reader, header any) ([]byte, error) {
 		return nil, fmt.Errorf("resource envelope: read header length: %w", err)
 	}
 	n := binary.BigEndian.Uint32(lenBuf[:])
-	if n == 0 || n > maxWireHeader {
+	if n > maxWireHeader {
+		return nil, fmt.Errorf("%w: declared %d bytes", ErrHeaderTooLarge, n)
+	}
+	if n == 0 {
 		return nil, fmt.Errorf("resource envelope: header length %d out of range", n)
 	}
 	hj := make([]byte, n)

@@ -90,6 +90,13 @@ var ErrDeviceLimit = errors.New("device limit reached; revoke a device before at
 // failed the server's verification, distinct from a generic bad request.
 var ErrBadPack = errors.New("uploaded pack is malformed or fails verification")
 
+// ErrResourceTooLarge maps the resource_too_large code (a 400 on a resource PUT):
+// the folder's chunk-ref set no longer fits the 32 MiB wire header that carries it,
+// which at the default ~8 KiB chunk profile lands near 500k chunks (~3.8 GiB). No
+// retry helps; the folder has to be split, or pinned to a coarser `chunkProfile`
+// that spends fewer chunks per byte.
+var ErrResourceTooLarge = errors.New("folder has more chunks than one manifest upload can carry (~3.8 GiB at the default chunk profile); split it into smaller folders, or pin a coarser chunkProfile in .aqtconfig")
+
 // ErrUpgradeRequired maps a 426: the resource is sealed in a format newer than this
 // build reads. Callers test errors.Is(err, ErrUpgradeRequired); the concrete
 // UpgradeRequiredError carries the server-declared min_client for messaging.
@@ -1026,6 +1033,8 @@ func statusError(status int, path string, body []byte) error {
 		return ErrSenderBlocked
 	case api.ErrCodeBadPack:
 		return ErrBadPack
+	case api.ErrCodeResourceTooLarge:
+		return ErrResourceTooLarge
 	case api.ErrCodeNotFound:
 		return ErrNotFound
 	case api.ErrCodeRateLimited:

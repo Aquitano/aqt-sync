@@ -25,6 +25,7 @@ func TestErrorCodesMapToSentinels(t *testing.T) {
 	}{
 		{"device limit", http.StatusForbidden, api.ErrCodeDeviceLimit, ErrDeviceLimit},
 		{"bad pack", http.StatusBadRequest, api.ErrCodeBadPack, ErrBadPack},
+		{"resource too large", http.StatusBadRequest, api.ErrCodeResourceTooLarge, ErrResourceTooLarge},
 		{"quota", http.StatusInsufficientStorage, api.ErrCodeQuotaExceeded, ErrQuotaExceeded},
 		{"version conflict", http.StatusConflict, api.ErrCodeVersionConflict, ErrConflict},
 		{"gone", http.StatusGone, api.ErrCodeGone, ErrGone},

@@ -19,8 +19,16 @@ are inherited from the resource model unchanged.
 The manifest is not the blob. It is chunked through the same pipeline as file content
 and stored as objects, and the resource blob is a compact sealed root naming those
 objects — so a one-file edit re-uploads a handful of manifest objects rather than the
-whole manifest, and the 64 MiB blob ceiling does not cap a folder by its size. Two
-root types exist: `TreeRoot` for a folder and `FileRoot` for a
+whole manifest, and the 64 MiB blob ceiling does not cap a folder by its size.
+
+What does cap it is `chunkRefs`. Every PUT carries the folder's *entire* object-id
+set in the 32 MiB wire header, so a folder is bounded at roughly 500k chunks — about
+3.8 GiB at the default ~8 KiB profile, and proportionally more on a coarser one.
+Crossing the bound is `400 resource_too_large`, and the workaround is to split the
+folder or pin a coarser `chunkProfile`; segmenting the ref set is the real fix and is
+not built yet.
+
+Two root types exist: `TreeRoot` for a folder and `FileRoot` for a
 [streamed single file](#streamed-single-files). (A third, `PackRoot`, belonged to
 the [removed pack-and-seal format](#pack-and-seal-removed).)
 

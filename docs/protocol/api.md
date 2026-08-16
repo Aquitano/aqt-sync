@@ -47,7 +47,12 @@ The resource envelope is a four-byte unsigned big-endian JSON-header length, a
 lower-camel JSON header of at most 32 MiB, then the sealed blob ciphertext as the
 remainder. The request header carries visibility, sealed metadata, wrapped key, blob
 nonce, chunk roots, expected version, minimum client capability, and lifecycle
-policy. The response header also carries the resource id and accepted version.
+policy. `chunkRefs` is the only header field that grows with the resource — one
+64-hex id per chunk root — so the 32 MiB header bound doubles as a ceiling on a
+tracked folder's chunk count: roughly 500k chunks, about 3.8 GiB at the official
+client's default ~8 KiB chunk profile. A header past the bound is
+`400 resource_too_large`. The response header also carries the resource id and
+accepted version.
 Object-frame responses repeat a four-byte unsigned big-endian length followed by
 exactly that object ciphertext, in request order. Object requests are capped at
 10,000 ids and every decoded length is bounds-checked before allocation or slicing.
@@ -246,8 +251,9 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 (request a fresh attach challenge and retry), `invalid_credentials` (the single
 401 a failed attach collapses to; retrying the same inputs cannot succeed),
 `proof_mismatch` (the passphrase-derived proof on a passphrase change, root-key
-rotation, or account deletion did not match), and `git_remote_policy` (the
-operation would share, publish, or reclassify a sealed Git remote resource) — so
+rotation, or account deletion did not match), `git_remote_policy` (the
+operation would share, publish, or reclassify a sealed Git remote resource), and
+`resource_too_large` (the upload's `chunkRefs` set overran the 32 MiB header) — so
 a client that acts on one of them matches the code rather than the prose.
 
 Every other error carries the bucket code for its status: `invalid_request`
