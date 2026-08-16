@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/ed25519"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -732,6 +733,43 @@ func TestResourceBodyAllowsBlobAboveControlCap(t *testing.T) {
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, &resp); code != http.StatusCreated {
 		t.Fatalf("1 MiB resource PUT: got %d, want 201", code)
+	}
+}
+
+// A folder whose chunk-ref set outgrows the wire header gets a named code, not the
+// bare 400 that used to make the ceiling unexplainable (issue #182). The decoder
+// checks the declared header length before reading the header, so the oversize case
+// is reachable with a 4-byte body — no need to materialize 32 MiB of ids.
+func TestOversizedResourceHeaderReturnsNamedCode(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, _ := h.signup("bigrefs@example.com", "a passphrase for big refs")
+	envelope := map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}
+
+	oversize := make([]byte, 4)
+	binary.BigEndian.PutUint32(oversize, (32<<20)+1)
+	rec := h.raw(http.MethodPut, "/v1/resources", token, envelope, oversize)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400; body=%s", rec.Code, rec.Body.String())
+	}
+	var e api.ErrorResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	if e.Code != api.ErrCodeResourceTooLarge {
+		t.Fatalf("code = %q, want %q", e.Code, api.ErrCodeResourceTooLarge)
+	}
+
+	// The new code is a distinction, not a rename: a merely corrupt envelope (a
+	// header length the body does not deliver) still buckets as a bad request.
+	truncated := make([]byte, 4)
+	binary.BigEndian.PutUint32(truncated, 64)
+	rec = h.raw(http.MethodPut, "/v1/resources", token, envelope, truncated)
+	if err := json.Unmarshal(rec.Body.Bytes(), &e); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusBadRequest || e.Code != api.ErrCodeInvalidRequest {
+		t.Fatalf("truncated envelope: %d/%q, want 400/%q", rec.Code, e.Code, api.ErrCodeInvalidRequest)
 	}
 }
 

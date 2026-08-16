@@ -1164,9 +1164,16 @@ func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
 	req, err := api.DecodeResourceUpload(c.Request.Body)
 	if err != nil {
 		var tooLarge *http.MaxBytesError
-		if errors.As(err, &tooLarge) {
+		switch {
+		case errors.As(err, &tooLarge):
 			abort(c, http.StatusRequestEntityTooLarge, "resource body exceeds limit")
-		} else {
+		case errors.Is(err, api.ErrHeaderTooLarge):
+			// Status stays 400 so existing clients see no change; only the code and the
+			// message move, from "invalid resource body" to the actual cause.
+			abortCode(c, http.StatusBadRequest,
+				"resource header exceeds the 32 MiB request cap; the chunk-ref set of this manifest is too large to upload in one request",
+				api.ErrCodeResourceTooLarge)
+		default:
 			abort(c, http.StatusBadRequest, "invalid resource body")
 		}
 		return api.PutResourceRequest{}, false

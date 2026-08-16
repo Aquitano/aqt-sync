@@ -57,6 +57,11 @@ const (
 	// ErrCodeBadPack accompanies a 400 when an uploaded pack is malformed or fails the
 	// server's content-address / slice verification.
 	ErrCodeBadPack = "bad_pack"
+	// ErrCodeResourceTooLarge accompanies a 400 when a resource upload's envelope
+	// header exceeds the wire cap. ChunkRefs is the only field that can grow that
+	// far, so it means the folder's chunk-ref set no longer fits one manifest PUT —
+	// distinct from a corrupt envelope, which no retry or resize would fix either.
+	ErrCodeResourceTooLarge = "resource_too_large"
 	// ErrCodeNotFound accompanies a 404 for a missing (or foreign-owned) resource,
 	// device, snapshot, or grant.
 	ErrCodeNotFound = "not_found"

@@ -121,6 +121,15 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- A folder that outgrows one manifest upload now says so. Every resource PUT carries
+  the folder's whole `chunkRefs` set in the 32 MiB wire header, which caps a folder
+  at roughly 500k chunks — about 3.8 GiB at the default ~8 KiB chunk profile — and
+  past that the server answered a bare `400 invalid resource body` that named nothing
+  and no retry could clear. The rejection now carries the `resource_too_large` code
+  (the status is unchanged) and the client explains the ceiling and the two ways
+  around it: split the folder, or pin a coarser `chunkProfile`. Raising the ceiling
+  itself needs segmented refs and is still open.
+
 - Case-colliding paths no longer destroy data through a case-insensitive device. A
   Linux folder can legally hold `Notes.md` and `notes.md`; cloning it on macOS or
   Windows collapsed both into one file, and that machine's next sync then uploaded
