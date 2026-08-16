@@ -86,6 +86,30 @@ published on, so a beta check that lands on a stable release says `stable`.
 The containment is one-directional, and the channel is part of what is signed: a
 beta manifest served to a stable check is refused even though it is authentic.
 
+### Replayed manifests and the freshness ceiling
+
+A signed manifest proves who published it, not that it is the newest one. Two guards
+stand between a replayed old manifest and a downgrade:
+
+- A release older than the **running build** is refused outright as a rollback.
+- Every check also records, per channel in `update.json`, the highest version it has
+  fully authenticated on this machine, and refuses a manifest below that ceiling —
+  the case the first guard cannot see: a manifest newer than the running build but
+  older than the newest release ever observed, which is exactly how a replay would
+  pin a client at an intermediate release. Background checks raise the ceiling too,
+  but never lower it, and a beta check that lands on a stable release records it
+  for the stable track as well — a prerelease-track user still builds the ceiling
+  the stable-only background check consults.
+
+If upstream genuinely retracted a release, `aqt update --accept-rollback` is the
+explicit way through: it skips the ceiling for that one check, and lowers the
+record only once the older release is actually accepted — installed, or confirmed
+as the version already running — so later plain checks stop tripping. A run that
+is declined at the prompt, stops at `--check`, or fails leaves the old ceiling
+standing. The ceiling is hardening on top of the signature checks, not a
+substitute — a state file that is missing or unreadable degrades to "no ceiling",
+never to skipped verification, and is never overwritten with defaults.
+
 ## The first install
 
 `aqt update` maintains an installation; it cannot create one. The first copy comes
@@ -220,7 +244,8 @@ falls back to a notice:
 - the release is on the **stable** channel. A prerelease is something a user opts into
   per invocation with `--prerelease`, never something a policy decides for them;
 - it is newer than the running build. A published version that is older is refused as
-  a rollback, not offered;
+  a rollback, not offered — and one below the recorded freshness ceiling (see
+  "Replayed manifests" above) is refused as a replay;
 - there is a build for this OS and architecture;
 - no registered watch agent is running.
 
@@ -425,5 +450,5 @@ request is an ordinary asset download, and what the client decides afterwards st
 local.
 
 The persisted state (`update.json`, beside the profiles) records the policy, the time
-of the last check, and the last version seen, so a notice is not repeated. It holds
-nothing about the account.
+of the last check, the last version seen (so a notice is not repeated), and the
+per-channel freshness ceiling. It holds nothing about the account.

@@ -5,6 +5,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -20,8 +21,18 @@ import (
 const updateFixtureSeed = "aqt update cli fixture signing k" // exactly ed25519.SeedSize bytes
 
 // serveUpdateFixture publishes a signed manifest for one version on a local origin
-// and points the CLI at it, standing in for the release assets.
-func serveUpdateFixture(t *testing.T, released string) {
+// and points the CLI at it, standing in for the release assets. It also gives the
+// test its own update store, since runUpdate persists the freshness ceiling there.
+func serveUpdateFixture(t *testing.T, released string) update.Store {
+	t.Helper()
+	store := withUpdateStore(t)
+	serveUpdateManifest(t, released)
+	return store
+}
+
+// serveUpdateManifest is serveUpdateFixture without the store isolation, so a
+// test can change the served version while keeping the recorded state.
+func serveUpdateManifest(t *testing.T, released string) {
 	t.Helper()
 	key := ed25519.NewKeyFromSeed([]byte(updateFixtureSeed))
 
@@ -58,9 +69,12 @@ func serveUpdateFixture(t *testing.T, released string) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/stable.json":
+		// The beta path serves the same stable-channel manifest: beta is a
+		// superset of stable, so this mirrors the common state where no
+		// prerelease is outstanding and a --prerelease check lands on stable.
+		case "/stable.json", "/beta.json":
 			w.Write(manifest)
-		case "/stable.json.sig":
+		case "/stable.json.sig", "/beta.json.sig":
 			w.Write(sigBytes)
 		default:
 			http.NotFound(w, r)
@@ -165,6 +179,7 @@ func TestUpdateCheckReportsUpToDate(t *testing.T) {
 // A source build must say so and offer no way to overwrite itself, without
 // contacting anything to find out.
 func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
+	withUpdateStore(t)
 	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
 	withBuild(t, "0.3.0-dev", "dev")
 
@@ -188,13 +203,121 @@ func TestUpdateCheckRefusesARollback(t *testing.T) {
 	}
 }
 
+// A signed manifest can be replayed: one older than the newest release this
+// machine ever authenticated — yet newer than the running build, so ErrRollback
+// is blind to it — must be refused, and `--accept-rollback` is the deliberate
+// way through after a real upstream retraction.
+func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
+	requirePublishedPlatform(t)
+	store := serveUpdateFixture(t, "v0.5.0")
+	withBuild(t, "v0.3.0", update.KindRelease)
+
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+			t.Fatalf("first check: %v", err)
+		}
+	})
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Ceiling(update.ChannelStable); got != "v0.5.0" {
+		t.Fatalf("ceiling after first check = %q, want v0.5.0", got)
+	}
+
+	// Upstream now serves v0.4.0 — newer than the running v0.3.0, older than the
+	// authenticated v0.5.0. Before the ceiling this replay was offered as an update.
+	serveUpdateManifest(t, "v0.4.0")
+	err = runUpdate(updateOptions{checkOnly: true})
+	if !errors.Is(err, update.ErrStaleManifest) {
+		t.Fatalf("replayed manifest: got %v, want ErrStaleManifest", err)
+	}
+	if !strings.Contains(err.Error(), "--accept-rollback") {
+		t.Fatalf("stale-manifest error does not name the recovery flag: %v", err)
+	}
+
+	// --check --accept-rollback bypasses the floor for the report but commits
+	// nothing: acceptance means actually taking the older release, so a mere
+	// report — or a run the user declines partway — must leave the old ceiling
+	// standing (else a mistaken origin could lower it durably with no install).
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
+			t.Fatalf("--accept-rollback --check: %v", err)
+		}
+	})
+	assertCeiling := func(want string) {
+		t.Helper()
+		st, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := st.Ceiling(update.ChannelStable); got != want {
+			t.Fatalf("ceiling = %q, want %q", got, want)
+		}
+	}
+	assertCeiling("v0.5.0")
+	if err := runUpdate(updateOptions{checkOnly: true}); !errors.Is(err, update.ErrStaleManifest) {
+		t.Fatalf("plain check after --accept-rollback --check: got %v, want the refusal to persist", err)
+	}
+
+	// An install run that aborts before completing (here: the test binary is not
+	// a replaceable release install / no terminal to confirm) commits nothing.
+	var insErr error
+	captureStdout(t, func() { insErr = runUpdate(updateOptions{acceptRollback: true}) })
+	if insErr == nil {
+		t.Fatal("install run unexpectedly succeeded in a test environment")
+	}
+	assertCeiling("v0.5.0")
+
+	// The machine already running the retracted-to version: accepting confirms
+	// it, lowers the record, and later plain checks pass clean.
+	withBuild(t, "v0.4.0", update.KindRelease)
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
+			t.Fatalf("--accept-rollback on the running version: %v", err)
+		}
+	})
+	assertCeiling("v0.4.0")
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+			t.Fatalf("check after accepted rollback: %v", err)
+		}
+	})
+}
+
+// A --prerelease check that lands on a stable release (the common case: no
+// prerelease outstanding) must raise the stable ceiling too — background checks
+// are stable-only, and a prerelease-track user would otherwise never establish
+// the floor they consult.
+func TestBetaCheckRaisesTheStableCeiling(t *testing.T) {
+	requirePublishedPlatform(t)
+	store := serveUpdateFixture(t, "v0.5.0")
+	withBuild(t, "v0.3.0", update.KindRelease)
+
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true, prerelease: true}); err != nil {
+			t.Fatalf("beta check: %v", err)
+		}
+	})
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Ceiling(update.ChannelBeta); got != "v0.5.0" {
+		t.Fatalf("beta ceiling = %q, want v0.5.0", got)
+	}
+	if got := st.Ceiling(update.ChannelStable); got != "v0.5.0" {
+		t.Fatalf("stable ceiling after a beta check on a stable release = %q, want v0.5.0", got)
+	}
+}
+
 func TestUpdateCommandSurface(t *testing.T) {
 	root := rootCmd()
 	cmd := subcommand(t, root, "update")
 	if cmd.Annotations[jsonAnnotation] == "" {
 		t.Error("`aqt update` does not advertise --json support")
 	}
-	for _, name := range []string{"check", "prerelease", "yes"} {
+	for _, name := range []string{"check", "prerelease", "yes", "accept-rollback"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("`aqt update` is missing --%s", name)
 		}

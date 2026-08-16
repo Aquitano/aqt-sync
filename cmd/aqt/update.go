@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -37,10 +38,11 @@ var updateTrustRoots = update.TrustRoots
 var updateStore = update.DefaultStore
 
 type updateOptions struct {
-	checkOnly  bool
-	prerelease bool
-	assumeYes  bool
-	asJSON     bool
+	checkOnly      bool
+	prerelease     bool
+	assumeYes      bool
+	acceptRollback bool
+	asJSON         bool
 }
 
 func updateCmd() *cobra.Command {
@@ -66,6 +68,7 @@ manifest promised; every failure puts it back.`,
 	cmd.Flags().BoolVar(&opts.checkOnly, "check", false, "report what is available and make no changes")
 	cmd.Flags().BoolVar(&opts.prerelease, "prerelease", false, "use the beta channel, which includes prereleases")
 	cmd.Flags().BoolVarP(&opts.assumeYes, "yes", "y", false, "install without asking for confirmation")
+	cmd.Flags().BoolVar(&opts.acceptRollback, "accept-rollback", false, "accept a release older than the newest one this machine has authenticated (after an upstream retraction)")
 	markJSONSupported(cmd)
 	markQuietSupported(cmd)
 	cmd.AddCommand(updatePolicyCmd())
@@ -86,20 +89,63 @@ func runUpdate(opts updateOptions) error {
 	if opts.prerelease {
 		ch = update.ChannelBeta
 	}
+	// The freshness floor lives in the same state file as the policy. A store that
+	// cannot be read fails open (no floor): the ceiling is replay hardening on top
+	// of signature verification, and a broken config dir must not block updating.
+	// The load error is deliberately dropped for the floor read only — all writes
+	// below go through the Store helpers, which re-read and skip the save when
+	// the file is unreadable, so a transient read failure never persists defaults.
+	store, storeErr := updateStore()
+	var st update.State
+	if storeErr == nil {
+		st, _ = store.Load()
+	}
+	floor := st.Ceiling(ch)
+	if opts.acceptRollback {
+		floor = ""
+	}
 	ctx, cancel := context.WithTimeout(rootCtx, updateCheckTimeout)
 	res, err := update.Check(ctx, update.Options{
 		Build:   update.Build{Version: version, Kind: buildKind},
 		Channel: ch,
 		Source:  updateSource(),
 		Roots:   updateTrustRoots(),
+		Floor:   floor,
 	})
 	cancel()
+	if errors.Is(err, update.ErrStaleManifest) {
+		return fmt.Errorf("%w; if the release was genuinely retracted upstream, re-run with --accept-rollback", err)
+	}
 	if err != nil {
 		return err
+	}
+	// Only a fully authenticated manifest reaches this point with a version.
+	// Raising is always safe (it never lowers), so it happens up front; the
+	// --accept-rollback lowering is deferred to the moment the older release is
+	// actually accepted — installed, or confirmed as the version already running.
+	// A declined prompt, a --check, or a non-replaceable install therefore
+	// leaves the old ceiling standing.
+	if storeErr == nil && res.AvailableVersion != "" {
+		_ = store.RaiseCeiling(ch, res.AvailableVersion)
+		// A beta check that lands on a stable release authenticated a stable
+		// version; record it for stable checks too, or a prerelease-track user
+		// would never establish the ceiling the stable-only background path
+		// consults.
+		if update.Channel(res.Channel) == update.ChannelStable && ch != update.ChannelStable {
+			_ = store.RaiseCeiling(update.ChannelStable, res.AvailableVersion)
+		}
+	}
+	acceptCeiling := func() {
+		if storeErr == nil && opts.acceptRollback && res.AvailableVersion != "" {
+			_ = store.ResetCeiling(ch, res.AvailableVersion)
+		}
 	}
 
 	report := updateReport{Result: res}
 	if res.Status != update.StatusUpdateAvailable {
+		// Up to date: the served release is the one already running, so accepting
+		// it cannot move below the running build.
+		acceptCeiling()
 		if opts.asJSON {
 			return printJSON(report)
 		}
@@ -145,6 +191,8 @@ func runUpdate(opts updateOptions) error {
 	if err != nil {
 		return err
 	}
+	// The older release is installed and verified — now the acceptance is real.
+	acceptCeiling()
 	report.Installed = true
 	if opts.asJSON {
 		return printJSON(report)

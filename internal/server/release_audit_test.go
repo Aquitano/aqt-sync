@@ -5,6 +5,7 @@ package server
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -100,6 +101,43 @@ func TestIdempotentCreateReplayNotChargedAgain(t *testing.T) {
 	}
 	if replay.Body.String() != first.Body.String() {
 		t.Fatalf("replay returned a different resource:\n%s\n%s", first.Body.String(), replay.Body.String())
+	}
+}
+
+// A reused Idempotency-Key with a different payload can never store anything, so the
+// key conflict must win over the quota: answering 507 (as the digest-hashing quota
+// preflight once did) told the client to free space for a request that would still
+// be refused afterwards.
+func TestConflictingIdempotencyKeyWinsOverQuota(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 96 * 1024})
+	token, mk := h.signup("quota-conflict@example.com", "a passphrase here")
+
+	ck, _ := crypto.GenerateContentKey()
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	hdr := map[string]string{"Idempotency-Key": "reused-key", "Content-Type": "application/json"}
+	put := func(n int) *httptest.ResponseRecorder {
+		blob, _ := crypto.Seal(make([]byte, n), ck, crypto.AADBlob)
+		body, err := json.Marshal(api.PutResourceRequest{
+			Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h.raw(http.MethodPut, "/v1/resources", token, hdr, body)
+	}
+
+	if first := put(16); first.Code != http.StatusCreated {
+		t.Fatalf("first create = %d: %s", first.Code, first.Body.String())
+	}
+	conflict := put(1 << 20)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("conflicting key over quota = %d, want 409: %s", conflict.Code, conflict.Body.String())
+	}
+	var resp api.ErrorResponse
+	if err := json.Unmarshal(conflict.Body.Bytes(), &resp); err != nil || resp.Code != api.ErrCodeIdempotencyConflict {
+		t.Fatalf("conflict code = %q (err %v), want %q", resp.Code, err, api.ErrCodeIdempotencyConflict)
 	}
 }
 

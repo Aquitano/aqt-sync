@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -66,12 +67,26 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 		Channel: update.ChannelStable,
 		Source:  updateSource(),
 		Roots:   updateTrustRoots(),
+		Floor:   st.Ceiling(update.ChannelStable),
 	})
 	// A failed check still counts as a check. Otherwise an unreachable network
 	// turns "once a day" into "on every command".
 	st.MarkChecked(time.Now())
+	// A version only reaches the result after full manifest authentication, so it
+	// raises the freshness ceiling. The background path never lowers it: accepting
+	// an upstream retraction is an explicit `aqt update --accept-rollback`.
+	if checkErr == nil && res.AvailableVersion != "" {
+		st.RaiseCeiling(update.ChannelStable, res.AvailableVersion)
+	}
 	if checkErr != nil || res.Status != update.StatusUpdateAvailable {
 		if checkErr == nil && res.Status == update.StatusUpToDate {
+			st.DeferredVersion = ""
+		}
+		// A stale origin is deterministic, unlike a network blip: a surviving
+		// deferral would bypass the daily interval and re-run this doomed check
+		// after every single command, silently. Recovering the deferred install
+		// is `aqt update --accept-rollback` territory anyway.
+		if errors.Is(checkErr, update.ErrStaleManifest) {
 			st.DeferredVersion = ""
 		}
 		_ = store.Save(st)

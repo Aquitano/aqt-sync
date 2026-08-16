@@ -48,15 +48,20 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
-	digest, err := idempotencyDigest(req)
-	if err != nil {
-		return "", 0, err
-	}
+	// The digest covers the complete request, blob included, so it is only worth
+	// computing when a key makes it usable; this is the single hash for the whole
+	// create (the quota preflight probes key existence without one).
+	var digest []byte
 	var prior api.PutResourceResponse
-	if found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
-		return "", 0, err
-	} else if found {
-		return prior.ID, prior.Version, nil
+	if req.IdempotencyKey != "" {
+		if digest, err = idempotencyDigest(req); err != nil {
+			return "", 0, err
+		}
+		if found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior); err != nil {
+			return "", 0, err
+		} else if found {
+			return prior.ID, prior.Version, nil
+		}
 	}
 	id := newID(8)
 	const version = 1
@@ -674,7 +679,8 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 	args = append(args, limit+1) // one extra row tells us whether a next page exists
 	rows, err := s.rdb.Query(
 		`SELECT id, visibility, encrypted_meta, wrapped_key, version, auto_snapshot, compact_at, min_client,
-		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at, reclaimed
+		        COALESCE(expires_at, 0), COALESCE(max_reads, 0), COALESCE(reads, 0), created_at, updated_at, reclaimed,
+		        (SELECT COUNT(*) FROM grants g WHERE g.resource_id = resources.id)
 		 FROM resources WHERE `+where+` ORDER BY id LIMIT ?`, args...,
 	)
 	if err != nil {
@@ -689,11 +695,14 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 			vis         string
 			metaJSON    string
 			wrappedJSON sql.NullString
+			grantCount  int
 		)
 		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot, &item.CompactAt,
-			&item.MinClient, &item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt, &item.Reclaimed); err != nil {
+			&item.MinClient, &item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt, &item.Reclaimed,
+			&grantCount); err != nil {
 			return nil, "", err
 		}
+		item.GrantCount = &grantCount
 		item.Visibility = api.Visibility(vis)
 		if err := json.Unmarshal([]byte(metaJSON), &item.EncryptedMeta); err != nil {
 			return nil, "", err
