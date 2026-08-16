@@ -122,6 +122,84 @@ func TestSweepReclaimStillDestroysContent(t *testing.T) {
 	}
 }
 
+// An on_expiry value this build does not know — a newer server wrote the row, or the
+// enum grew — must stop the sweep, not fall through to the destructive action. Nothing
+// about the resource may change.
+func TestSweepRefusesUnknownOnExpiry(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "unknown@example.com")
+	id := s.putPublicOnExpiry(t, owner, "keep me", 3600, 0, api.ExpiryRetire)
+	// Only the store's own write path can reach on_expiry, and it rejects anything it
+	// does not know, so a future value has to be planted directly.
+	if _, err := s.db.Exec(`UPDATE resources SET on_expiry = 'archive' WHERE id = ?`, id); err != nil {
+		t.Fatalf("plant unknown on_expiry: %v", err)
+	}
+
+	now := time.Now().Unix()
+	s.pokeExpiry(t, id, now-1)
+	swept, err := s.SweepExpired(owner, now)
+	if err == nil {
+		t.Fatalf("sweep of an unknown on_expiry action: got nil error (swept %d), want a refusal", swept)
+	}
+	if swept != 0 {
+		t.Fatalf("swept = %d, want 0 (the row must be left alone)", swept)
+	}
+
+	res, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatalf("owner read after the refused sweep: %v, want the resource", err)
+	}
+	if len(res.Blob.Ciphertext) == 0 || res.WrappedKey == nil {
+		t.Fatal("the refused sweep destroyed content")
+	}
+	vis, _, _, _, reclaimed, hasKey := s.linkState(t, id)
+	if reclaimed || !hasKey {
+		t.Fatalf("the refused sweep tombstoned the row: reclaimed=%v hasKey=%v", reclaimed, hasKey)
+	}
+	if api.Visibility(vis) != api.Public {
+		t.Fatalf("visibility = %q, want public (the row must be untouched)", vis)
+	}
+}
+
+// The sweep acts on the action stored with the link, not on one re-derived from the last
+// write to touch the resource. A folder sync re-PUTs content with no policy of its own —
+// re-deriving from that request would read as reclaim and delete the folder every other
+// device pulls from.
+func TestSweepActsOnStoredOnExpiry(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "stored@example.com")
+	id := s.putPublicOnExpiry(t, owner, "v1", 3600, 0, api.ExpiryRetire)
+
+	res, err := s.GetResource(id, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("v2"), ck, crypto.AADBlob)
+	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+		ID: id, Visibility: api.Public, Blob: blob, EncryptedMeta: res.EncryptedMeta,
+		WrappedKey: res.WrappedKey, ExpectedVersion: res.Version,
+	}); err != nil {
+		t.Fatalf("content re-put: %v", err)
+	}
+
+	now := time.Now().Unix()
+	s.pokeExpiry(t, id, now-1)
+	if swept, err := s.SweepExpired(owner, now); err != nil || swept != 1 {
+		t.Fatalf("sweep: swept=%d err=%v, want 1", swept, err)
+	}
+
+	vis, _, _, _, reclaimed, hasKey := s.linkState(t, id)
+	if reclaimed || !hasKey {
+		t.Fatalf("stored retire was swept as reclaim: reclaimed=%v hasKey=%v", reclaimed, hasKey)
+	}
+	if api.Visibility(vis) != api.Private {
+		t.Fatalf("visibility = %q, want private (the link must be down)", vis)
+	}
+}
+
 // A content write that carries no policy of its own preserves the live link's: the
 // folder sync path re-PUTs the whole manifest on every change, and taking the policy
 // (and the visibility) from those writes silently un-shared a folder on its next sync.

@@ -1052,14 +1052,20 @@ func policyMaxReads(req api.PutResourceRequest) int64 {
 // the content behind it. A server that predates the field echoes nothing at all, which
 // is how the client tells the two apart. Empty when no policy was accepted: there is
 // then no end of life to act on.
+//
+// The value comes from storedOnExpiry, the same mapping the write used, rather than a
+// second reading of the request: an action mapped one way into the row and another way
+// into the echo is exactly the mismatch the client's check exists to catch.
 func echoedOnExpiry(requested api.OnExpiry, expiresAt, maxReads int64) api.OnExpiry {
 	if expiresAt == 0 && maxReads == 0 {
 		return ""
 	}
-	if requested == api.ExpiryRetire {
-		return api.ExpiryRetire
+	action, err := storedOnExpiry(requested)
+	if err != nil {
+		// Unreachable: the same error already rejected the write with a 400.
+		return ""
 	}
-	return api.ExpiryReclaim
+	return api.OnExpiry(action)
 }
 
 func (s *Server) publicResourcePreflight(c *gin.Context) {

@@ -794,6 +794,9 @@ func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 // and bumps the version. The encrypted metadata is left intact so the owner can still
 // see (and `aqt rm`) the tombstone.
 //
+// Any other stored action errors and leaves the row alone, so the sweep stops rather
+// than guesses.
+//
 // Held under the resource lock so it serializes against a concurrent update/delete of
 // the same id. now/graceCutoff are the sweep's, so the under-lock re-check tests the
 // same lifecycle predicate the scan used.
@@ -829,7 +832,12 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 	if !stillExpired {
 		return nil
 	}
-	if api.OnExpiry(action) == api.ExpiryRetire {
+	// Every action is named. Destroying content is never the fall-through: an on_expiry
+	// this build does not know (a newer server wrote the row, or an enum grew) leaves the
+	// resource untouched and fails the sweep, because the one guess that cannot be undone
+	// is the wrong one to make.
+	switch api.OnExpiry(action) {
+	case api.ExpiryRetire:
 		if _, err := tx.Exec(
 			`UPDATE resources SET visibility = ?, expires_at = NULL, max_reads = NULL, reads = 0,
 			   exhausted_at = NULL, version = version + 1
@@ -839,7 +847,16 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 			return err
 		}
 		return tx.Commit()
+	case api.ExpiryReclaim:
+		return s.reclaimLink(tx, owner, id)
+	default:
+		return fmt.Errorf("resource %s: unknown on_expiry action %q", id, action)
 	}
+}
+
+// reclaimLink is endOfLife's reclaim arm: it runs inside that function's transaction and
+// under its resource lock, and commits.
+func (s *Store) reclaimLink(tx *sql.Tx, owner, id string) error {
 	dropped, err := resourceChunkIDs(tx, id)
 	if err != nil {
 		return err
