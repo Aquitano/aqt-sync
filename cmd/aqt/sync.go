@@ -613,7 +613,7 @@ type syncOptions struct {
 	reconcile      bool
 	rehash         bool
 	acceptRollback bool
-	conflicts      string // "" (use .aqtconfig, else block), "block", or "copy"
+	conflicts      string // "" (use .aqtconfig, else block), "block", "copy", or "merge"
 }
 
 // errSyncNoBase signals that a sync has no last-synced state to reconcile against
@@ -730,6 +730,16 @@ func runSync(dir string, opts syncOptions) error {
 	// concurrent sync's own state write.
 	if err := bindTrackedRoot(root); err != nil {
 		return err
+	}
+	// A kill mid-swap during an in-place restore leaves a half-emptied root that
+	// scans as mass deletion; syncing it would push those deletions fleet-wide.
+	if torn, err := loadRestoreMarker(root); err != nil {
+		return err
+	} else if torn.present {
+		return fmt.Errorf("an in-place restore of this folder (snapshot %s) was interrupted mid-swap, so the "+
+			"working tree may be incomplete; re-run `aqt restore %s --in-place` to finish it, or move the "+
+			"original contents back from the .aqt-backup-* directory beside this folder and then remove "+
+			".aqt/%s", torn.SnapshotID, torn.SnapshotID, restoreMarkerFile)
 	}
 	cfg, err := syncengine.LoadConfig(root)
 	if err != nil {
@@ -1709,7 +1719,10 @@ func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Me
 	if err := guardTrackedGit(abs, syncOptions{reconcile: true}); err != nil {
 		return err
 	}
-	return runSync(abs, syncOptions{reconcile: true})
+	// conflicts is pinned to block: the adopted tree's own .aqtconfig may select
+	// copy or merge, which contradict --reconcile — a wedge the user never caused,
+	// hit only after tracking metadata was already written.
+	return runSync(abs, syncOptions{reconcile: true, conflicts: "block"})
 }
 
 // validateCloneRoot confirms the resource's sealed root decrypts under ck, using the
