@@ -2,7 +2,31 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v0.8.0] - 2026-08-16
+
+### Breaking Changes
+
+- Pack-and-seal folder sync (`"pack": true` in `.aqtconfig`) is gone. It existed
+  primarily to sync Git internals, which the encrypted Git remote now handles at the
+  protocol level; what remained was a narrow structure-hiding mode that re-uploaded
+  the entire folder on every change, deduplicated nothing, resolved conflicts
+  whole-folder last-writer-wins, and carried a parallel branch through sync, clone,
+  sharing, diff, and recovery. A packed resource — or a stale `pack: true` config —
+  is now refused with recovery guidance; see Upgrading below. This also retires the
+  unsafe baseless resume of a torn pack pull (#176): the path no longer exists, and a
+  leftover `.aqt/pull-in-progress` marker from an older build still keeps `status`
+  and `diff` from misreading the torn tree as local edits.
+
+### Upgrading
+
+- The two `pack: true` states differ: a stale line on a folder that is actually
+  chunked just needs the line removed from `.aqtconfig`, while a genuinely packed
+  resource needs a one-time export — clone it with an aqt release that still reads
+  the format (v0.7.x or earlier) and push the tree again as a normal chunked folder.
+  Do the export before upgrading the last client that can read the format.
+- Upgrade the server before the clients. Migrations 19 and 20 apply automatically on
+  first start and are forward-only; an older binary refuses a migrated data
+  directory, so take a backup first if you need the option to roll back to v0.7.x.
 
 ### Added
 
@@ -55,23 +79,6 @@ All notable changes to this project are documented in this file.
   that stdin channel carrying nothing but a share password, the one secret that must
   stay out of the process table.
 
-### Removed
-
-- Pack-and-seal folder sync (`"pack": true` in `.aqtconfig`) is gone. It existed
-  primarily to sync Git internals, which the encrypted Git remote now handles at the
-  protocol level; what remained was a narrow structure-hiding mode that re-uploaded
-  the entire folder on every change, deduplicated nothing, resolved conflicts
-  whole-folder last-writer-wins, and carried a parallel branch through sync, clone,
-  sharing, diff, and recovery. A packed resource — or a stale `pack: true` config —
-  is now refused with recovery guidance. The two states differ: a stale
-  `pack: true` on a folder that is actually chunked just needs the line removed,
-  while a genuinely packed resource needs a one-time export — clone it with an aqt
-  release that still reads the format (v0.5.x or earlier) and push the tree again
-  as a normal chunked folder. This also retires the unsafe baseless resume of a torn
-  pack pull (#176): the path no longer exists, and a leftover
-  `.aqt/pull-in-progress` marker from an older build still keeps `status` and
-  `diff` from misreading the torn tree as local edits.
-
 ### Changed
 
 - The updater now supports the two installation paths this project actually ships:
@@ -119,6 +126,43 @@ All notable changes to this project are documented in this file.
   build, the test command, the commit convention, and what the license means for a
   contribution.
 
+- A resource upload no longer pays for a quota check nobody configured. Every `PUT` ran
+  the seven-table usage aggregation under the per-owner lock — around 155 ms per call
+  against a million-row store — because the test for whether a limit exists at all came
+  after the scan rather than before it. `checkAccountLimit` now resolves the effective
+  quota, per-account override included, and the row cap first, and returns without
+  touching `AccountUsage` when there is nothing to enforce. Migration 20 adds the
+  owner-leading indexes the usage aggregation and the other per-owner scans were missing
+  (`resources`, `grants`, `devices`), plus `snapshots(resource_id, version_captured)` for
+  the auto-snapshot due probe.
+
+- Pulling a large share link or grant no longer sizes its memory by the whole tree. Those
+  two paths built their object index in one pass — roughly 484 MiB for a 20 GiB clone —
+  never reaching the batching that already bounded the authenticated path.
+  `runPublicDownloads` now materializes in the same chunk-bounded batches, carrying one
+  LRU across them so an object shared by several files is still fetched once. That LRU
+  updated recency by scanning its order slice, and the link path caches per chunk, so at
+  500k chunks every cache hit walked the entire list under the mutex that serializes the
+  worker pool — 14.7s of pure bookkeeping, now O(1) through a linked list. A folder
+  standing in conflict also stops retrying a full failing sync at the base interval
+  forever: a failed or deferred attempt counted as watch activity and reset the backoff,
+  and now grows the idle streak instead, while any real change to the tree — resolving
+  the conflict, for one — still snaps polling back to base.
+
+- A push no longer assembles a pack the server is required to refuse. The client checked
+  its size target only after appending, so a large directory node landing on a nearly
+  full buffer could build a pack past the server's body cap and earn a `413` that no
+  retry could ever clear. `api.MaxPackBytes` is the single wire contract now — the server
+  derives its body cap from it, and the uploader dispatches before an append would cross
+  it, through `syncengine.FitsInPack`, whose overhead bound over-estimates the index
+  trailer rather than under-estimating it. Two consolidations ride along: the
+  conflict-mode value set was declared in `cmd/aqt` and separately validated against
+  string literals in the `.aqtconfig` loader, and now lives once in `syncengine` with
+  both sides deriving from it; and the client's response reader, which buffered any body
+  with an unbounded `io.ReadAll` against its own hostile-server posture, caps at 256 MiB
+  — generous headroom over the largest legitimate body — and refuses a larger stream in
+  words.
+
 ### Fixed
 
 - A folder that outgrows one manifest upload now says so. Every resource PUT carries
@@ -143,29 +187,16 @@ All notable changes to this project are documented in this file.
   flag — and a scan recorded that as a genuine change, so one sync from a Windows
   box stripped `+x` from every executable and made the tree world-writable on every
   other device. A Windows scan now carries the last-synced mode forward untouched
-  (new paths record 0644/0755), on both the chunked and pack-and-seal paths.
+  (new paths record 0644/0755).
 
 - One symlink no longer makes a folder unusable on Windows. Creating a symlink
   there needs a privilege that is off outside Developer Mode, and any tree with one
   failed clone and wedged sync with a raw Win32 error. A filesystem that cannot
   create symlinks now receives everything else, skips the links with a warning that
   names the fix, and keeps their entries in the base so their absence is never read
-  as a deletion to push — a pack push from such a device carries them into the
-  archive from the base. Files another process holds exclusively open (Outlook's
+  as a deletion to push. Files another process holds exclusively open (Outlook's
   .pst, a running .exe) are likewise skipped as unreadable instead of failing the
   scan.
-
-- An interrupted pack-and-seal pull no longer destroys the intact remote folder. Such
-  a pull extracts in place — staging the root and renaming would take the ignored
-  files, build output and caches, with it — so an interruption leaves a tree that is
-  part new version and part old, and no scan tells that from deliberate local edits.
-  The next reconcile read it as "changed on both sides" and printed the `--force`
-  hint, which means push: the torn tree was tarred and committed as the new
-  authoritative version. A pull now records `.aqt/pull-in-progress` for the length of
-  the extract and prune and clears it only once the base commits. While it exists the
-  folder pulls — `--force` cannot re-route that into a push, `--push-only` refuses and
-  says why, and `status` warns that the changes it shows are a half-applied remote
-  version rather than local edits. Re-running `aqt sync` is the whole recovery.
 
 - An interrupted migration no longer wedges a server data directory permanently. Each
   step ran as one statement batch with its `PRAGMA user_version` bump separate, and
@@ -232,6 +263,153 @@ All notable changes to this project are documented in this file.
   capability the page advertised was also stale — `3`, against a current `4` — so it
   was taking some `426`s it had no reason to take.
 
+- A scan no longer fails because the tree changed underneath it. An entry removed
+  mid-walk, or a parent that became a file and surfaced as `ENOTDIR`, aborted the entire
+  sync — an ordinary outcome for a build directory or a mail spool. Vanished entries are
+  now read as churn and skipped, entries that exist but cannot be read are carried
+  forward from the base and reported by name, and anything else still fails. Files a pull
+  writes record the mtime they landed with, so the first `aqt status` after a clone takes
+  the stat fast path instead of re-hashing the whole tree. Downloads resolve chunk
+  locations in batches of about 50k chunks, which bounds the location index by the batch
+  rather than by the size of the folder.
+
+- A case-only rename no longer deletes the file it renamed. On a case-folding filesystem
+  — macOS and Windows by default — `notes.md` to `Notes.md` planned as an add paired with
+  a delete whose two paths are one physical file: the download landed on it, the delete
+  then resolved to the same file and removed it, and the next sync pushed the loss to
+  every device. Directory renames lost their contents the same way. Such pairs are now
+  matched on case-folding roots and executed as a real rename before any other byte
+  moves, with the delete dropped; the early/late delete partition folds case when it
+  nests paths too, so a change of type across cases still clears the download's way.
+
+- A root-key rotation racing an in-flight upload no longer strands the resource. Rotation
+  replaced each migrated resource's `wrapped_key` without touching its version, and a
+  write never re-checked the auth epoch, so a `PUT` that authenticated before the
+  rotation and committed after it pinned a key sealed under the destroyed old root — once
+  the writer's local copy was gone, that resource was unrecoverable from server state.
+  Rotation now bumps every migrated resource's version inside its own transaction, so the
+  stale writer loses on the version predicate each write path already commits under and
+  the client re-syncs against the new state. The reverse order was already safe: the
+  migration pins each enumerated version, so a write that commits first fails the
+  rotation, and the client re-runs it.
+
+- A pull that empties a tracked directory no longer deletes it everywhere. Removing a
+  file pruned its now-empty parents with no regard for the tracked set, so a pull that
+  took the last file out of a first-class directory removed the directory locally, the
+  next sync read that as a local delete, and the directory disappeared fleet-wide. A
+  healing pass now recreates missing tracked directories after the destructive half of an
+  apply, applying recorded modes only to what it creates.
+
+- Anchoring a snapshot while the auto-snapshot prune runs no longer loses it. The delete
+  read the `anchored` flag outside its own transaction and the `DELETE` carried no
+  predicate on it, so a snapshot anchored in that window could still be pruned — the
+  audit reproduced it 2797 times in 3000 — against the guarantee that an anchored
+  snapshot is exempt from all retention. The read happens inside the delete transaction
+  now, the `DELETE` itself carries `AND anchored = 0` with a rows-affected check behind
+  it, and a prune treats a snapshot anchored or deleted since it was enumerated as no
+  longer due rather than as a failed prune.
+
+- A read-exhausted share link stops serving a live page at once. The share page's
+  visibility query read neither `max_reads` nor `reads`, despite a docstring claiming it
+  did, so `GET /x/:id` answered `200` until the GC sweep tombstoned the link — possibly
+  hours in which a non-JS viewer or a crawler saw a live share the owner believed was
+  burned. It applies the same exhaustion predicate the preflight endpoint already used,
+  and answers `410` the moment the last read permit is spent.
+
+- An email that differs only in case reaches the account it names. The client compares
+  addresses case-insensitively while the server collated them as bytes, so `User@X.com`
+  got the decoy salt and a wrong-passphrase dead end, mixed-case rows for one mailbox
+  could coexist and cross-write key material, and a share sent to a mixed-case address
+  fell through to the decoy and produced a grant that would never decrypt.
+  `api.NormalizeEmail` is the canonical form on both ends now: the client normalizes at
+  signup and login, and the store normalizes on write and folds case on lookup — the
+  grant-target and admin lookups included — while the decoy salt derives from the
+  normalized form, so casing cannot be used to probe whether an address is registered. A
+  signup that would twin a legacy mixed-case row is refused. Two more conditions go with
+  it. A read racing an update no longer `404`s a resource that exists: an update unlinks
+  the superseded blob after its row commits, so the read retries once on the miss and
+  reports a second miss as the internal inconsistency it is. And a reclaimed resource is
+  visible on the wire, so `aqt ls` labels the tombstone with the `aqt rm` hint instead of
+  printing a row that fails every read, and setting visibility on one answers `410`
+  rather than resetting the read counters over a corpse.
+
+- A path deleted on both sides is agreement, not a conflict. It planned as a conflict, so
+  a crash in the window between a successful `PUT` and the base being saved wedged every
+  later sync at exit `4` until someone reached for `--force`. Planning emits no action for
+  a converged deletion now, and the apply drops the path from the new base so it stops
+  reading as forever-pending; a one-sided delete, and a delete against an edit, are
+  unchanged. Separately, the scanner's built-in ignore set covers aqt's own transient
+  files — the `.aqt-tmp-*` materialize temporaries a crash leaves behind, and the
+  `.aqt-CaseProbe-*` and `.aqt-linkprobe` filesystem probes — which were otherwise
+  scanned as tracked content, so a leftover, or a scan racing a probe, was pushed
+  fleet-wide as a local add. They stay re-includable with `!` like every other default.
+
+- `aqt restore --in-place` and `aqt clone --adopt` survive a folder whose own config
+  resolves conflicts. Both run an internal sync after mutating local state, and a synced
+  `.aqtconfig` selecting `conflicts=copy` or `conflicts=merge` made that sync abort on a
+  flag contradiction the user never expressed — after the tree had already been swapped,
+  or the tracking metadata already written. Both internal syncs pin `conflicts=block`
+  now, which the flag layer is entitled to do over a config. The in-place swap also
+  gained a crash marker: a kill mid-swap left a half-emptied root that the next sync or
+  watch tick scanned as a mass deletion and replicated everywhere.
+  `.aqt/restore-in-progress` is written before the swap and cleared once the tree is
+  whole, and while it exists every sync refuses and names the way out — finish the
+  restore, or recover from the preserved `.aqt-backup-*` directory.
+
+- The sync lock is an OS file lock rather than a pid file. Reclaiming a stale pid file
+  was a check-then-act: two syncs, or a watch agent and a manual sync, racing over a
+  crashed holder's file could both remove it and both create their own, ending with two
+  holders — reproduced in the audit — and a second window let a reader catch the file
+  between the `O_EXCL` create and the pid write and reclaim it as garbage. `.aqt/lock` is
+  now held with `flock` (`LockFileEx` on Windows), taken non-blocking on an open file the
+  release closes: the kernel drops it when the holding process exits, so a crash frees
+  the lock with no reclaim step left to race, and the recorded pid is informational, used
+  for the busy message alone. The file itself persists across releases, since removing it
+  would reopen the unlink race — `aqt untrack` clears the rest of the control directory
+  under the lock's protection, then releases and takes the now-empty directory with it,
+  which is what Windows needs in order to delete an open file.
+
+- `aqt info`, `aqt share`, and `aqt clone` accept a share ref carrying a subpath. Two ref
+  parsers disagreed about where the resource id sits: one treats the first `/x/` segment
+  as the route, the other scanned from the end and read the subpath's tail as the id.
+  `aqt pull` happened to strip the subpath before parsing, so the same URL worked there
+  and `404`ed everywhere else. There is one parser now — the subpath is stripped first,
+  and the callers that need it split it themselves and pass a base ref the strip leaves
+  alone.
+
+- The TUI reports three states the way the CLI already does. A deferral — exit `75`, a
+  git operation holding the sync back — is deliberate, but rendered as a red failure; it
+  gets its own note and neutral treatment in the log and the toast. An interrupted pull
+  leaves a tree part remote and part stale, which `aqt status` says plainly while the TUI
+  read it as ordinary local edits; the files load carries the `.aqt/pull-in-progress`
+  marker now, and the interruption outranks every other verdict. And a version-only
+  remote delta — a policy change, or a key-rotation bump — showed as `incoming: 0
+  change(s) to pull`, which reads as drift, and collapses to the up-to-date wording.
+
+- A link's end-of-life action can no longer be destruction by fall-through. The expiry
+  sweep treated `retire` as the only named case and reclaimed — destroyed content — for
+  any other stored `on_expiry` value, and the write path and the policy echo each
+  re-derived the action separately from the request. The sweep now switches over the
+  stored value with an erroring default, so a value this build does not know (a newer
+  server's enum, a hand-edited row) stops the sweep and leaves the resource untouched;
+  and one mapping is what the write stores and the echo promises, so the server can no
+  longer promise one action and perform another.
+
+- A push slower than the server's unreferenced-pack grace period no longer loses the
+  race with GC. Packs upload as a push walks the tree, but only the final manifest PUT
+  roots them, and an owner-wide sweep — any other folder's push, or the six-hour tick —
+  reaps unrooted packs after an hour, so a multi-hour initial push could have its
+  earliest packs swept before it committed. The foreign-key backstop already refused
+  such a PUT rather than committing dangling refs, but as an opaque internal error, and
+  a push that reliably outlives the guard failed the same way on every attempt. A push
+  running longer than 15 minutes now re-checks its chunk ids right before the PUT — the
+  check re-arms the age guard on every pack still holding them — and ids already swept
+  fail with the recovery path (re-running sync re-uploads exactly the missing chunks);
+  the server names the backstop `400 missing_chunks` with the same guidance.
+
+- An atomic file replace fsyncs the parent directory after the rename on POSIX, so a
+  crash moments later can no longer roll back a rename the caller already depends on.
+
 ### Security
 
 - The threat model understated the chunk-size side channel. Chunks are compressed
@@ -240,11 +418,26 @@ All notable changes to this project are documented in this file.
   of where the chunker cut. That is a strictly stronger fingerprint than the boundary
   sizes the document described: an observer can separate incompressible or media
   content from source text inside a folder, and match a candidate file against
-  compressed lengths that vary far more than raw boundaries do. `pack: true` is
-  imprecise in the same direction — it leaks the compressed total, so choosing it for
-  a highly compressible tree reveals its compressibility rather than its size. No
-  behavior changed; what changed is that the document now says so, including in the
-  "Still open" padding trade-off, which had been reasoning about the wrong quantity.
+  compressed lengths that vary far more than raw boundaries do. Pack-and-seal, while
+  it existed, was imprecise in the same direction — it leaked the compressed total, so
+  choosing it for a highly compressible tree revealed its compressibility rather than
+  its size. Its removal (see Breaking Changes) also removed the only structure-hiding
+  mitigation the threat model listed: per-entry name, size, and shape exposure is now
+  recorded there as an unmitigated side channel. Beyond the document, no behavior
+  changed, including in the "Still open" padding trade-off, which had been reasoning
+  about the wrong quantity.
+
+- Release binaries build on Go 1.26.6 (`go.mod` now carries the toolchain
+  directive), taking the standard-library fixes `govulncheck` flags as reachable
+  from this code: GO-2026-5026, GO-2026-5972, GO-2026-6089, GO-2026-6090,
+  GO-2026-6091, and GO-2026-6218 (`net/http`, `crypto/tls`, `html/template`,
+  `net/url`, `encoding/asn1`). `pnpm audit` over the landing site reports no known
+  vulnerabilities.
+
+- The landing site's transitive `nanoid` floor rises to 3.3.18: earlier versions
+  spin forever in `customAlphabet`/`customRandom` when given a size of 0 (Dependabot
+  alert 30). It reaches the site through `next` and `tailwindcss`; the existing
+  workspace override floor takes the fix the same way the previous ones did.
 
 ## [v0.7.0] - 2026-08-11
 

@@ -2,6 +2,8 @@ module github.com/aquitano/aqt-sync
 
 go 1.25.4
 
+toolchain go1.26.6
+
 require (
 	github.com/atotto/clipboard v0.1.4
 	github.com/cloudflare/circl v1.6.4
