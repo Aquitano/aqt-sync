@@ -178,9 +178,11 @@ func TestSweepActsOnStoredOnExpiry(t *testing.T) {
 	}
 	ck, _ := crypto.GenerateContentKey()
 	blob, _ := crypto.Seal([]byte("v2"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
-		ID: id, Visibility: api.Public, Blob: blob, EncryptedMeta: res.EncryptedMeta,
-		WrappedKey: res.WrappedKey, ExpectedVersion: res.Version,
+		ID: id, Visibility: api.Public, Blob: blob, EncryptedMeta: meta,
+		WrappedKey: &wrapped, ExpectedVersion: res.Version,
 	}); err != nil {
 		t.Fatalf("content re-put: %v", err)
 	}
@@ -220,9 +222,11 @@ func TestPutResourceKeepsLiveLinkPolicy(t *testing.T) {
 
 	ck, _ := crypto.GenerateContentKey()
 	blob, _ := crypto.Seal([]byte("v2"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
 	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
-		ID: id, Visibility: api.Public, Blob: blob, EncryptedMeta: res.EncryptedMeta,
-		WrappedKey: res.WrappedKey, ExpectedVersion: res.Version,
+		ID: id, Visibility: api.Public, Blob: blob, EncryptedMeta: meta,
+		WrappedKey: &wrapped, ExpectedVersion: res.Version,
 	}); err != nil {
 		t.Fatalf("content re-put: %v", err)
 	}
