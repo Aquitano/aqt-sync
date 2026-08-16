@@ -246,7 +246,9 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 `quota_exceeded`, `device_limit`, `bad_pack`, `gone`, `snapshot_anchored`,
 `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
 `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
-`account_exists`, `account_disabled`, `drops_roots`, `invite_required`
+`account_exists`, `account_disabled`, `drops_roots`, `missing_chunks`
+(a push outlived the unreferenced-pack grace period and GC swept chunks it had
+uploaded; re-running sync re-uploads them), `invite_required`
 (signup on an invite-mode server without a valid token), `invalid_challenge`
 (request a fresh attach challenge and retry), `invalid_credentials` (the single
 401 a failed attach collapses to; retrying the same inputs cannot succeed),
