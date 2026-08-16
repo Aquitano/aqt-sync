@@ -6,7 +6,7 @@ subsystems at once may sit until there is time to review it properly.
 
 ## Build and test
 
-Go 1.25 or newer, and nothing else.
+Go 1.25.4 or newer (see `go.mod`), and nothing else.
 
 ```sh
 go build ./...            # everything compiles

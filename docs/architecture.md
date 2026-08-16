@@ -39,7 +39,7 @@ keys.
 ## Package layout
 
 ```text
-cmd/aqt/            CLI: signup/login/logout/lock, whoami, devices, passphrase, account, push, pull, cat, ls, info, find, mv, share, unshare, shares, contacts, rm, init/status/sync/clone/diff, snapshot, checkpoint, restore, usage, repo, git setup, watch/agent, tui, update  [implemented]
+cmd/aqt/            CLI: signup/login/logout/lock, whoami, devices, passphrase, account, push, pull, cat, ls, info, find, mv, share, unshare, shares, contacts, rm, init/status/sync/clone/diff/untrack, snapshot, checkpoint, restore, usage, repo, git setup, watch/agent, tui, update  [implemented]
 cmd/aqt-server/     server entrypoint + `admin` account/quota tooling           [implemented + tested]
 cmd/updatectl/      release tooling: generate/sign/verify the update manifest   [implemented + tested]
 internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)          [implemented + tested]
@@ -48,6 +48,9 @@ internal/api/       shared wire types + capability constants                    
 internal/server/    Gin handlers + SQLite/FS store + packed object store + GC   [implemented + tested]
 internal/identity/  local profile, keystore, session cache                      [implemented + tested]
 internal/client/    HTTP API client                                             [implemented]
+internal/safetext/  control-byte and bidi sanitizer for server-supplied text    [implemented + tested]
+internal/cliutil/   formatting and confirmation rules both binaries share       [implemented]
+internal/fsatomic/  write-temp-fsync-rename file replacement                    [implemented]
 internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
 internal/gitremote/ sealed bundle chain + RefsRoot behind `git-remote-aqt`      [implemented + tested]
 internal/update/    signed release manifest, verified download, atomic install  [implemented + tested]
@@ -68,14 +71,18 @@ once per session. Every push wraps the content key under the owner's master key,
 even a public resource can later be shared or rotated. Verified by `go test ./...`
 plus live multi-machine cycles.
 
-A public share link (`/x/<id>`) opens a landing page that decrypts inline single files
-locally from the `#k.` key or a password-gated `#p.` wrap; streamed files and folders
-keep the `aqt pull` fallback. The pinned XChaCha20-Poly1305 and Argon2id browser
-runtimes are self-hosted, and the fragment is never sent to the server.
+A public share link (`/x/<id>`) opens a landing page that decrypts locally from the
+`#k.` key or a password-gated `#p.` wrap: inline single files, streamed files
+(chunk-by-chunk through the public objects endpoint, with fzstd for decompression),
+and public folders, which it walks in the browser. `aqt pull` is offered as an
+alternative route, not the only one. The pinned XChaCha20-Poly1305 and Argon2id
+browser runtimes are self-hosted, and the fragment is never sent to the server.
 
 Tracked folders default to **private**. `aqt share <folder-id>` flips a chunked folder
 public and mints a fragment link, and a link holder clones or subpath-pulls it
-read-only through the public object endpoint. Pack-and-seal folders stay unshareable.
+read-only through the public object endpoint. Folders written by the removed
+pack-and-seal format are refused.
 
-Run locally: `go run ./cmd/aqt-server` (listens on `:8080`; `AQT_DATA_DIR` and
-`AQT_ADDR` override), then `aqt --server http://localhost:8080 login`.
+Run locally: `go run ./cmd/aqt-server` (listens on `127.0.0.1:8080` and stores under
+`./aqt-data`; `AQT_DATA_DIR` and `AQT_ADDR` override), then
+`aqt --server http://localhost:8080 login`.

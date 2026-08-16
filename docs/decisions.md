@@ -101,7 +101,9 @@ release each landed in.
 - **Account-enumeration oracle.** `GET /v1/account/salt` returns an indistinguishable
   decoy for an unknown email, with costs drawn per-email from the value set a real
   calibration produces, and open-mode signup answers a duplicate with a success-shaped
-  decoy rather than `409`. Only `AQT_REGISTRATION=invite` actually closes enumeration.
+  decoy rather than `409` — unless the caller proves ownership with the account's
+  passphrase verifier, which does get `409 account_exists`. Only
+  `AQT_REGISTRATION=invite` actually closes enumeration.
   See [account enumeration](threat-model.md#account-enumeration).
 
 - **Authenticated-route abuse / quotas.** The authenticated group is rate-limited per

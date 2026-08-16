@@ -12,6 +12,8 @@ metadata.
 - [Docker](#docker)
 - [Backup and restore](#backup-and-restore)
 - [Managing accounts](#managing-accounts)
+- [Privacy boundary](#privacy-boundary)
+- [Monitoring](#monitoring)
 - [Health checks and upgrades](#health-checks-and-upgrades)
 
 ## Install and run
@@ -188,6 +190,12 @@ sudo install -m 0640 /dev/null /etc/aqt-server.env
 sudo systemctl daemon-reload
 sudo systemctl enable --now aqt-server
 ```
+
+The unit pins `AQT_ADDR=:443`, so `/etc/aqt-server.env` must carry TLS settings before
+that last step — `AQT_TLS_CERT`/`AQT_TLS_KEY`, or `AQT_TLS_AUTOCERT_DOMAINS` — or an
+`AQT_ADDR` override (plus `AQT_ALLOW_INSECURE_HTTP=1` when a reverse proxy terminates
+TLS). Without one of those the server fails closed at startup and the unit
+crash-loops.
 
 The unit sets `AQT_DATA_DIR=/var/lib/aqt-server` (created and owned via
 `StateDirectory`) and grants `CAP_NET_BIND_SERVICE` so it can bind `:443` without

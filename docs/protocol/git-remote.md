@@ -44,8 +44,8 @@ out of sync with the remote.
 
 Push checks fast-forward policy, creates one incremental bundle for the ref batch,
 uploads its segments, then flips `RefsRoot` with `ExpectedVersion`. A `409` re-reads
-refs, re-checks ancestry, rebuilds, and retries up to five times; the losing uploads
-remain unrooted and age-GC eligible.
+refs, re-checks ancestry, and rebuilds, for at most five attempts in total; the
+losing uploads remain unrooted and age-GC eligible.
 
 Ref deletion changes only the root — no bundle is written. A standalone annotated tag
 always includes its tag object.

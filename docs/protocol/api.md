@@ -59,7 +59,9 @@ a key for another payload returns `409 idempotency_conflict`. The official clien
 retries only these key-backed creates. Replacements use `expectedVersion`; visibility
 changes include the same field, and deletes use an `If-Match` resource version. Stale
 mutations return `409 version_conflict`. Creates return `201`; replacements and
-in-place mutations return `200` (or `204` when no response body is defined).
+in-place mutations return `200` (or `204` when no response body is defined). The one
+exception is the grant upsert: re-posting an existing grantee — the rotation path —
+returns `201` with no body, like the first post.
 
 ## Routes
 
@@ -76,9 +78,10 @@ POST   /v1/devices                   Attach device. Body: { email, challengeId, 
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
 GET    /v1/devices                   List the account's attached devices (owner token).
                                      Paginated (?limit=, ?cursor=)
-                                     → { devices: [{ id, name, current? }], nextCursor? }
-                                     `current` marks the calling device. Names are client-supplied
-                                     labels, not secrets.
+                                     → { devices: [{ id, name }], nextCursor? }
+                                     The server never marks a device; `current` is a client-side
+                                     annotation the CLI adds for its own device. Names are
+                                     client-supplied labels, not secrets.
 DELETE /v1/devices/:id               Revoke a device.
 DELETE /v1/account                   Erase the account and everything under it. Body: { authVerifier }
                                      — the passphrase proof, so a device token alone cannot destroy an
@@ -90,11 +93,12 @@ DELETE /v1/account                   Erase the account and everything under it. 
 POST   /v1/resources                 Create (server-assigned id). Same body/echo as PUT below.
 PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). Also still
                                      accepts a create (id omitted) so an older client keeps working.
-                                     Body: { ciphertext, encryptedMeta, visibility,
-                                             wrappedKey?, expireSeconds?, maxReads? }  // wrappedKey only for private;
+                                     Body: { blob, encryptedMeta, visibility,
+                                             wrappedKey?, expireSeconds?, maxReads? }  // blob = { nonce, ciphertext };
+                                                                                       // wrappedKey only for private;
                                                                                        // policy only for public
-                                     → { id, version, expiresAt?, maxReads? }  // echoes the accepted policy
-GET    /v1/resources/:id             → { ciphertext, encryptedMeta, visibility, wrappedKey?, version }
+                                     → { id, version, expiresAt?, maxReads?, onExpiry? }  // echoes the accepted policy
+GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth. A private id needs the owner
                                      token OR a grant to the caller; a grantee gets the grant wrap and the
                                      owner handle in place of the owner's wrapped key (see grants below).
@@ -133,7 +137,7 @@ GET    /v1/account/usage             → { storageBytes, quotaBytes?, packs, obj
 # ciphertext is reused, not re-uploaded, and min_client is copied from the source at
 # capture time so a restore is gated exactly like a resource read:
 POST   /v1/snapshots                 Body: { resourceId, encryptedLabel?, anchor?, automatic? } → SnapshotInfo
-GET    /v1/snapshots                 List (?resourceId=, ?limit=, ?cursor=) → { snapshots, nextCursor? }
+GET    /v1/snapshots                 List (?resource=, ?limit=, ?cursor=) → { snapshots, nextCursor? }
 GET    /v1/snapshots/:id             → { snapshot, blob, minClient? }; 426 like a resource read.
 POST   /v1/snapshots/:id/anchor      Body: { anchored }. An anchored snapshot is exempt from every
                                      retention path; deleting one is 409 `snapshot_anchored`.
@@ -155,7 +159,8 @@ PUT    /v1/account/enc-key           Backfill the caller's X25519 enc key; the E
 POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey }. Upsert (rotation
                                      re-wraps by re-posting). No grantee-existence check (decoy handles
                                      must be accepted indistinguishably).
-GET    /v1/resources/:id/grants      Owner only: [{ granteeHandle, createdAt }]. Paginated (see below).
+GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, createdAt }], nextCursor? }.
+                                     Paginated (see below).
 DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
                                      (private resources) and re-wraps surviving grantees.
 GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHandle, wrap, sealed meta). Paginated.
@@ -164,7 +169,8 @@ DELETE /v1/shares/:id                Grantee only (predicate: grantee_handle = c
                                      account's future grants (403 sender_blocked) and drops the shares it has
                                      already sent; 400 block_limit when the caller's block list is full.
                                      Never bumps resources.version: that is the owner's CAS token.
-GET    /v1/share-blocks              Accounts the caller refuses grants from: [{ ownerHandle, createdAt }]. Paginated.
+GET    /v1/share-blocks              Accounts the caller refuses grants from:
+                                     { blocks: [{ ownerHandle, createdAt }], nextCursor? }. Paginated.
 DELETE /v1/share-blocks/:owner       Lift one block.
 POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the public variant, gated on
                                      ownership OR a grant instead of visibility — a grantee reads exact
@@ -181,7 +187,8 @@ PUT    /v1/packs/:id                  Body: raw pack bytes (octet-stream). id = 
                                      server verifies the address and every object slice. Range-able GET.
                                      → { storedObjects }
 GET    /v1/packs/:id                  → raw pack bytes; supports Range (pull fetches only the needed span)
-POST   /v1/gc                        Pack-level mark-and-sweep → { deletedPacks, freedBytes }
+POST   /v1/gc                        Pack-level mark-and-sweep, which also repacks partially dead packs
+                                     → { deletedPacks, freedBytes, repackedPacks, reclaimedBytes }
 ```
 
 `GET /livez` is the liveness probe and `GET /readyz` admits traffic only while
@@ -320,8 +327,9 @@ Expired links (immediately) and exhausted ones (after a grace window so an in-fl
 streamed pull can finish) are reclaimed by the GC sweep: the ciphertext blob and its
 objects are deleted and the row kept as a `reclaimed` tombstone that keeps returning
 `410` rather than decaying to `404`. The object-read endpoint 410s on
-expiry/reclamation but *not* on `maxReads` exhaustion, so the final permitted
-streamed pull is never cut off mid-flight.
+expiry/reclamation immediately, and on `maxReads` exhaustion only once the same
+10-minute grace window has passed — inside it the objects keep serving, so the final
+permitted streamed pull is never cut off mid-flight.
 
 ## What the server enforces
 

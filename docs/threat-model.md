@@ -22,10 +22,13 @@ passphrase ──Argon2id(salt)──▶ unlockKey (UK)       (never leaves the 
                                                   │     wrappedRoot = seal(RK, UK))
                                                   ├─ wraps ─▶ contentKey (one per resource)
                                                   ├─ HKDF ─▶ convergence key (chunk dedup)
-                                                  └─ HKDF ─▶ Ed25519 signing key
-                                                               (public half registered with the
-                                                                server; logins sign a server
-                                                                challenge — no secret is sent)
+                                                  ├─ HKDF ─▶ Ed25519 signing key
+                                                  │            (public half registered with the
+                                                  │             server; logins sign a server
+                                                  │             challenge — no secret is sent)
+                                                  └─ HKDF ─▶ X25519 encryption key
+                                                               (HPKE grant wraps; public half
+                                                                published)
 file ──encrypt(contentKey)──▶ ciphertext + nonce + AEAD tag  ──▶ server (opaque blob)
 metadata (real name, size…) ──encrypt(contentKey)──▶ sealed metadata ──▶ server
 ```
@@ -80,10 +83,13 @@ devices re-login).
 ## What the server stores
 
 Per resource: `id`, opaque `ownerHandle`, ciphertext blob(s), encrypted-metadata
-blob, a `visibility` flag, a wrapped-key record *only for private resources owned by
-an account*, version counter, timestamps, and — for a public link with a lifecycle
-policy — an `expires_at` timestamp, a `max_reads` cap, a `reads` counter, an
-`exhausted_at` stamp, and a `reclaimed` tombstone flag.
+blob, a `visibility` flag, a wrapped-key record for *every* account-owned resource
+(public ones included) that is returned only to the owner — a public resource read by
+anyone else carries none — version counter, timestamps, the `min_client` capability
+floor, an `auto_snapshot` opt-out flag, a `compact_at` stamp, a `blob_size`, and —
+for a public link with a lifecycle policy — an `expires_at` timestamp, a `max_reads`
+cap, a `reads` counter, an `on_expiry` selector, an `exhausted_at` stamp, and a
+`reclaimed` tombstone flag.
 
 No user content is ever stored in plaintext: the file, its name, its size, and every
 other attribute a user set live inside the sealed blob and sealed metadata. What is
@@ -251,7 +257,10 @@ fixed package default, so a decoy's parameters do not stand out.
 `POST /v1/account` does not answer `409` on a duplicate email in the default *open*
 registration mode. It returns the same success shape with a decoy token that grants
 nothing, so signup is not an existence oracle either: the caller's next authenticated
-call fails, matching the wrong-passphrase ambiguity.
+call fails, matching the wrong-passphrase ambiguity. The exception is a caller who
+proves ownership by presenting the account's passphrase verifier; that request gets
+`409 account_exists`, because confirming the account to the person who can already
+unlock it leaks nothing.
 
 Open registration is nonetheless enumerable by design. Signing up for an unused
 address must succeed, so "the signup worked" always reveals that the address was
