@@ -118,6 +118,32 @@ func (st *State) ResetCeiling(ch Channel, v string) {
 	st.HighestSeen[string(ch)] = v
 }
 
+// RaiseCeiling re-reads the state and persists a raised ceiling for ch. It is a
+// fresh load-modify-save (like SetPolicy) rather than a mutation of a State the
+// caller loaded earlier: a check can take tens of seconds, and saving that
+// stale copy would clobber a concurrent `update policy` write. A load failure
+// skips the write entirely, so a transiently unreadable file is never
+// overwritten with defaults.
+func (s Store) RaiseCeiling(ch Channel, v string) error {
+	st, err := s.Load()
+	if err != nil {
+		return err
+	}
+	st.RaiseCeiling(ch, v)
+	return s.Save(st)
+}
+
+// ResetCeiling is RaiseCeiling's deliberate lowering counterpart (the
+// accept-rollback path), with the same fresh-read discipline.
+func (s Store) ResetCeiling(ch Channel, v string) error {
+	st, err := s.Load()
+	if err != nil {
+		return err
+	}
+	st.ResetCeiling(ch, v)
+	return s.Save(st)
+}
+
 // Store is the directory the update state lives in. It is a value rather than a
 // package global so tests get their own and never touch the real config.
 type Store struct{ Dir string }

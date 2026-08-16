@@ -69,9 +69,12 @@ func serveUpdateManifest(t *testing.T, released string) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/stable.json":
+		// The beta path serves the same stable-channel manifest: beta is a
+		// superset of stable, so this mirrors the common state where no
+		// prerelease is outstanding and a --prerelease check lands on stable.
+		case "/stable.json", "/beta.json":
 			w.Write(manifest)
-		case "/stable.json.sig":
+		case "/stable.json.sig", "/beta.json.sig":
 			w.Write(sigBytes)
 		default:
 			http.NotFound(w, r)
@@ -233,25 +236,79 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 		t.Fatalf("stale-manifest error does not name the recovery flag: %v", err)
 	}
 
-	// The explicit recovery: accept the retraction, which also lowers the record
-	// so the next plain check stops tripping.
+	// --check --accept-rollback bypasses the floor for the report but commits
+	// nothing: acceptance means actually taking the older release, so a mere
+	// report — or a run the user declines partway — must leave the old ceiling
+	// standing (else a mistaken origin could lower it durably with no install).
 	captureStdout(t, func() {
 		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
-			t.Fatalf("--accept-rollback check: %v", err)
+			t.Fatalf("--accept-rollback --check: %v", err)
 		}
 	})
-	st, err = store.Load()
-	if err != nil {
-		t.Fatal(err)
+	assertCeiling := func(want string) {
+		t.Helper()
+		st, err := store.Load()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := st.Ceiling(update.ChannelStable); got != want {
+			t.Fatalf("ceiling = %q, want %q", got, want)
+		}
 	}
-	if got := st.Ceiling(update.ChannelStable); got != "v0.4.0" {
-		t.Fatalf("ceiling after accept-rollback = %q, want v0.4.0", got)
+	assertCeiling("v0.5.0")
+	if err := runUpdate(updateOptions{checkOnly: true}); !errors.Is(err, update.ErrStaleManifest) {
+		t.Fatalf("plain check after --accept-rollback --check: got %v, want the refusal to persist", err)
 	}
+
+	// An install run that aborts before completing (here: the test binary is not
+	// a replaceable release install / no terminal to confirm) commits nothing.
+	var insErr error
+	captureStdout(t, func() { insErr = runUpdate(updateOptions{acceptRollback: true}) })
+	if insErr == nil {
+		t.Fatal("install run unexpectedly succeeded in a test environment")
+	}
+	assertCeiling("v0.5.0")
+
+	// The machine already running the retracted-to version: accepting confirms
+	// it, lowers the record, and later plain checks pass clean.
+	withBuild(t, "v0.4.0", update.KindRelease)
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
+			t.Fatalf("--accept-rollback on the running version: %v", err)
+		}
+	})
+	assertCeiling("v0.4.0")
 	captureStdout(t, func() {
 		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("check after accepted rollback: %v", err)
 		}
 	})
+}
+
+// A --prerelease check that lands on a stable release (the common case: no
+// prerelease outstanding) must raise the stable ceiling too — background checks
+// are stable-only, and a prerelease-track user would otherwise never establish
+// the floor they consult.
+func TestBetaCheckRaisesTheStableCeiling(t *testing.T) {
+	requirePublishedPlatform(t)
+	store := serveUpdateFixture(t, "v0.5.0")
+	withBuild(t, "v0.3.0", update.KindRelease)
+
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true, prerelease: true}); err != nil {
+			t.Fatalf("beta check: %v", err)
+		}
+	})
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Ceiling(update.ChannelBeta); got != "v0.5.0" {
+		t.Fatalf("beta ceiling = %q, want v0.5.0", got)
+	}
+	if got := st.Ceiling(update.ChannelStable); got != "v0.5.0" {
+		t.Fatalf("stable ceiling after a beta check on a stable release = %q, want v0.5.0", got)
+	}
 }
 
 func TestUpdateCommandSurface(t *testing.T) {

@@ -97,13 +97,18 @@ stand between a replayed old manifest and a downgrade:
   the case the first guard cannot see: a manifest newer than the running build but
   older than the newest release ever observed, which is exactly how a replay would
   pin a client at an intermediate release. Background checks raise the ceiling too,
-  but never lower it.
+  but never lower it, and a beta check that lands on a stable release records it
+  for the stable track as well — a prerelease-track user still builds the ceiling
+  the stable-only background check consults.
 
 If upstream genuinely retracted a release, `aqt update --accept-rollback` is the
-explicit way through: it skips the ceiling for that one check and lowers the record
-to what upstream now serves, so later plain checks stop tripping. The ceiling is
-hardening on top of the signature checks, not a substitute — a state file that is
-missing or unreadable degrades to "no ceiling", never to skipped verification.
+explicit way through: it skips the ceiling for that one check, and lowers the
+record only once the older release is actually accepted — installed, or confirmed
+as the version already running — so later plain checks stop tripping. A run that
+is declined at the prompt, stops at `--check`, or fails leaves the old ceiling
+standing. The ceiling is hardening on top of the signature checks, not a
+substitute — a state file that is missing or unreadable degrades to "no ceiling",
+never to skipped verification, and is never overwritten with defaults.
 
 ## The first install
 

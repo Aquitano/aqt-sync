@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -79,6 +80,13 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 	}
 	if checkErr != nil || res.Status != update.StatusUpdateAvailable {
 		if checkErr == nil && res.Status == update.StatusUpToDate {
+			st.DeferredVersion = ""
+		}
+		// A stale origin is deterministic, unlike a network blip: a surviving
+		// deferral would bypass the daily interval and re-run this doomed check
+		// after every single command, silently. Recovering the deferred install
+		// is `aqt update --accept-rollback` territory anyway.
+		if errors.Is(checkErr, update.ErrStaleManifest) {
 			st.DeferredVersion = ""
 		}
 		_ = store.Save(st)

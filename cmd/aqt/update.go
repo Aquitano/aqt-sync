@@ -92,6 +92,9 @@ func runUpdate(opts updateOptions) error {
 	// The freshness floor lives in the same state file as the policy. A store that
 	// cannot be read fails open (no floor): the ceiling is replay hardening on top
 	// of signature verification, and a broken config dir must not block updating.
+	// The load error is deliberately dropped for the floor read only — all writes
+	// below go through the Store helpers, which re-read and skip the save when
+	// the file is unreadable, so a transient read failure never persists defaults.
 	store, storeErr := updateStore()
 	var st update.State
 	if storeErr == nil {
@@ -116,20 +119,33 @@ func runUpdate(opts updateOptions) error {
 	if err != nil {
 		return err
 	}
-	// Only a fully authenticated manifest reaches this point with a version, so
-	// record it. --accept-rollback lowers the record to what upstream now serves;
-	// otherwise the ceiling only ever rises.
+	// Only a fully authenticated manifest reaches this point with a version.
+	// Raising is always safe (it never lowers), so it happens up front; the
+	// --accept-rollback lowering is deferred to the moment the older release is
+	// actually accepted — installed, or confirmed as the version already running.
+	// A declined prompt, a --check, or a non-replaceable install therefore
+	// leaves the old ceiling standing.
 	if storeErr == nil && res.AvailableVersion != "" {
-		if opts.acceptRollback {
-			st.ResetCeiling(ch, res.AvailableVersion)
-		} else {
-			st.RaiseCeiling(ch, res.AvailableVersion)
+		_ = store.RaiseCeiling(ch, res.AvailableVersion)
+		// A beta check that lands on a stable release authenticated a stable
+		// version; record it for stable checks too, or a prerelease-track user
+		// would never establish the ceiling the stable-only background path
+		// consults.
+		if update.Channel(res.Channel) == update.ChannelStable && ch != update.ChannelStable {
+			_ = store.RaiseCeiling(update.ChannelStable, res.AvailableVersion)
 		}
-		_ = store.Save(st)
+	}
+	acceptCeiling := func() {
+		if storeErr == nil && opts.acceptRollback && res.AvailableVersion != "" {
+			_ = store.ResetCeiling(ch, res.AvailableVersion)
+		}
 	}
 
 	report := updateReport{Result: res}
 	if res.Status != update.StatusUpdateAvailable {
+		// Up to date: the served release is the one already running, so accepting
+		// it cannot move below the running build.
+		acceptCeiling()
 		if opts.asJSON {
 			return printJSON(report)
 		}
@@ -175,6 +191,8 @@ func runUpdate(opts updateOptions) error {
 	if err != nil {
 		return err
 	}
+	// The older release is installed and verified — now the acceptance is real.
+	acceptCeiling()
 	report.Installed = true
 	if opts.asJSON {
 		return printJSON(report)

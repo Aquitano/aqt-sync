@@ -155,6 +155,48 @@ func TestCeilingFailsOpenOnCorruptedState(t *testing.T) {
 	}
 }
 
+// A transiently unreadable state file must not be replaced with defaults by a
+// ceiling write: the Store helpers skip the save when the load fails, so the
+// user's real policy and records survive the blip.
+func TestStoreCeilingWriteSkipsAnUnreadableFile(t *testing.T) {
+	if !runtimeIsPOSIX() {
+		t.Skip("chmod-based unreadable file needs POSIX")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("root reads through file modes")
+	}
+	s := testStore(t)
+	path := filepath.Join(s.Dir, stateFileName)
+	if err := os.WriteFile(path, []byte(`{"policy":"auto"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(path, 0o600) })
+
+	if err := s.RaiseCeiling(ChannelStable, "v9.9.9"); err == nil {
+		t.Fatal("RaiseCeiling wrote through a load failure")
+	}
+	if err := s.ResetCeiling(ChannelStable, "v0.0.1"); err == nil {
+		t.Fatal("ResetCeiling wrote through a load failure")
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	st, err := s.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Policy != PolicyAuto {
+		t.Fatalf("policy = %q; the unreadable file was clobbered with defaults", st.Policy)
+	}
+	if st.Ceiling(ChannelStable) != "" {
+		t.Fatalf("a skipped write still recorded a ceiling: %q", st.Ceiling(ChannelStable))
+	}
+}
+
 func TestDueForCheckRateLimits(t *testing.T) {
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	cases := []struct {
