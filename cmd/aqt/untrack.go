@@ -97,9 +97,27 @@ func runUntrack(dir string, deleteRemote, assumeYes bool) error {
 	if err != nil {
 		return err
 	}
-	defer release()
-	if err := os.RemoveAll(filepath.Join(root, syncengine.ControlDir)); err != nil {
-		return fmt.Errorf("remove %s: %w", filepath.Join(root, syncengine.ControlDir), err)
+	// The lock is an open handle on .aqt/lock, which Windows will not let us
+	// delete while it is held. Remove everything else under the lock's protection,
+	// then release (closing the handle) and take the now-empty control dir with it.
+	ctl := filepath.Join(root, syncengine.ControlDir)
+	entries, err := os.ReadDir(ctl)
+	if err != nil {
+		release()
+		return fmt.Errorf("read %s: %w", ctl, err)
+	}
+	for _, e := range entries {
+		if e.Name() == "lock" {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(ctl, e.Name())); err != nil {
+			release()
+			return fmt.Errorf("remove %s: %w", filepath.Join(ctl, e.Name()), err)
+		}
+	}
+	release()
+	if err := os.RemoveAll(ctl); err != nil {
+		return fmt.Errorf("remove %s: %w", ctl, err)
 	}
 	fmt.Printf("untracked %s\n", root)
 	if !deleteRemote && stateErr == nil && st.ID != "" {

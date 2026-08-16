@@ -44,8 +44,8 @@ func TestSyncLockExcludesConcurrent(t *testing.T) {
 var errLockBusy = errors.New("busy")
 
 // In-place restore takes the sync lock before swapping the tree and then calls
-// runSync underneath it, so the lock must be re-entrant within one process — and the
-// pid file must survive until the outermost release.
+// runSync underneath it, so the lock must be re-entrant within one process — and
+// the OS lock must be held until the outermost release.
 func TestSyncLockIsReentrantInProcess(t *testing.T) {
 	root := tempTrackedRoot(t)
 	lockPath := filepath.Join(root, syncengine.ControlDir, "lock")
@@ -59,13 +59,16 @@ func TestSyncLockIsReentrantInProcess(t *testing.T) {
 		t.Fatalf("nested acquire: %v", err)
 	}
 	inner()
-	if _, err := os.Stat(lockPath); err != nil {
-		t.Fatalf("pid file gone after the inner release: %v", err)
+	// Still held after the inner release: an outside acquirer stays excluded.
+	if _, err := acquirePIDFile(lockPath, func(int) error { return errLockBusy }); err == nil {
+		t.Fatal("lock free after the inner release")
 	}
 	outer()
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("pid file still present after the outer release: %v", err)
+	rel, err := acquirePIDFile(lockPath, func(int) error { return errLockBusy })
+	if err != nil {
+		t.Fatalf("lock still held after the outer release: %v", err)
 	}
+	rel()
 }
 
 func TestSyncLockReclaimsStale(t *testing.T) {
