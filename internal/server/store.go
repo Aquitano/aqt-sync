@@ -138,15 +138,9 @@ func resolvePolicy(vis api.Visibility, expireSeconds, maxReads int64, onExpiry a
 	if (expireSeconds > 0 || maxReads > 0) && vis != api.Public {
 		return sql.NullInt64{}, sql.NullInt64{}, "", ErrPolicyOnPrivate
 	}
-	// An absent action is reclaim: that is what every client written before the field
-	// existed meant, and what the server did for them.
-	switch onExpiry {
-	case "", api.ExpiryReclaim:
-		action = string(api.ExpiryReclaim)
-	case api.ExpiryRetire:
-		action = string(api.ExpiryRetire)
-	default:
-		return sql.NullInt64{}, sql.NullInt64{}, "", ErrBadPolicy
+	action, err = storedOnExpiry(onExpiry)
+	if err != nil {
+		return sql.NullInt64{}, sql.NullInt64{}, "", err
 	}
 	if expireSeconds > 0 {
 		expiresAt = sql.NullInt64{Int64: now + expireSeconds, Valid: true}
@@ -155,6 +149,22 @@ func resolvePolicy(vis api.Visibility, expireSeconds, maxReads int64, onExpiry a
 		max = sql.NullInt64{Int64: maxReads, Valid: true}
 	}
 	return expiresAt, max, action, nil
+}
+
+// storedOnExpiry maps a requested end-of-life action to the on_expiry column value, and
+// is the only place that mapping lives: the response echo goes through it too, so the
+// server can never promise one action and store another. An absent action is reclaim:
+// that is what every client written before the field existed meant, and what the server
+// did for them. An unknown action is a client bug.
+func storedOnExpiry(onExpiry api.OnExpiry) (string, error) {
+	switch onExpiry {
+	case "", api.ExpiryReclaim:
+		return string(api.ExpiryReclaim), nil
+	case api.ExpiryRetire:
+		return string(api.ExpiryRetire), nil
+	default:
+		return "", ErrBadPolicy
+	}
 }
 
 // queryer is the read subset shared by *sql.DB and *sql.Tx, so a query helper runs
