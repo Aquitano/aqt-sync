@@ -227,7 +227,12 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 		if err != nil {
 			return fail(err)
 		}
-		if _, err := tx.Exec(`UPDATE resources SET wrapped_key = ? WHERE id = ? AND owner_handle = ?`, string(b), m.ID, owner); err != nil {
+		// The version bump is what makes rotation atomic against in-flight resource
+		// writes: every write path (resource update, snapshot create) predicates its
+		// commit on the version it read, so a request that authenticated before this
+		// transaction but commits after it loses with ErrVersionConflict instead of
+		// pinning a wrapped_key sealed under the root this rotation destroys.
+		if _, err := tx.Exec(`UPDATE resources SET wrapped_key = ?, version = version + 1, updated_at = unixepoch() WHERE id = ? AND owner_handle = ?`, string(b), m.ID, owner); err != nil {
 			return fail(err)
 		}
 	}
