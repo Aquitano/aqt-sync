@@ -83,7 +83,7 @@ func TestInfoCatRm(t *testing.T) {
 	}
 }
 
-// TestRmSnapshotSemantics covers 1.5: a plain rm leaves the resource's snapshots
+// TestRmSnapshotSemantics checks that a plain rm leaves the resource's snapshots
 // pinning its ciphertext (still fetchable), while --with-snapshots cascades the delete
 // so nothing keeps the data alive.
 func TestRmSnapshotSemantics(t *testing.T) {

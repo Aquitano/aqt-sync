@@ -351,7 +351,6 @@ func TestDeriveAuthVerifier(t *testing.T) {
 	if len(v1) != KeySize {
 		t.Fatalf("verifier length = %d, want %d", len(v1), KeySize)
 	}
-	// Deterministic for the same unlock key, distinct for a different one.
 	if !bytes.Equal(v1, DeriveAuthVerifier(uk)) {
 		t.Fatal("verifier must be deterministic for a given unlock key")
 	}

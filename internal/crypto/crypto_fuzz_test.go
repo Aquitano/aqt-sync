@@ -31,8 +31,8 @@ func FuzzDecodeFragment(f *testing.F) {
 
 // FuzzFragmentRoundTrip pins the public fragment codec: any 32-byte key encodes to a
 // fragment that decodes back to the same key. Only the public (empty-password) path is
-// round-tripped; the gated path calibrates fresh Argon2id params on every encode, which
-// is too slow to fuzz.
+// round-tripped; the gated path runs the full 256 MiB Argon2id profile on every
+// encode, which is too slow to fuzz.
 func FuzzFragmentRoundTrip(f *testing.F) {
 	f.Add(make([]byte, KeySize))
 	seed := make([]byte, KeySize)

@@ -106,8 +106,8 @@ const (
 // passwords are typically weaker than account passphrases, so the gate is tuned
 // deliberately higher than the interactive account-unlock profile.
 //
-// Vars, not consts, only so crypto_test.go can shrink them for the fragment
-// round-trip tests, which drive this profile through EncodeFragment three times;
+// Vars, not consts, only so crypto_test.go can shrink them for the gated
+// round-trip test, which would otherwise pay three 256 MiB derivations;
 // nothing outside a test assigns to them.
 var (
 	gatedTime    uint32 = 4

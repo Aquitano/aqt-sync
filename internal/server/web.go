@@ -127,8 +127,8 @@ func shareURL(c *gin.Context, id string) string {
 	return scheme + "://" + c.Request.Host + "/x/" + id
 }
 
-// Small static pages share the visual language of the share page: cream paper,
-// dot grid, mono labels, a dashed frame with square corner marks.
+// Small static pages share the visual language of webassets/share.html; keep the
+// palette and frame in step with it.
 const staticPageShell = `<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

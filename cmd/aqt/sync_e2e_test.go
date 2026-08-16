@@ -611,7 +611,7 @@ func TestPackSourceMissingObjectIsNotFound(t *testing.T) {
 	}
 }
 
-// TestSyncDedupHoldsOnResync covers the Phase 1 acceptance: a re-sync with no local
+// TestSyncDedupHoldsOnResync checks that a re-sync with no local
 // changes uploads no new packs (the have/want gate dedups), and a clone reconstructs
 // the chunked content byte-for-byte from the packs.
 func TestSyncDedupHoldsOnResync(t *testing.T) {
@@ -642,7 +642,7 @@ func TestSyncDedupHoldsOnResync(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
-// TestSyncRefusesMissingBase covers C7: a sync with no base must refuse rather
+// TestSyncRefusesMissingBase checks that a sync with no base must refuse rather
 // than reconcile against an empty base (which resurrects deletions), and
 // --reconcile must surface one-sided differences as conflicts.
 func TestSyncRefusesMissingBase(t *testing.T) {

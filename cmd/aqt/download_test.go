@@ -218,7 +218,7 @@ func TestForgetLocationsKeepsFetchedSpans(t *testing.T) {
 	}
 }
 
-// TestPackSourceSpanSplitting checks 3.5: needed objects close together share one span
+// TestPackSourceSpanSplitting checks that needed objects close together share one span
 // (one range), but a gap wider than spanSplitGap opens a new span so the dead bytes
 // between them are never downloaded.
 func TestPackSourceSpanSplitting(t *testing.T) {

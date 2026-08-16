@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// TestSyncEmptyDirsAndModes covers the Phase 4 first-class-directory behavior: an
+// TestSyncEmptyDirsAndModes covers first-class-directory behavior: an
 // explicitly empty directory round-trips through clone and pull, a directory mode
 // propagates, and removing an empty directory propagates as a removal.
 func TestSyncEmptyDirsAndModes(t *testing.T) {
@@ -64,7 +64,7 @@ func TestSyncEmptyDirsAndModes(t *testing.T) {
 	assertAbsent(t, replica, "later")
 }
 
-// TestSyncDirModeConflictSurfaces verifies the Phase 4 behavior change: a directory whose
+// TestSyncDirModeConflictSurfaces verifies that a directory whose
 // mode diverged on both sides since the last sync is surfaced as a conflict (like a file
 // conflict) rather than silently resolving local-wins, so a plain sync aborts and --force
 // is required to take local.
@@ -111,7 +111,7 @@ func TestSyncDirModeConflictSurfaces(t *testing.T) {
 	}
 }
 
-// TestSyncSubtreeDedupOnMove covers the Phase 4 headline: moving a whole directory
+// TestSyncSubtreeDedupOnMove checks that moving a whole directory
 // re-uploads no file-content packs, because the file chunks and the subtree's
 // directory node are content-addressed and already on the server. Only the new root
 // node (its child was renamed) is uploaded, so the pack count grows by at most one.

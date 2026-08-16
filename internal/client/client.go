@@ -526,7 +526,7 @@ func (c *Client) LocateChunks(ids []string) ([]api.ObjectLocation, error) {
 // the server's per-pack body cap (an object slice is a sub-range of one pack).
 const maxPublicFrame = 32 << 20
 
-// maxResponseBytes bounds any single buffered response body (do's io.ReadAll):
+// maxResponseBytes bounds any single buffered response body (send's io.ReadAll):
 // the largest legitimate bodies are pack ranges and root blobs, both bounded by
 // api.MaxPackBytes, so 256 MiB is generous headroom rather than a tight fit.
 const maxResponseBytes = 256 << 20
@@ -794,9 +794,7 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
 		}
 		// Bounded against the client's own hostile-server posture: a server that
-		// streams forever must not buffer unbounded memory here. The cap leaves
-		// generous headroom over the largest legitimate body (a pack range or a
-		// root blob, both bounded by api.MaxPackBytes).
+		// streams forever must not buffer unbounded memory here.
 		data, readErr := io.ReadAll(io.LimitReader(&progressBody{rc: resp.Body, touch: guard.touch}, maxResponseBytes+1))
 		resp.Body.Close()
 		if readErr == nil && len(data) > maxResponseBytes {
@@ -987,7 +985,6 @@ func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
 		return nil, err
 	}
 	if status == http.StatusOK {
-		// The server ignored the Range and sent the whole body; cut out the window.
 		if off < 0 || off > int64(len(data)) {
 			return nil, fmt.Errorf("range start %d beyond %s length %d", off, path, len(data))
 		}

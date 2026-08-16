@@ -28,7 +28,6 @@ func TestSyncLockExcludesConcurrent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	// Another live process must still be excluded; the pid file is what enforces it.
 	if _, err := acquirePIDFile(lockPath, func(int) error { return errLockBusy }); err == nil {
 		t.Fatal("expected a second process to be excluded while the lock is held")
 	}

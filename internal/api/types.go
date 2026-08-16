@@ -41,7 +41,7 @@ type Metadata struct {
 	// parses. Recover the data with an aqt release that still reads the format.
 	Packed bool `json:"packed,omitempty"`
 	// Tree marks a chunked folder whose blob is a sealed TreeRoot over a Merkle DAG of
-	// directory nodes (Phase 4), so a moved/copied subtree dedups and a diff can skip
+	// directory nodes, so a moved/copied subtree dedups and a diff can skip
 	// unchanged subtrees. A chunked folder created by a current client always sets it.
 	Tree bool `json:"tree,omitempty"`
 }
@@ -299,6 +299,7 @@ type DeleteAccountResponse struct {
 // This is an in-process type: on the wire it travels as the raw envelope in
 // wire.go (JSON header + ciphertext), never as JSON, so the blob pays no base64
 // tax.
+//
 // MinClient declares the lowest client capability that can read the sealed formats
 // this write stores (Capability* constants). A create/update leaves it 0 for a
 // baseline (v1) write; a server treats 0 as CapabilityBaseline and never lets a

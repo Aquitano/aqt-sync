@@ -28,9 +28,6 @@ func TestCaseCollisions(t *testing.T) {
 	}
 }
 
-// A tar carrying case-twins must be refused before the second write on a
-// case-folding destination, naming both paths — extracting it would collapse the
-// pair into one file with whichever content streamed last.
 func TestKeepUnsupportedLinks(t *testing.T) {
 	base := &Manifest{Entries: []Entry{
 		{Path: "link", Link: "target", Hash: linkHash("target")},
@@ -52,6 +49,3 @@ func TestKeepUnsupportedLinks(t *testing.T) {
 		t.Fatalf("deleted link resurrected on a capable filesystem: %v", m.Entries)
 	}
 }
-
-// The extract records a link it cannot write as skipped-but-present, so the
-// caller's base keeps it and the next scan does not read absence as a delete.
