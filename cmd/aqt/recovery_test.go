@@ -3,8 +3,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -30,6 +32,24 @@ func TestExhaustedRateLimitExitsRetryable(t *testing.T) {
 	}
 	if got := exitCode(client.ErrRateLimited); got != 5 {
 		t.Errorf("exitCode(ErrRateLimited) = %d, want 5", got)
+	}
+}
+
+// A ^C surfaces as a *url.Error wrapping context.Canceled, which satisfies
+// isNetworkError — without the dedicated case it would exit 5 and cron would
+// re-run a command the user deliberately killed. A stall is the opposite: the
+// link wedged, which IS the retryable family, not a generic 1.
+func TestCancelAndStallExitCodes(t *testing.T) {
+	canceled := &url.Error{Op: "Put", URL: "https://example.test/v1/packs/x", Err: context.Canceled}
+	if got := exitCode(fmt.Errorf("request PUT /v1/packs/x: %w", canceled)); got != 130 {
+		t.Errorf("exitCode(canceled request) = %d, want 130", got)
+	}
+	if msg := explainError(canceled).Error(); msg != "interrupted" {
+		t.Errorf("explainError(canceled) = %q, want %q", msg, "interrupted")
+	}
+	stalled := fmt.Errorf("request GET /v1/packs/x: %w", client.ErrStalled)
+	if got := exitCode(stalled); got != 5 {
+		t.Errorf("exitCode(stalled) = %d, want 5", got)
 	}
 }
 

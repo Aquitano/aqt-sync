@@ -49,12 +49,14 @@ path inside it cannot be told apart in `<folder>/<path>`.
 | `1` | generic failure |
 | `3` | auth required, or the session is locked |
 | `4` | sync conflict |
-| `5` | network, including a rate limit that outlasted the client's retry budget |
+| `5` | network, including a stalled transfer and a rate limit that outlasted the client's retry budget |
 | `6` | upgrade required — the remote resource is sealed in a format this build cannot read |
 | `7` | link gone — the public link expired or reached its read limit |
 | `75` | deferred — `watch --once` skipped because git was busy |
+| `130` | interrupted — the command was killed by ^C/SIGTERM, which also aborts any in-flight transfer |
 
-`5` and `75` are temporary by construction, so cron retries rather than giving up.
+`5` and `75` are temporary by construction, so cron retries rather than giving up;
+`130` is deliberate, so cron must not.
 The `6` message names the command that upgrades *this* install; see
 [`compatibility.md`](compatibility.md#recovering-from-a-426).
 

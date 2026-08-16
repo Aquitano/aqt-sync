@@ -3,6 +3,8 @@
 package client
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -32,8 +34,13 @@ func TestStallGuard(t *testing.T) {
 		}
 		start := time.Now()
 		_, err = cl.GetPackRange("pack", 0, 4)
-		if err == nil || !strings.Contains(err.Error(), "transfer stalled") {
-			t.Fatalf("err = %v, want transfer stalled", err)
+		if !errors.Is(err, ErrStalled) {
+			t.Fatalf("err = %v, want ErrStalled", err)
+		}
+		// A stall is the guard's decision, not the user's; the two must never
+		// read as each other (cancel maps to exit 130, stall to retryable 5).
+		if errors.Is(err, context.Canceled) {
+			t.Fatalf("a stall surfaced as a user cancel: %v", err)
 		}
 		if elapsed := time.Since(start); elapsed > 5*time.Second {
 			t.Fatalf("abort took %s, guard did not fire", elapsed)
@@ -56,8 +63,8 @@ func TestStallGuard(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, err = cl.GetPackRange("pack", 0, 16)
-		if err == nil || !strings.Contains(err.Error(), "transfer stalled") {
-			t.Fatalf("err = %v, want transfer stalled", err)
+		if !errors.Is(err, ErrStalled) {
+			t.Fatalf("err = %v, want ErrStalled", err)
 		}
 	})
 

@@ -444,7 +444,7 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	if err != nil {
 		return nil
 	}
-	cl, err := client.New(prof.Server, prof.Token)
+	cl, err := newBoundClient(prof.Server, prof.Token)
 	if err != nil {
 		return nil
 	}
@@ -1852,7 +1852,9 @@ func syncTransferLimit(n int) int {
 }
 
 func newPackUploader(cl *client.Client, prog *progressBar) *packUploader {
-	g, ctx := errgroup.WithContext(context.Background())
+	// Parented on the root signal context so a ^C stops queued uploads from
+	// dispatching, not just the in-flight requests the bound client kills itself.
+	g, ctx := errgroup.WithContext(rootCtx)
 	g.SetLimit(syncTransferLimit(uploadConcurrency))
 	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}, group: g, ctx: ctx, prog: prog}
 }

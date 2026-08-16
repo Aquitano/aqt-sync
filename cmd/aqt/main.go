@@ -5,6 +5,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,8 +13,10 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/atotto/clipboard"
@@ -65,7 +68,25 @@ var (
 	flagProgress bool
 )
 
+// rootCtx is canceled on SIGINT/SIGTERM and parents every server request (each
+// client is bound to it at construction), so ^C aborts an in-flight transfer —
+// including its retry and rate-limit waits — instead of letting it run out the
+// stall clock. A package variable like the global flags above: one process, one
+// command, one root context. Tests run commands without main(), so the default
+// keeps them uncancellable.
+var rootCtx context.Context = context.Background()
+
 func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	rootCtx = ctx
+	go func() {
+		// After the first signal starts a graceful abort, restore default handling
+		// so a second ^C kills a process that is wedged in cleanup.
+		<-ctx.Done()
+		stop()
+	}()
+
 	root := rootCmd()
 	root.SetArgs(rootArgs(root, os.Args))
 	cmd, err := root.ExecuteC()
@@ -167,6 +188,11 @@ func explainError(err error) error {
 	if errors.As(err, &upgrade) {
 		return errors.New(upgradeGuidance(upgrade, detectedInstall()))
 	}
+	// A ^C mid-transfer otherwise prints transport plumbing ("request PUT
+	// /v1/packs/…: context canceled") for something the user did on purpose.
+	if errors.Is(err, context.Canceled) {
+		return errors.New("interrupted")
+	}
 	return err
 }
 
@@ -207,13 +233,19 @@ func upgradeGuidance(e *client.UpgradeRequiredError, install update.Install) str
 
 // exitCode maps an error to the documented CLI contract (docs/cli.md):
 // 0 ok · 1 generic · 3 auth/locked · 4 sync conflict · 5 network · 6 upgrade
-// required · 7 link gone (expired/exhausted). Scripts and cron (`--once`) use it to
-// tell a retryable network blip from re-login from a conflict needing resolution from a
-// client too old to read the remote from a link that has expired.
+// required · 7 link gone (expired/exhausted) · 130 interrupted. Scripts and cron
+// (`--once`) use it to tell a retryable network blip from re-login from a conflict
+// needing resolution from a client too old to read the remote from a link that has
+// expired.
 func exitCode(err error) int {
 	switch {
 	case err == nil:
 		return 0
+	// Checked before the network case: a canceled request surfaces as a *url.Error
+	// wrapping context.Canceled, which would otherwise read as a retryable blip and
+	// make cron re-run a command the user deliberately killed.
+	case errors.Is(err, context.Canceled):
+		return 130
 	case errors.Is(err, identity.ErrNoProfile), errors.Is(err, errSessionRequired):
 		return 3
 	case errors.Is(err, errConflictsRemain), errors.Is(err, errSyncRace), errors.Is(err, client.ErrConflict),
@@ -221,8 +253,9 @@ func exitCode(err error) int {
 		return 4
 	// Exhausted rate limiting is temporary by definition, so it maps to the
 	// retryable network code: cron and `watch --once` must treat a throttled run as
-	// "try again later", not as a permanent failure.
-	case isNetworkError(err), errors.Is(err, client.ErrRateLimited):
+	// "try again later", not as a permanent failure. A stalled transfer is the same
+	// family — a link that wedged, worth retrying — not a generic failure.
+	case isNetworkError(err), errors.Is(err, client.ErrRateLimited), errors.Is(err, client.ErrStalled):
 		return 5
 	case errors.Is(err, client.ErrUpgradeRequired):
 		return 6
@@ -404,12 +437,23 @@ func loadProfileOptional() *identity.Profile {
 	return p
 }
 
+// newBoundClient is client.New bound to the process's root signal context, so a
+// ^C reaches every request the client sends. All CLI client construction goes
+// through here.
+func newBoundClient(server, token string) (*client.Client, error) {
+	c, err := client.New(server, token)
+	if err != nil {
+		return nil, err
+	}
+	return c.WithContext(rootCtx), nil
+}
+
 func authedClient() (*client.Client, *identity.Profile, error) {
 	p, err := loadProfile()
 	if err != nil {
 		return nil, nil, err
 	}
-	c, err := client.New(p.Server, p.Token)
+	c, err := newBoundClient(p.Server, p.Token)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -459,7 +503,7 @@ func newLinkClient(origin string, prof *identity.Profile) (*client.Client, error
 	if own && prof != nil {
 		token = prof.Token
 	}
-	return client.New(server, token)
+	return newBoundClient(server, token)
 }
 
 // sameServer compares two server URLs ignoring a trailing slash. A mismatch only
