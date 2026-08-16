@@ -115,7 +115,8 @@ POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxRead
                                      Used by `share`/`unshare`; rotation just replaces the blob. Echoes the
                                      accepted policy; a private flip clears it.
 DELETE /v1/resources/:id
-GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility + minClient).
+GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility + minClient +
+                                     grantCount, so `share ls` skips grant fetches for ungranted resources).
                                      Never 426s (see the capability header above). Paginated
                                      (?limit=, ?cursor=) → { resources, nextCursor? }; see pagination below.
 PUT    /v1/resources/:id/metadata    Replace only the sealed metadata (a rename), leaving the blob

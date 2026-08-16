@@ -66,6 +66,89 @@ func TestListResourcesPaginationWalksAllPages(t *testing.T) {
 	}
 }
 
+// TestListResourcesReportsGrantCount covers the per-row grant count the list
+// echoes so `share ls` can skip grant fetches: zero for an ungranted resource
+// (present, not nil — absent means an older server), the live count for a
+// granted one, and the count shrinking on revocation.
+func TestListResourcesReportsGrantCount(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "grantcount@example.com")
+	plain := s.rootResource(t, owner, nil)
+	shared := s.rootResource(t, owner, nil)
+	for _, grantee := range []string{"g1", "g2"} {
+		if err := s.PutGrant(owner, shared, grantee, []byte("wrap")); err != nil {
+			t.Fatalf("put grant %s: %v", grantee, err)
+		}
+	}
+
+	counts := func() map[string]int {
+		items, _, err := s.ListResources(owner, pageParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]int{}
+		for _, it := range items {
+			if it.GrantCount == nil {
+				t.Fatalf("resource %s has no grant count; nil is reserved for servers predating the field", it.ID)
+			}
+			got[it.ID] = *it.GrantCount
+		}
+		return got
+	}
+	if got := counts(); got[plain] != 0 || got[shared] != 2 {
+		t.Fatalf("counts = %v, want %s=0 %s=2", got, plain, shared)
+	}
+	if err := s.DeleteGrant(owner, shared, "g1"); err != nil {
+		t.Fatalf("delete grant: %v", err)
+	}
+	if got := counts(); got[shared] != 1 {
+		t.Fatalf("count after revoke = %d, want 1", got[shared])
+	}
+}
+
+// TestListResourceGrantsPaginationWalksAllPages covers the grant-list walk:
+// every grantee returned exactly once across bounded pages, terminating cursor.
+func TestListResourceGrantsPaginationWalksAllPages(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "grantpage@example.com")
+	id := s.rootResource(t, owner, nil)
+	const total = 5
+	for i := 0; i < total; i++ {
+		if err := s.PutGrant(owner, id, fmt.Sprintf("grantee-%d", i), []byte("wrap")); err != nil {
+			t.Fatalf("put grant %d: %v", i, err)
+		}
+	}
+
+	seen := map[string]bool{}
+	cursor := ""
+	pages := 0
+	for {
+		page, next, err := s.ListResourceGrants(owner, id, pageParams{limit: 2, cursor: cursor})
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		pages++
+		if len(page) > 2 {
+			t.Fatalf("page %d returned %d grants, over the limit", pages, len(page))
+		}
+		for _, g := range page {
+			if seen[g.GranteeHandle] {
+				t.Fatalf("duplicate grantee %s across pages", g.GranteeHandle)
+			}
+			seen[g.GranteeHandle] = true
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != total || pages != 3 { // 2 + 2 + 1
+		t.Fatalf("grantees = %d pages = %d, want %d grantees over 3 pages", len(seen), pages, total)
+	}
+}
+
 // TestListResourcesExactBoundary covers the boundary case: when the total is an exact
 // multiple of the limit, the last full page must not be followed by a phantom empty page.
 func TestListResourcesExactBoundary(t *testing.T) {

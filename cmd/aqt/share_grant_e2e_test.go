@@ -80,6 +80,46 @@ func asProfile(name string, fn func()) {
 	fn()
 }
 
+// share ls fetches a resource's grants only when the server-echoed grant count
+// says there are any: a private, ungranted resource used to cost one /grants
+// round-trip per resource just to be skipped.
+func TestShareLsFetchesGrantsOnlyWhereTheyExist(t *testing.T) {
+	var grantGets atomic.Int64
+	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/grants") {
+			grantGets.Add(1)
+		}
+		pass(w, r)
+	})
+	grantSignup(t, h, "count-grantee@example.com", "count-grantee", "another passphrase")
+
+	private := pushSecretFile(t, "private.txt", "p")
+	public := pushSecretFile(t, "public.txt", "pub")
+	granted := pushSecretFile(t, "granted.txt", "g")
+	if err := runShare(public, "", true, linkPolicy{}); err != nil {
+		t.Fatalf("share public: %v", err)
+	}
+	if err := runShareWith(granted, "count-grantee@example.com"); err != nil {
+		t.Fatalf("share --with: %v", err)
+	}
+
+	grantGets.Store(0)
+	out := captureStdout(t, func() {
+		if err := runShareList(""); err != nil {
+			t.Fatalf("share ls: %v", err)
+		}
+	})
+	if strings.Contains(out, private) {
+		t.Fatalf("share ls lists the private, ungranted resource:\n%s", out)
+	}
+	if !strings.Contains(out, public) || !strings.Contains(out, granted) {
+		t.Fatalf("share ls misses a shared resource:\n%s", out)
+	}
+	if got := grantGets.Load(); got != 1 {
+		t.Fatalf("share ls made %d grant fetches, want exactly 1 (the granted resource)", got)
+	}
+}
+
 // pushSecretFile pushes one inline file as the current profile and returns its id.
 func pushSecretFile(t *testing.T, name, content string) string {
 	t.Helper()
