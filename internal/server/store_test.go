@@ -28,7 +28,7 @@ import (
 // not have to wait out gcMinAge to collect a just-uploaded pack.
 const forceGC = -time.Hour
 
-func newStore(t *testing.T) *Store {
+func newStore(t testing.TB) *Store {
 	t.Helper()
 	s, err := OpenStore(t.TempDir())
 	if err != nil {
@@ -67,7 +67,7 @@ func packOf(payloads ...string) (packID string, pack []byte, ids []string) {
 	return objID(pack), pack, ids
 }
 
-func (s *Store) mustAccount(t *testing.T, email string) string {
+func (s *Store) mustAccount(t testing.TB, email string) string {
 	t.Helper()
 	kdf := cryptotest.KdfParams(t)
 	acc, err := s.CreateAccount(email, kdf, make([]byte, 32), crypto.SealedBlob{Nonce: make([]byte, 1), Ciphertext: make([]byte, 1)}, make([]byte, 32), nil, nil)

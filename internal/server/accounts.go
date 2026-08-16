@@ -546,21 +546,22 @@ func (s *Store) ResourceStoredBytes(owner, id string) (int64, error) {
 	return info.Size() + int64(len(nonce)) + metaLen + wrappedLen + 256, nil
 }
 
-// ResourceCreateReplayed reports whether req's Idempotency-Key already names a
-// completed create of this resource. A replay stores nothing new, so charging it
-// against the quota would answer 507 for a resource that exists — defeating the
-// retry the key exists for.
-func (s *Store) ResourceCreateReplayed(owner string, req api.PutResourceRequest) bool {
+// ResourceCreateKeyRecorded reports whether req's Idempotency-Key was already
+// recorded for a create. A replay stores nothing new, so charging it against the
+// quota would answer 507 for a resource that exists — defeating the retry the key
+// exists for. The probe deliberately checks only key existence, not the payload
+// digest: a recorded key with a different payload fails with ErrIdempotencyConflict
+// inside PutResource and stores nothing either, so skipping the quota check is
+// safe there too — and the probe stays a point query instead of hashing the
+// complete request (blob included).
+func (s *Store) ResourceCreateKeyRecorded(owner string, req api.PutResourceRequest) bool {
 	if req.IdempotencyKey == "" || req.ID != "" {
 		return false
 	}
-	digest, err := idempotencyDigest(req)
-	if err != nil {
-		return false
-	}
-	var prior api.PutResourceResponse
-	found, err := lookupIdempotency(s.rdb, owner, "resource.create", req.IdempotencyKey, digest, &prior)
-	return err == nil && found
+	var one int
+	err := s.rdb.QueryRow(`SELECT 1 FROM idempotency_keys WHERE owner_handle = ? AND kind = ? AND key = ?`,
+		owner, "resource.create", req.IdempotencyKey).Scan(&one)
+	return err == nil
 }
 
 // ownerBlobBytes totals the resource and snapshot blob bytes an account holds.
