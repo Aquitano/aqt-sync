@@ -65,7 +65,7 @@ manifest promised; every failure puts it back.`,
 			return runUpdate(opts)
 		},
 	}
-	cmd.Flags().BoolVar(&opts.checkOnly, "check", false, "report what is available and make no changes")
+	cmd.Flags().BoolVar(&opts.checkOnly, "check", false, "report what is available without installing anything")
 	cmd.Flags().BoolVar(&opts.prerelease, "prerelease", false, "use the beta channel, which includes prereleases")
 	cmd.Flags().BoolVarP(&opts.assumeYes, "yes", "y", false, "install without asking for confirmation")
 	cmd.Flags().BoolVar(&opts.acceptRollback, "accept-rollback", false, "accept a release older than the newest one this machine has authenticated (after an upstream retraction)")
