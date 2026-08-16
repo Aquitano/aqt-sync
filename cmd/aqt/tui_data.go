@@ -44,7 +44,11 @@ type tuiUnlockResultMsg struct {
 type tuiLocalMsg struct {
 	changes   changeSet
 	conflicts []string
-	err       error
+	// torn reports an interrupted pack pull: the tree is part remote and part
+	// stale, so the changes above are not ordinary local edits. The CLI's status
+	// says so; the TUI must too.
+	torn pullMarker
+	err  error
 }
 
 // tuiRemoteMsg is the server half: version freshness plus, when the folder key
@@ -144,7 +148,11 @@ func (c *tuiCtx) localStatusCmd() tea.Cmd {
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
-		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts}
+		torn, err := loadPullMarker(root)
+		if err != nil {
+			return tuiLocalMsg{err: err}
+		}
+		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts, torn: torn}
 	}
 }
 
@@ -188,10 +196,13 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 			base, berr := loadBase(ctx.root)
 			if berr == nil {
 				if inc, ierr := incomingFiles(ctx.cl, res, base, ctx.mk); ierr == nil {
-					return tuiRemoteMsg{
-						incoming: inc, fileLevel: true,
-						note: fmt.Sprintf("incoming: %d change(s) to pull", inc.total()),
+					note := fmt.Sprintf("incoming: %d change(s) to pull", inc.total())
+					if inc.total() == 0 {
+						// A version-only delta (a policy change, a key rotation bump)
+						// carries no entries; "0 change(s) to pull" reads as drift.
+						note = "up to date with the server (metadata-only change)"
 					}
+					return tuiRemoteMsg{incoming: inc, fileLevel: true, note: note}
 				}
 			}
 		}

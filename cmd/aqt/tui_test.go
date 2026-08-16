@@ -206,10 +206,27 @@ func TestTUIExecArgsCarryGlobalFlags(t *testing.T) {
 func TestTUIExitNotes(t *testing.T) {
 	for exit, frag := range map[int]string{
 		0: "done", 3: "session", 4: "conflict", 5: "network", 6: "upgrade", 7: "gone", 9: "exit 9",
+		exitDeferred: "deferred",
 	} {
 		if note := tuiExitNote(exit); !strings.Contains(note, frag) {
 			t.Errorf("exit %d note %q missing %q", exit, note, frag)
 		}
+	}
+}
+
+// A torn tree (interrupted pack pull) outranks every other verdict: the local
+// change counts are not the user's edits, and the CLI's status says so too.
+func TestTUIStatusVerdictTornPull(t *testing.T) {
+	m := testModel(t)
+	m.local = testChanges([]string{"a"}, nil)
+	m.conflicts = []string{"x.conflict-h-1"}
+	m.torn = pullMarker{Version: 7, present: true}
+	txt, style := m.statusVerdict()
+	if !strings.Contains(txt, "interrupted pull") || !strings.Contains(txt, "7") {
+		t.Fatalf("torn verdict = %q", txt)
+	}
+	if style.GetForeground() != tuiStyleErr.GetForeground() {
+		t.Fatal("torn verdict not error-styled")
 	}
 }
 

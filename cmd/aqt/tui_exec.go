@@ -200,6 +200,8 @@ func tuiExitNote(exit int) string {
 			api.ClientCapability, upgradeAction(detectedInstall()))
 	case 7:
 		return "link gone — expired or read limit reached"
+	case exitDeferred:
+		return "deferred — a git operation is in progress; retry when it finishes"
 	default:
 		return fmt.Sprintf("failed (exit %d)", exit)
 	}

@@ -70,6 +70,7 @@ type tuiModel struct {
 	folderID  string
 	local     changeSet
 	conflicts []string
+	torn      pullMarker // an interrupted pack pull left the tree part remote, part stale
 	remote    tuiRemoteMsg
 	remoteOK  bool
 	resources []lsRow
@@ -257,7 +258,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.panels[tuiPanelFiles].loading = false
 		m.panels[tuiPanelFiles].err = msg.err
 		if msg.err == nil {
-			m.local, m.conflicts = msg.changes, msg.conflicts
+			m.local, m.conflicts, m.torn = msg.changes, msg.conflicts, msg.torn
 		}
 		m.retireComparison()
 		m.rebuildFilesPanel()
@@ -401,6 +402,12 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			note = tuiExitNote(msg.exit)
 			m.appendLog(tuiStyleAdd.Render("✓ "+note) + elapsed)
 			toast = m.toastStyled(note, tuiStyleAdd)
+		case msg.exit == exitDeferred:
+			// EX_TEMPFAIL is a deliberate deferral (a git operation held the sync
+			// back), not a failure; a red ✗ would tell the user something broke.
+			note = tuiExitNote(msg.exit)
+			m.appendLog(tuiStyleDim.Render("○ "+note) + elapsed)
+			toast = m.toastStyled(note, tuiStyleDim)
 		default:
 			note = tuiExitNote(msg.exit)
 			// A failure to even start the child (bad exe, fork failure) reports no
@@ -1184,6 +1191,13 @@ func (m *tuiModel) statusVerdict() (string, lipgloss.Style) {
 	// any note other than the up-to-date one means the server holds more.
 	coarseAhead := m.remoteOK && m.remote.err == nil && !m.remote.stale &&
 		!m.remote.fileLevel && m.remote.note != "up to date with the server"
+
+	// A torn tree outranks everything: half of it is already the remote's, so the
+	// local-change counts below are not the user's edits (the CLI's status makes
+	// the same call).
+	if m.torn.present {
+		return fmt.Sprintf("! interrupted pull (version %d) — sync to finish it", m.torn.Version), tuiStyleErr
+	}
 
 	if conflictN > 0 {
 		noun := "conflict copies"
