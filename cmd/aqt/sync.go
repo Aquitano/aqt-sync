@@ -631,8 +631,10 @@ var (
 	// re-uploads, no dedup, a parallel branch through sync/clone/share/diff — was
 	// not worth its narrow structure-hiding benefit.
 	errPackRemoved = errors.New("pack-and-seal folders are no longer supported: " +
-		"recover the data by cloning with an aqt release that still reads them (v0.5.x or earlier), " +
-		"remove \"pack\": true from .aqtconfig, and push the tree again as a normal chunked folder")
+		"if only .aqtconfig carries a stale \"pack\": true (the folder itself is chunked), removing that " +
+		"line is the whole fix; if the resource is actually packed, recover the data by cloning it with " +
+		"an aqt release that still reads the format (v0.5.x or earlier) and pushing the tree again as a " +
+		"normal chunked folder")
 	errSyncRace = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
 )
 

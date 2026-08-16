@@ -63,9 +63,11 @@ All notable changes to this project are documented in this file.
   the entire folder on every change, deduplicated nothing, resolved conflicts
   whole-folder last-writer-wins, and carried a parallel branch through sync, clone,
   sharing, diff, and recovery. A packed resource — or a stale `pack: true` config —
-  is now refused with recovery guidance: clone with an aqt release that still reads
-  the format (v0.5.x or earlier), drop the setting, and push the tree again as a
-  normal chunked folder. This also retires the unsafe baseless resume of a torn
+  is now refused with recovery guidance. The two states differ: a stale
+  `pack: true` on a folder that is actually chunked just needs the line removed,
+  while a genuinely packed resource needs a one-time export — clone it with an aqt
+  release that still reads the format (v0.5.x or earlier) and push the tree again
+  as a normal chunked folder. This also retires the unsafe baseless resume of a torn
   pack pull (#176): the path no longer exists, and a leftover
   `.aqt/pull-in-progress` marker from an older build still keeps `status` and
   `diff` from misreading the torn tree as local edits.

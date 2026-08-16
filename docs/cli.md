@@ -192,9 +192,10 @@ An interrupted pack-and-seal pull from an older release leaves
 `.aqt/pull-in-progress` behind, and the working tree holds part of the new version
 and part of the old. The format itself was removed, so a current build refuses to
 sync such a folder; `status` still warns (`--json` adds an `interruptedPull`
-object) so the half-applied version is not mistaken for local edits. Recover with
-an aqt release that still reads the format (v0.5.x or earlier), or restore the tree
-from a snapshot.
+object) so the half-applied version is not mistaken for local edits. Recovery
+needs an aqt release that still reads the format (v0.5.x or earlier) — finish the
+pull there, or restore from a snapshot with it; a current build cannot reconstruct
+a packed resource's snapshots either, so `aqt restore` is not a way out here.
 
 ## Encrypted Git remotes
 

@@ -33,5 +33,9 @@ func TestPartitionDeletesByDownload(t *testing.T) {
 		if !wantLate[p] {
 			t.Errorf("unexpected late delete %q", p)
 		}
+		delete(wantLate, p)
+	}
+	if len(wantLate) != 0 {
+		t.Errorf("missing late deletes: %v", wantLate)
 	}
 }
