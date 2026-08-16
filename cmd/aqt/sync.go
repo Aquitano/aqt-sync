@@ -1911,7 +1911,16 @@ func (u *packUploader) dispatch() error {
 	u.cand = nil
 	u.candSize = 0
 	if u.ctx.Err() != nil {
-		return u.Wait()
+		// The batch was just detached and is being dropped, so success must not
+		// be reported. A worker failure surfaces through Wait; a root cancel
+		// leaves the group error-free (the context is no longer only canceled by
+		// failing workers, it parents on rootCtx), so the cancellation itself is
+		// the error — returning nil here would let a ^C'd push keep sealing the
+		// rest of the tree and report every dropped pack as uploaded.
+		if err := u.Wait(); err != nil {
+			return err
+		}
+		return context.Cause(u.ctx)
 	}
 	u.group.Go(func() error { return u.upload(batch) })
 	return nil

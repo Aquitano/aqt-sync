@@ -520,12 +520,36 @@ func promptPassphrase(label string) (string, error) {
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
 		fmt.Fprint(os.Stderr, label)
-		b, err := term.ReadPassword(fd)
-		fmt.Fprintln(os.Stderr)
+		state, err := term.GetState(fd)
 		if err != nil {
 			return "", err
 		}
-		return strings.TrimRight(string(b), "\r\n"), nil
+		// term.ReadPassword blocks in a read no context can interrupt (Go's
+		// signal handlers restart syscalls), so a ^C at the prompt would look
+		// hung until a second one killed the process with echo still off. Read
+		// on the side and, on cancel, restore the terminal ourselves; the reader
+		// goroutine stays blocked but the process is about to exit 130.
+		type read struct {
+			b   []byte
+			err error
+		}
+		ch := make(chan read, 1)
+		go func() {
+			b, err := term.ReadPassword(fd)
+			ch <- read{b, err}
+		}()
+		select {
+		case r := <-ch:
+			fmt.Fprintln(os.Stderr)
+			if r.err != nil {
+				return "", r.err
+			}
+			return strings.TrimRight(string(r.b), "\r\n"), nil
+		case <-rootCtx.Done():
+			_ = term.Restore(fd, state)
+			fmt.Fprintln(os.Stderr)
+			return "", context.Canceled
+		}
 	}
 	line, err := stdinReader().ReadString('\n')
 	if err != nil && err != io.EOF {

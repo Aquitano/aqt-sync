@@ -56,7 +56,7 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), update.BackgroundTimeout)
+	ctx, cancel := context.WithTimeout(rootCtx, update.BackgroundTimeout)
 	defer cancel()
 
 	res, checkErr := update.Check(ctx, update.Options{
@@ -110,7 +110,7 @@ func applyInBackground(store update.Store, st *update.State, res update.Result) 
 		return true
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), backgroundApplyTimeout)
+	ctx, cancel := context.WithTimeout(rootCtx, backgroundApplyTimeout)
 	defer cancel()
 
 	applied, err := applyUpdate(ctx, in, res)

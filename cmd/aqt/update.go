@@ -86,7 +86,7 @@ func runUpdate(opts updateOptions) error {
 	if opts.prerelease {
 		ch = update.ChannelBeta
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
+	ctx, cancel := context.WithTimeout(rootCtx, updateCheckTimeout)
 	res, err := update.Check(ctx, update.Options{
 		Build:   update.Build{Version: version, Kind: buildKind},
 		Channel: ch,
@@ -141,7 +141,7 @@ func runUpdate(opts updateOptions) error {
 		return err
 	}
 
-	applied, err := applyUpdate(context.Background(), in, res)
+	applied, err := applyUpdate(rootCtx, in, res)
 	if err != nil {
 		return err
 	}

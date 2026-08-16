@@ -817,7 +817,11 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 		// This is also where a retry serves its own wait.
 		guard.touch()
 		if err := c.cooldown.wait(ctx, guard.touch); err != nil {
-			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, err)
+			// unwrapStall so a guard-fired abort during the park reads as the
+			// stall it is, not as a user cancel (unreachable at today's
+			// constants — a park tops out well under stallTimeout — but the
+			// discrimination must not depend on that arithmetic).
+			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
 		}
 
 		resp, err := c.http.Do(req.WithContext(ctx))
