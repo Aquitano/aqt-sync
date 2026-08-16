@@ -4,6 +4,7 @@ package syncengine
 
 import (
 	"bytes"
+	"io"
 	"testing"
 )
 
@@ -33,6 +34,54 @@ func TestSplitStreamMatchesSplit(t *testing.T) {
 		}
 		if joined := concat(got); !bytes.Equal(joined, data) {
 			t.Fatalf("n=%d stream chunks do not reconstruct input", n)
+		}
+	}
+}
+
+// shortReader hands out at most step bytes per Read, forcing many refills per
+// window. bytes.Reader satisfies each refill in one call, so only this reader
+// exercises the incremental-fill and window-compaction paths.
+type shortReader struct {
+	data []byte
+	step int
+}
+
+func (s *shortReader) Read(p []byte) (int, error) {
+	if len(s.data) == 0 {
+		return 0, io.EOF
+	}
+	n := s.step
+	if n > len(s.data) {
+		n = len(s.data)
+	}
+	if n > len(p) {
+		n = len(p)
+	}
+	copy(p, s.data[:n])
+	s.data = s.data[n:]
+	return n, nil
+}
+
+func TestSplitStreamShortReadsMatchSplit(t *testing.T) {
+	t.Parallel()
+	c := testChunker()
+	data := deterministicData(7, 333333)
+	want := c.Split(data)
+	for _, step := range []int{1, 977, c.Min, c.Max} {
+		var got [][]byte
+		if err := c.SplitStream(&shortReader{data: data, step: step}, func(ch []byte) error {
+			got = append(got, append([]byte(nil), ch...))
+			return nil
+		}); err != nil {
+			t.Fatalf("step=%d SplitStream: %v", step, err)
+		}
+		if len(got) != len(want) {
+			t.Fatalf("step=%d chunk count: stream=%d split=%d", step, len(got), len(want))
+		}
+		for i := range want {
+			if !bytes.Equal(got[i], want[i]) {
+				t.Fatalf("step=%d chunk %d differs between Split and SplitStream", step, i)
+			}
 		}
 	}
 }

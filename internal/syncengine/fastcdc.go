@@ -22,15 +22,7 @@ type Chunker struct {
 	Max    int // longest chunk
 	maskS  uint64
 	maskL  uint64
-	bufs   *sync.Pool // *splitBuffers, reused across SplitStream calls to cut per-file allocation
-}
-
-// splitBuffers holds SplitStream's reusable working memory: window is the bounded
-// chunking buffer (cap 2*Max, never grown past it), read stages each Read. Pooling
-// them per chunker keeps a tree of many files from allocating ~3*Max per file.
-type splitBuffers struct {
-	window []byte
-	read   []byte
+	bufs   *sync.Pool // *[]byte window (cap 2*Max), reused across SplitStream calls to cut per-file allocation
 }
 
 // Default chunker sizes. Small files inline below Min, so these only govern the
@@ -60,7 +52,8 @@ func NewChunker(min, normal, max int) *Chunker {
 		maskL:  lowMask(bits - normalization),
 	}
 	c.bufs = &sync.Pool{New: func() any {
-		return &splitBuffers{window: make([]byte, 0, 2*max), read: make([]byte, max)}
+		b := make([]byte, 0, 2*max)
+		return &b
 	}}
 	return c
 }
@@ -101,33 +94,40 @@ func (c *Chunker) Split(data []byte) [][]byte {
 // must copy them (crypto.SealChunk produces an independent ciphertext, so the
 // common seal-then-pack caller needs no copy).
 func (c *Chunker) SplitStream(r io.Reader, emit func(chunk []byte) error) error {
-	sb := c.bufs.Get().(*splitBuffers)
-	defer c.bufs.Put(sb)
-	buf := sb.window[:0] // append never exceeds cap 2*Max, so buf keeps sb.window's array
-	read := sb.read
+	wp := c.bufs.Get().(*[]byte)
+	defer c.bufs.Put(wp)
+	buf := (*wp)[:0]
+	start := 0 // window of unconsumed bytes is buf[start:]
 	eof := false
 	for {
 		// Top the window up to at least Max bytes (or EOF) before cutting, so the
 		// boundary search sees the same window Split would and the cuts agree.
-		for !eof && len(buf) < c.Max {
-			n, err := r.Read(read)
-			if n > 0 {
-				buf = append(buf, read[:n]...)
+		// Reads land directly in the buffer's spare capacity; the window only
+		// slides back to the front once that capacity is exhausted, which with
+		// cap 2*Max amortizes to one sub-Max copy per Max bytes consumed rather
+		// than one per chunk.
+		for !eof && len(buf)-start < c.Max {
+			if len(buf) == cap(buf) {
+				buf = buf[:copy(buf, buf[start:])]
+				start = 0
 			}
+			n, err := r.Read(buf[len(buf):cap(buf)])
+			buf = buf[:len(buf)+n]
 			if err == io.EOF {
 				eof = true
 			} else if err != nil {
 				return err
 			}
 		}
-		if len(buf) == 0 {
+		window := buf[start:]
+		if len(window) == 0 {
 			return nil
 		}
-		n := c.nextCut(buf)
-		if err := emit(buf[:n]); err != nil {
+		n := c.nextCut(window)
+		if err := emit(window[:n]); err != nil {
 			return err
 		}
-		buf = buf[:copy(buf, buf[n:])]
+		start += n
 	}
 }
 
