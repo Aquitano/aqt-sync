@@ -10,10 +10,8 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -217,8 +215,9 @@ func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 		return err
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	// The root signal context already covers SIGINT/SIGTERM; registering a second
+	// handler here would swallow the "second ^C force-kills" escape main arranges.
+	ctx := rootCtx
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 	w := &watcher{

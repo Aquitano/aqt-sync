@@ -59,7 +59,7 @@ func (c *Client) RevokeGrant(resourceID, granteeHandle string) error {
 		return err
 	}
 	path := "/v1/resources/" + url.PathEscape(resourceID) + "/grants/" + url.PathEscape(granteeHandle)
-	req, err := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodDelete, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -114,7 +114,7 @@ func (c *Client) ResourceObjects(resourceID string, ids []string) ([][]byte, err
 		return nil, err
 	}
 	path := "/v1/resources/" + url.PathEscape(resourceID) + "/objects"
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}

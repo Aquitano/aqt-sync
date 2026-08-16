@@ -149,6 +149,24 @@ type Client struct {
 	// cooldown is shared by every request this client makes, so a 429 observed by
 	// one of a sync's concurrent transfers backs all of them off together.
 	cooldown *cooldown
+	// ctx is the parent of every request this client sends, following the
+	// http.Request precedent of a WithContext-derived value. A CLI's requests are
+	// uniformly command-scoped, so binding the root signal context here is what
+	// makes ^C stop an in-flight transfer — the per-request stall guard nests
+	// under it (see send). Never nil; New sets context.Background().
+	ctx context.Context
+}
+
+// WithContext returns a copy of the client whose requests — including retry
+// waits and rate-limit cooldowns — are canceled when ctx is. The copy shares
+// the transport and the 429 cooldown gate with its parent.
+func (c *Client) WithContext(ctx context.Context) *Client {
+	if ctx == nil {
+		panic("client: nil context")
+	}
+	c2 := *c
+	c2.ctx = ctx
+	return &c2
 }
 
 // ErrInsecureScheme is returned by New when a bearer token would be sent over a
@@ -175,6 +193,7 @@ func New(baseURL, token string) (*Client, error) {
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		token:    token,
 		cooldown: newCooldown(),
+		ctx:      context.Background(),
 		http: &http.Client{
 			// No Client.Timeout: it caps the whole exchange including body
 			// transfer, so a 16 MiB pack upload failed permanently on links
@@ -327,7 +346,7 @@ func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceRespons
 // straight off the body.
 func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 	path := "/v1/resources/" + url.PathEscape(id)
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return api.GetResourceResponse{}, err
 	}
@@ -468,7 +487,7 @@ func (c *Client) versionToPin(id string) (int, error) {
 
 func (c *Client) DeleteResourceVersion(id string, version int) error {
 	path := "/v1/resources/" + url.PathEscape(id)
-	req, err := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodDelete, c.baseURL+path, nil)
 	if err != nil {
 		return err
 	}
@@ -550,7 +569,7 @@ func (c *Client) PublicObjects(resourceID string, ids []string) ([][]byte, error
 		return nil, err
 	}
 	path := "/v1/public/resources/" + url.PathEscape(resourceID) + "/objects"
-	req, err := http.NewRequest(http.MethodPost, c.baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodPost, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -703,8 +722,13 @@ func (c *Client) SetAutoSnapshot(resourceID string, enabled bool) error {
 // tests can shorten it.
 var stallTimeout = 60 * time.Second
 
+// ErrStalled means the stall guard killed a request that moved no bytes for
+// stallTimeout. Callers test errors.Is to tell it apart from a user cancel
+// (which surfaces as context.Canceled) and from ordinary transport failures.
+var ErrStalled = errors.New("transfer stalled")
+
 func errStalled(timeout time.Duration) error {
-	return fmt.Errorf("aqt: transfer stalled (no data for %s)", timeout)
+	return fmt.Errorf("aqt: %w (no data for %s)", ErrStalled, timeout)
 }
 
 // stallGuard cancels a request's context once no progress has been observed
@@ -793,7 +817,11 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 		// This is also where a retry serves its own wait.
 		guard.touch()
 		if err := c.cooldown.wait(ctx, guard.touch); err != nil {
-			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, err)
+			// unwrapStall so a guard-fired abort during the park reads as the
+			// stall it is, not as a user cancel (unreachable at today's
+			// constants — a park tops out well under stallTimeout — but the
+			// discrimination must not depend on that arithmetic).
+			return 0, nil, fmt.Errorf("request %s %s: %w", req.Method, path, unwrapStall(ctx, err))
 		}
 
 		resp, err := c.http.Do(req.WithContext(ctx))
@@ -870,7 +898,7 @@ func unwrapStall(ctx context.Context, err error) error {
 // putRaw uploads an opaque body as application/octet-stream (the pack transport),
 // mapping non-2xx responses the same way do() does.
 func (c *Client) putRaw(path string, body []byte) error {
-	req, err := http.NewRequest(http.MethodPut, c.baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodPut, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -883,7 +911,7 @@ func (c *Client) putRaw(path string, body []byte) error {
 // and decodes a JSON response into out, mapping non-2xx the same way do() does.
 // Unlike putRaw it carries a status/response body back to the caller.
 func (c *Client) doRaw(method, path string, body []byte, out any) error {
-	req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(body))
+	req, err := http.NewRequestWithContext(c.ctx, method, c.baseURL+path, bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
@@ -921,7 +949,7 @@ func (c *Client) doRawIdempotent(method, path string, body []byte, out any) erro
 	}
 	var last error
 	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(c.ctx, method, c.baseURL+path, bytes.NewReader(body))
 		if err != nil {
 			return err
 		}
@@ -929,7 +957,9 @@ func (c *Client) doRawIdempotent(method, path string, body []byte, out any) erro
 		req.Header.Set("Idempotency-Key", key)
 		status, data, err := c.send(req, path)
 		if err != nil {
-			if !retryableCreate(status) {
+			// A canceled command must not be retried: send reports cancellation as a
+			// transport failure (status 0), which would otherwise look retryable.
+			if !retryableCreate(status) || c.ctx.Err() != nil {
 				return err
 			}
 			last = err
@@ -954,7 +984,7 @@ func (c *Client) doIdempotent(method, path string, body, out any) error {
 	}
 	var last error
 	for attempt := 0; attempt < 2; attempt++ {
-		req, err := http.NewRequest(method, c.baseURL+path, bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(c.ctx, method, c.baseURL+path, bytes.NewReader(payload))
 		if err != nil {
 			return err
 		}
@@ -962,7 +992,8 @@ func (c *Client) doIdempotent(method, path string, body, out any) error {
 		req.Header.Set("Idempotency-Key", key)
 		status, data, err := c.send(req, path)
 		if err != nil {
-			if !retryableCreate(status) {
+			// See doRawIdempotent: cancellation reads as a retryable status 0.
+			if !retryableCreate(status) || c.ctx.Err() != nil {
 				return err
 			}
 			last = err
@@ -982,7 +1013,7 @@ func (c *Client) doIdempotent(method, path string, body, out any) error {
 // window is sliced out here, so callers can rely on getRange returning the requested
 // bytes regardless of which status the server chose.
 func (c *Client) getRange(path string, off, length int64) ([]byte, error) {
-	req, err := http.NewRequest(http.MethodGet, c.baseURL+path, nil)
+	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1092,7 +1123,7 @@ func (c *Client) do(method, path string, body, out any) error {
 		}
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, c.baseURL+path, reader)
+	req, err := http.NewRequestWithContext(c.ctx, method, c.baseURL+path, reader)
 	if err != nil {
 		return err
 	}

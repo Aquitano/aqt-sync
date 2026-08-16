@@ -4,7 +4,10 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -138,5 +141,38 @@ func TestPackUploaderCountsProgress(t *testing.T) {
 	}
 	if got := prog.done.Load(); got != 300 {
 		t.Errorf("upload progress = %d, want 300", got)
+	}
+}
+
+// A ^C between packs cancels the uploader's group without any worker error (the
+// group parents on the root signal context, not only on failing workers). The
+// batch under dispatch is dropped at that point, so Add/Flush must surface the
+// cancellation — returning nil made a canceled push keep sealing the rest of
+// the tree and report every dropped pack as uploaded.
+func TestPackUploaderSurfacesRootCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	origRoot := rootCtx
+	rootCtx = ctx
+	t.Cleanup(func() { rootCtx = origRoot })
+
+	cl, err := client.New("https://127.0.0.1:1/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := newPackUploader(cl.WithContext(ctx), nil)
+	cancel()
+
+	var failed error
+	for i := 0; i < 64 && failed == nil; i++ {
+		failed = up.Add(crypto.Chunk{ID: fmt.Sprintf("chunk-%03d", i), Len: 1 << 20}, make([]byte, 1<<20))
+	}
+	if failed == nil {
+		failed = up.Flush()
+	}
+	if failed == nil {
+		t.Fatal("uploader reported success after cancel; every pack was dropped")
+	}
+	if !errors.Is(failed, context.Canceled) {
+		t.Fatalf("cancel surfaced as %v, want context.Canceled", failed)
 	}
 }

@@ -444,7 +444,7 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	if err != nil {
 		return nil
 	}
-	cl, err := client.New(prof.Server, prof.Token)
+	cl, err := newBoundClient(prof.Server, prof.Token)
 	if err != nil {
 		return nil
 	}
@@ -1852,7 +1852,9 @@ func syncTransferLimit(n int) int {
 }
 
 func newPackUploader(cl *client.Client, prog *progressBar) *packUploader {
-	g, ctx := errgroup.WithContext(context.Background())
+	// Parented on the root signal context so a ^C stops queued uploads from
+	// dispatching, not just the in-flight requests the bound client kills itself.
+	g, ctx := errgroup.WithContext(rootCtx)
 	g.SetLimit(syncTransferLimit(uploadConcurrency))
 	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}, group: g, ctx: ctx, prog: prog}
 }
@@ -1909,7 +1911,16 @@ func (u *packUploader) dispatch() error {
 	u.cand = nil
 	u.candSize = 0
 	if u.ctx.Err() != nil {
-		return u.Wait()
+		// The batch was just detached and is being dropped, so success must not
+		// be reported. A worker failure surfaces through Wait; a root cancel
+		// leaves the group error-free (the context is no longer only canceled by
+		// failing workers, it parents on rootCtx), so the cancellation itself is
+		// the error — returning nil here would let a ^C'd push keep sealing the
+		// rest of the tree and report every dropped pack as uploaded.
+		if err := u.Wait(); err != nil {
+			return err
+		}
+		return context.Cause(u.ctx)
 	}
 	u.group.Go(func() error { return u.upload(batch) })
 	return nil

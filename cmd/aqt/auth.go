@@ -148,7 +148,7 @@ func runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
 		}
 	}
 	server := serverURL()
-	cl, err := client.New(server, "")
+	cl, err := newBoundClient(server, "")
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func runLogin(email string, ttl time.Duration) error {
 		return fmt.Errorf("profile %q is already logged in as %s on %s; run `aqt logout` first (which revokes that device), or use a different --profile",
 			name, prof.Email, prof.Server)
 	}
-	cl, err := client.New(server, "")
+	cl, err := newBoundClient(server, "")
 	if err != nil {
 		return err
 	}
@@ -211,7 +211,7 @@ func runLogin(email string, ttl time.Duration) error {
 
 	if prof, loadErr := identity.Load(name); loadErr == nil &&
 		sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email) && prof.Token != "" {
-		authed, newErr := client.New(server, prof.Token)
+		authed, newErr := newBoundClient(server, prof.Token)
 		if newErr != nil {
 			return newErr
 		}
@@ -361,7 +361,7 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 	if err != nil {
 		return err
 	}
-	authed, err := client.New(server, resp.Token)
+	authed, err := newBoundClient(server, resp.Token)
 	if err != nil {
 		return err
 	}
@@ -405,7 +405,7 @@ func attachDevice(cl *client.Client, server, email string, boot api.SaltResponse
 	if err != nil {
 		return err
 	}
-	authed, err := client.New(server, resp.Token)
+	authed, err := newBoundClient(server, resp.Token)
 	if err != nil {
 		return err
 	}
@@ -418,7 +418,7 @@ func attachDevice(cl *client.Client, server, email string, boot api.SaltResponse
 	}
 	// Lazy enc-key backfill for accounts created before grants existed. Best
 	// effort: an old server without the endpoint must not fail the login.
-	if authed, err := client.New(server, resp.Token); err == nil {
+	if authed, err := newBoundClient(server, resp.Token); err == nil {
 		encPub := crypto.DeriveEncKey(rk).Public()
 		_ = authed.PublishEncKey(api.PublishEncKeyRequest{
 			EncPublicKey: encPub,

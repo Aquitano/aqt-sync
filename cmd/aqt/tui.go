@@ -11,7 +11,6 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
-	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -48,7 +47,7 @@ func runTUI(dir string, explicitDir bool) error {
 	if err != nil {
 		return fmt.Errorf("%w — run `aqt login` first", err)
 	}
-	cl, err := client.New(prof.Server, prof.Token)
+	cl, err := newBoundClient(prof.Server, prof.Token)
 	if err != nil {
 		return err
 	}
