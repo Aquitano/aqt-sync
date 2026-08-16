@@ -138,6 +138,3 @@ func TestScanKeepsUnreadableDirSubtree(t *testing.T) {
 		t.Fatal("a tracked directory under an unreadable parent must keep its base record")
 	}
 }
-
-// Pack-and-seal ships the whole tree as one archive, so a file it cannot read would
-// be a file deleted from the remote copy. That one has to fail loudly, naming the path.

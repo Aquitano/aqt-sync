@@ -26,7 +26,8 @@ const (
 )
 
 // Clean drops the characters that let remote text rewrite the terminal and bounds
-// the result at maxLen runes' worth of bytes. Tabs and spaces survive as spaces so
+// the result at maxLen bytes, plus the appended ellipsis when it truncates (cut on
+// a rune boundary). Tabs and spaces survive as spaces so
 // wording stays readable; everything else in C0, DEL, and C1 goes, including the
 // newline that would otherwise forge a second line of our output. So do the Unicode
 // format controls (except zwnj and zwj) and the line and paragraph separators: they

@@ -34,9 +34,6 @@ import (
 // Each seed runs in copy-mode host variants plus merge mode: distinct-host stamps each
 // device's own conflict-copy name, shared-host forces name collisions, and merge-text
 // also exercises clean line merges while retaining the same copy fallback.
-// conflict-copy hostname (the common case), and shared-host, where all devices share
-// one hostname and colliding copy names must be resolved by the suffix bump (see
-// hostModes).
 //
 // It complements the example-based conflict-copy tests by exercising operation
 // orderings no hand-written case enumerates.

@@ -17,8 +17,7 @@ identifies your content.
 Encryption is XChaCha20-Poly1305. Argon2id turns your passphrase into an unlock key that
 wraps a random root key, and the root key never leaves the machine. Folders sync
 incrementally: unchanged chunks are not re-sent, and a file that appears in several of
-your folders is stored once. If you would rather not reveal even the shape of a folder,
-it can go up as a single sealed pack instead.
+your folders is stored once.
 
 The server is one static Go binary (`aqt-server`) and a SQLite data directory. Nothing in
 that directory identifies your content, so you can back it up somewhere you do not
@@ -44,9 +43,10 @@ iwr -useb https://web.sync.aquitano.me/install.ps1 | iex
 
 Both scripts read the release's signed update manifest to learn which archive belongs to
 your platform, check the download against the size and SHA-256 the manifest declares, and
-install to `~/.local/bin` (`%LOCALAPPDATA%\Programs\aqt` on Windows). `--server` also
-installs `aqt-server`, and `AQT_INSTALL_DIR` picks a different location. Add
-`--version=vX.Y.Z` to pin a release.
+install to `~/.local/bin` (`%LOCALAPPDATA%\Programs\aqt` on Windows). `--server`
+(`-Server` on Windows) also installs `aqt-server`, and `AQT_INSTALL_DIR` picks a
+different location on both. Add `--version=vX.Y.Z` (`-Version vX.Y.Z`) to pin a
+release.
 
 The install script trusts whatever the origin serves, because verifying an Ed25519
 signature from a shell script is not practical. Later updates do not rely on that trust:
@@ -201,7 +201,7 @@ update, the manifest format, signing-key custody, and rotation policy are in
 
 ## Backing up a git repository
 
-Folder sync ignores `.git`. To back up repository history, use an encrypted `aqt::` Git
+Folder sync ignores `.git` by default (`aqt init --git` opts in). To back up repository history, use an encrypted `aqt::` Git
 remote; see **[docs/git-repositories.md](docs/git-repositories.md)**.
 
 ## Proving restore works

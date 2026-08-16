@@ -153,7 +153,9 @@ larger small files into the (sealed) manifest.
 
 ## Storage layout
 
-Sealed-blob resources keep `blobs/<id>.bin`. Objects (chunks) are not one file each:
+Sealed-blob resources keep one immutable file per version, prefix-fanned like packs:
+`blobs/<ab>/<cd>/<id>.<nonce>.bin`; the superseded file is unlinked once the new
+version commits. Objects (chunks) are not one file each:
 they are concatenated into **packs** (~16 MiB), one immutable content-addressed file
 with a self-describing trailing index, fanned out per owner:
 `packs/<owner>/<ab>/<cd>/<packID>.bin`. A pack ships as raw bytes (no base64), and a
@@ -328,14 +330,15 @@ recovery guidance rather than reconciled as an empty chunked manifest.
 ## Tracked state
 
 `.aqt/state.json` records, next to the resource id and server URL, the owning profile
-name and the account's signing-key fingerprint. Tracked commands default to that
-recorded identity (no `--profile` needed even from a shell whose default profile
-differs), and an explicit `--profile` or `--server` that contradicts it is rejected
-with guidance rather than talking to the wrong account or server. A profile that was
-re-logged into a different account (fingerprint change) is likewise refused. If the
-recorded profile itself starts talking to a different server — a migration, or a
-restore under a new URL — the folder follows the profile, because the account key and
-not the URL is the identity, and records the move.
+name, the account's owner handle, and its signing-key fingerprint — the fingerprint
+only as a legacy fallback for state written before the handle was recorded. Tracked
+commands default to that recorded identity (no `--profile` needed even from a shell
+whose default profile differs), and an explicit `--profile` or `--server` that
+contradicts it is rejected with guidance rather than talking to the wrong account or
+server. A profile that was re-logged into a different account is likewise refused.
+If the recorded profile itself starts talking to a different server — a migration, or
+a restore under a new URL — the folder follows the profile, because the account key
+and not the URL is the identity, and records the move.
 
 The binding is on the account's owner handle, not its signing key, so
 `aqt passphrase rotate-root` — which mints a new signing key on every device — does
@@ -438,7 +441,7 @@ content, excessive edit distance, overlapping hunks, adjacent unterminated hunks
 would invent a line, delete/modify pairs, and a GC'd base chunk.
 
 Both resolving modes are refused with `--force`, with a baseless reconcile or
-rollback, with a one-direction sync, and in pack mode.
+rollback, and with a one-direction sync.
 
 ## Pack-and-seal (removed)
 

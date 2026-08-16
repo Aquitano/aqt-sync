@@ -337,10 +337,8 @@ All notable changes to this project are documented in this file.
   subcommand. `aqt git setup` creates that link beside the running binary (symlink,
   falling back to a hard link and then a copy on Windows, where symlinks need
   Developer Mode), reports where it went, and warns when the directory is not on
-  `PATH` or another `git-remote-aqt` comes first. It refuses a directory Homebrew,
-  WinGet, or Scoop owns, because a package that records every file it installs should
-  ship the link itself; `--dir` puts one anywhere else. Re-running is a no-op, and
-  replacing an existing helper asks first.
+  `PATH` or another `git-remote-aqt` comes first. `--dir` puts one anywhere else.
+  Re-running is a no-op, and replacing an existing helper asks first.
 
   This closes the gap where `aqt update` upgraded only the client: there is now one
   file to replace, so the two can no longer disagree about protocol or crypto. A

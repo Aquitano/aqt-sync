@@ -11,16 +11,11 @@ package syncengine
 // of losing data.
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 )
-
-// errSymlinkUnsupported explains a skipped link; the wording reaches users through
-// the skipped-path warnings, so it must name the fix, not just the failure.
-var errSymlinkUnsupported = errors.New("symlinks are unsupported here (on Windows, enable Developer Mode or use an elevated shell)")
 
 // CaseCollisions groups the manifest paths (files, symlinks, and directories)
 // that a case-insensitive filesystem would resolve to the same name. Groups and

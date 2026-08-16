@@ -72,10 +72,10 @@ capability discovery endpoint is an open item.
 - Every client request carries `X-Aqt-Capability: <n>` (`api.CapabilityHeader`),
   set to `api.ClientCapability`.
 - A write (`PUT /v1/resources`) may declare `minClient`: the lowest capability that
-  can read the formats it seals. The sealing sites set it — id-bound folder/pack
-  updates and key rotation declare `2`; unbound creates and one-shot `push` declare
-  `1` (baseline). The server stores it per resource. A snapshot copies the value from
-  its source resource at capture time.
+  can read the formats it seals. The sealing sites set it — id-bound folder updates
+  and key rotation declare `2`; Git-remote roots declare `4`; unbound creates and
+  one-shot `push` declare `1` (baseline). The server stores it per resource. A
+  snapshot copies the value from its source resource at capture time.
 - On a **read** (`GET /v1/resources/:id`, `GET /v1/snapshots/:id`) or an
   **overwriting write** of an existing resource, the server compares the requester's
   capability to the resource's stored `min_client`. If the requester is below it, the
@@ -195,9 +195,9 @@ When a new write format lands that older releases cannot read:
    `ClientCapability` to it.
 2. At each sealing site that writes the new format, declare
    `MinClient: api.Capability<New>` on the `PutResourceRequest`. `rg 'MinClient:'
-   cmd/aqt` lists them all; today they are `cmd/aqt/sync.go`, `cmd/aqt/pack.go`,
-   `cmd/aqt/share.go`, `cmd/aqt/push.go`, `cmd/aqt/repo.go`, and the two root flips
-   in `cmd/aqt/git_remote_helper.go`.
+   cmd/aqt` lists them all; today they are `cmd/aqt/sync.go`, `cmd/aqt/share.go`,
+   `cmd/aqt/push.go`, `cmd/aqt/repo.go`, and the two root flips in
+   `cmd/aqt/git_remote_helper.go`.
    Sites still writing an older format keep their lower declaration.
 3. Add a `### Breaking Changes` / `### Changed` note to `CHANGELOG.md` and extend the
    capability table above.

@@ -292,7 +292,8 @@ func TestSessionCacheRejectsMalformed(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	// A key of the wrong length must be treated as a miss and removed.
+	// A session file in an unrecognized shape (here the pre-sealing schema) must
+	// be treated as a miss and removed.
 	if err := os.WriteFile(p, []byte(`{"masterKey":"YWJj","expiresAt":0}`), 0o600); err != nil {
 		t.Fatal(err)
 	}

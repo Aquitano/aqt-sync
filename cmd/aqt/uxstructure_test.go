@@ -14,7 +14,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// The block-B restructure: `unshare` replaces `private` and `share --revoke`,
+// The command restructure: `unshare` replaces `private` and `share --revoke`,
 // `share ls` exists, `snapshot restore` folded into `restore` (side-by-side default),
 // and the agent tree gained `start`.
 func TestCommandSurfaceRestructure(t *testing.T) {

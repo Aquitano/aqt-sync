@@ -11,7 +11,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// Phase 4 Merkle-DAG manifests. A tracked folder is a tree of directory nodes
+// Merkle-DAG manifests. A tracked folder is a tree of directory nodes
 // rather than one flat entry list: each directory node lists its immediate
 // children (name-sorted) and is sealed through the convergent pipeline, so the
 // node's content address (crypto.Chunk.ID) is the subtree's Merkle hash. Two

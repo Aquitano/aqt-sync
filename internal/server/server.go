@@ -307,8 +307,10 @@ func (s *Server) Router() *gin.Engine {
 			authed.GET("/devices", s.listDevices)
 			authed.DELETE("/devices/:id", s.deleteDevice)
 
-			// Re-wrap the account's root key under a new passphrase. Small body
+			// Re-wrap the account's root key under a new passphrase: a small body
 			// (KDF params + a wrapped key + verifiers), so it keeps the control cap.
+			// Root-key rotation does not — its body carries every re-wrapped
+			// resource, snapshot, and grant key, so it needs the engine-wide cap.
 			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.changePassphrase)
 			authed.PUT("/account/root-key", s.rotateRootKey)
 

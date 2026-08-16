@@ -612,34 +612,19 @@ func (s *Store) orderedObjectSlices(owner, resourceID string, ids []string) ([]a
 	// Membership: every requested id must be a chunk root of this resource. A miss on
 	// any id fails the whole request without revealing which one.
 	member := map[string]bool{}
-	for start := 0; start < len(distinct); start += batch {
-		end := min(start+batch, len(distinct))
-		group := distinct[start:end]
-		args := make([]any, 0, len(group)+1)
-		args = append(args, resourceID)
-		for _, id := range group {
-			args = append(args, id)
-		}
-		rows, err := s.rdb.Query(
-			`SELECT chunk_id FROM resource_chunks WHERE resource_id = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
+	if err := queryIDsBatched(s.rdb,
+		`SELECT chunk_id FROM resource_chunks WHERE resource_id = ? AND chunk_id IN (`,
+		[]any{resourceID}, distinct, batch,
+		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
+				return err
 			}
 			member[id] = true
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 	for _, id := range distinct {
 		if !member[id] {
@@ -652,41 +637,26 @@ func (s *Store) orderedObjectSlices(owner, resourceID string, ids []string) ([]a
 	locByID := make(map[string]api.ObjectLocation, len(distinct))
 	seenPack := map[string]bool{}
 	var packs []string
-	for start := 0; start < len(distinct); start += batch {
-		end := min(start+batch, len(distinct))
-		group := distinct[start:end]
-		args := make([]any, 0, len(group)+1)
-		args = append(args, owner)
-		for _, id := range group {
-			args = append(args, id)
-		}
-		rows, err := s.rdb.Query(
-			`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
-			args...,
-		)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
+	if err := queryIDsBatched(s.rdb,
+		`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
+		[]any{owner}, distinct, batch,
+		func(rows *sql.Rows) error {
 			var (
 				id, packID  string
 				off, length int64
 			)
 			if err := rows.Scan(&id, &packID, &off, &length); err != nil {
-				rows.Close()
-				return nil, err
+				return err
 			}
 			locByID[id] = api.ObjectLocation{ID: id, PackID: packID, Off: off, Len: length}
 			if !seenPack[packID] {
 				seenPack[packID] = true
 				packs = append(packs, packID)
 			}
-		}
-		if err := rows.Err(); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		rows.Close()
+			return nil
+		},
+	); err != nil {
+		return nil, err
 	}
 
 	// The resource_chunks -> objects FK guarantees a membership-verified id locates;

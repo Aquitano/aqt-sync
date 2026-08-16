@@ -165,8 +165,6 @@ func escapeLeadingDashIDs(root *cobra.Command, args []string) []string {
 func explainError(err error) error {
 	var upgrade *client.UpgradeRequiredError
 	if errors.As(err, &upgrade) {
-		// Detection failing is not worth failing the message over: fall back to the
-		// standalone route, whose action is `aqt update`.
 		return errors.New(upgradeGuidance(upgrade, detectedInstall()))
 	}
 	return err

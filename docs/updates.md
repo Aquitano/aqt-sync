@@ -51,9 +51,15 @@ checked against the size and digest that signed manifest declares.
   "channel": "stable",
   "status": "updateAvailable",
   "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.6.0",
-  "publishedAt": "2026-08-09T21:47:59Z"
+  "publishedAt": "2026-08-09T21:47:59Z",
+  "installed": false
 }
 ```
+
+`installed` says whether this run replaced the binary and is always present. `owner`
+joins it once the running install has been classified — `standalone` for a release
+archive the updater may replace, `source` for a build from the repository it will
+not.
 
 `status` is one of:
 
@@ -96,7 +102,9 @@ that manifest declares — neither script guesses an asset name. `sh -s -- --ser
 also installs `aqt-server`, which no signed manifest covers, so it is checked
 against the release's `checksums.txt` instead; an unreadable or entry-less
 checksums file is a refusal rather than a warning. `AQT_INSTALL_DIR` relocates the
-install (default `~/.local/bin`) and `--version=vX.Y.Z` pins a release.
+install on both scripts — the default is `~/.local/bin` for `install.sh` and
+`%LOCALAPPDATA%\Programs\aqt` for `install.ps1`. Pin a release with
+`--version=vX.Y.Z` on the shell script or `-Version vX.Y.Z` on the PowerShell one.
 
 The trust boundary differs from `aqt update` in exactly one place. Verifying an
 Ed25519 signature in shell is not practical, so the first install trusts the origin

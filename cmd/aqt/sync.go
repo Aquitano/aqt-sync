@@ -3126,45 +3126,36 @@ func coalescePlanRenames(actions []syncengine.Action, dirActions []syncengine.Di
 		return actions, dirActions, nil
 	}
 
-	covers := func(r syncengine.Rename, addPath, delPath string, add bool) bool {
+	coversAdded := func(r syncengine.Rename, path string) bool {
 		if r.Dir {
-			if add {
-				return strings.HasPrefix(addPath, r.To+"/")
-			}
-			return strings.HasPrefix(delPath, r.From+"/")
+			return strings.HasPrefix(path, r.To+"/")
 		}
-		if add {
-			return addPath == r.To
+		return path == r.To
+	}
+	coversDeleted := func(r syncengine.Rename, path string) bool {
+		if r.Dir {
+			return strings.HasPrefix(path, r.From+"/")
 		}
-		return delPath == r.From
+		return path == r.From
 	}
 	keepActions := actions[:0:0]
 	for _, a := range actions {
-		match := func(r syncengine.Rename, add bool) bool {
-			if add {
-				return covers(r, a.Path, "", true)
-			}
-			return covers(r, "", a.Path, false)
-		}
-		if !renameCovers(a.Kind, localRen, remoteRen, match) {
+		if !renameCovers(a.Kind, localRen, remoteRen, a.Path, coversAdded, coversDeleted) {
 			keepActions = append(keepActions, a)
 		}
 	}
 	atOrUnder := func(path, dir string) bool {
 		return path == dir || strings.HasPrefix(path, dir+"/")
 	}
+	dirCoversAdded := func(r syncengine.Rename, path string) bool {
+		return r.Dir && atOrUnder(path, r.To)
+	}
+	dirCoversDeleted := func(r syncengine.Rename, path string) bool {
+		return r.Dir && atOrUnder(path, r.From)
+	}
 	keepDirs := dirActions[:0:0]
 	for _, a := range dirActions {
-		match := func(r syncengine.Rename, add bool) bool {
-			if !r.Dir {
-				return false
-			}
-			if add {
-				return atOrUnder(a.Path, r.To)
-			}
-			return atOrUnder(a.Path, r.From)
-		}
-		if !renameCovers(a.Kind, localRen, remoteRen, match) {
+		if !renameCovers(a.Kind, localRen, remoteRen, a.Path, dirCoversAdded, dirCoversDeleted) {
 			keepDirs = append(keepDirs, a)
 		}
 	}
@@ -3174,20 +3165,20 @@ func coalescePlanRenames(actions []syncengine.Action, dirActions []syncengine.Di
 }
 
 // renameCovers reports whether a detected rename subsumes an action of the given
-// kind. match tests one rename against the action's path, distinguishing the added
-// (To) side from the deleted (From) side. Local renames cover the push side of an
-// action (Upload/DeleteRemote); remote renames cover the pull side
+// kind on path. coversAdded tests the added (To) side of a rename, coversDeleted
+// the deleted (From) side; the kind picks which. Local renames cover the push side
+// of an action (Upload/DeleteRemote); remote renames cover the pull side
 // (Download/DeleteLocal).
-func renameCovers(kind syncengine.ActionKind, localRen, remoteRen []syncengine.Rename, match func(r syncengine.Rename, add bool) bool) bool {
+func renameCovers(kind syncengine.ActionKind, localRen, remoteRen []syncengine.Rename, path string, coversAdded, coversDeleted func(r syncengine.Rename, path string) bool) bool {
 	for _, r := range localRen {
-		if (kind == syncengine.Upload && match(r, true)) ||
-			(kind == syncengine.DeleteRemote && match(r, false)) {
+		if (kind == syncengine.Upload && coversAdded(r, path)) ||
+			(kind == syncengine.DeleteRemote && coversDeleted(r, path)) {
 			return true
 		}
 	}
 	for _, r := range remoteRen {
-		if (kind == syncengine.Download && match(r, true)) ||
-			(kind == syncengine.DeleteLocal && match(r, false)) {
+		if (kind == syncengine.Download && coversAdded(r, path)) ||
+			(kind == syncengine.DeleteLocal && coversDeleted(r, path)) {
 			return true
 		}
 	}
