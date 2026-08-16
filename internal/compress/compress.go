@@ -73,9 +73,9 @@ func Encode(raw []byte) ([]byte, string) {
 	return c, Zstd
 }
 
-// Decode reverses Encode for a payload sealed under alg. rawLen >= 0 pins the
-// exact expected output length (the tamper check callers previously applied to
-// the decrypted bytes directly); rawLen < 0 leaves only the global cap.
+// Decode reverses Encode for a payload sealed under alg. rawLen >= 0 pins the exact
+// expected output length, which is the caller's tamper check; rawLen < 0 leaves only
+// the global cap.
 func Decode(payload []byte, alg string, rawLen int) ([]byte, error) {
 	switch alg {
 	case "":

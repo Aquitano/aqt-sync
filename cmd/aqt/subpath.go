@@ -226,7 +226,7 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		// is no base manifest for its mtimes to feed.
 		var dlErr error
 		if slices != nil {
-			// Batched: the object index stays O(batch), not O(subtree) (issue #183).
+			// Batched: the object index stays O(batch), not O(subtree).
 			_, dlErr = runPublicDownloads(slices, staging, m.Entries, prog)
 		} else {
 			_, dlErr = runDownloadsFrom(get, staging, m.Entries, prog)

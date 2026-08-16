@@ -79,8 +79,8 @@ var ErrBadPolicy = errors.New("lifecycle policy values must be non-negative")
 // git-remote resource. Git remotes are private-only in v1 and cannot carry grants.
 var ErrGitRemotePolicy = errors.New("git remote resources are private and cannot be shared")
 
-// ErrDeviceLimit is returned when attaching a device would exceed an account's
-// configured device cap. Handlers map it to 403.
+// ErrDeviceLimit is returned when a device attach hits the account's cap. Handlers
+// map it to 403.
 var ErrDeviceLimit = errors.New("device limit reached")
 
 // UpgradeRequiredError is returned when a write targets a resource whose stored

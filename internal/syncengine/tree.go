@@ -281,8 +281,7 @@ func SealTreeCiphertexts(m Manifest, conv crypto.ConvergenceKey) (map[string][]b
 // it hands the whole frontier of directory-node ids to fetchBatch in one call, so the
 // transport can locate them in a single round-trip and range-fetch their packs grouped,
 // rather than paying 2 RTTs per node. Every node's ciphertext is verified against its
-// content address before its children are trusted. Used by clone, reconcile, snapshot
-// restore/diff, and find.
+// content address before its children are trusted.
 func OpenTreeBatched(root TreeRoot, fetchBatch func(ids []string) (map[string][]byte, error)) (Manifest, error) {
 	m := Manifest{Version: root.Version}
 	// A file whose chunk list is indirected (ChunksRef) needs its list segments fetched

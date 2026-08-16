@@ -173,7 +173,7 @@ func materializeAt(full string, mode os.FileMode, prepare func() error, write fu
 		return 0, err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op once renamed; cleans up every failure path
+	defer os.Remove(tmpName)
 	bw := bufio.NewWriter(tmp)
 	if err := write(bw); err != nil {
 		tmp.Close()

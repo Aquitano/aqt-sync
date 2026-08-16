@@ -39,7 +39,7 @@ func newChangeSet(d syncengine.Delta) changeSet {
 func (s changeSet) total() int { return len(s.changes) + len(s.renamed) }
 
 // kindRank orders the change kinds so the familiar new/modified/deleted grouping
-// survives, with the two newly visible kinds slotted next to the edits they refine.
+// survives, with mode and type changes slotted next to the edits they refine.
 func kindRank(k syncengine.ChangeKind) int {
 	switch k {
 	case syncengine.ChangeAdded:
@@ -55,8 +55,7 @@ func kindRank(k syncengine.ChangeKind) int {
 	}
 }
 
-// changeLabel is the column label for a classified change: the three buckets status
-// has always printed, plus the two the buckets used to hide.
+// changeLabel is the column label for a classified change.
 func changeLabel(k syncengine.ChangeKind) string {
 	switch k {
 	case syncengine.ChangeAdded:

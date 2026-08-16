@@ -321,8 +321,8 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 func parseRef(ref string) (id, fragment, origin string) {
 	// One parser for every ref form: strip any subpath first (aqt://<id>/<sub> or
 	// .../x/<id>/<sub/path>), so a subpath-bearing link resolves to the same id
-	// here as in the pull path. The last-index scan below used to read the
-	// subpath's tail as the id, 404ing `info` on links `pull` accepted.
+	// here as in the pull path (the last-index scan below would otherwise read the
+	// subpath's tail as the id).
 	ref, _ = splitRefPath(ref)
 	if i := strings.Index(ref, "#"); i >= 0 {
 		fragment = ref[i+1:]
