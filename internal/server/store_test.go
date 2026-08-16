@@ -1687,6 +1687,48 @@ func TestUpdateResourceMetadataOnly(t *testing.T) {
 	}
 }
 
+// The quota preflight trusts this probe's bare "key exists" answer to skip the
+// quota check, on the strength of the create's own key lookup later refusing to
+// store anything. A row the GC sweep deletes between the two would break that
+// chain and let the create land unmetered — so a row near enough to the TTL to
+// be sweepable mid-request must read as unrecorded, and the request falls back
+// to the normal quota-checked path.
+func TestResourceCreateKeyProbeIgnoresSweepableRows(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "probe-age@example.com")
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	req := api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped, IdempotencyKey: "aging-key"}
+	if _, _, err := s.PutResource(owner, api.ClientCapability, req); err != nil {
+		t.Fatal(err)
+	}
+	if !s.ResourceCreateKeyRecorded(owner, req) {
+		t.Fatal("fresh key not recognized by the probe")
+	}
+
+	// Half an hour of TTL left: still present, but sweepable too soon to trust.
+	backdated := time.Now().Add(-(idempotencyTTL - 30*time.Minute)).Unix()
+	if _, err := s.db.Exec(`UPDATE idempotency_keys SET created_at = ? WHERE owner_handle = ? AND key = ?`,
+		backdated, owner, "aging-key"); err != nil {
+		t.Fatal(err)
+	}
+	if s.ResourceCreateKeyRecorded(owner, req) {
+		t.Fatal("probe trusted a row the GC sweep could delete mid-request")
+	}
+	// The fallback path still replays: the row is present, so the create's own
+	// lookup answers with the recorded response rather than storing again.
+	id, _, err := s.PutResource(owner, api.ClientCapability, req)
+	if err != nil {
+		t.Fatalf("near-TTL replay: %v", err)
+	}
+	if id == "" {
+		t.Fatal("near-TTL replay returned no id")
+	}
+}
+
 func TestCreationIdempotencyKeysReplayAndRejectPayloadReuse(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
