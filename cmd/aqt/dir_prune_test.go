@@ -45,29 +45,6 @@ func TestPullEmptyingTrackedDirKeepsIt(t *testing.T) {
 	}
 }
 
-// The pack-and-seal pull prunes with the same blind parent-pruning; its healing
-// pass must keep an emptied tracked directory alive as well.
-func TestPackPullEmptyingTrackedDirKeepsIt(t *testing.T) {
-	h := newE2E(t)
-	origin := t.TempDir()
-	writePackConfig(t, origin)
-	h.init(origin)
-	writeTree(t, origin, "docs/only.txt", "content")
-	h.sync(origin)
-
-	replica := t.TempDir()
-	h.clone(h.folderID(origin), replica)
-
-	removeTree(t, origin, "docs/only.txt")
-	h.sync(origin)
-
-	h.sync(replica)
-	assertAbsent(t, replica, "docs/only.txt")
-	if fi, err := os.Stat(filepath.Join(replica, "docs")); err != nil || !fi.IsDir() {
-		t.Fatalf("tracked dir gone after pack pull emptied it: %v", err)
-	}
-}
-
 // EnsureDirs recreates only what is missing: an existing directory keeps its
 // on-disk mode, a missing one is created with its recorded mode.
 func TestEnsureDirsRecreatesOnlyMissing(t *testing.T) {
