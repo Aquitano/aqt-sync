@@ -164,7 +164,7 @@ func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 	store := withUpdateStore(t)
 	withTerminal(t, true)
 	withFlags(t, false, false)
-	serveUpdateFixture(t, "v9.9.9")
+	serveUpdateManifest(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
 	if err := store.SetPolicy(update.PolicyAuto); err != nil {
 		t.Fatal(err)

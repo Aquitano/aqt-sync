@@ -36,6 +36,13 @@ var ErrRollback = errors.New("the published release is older than the running bu
 // different channel than the one asked for.
 var ErrChannelMismatch = errors.New("update manifest is for a different channel")
 
+// ErrStaleManifest means the fetched manifest is authentic but names a release
+// older than one this machine has already authenticated on the channel. ErrRollback
+// cannot catch this case: a manifest newer than the running build but older than
+// the newest one ever seen is exactly how a replayed signed manifest pins a
+// client at an intermediate release.
+var ErrStaleManifest = errors.New("update manifest is older than a release already authenticated on this machine")
+
 // Build describes the running binary's provenance, stamped in at link time.
 type Build struct {
 	Version string
@@ -50,6 +57,11 @@ type Options struct {
 	Roots    []TrustRoot
 	Repo     string
 	Platform Platform
+	// Floor is the highest version already authenticated for the requested
+	// channel (State.Ceiling), or "" for no floor. A manifest below it is refused
+	// with ErrStaleManifest. An unparseable floor is ignored, failing open the
+	// same way a corrupt state file does.
+	Floor string
 }
 
 // Result is the answer to "is this binary current?". Its JSON encoding is the
@@ -140,6 +152,14 @@ func Check(ctx context.Context, opts Options) (Result, error) {
 	res.AvailableVersion = m.Version
 	res.ReleaseURL = m.ReleaseURL
 	res.PublishedAt = m.PublishedAt
+
+	// Freshness floor: everything about the manifest is validated by now, so a
+	// version below the floor is an authentic-but-stale manifest, not a broken one.
+	if opts.Floor != "" {
+		if floor, err := ParseVersion(opts.Floor); err == nil && Compare(available, floor) < 0 {
+			return res, fmt.Errorf("%w: %s is older than %s", ErrStaleManifest, m.Version, opts.Floor)
+		}
+	}
 
 	switch Compare(available, current) {
 	case -1:

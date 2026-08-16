@@ -66,6 +66,56 @@ type State struct {
 	// agent was using the binary. It is what lets the next idle invocation finish
 	// the job instead of waiting another full interval.
 	DeferredVersion string `json:"deferredVersion,omitempty"`
+	// HighestSeen records, per requested channel, the highest release version that
+	// ever passed full manifest authentication on this machine. Checks pass it to
+	// Options.Floor, so a replayed older — but genuinely signed — manifest cannot
+	// pin a client at an intermediate release. Keyed by the requested channel, not
+	// the manifest's: beta checks accept stable manifests, and a ceiling only beta
+	// established must never gate a stable check.
+	HighestSeen map[string]string `json:"highestSeen,omitempty"`
+}
+
+// Ceiling returns the channel's highest authenticated version, or "" when none
+// is recorded or the record does not parse — failing open, like the rest of a
+// corrupt state file: the ceiling is replay hardening on top of signature
+// verification, not the thing standing between the user and an attacker.
+func (st State) Ceiling(ch Channel) string {
+	v := st.HighestSeen[string(ch)]
+	if v == "" {
+		return ""
+	}
+	if _, err := ParseVersion(v); err != nil {
+		return ""
+	}
+	return v
+}
+
+// RaiseCeiling records v as the channel's highest authenticated version. It
+// never lowers an existing record; ResetCeiling is the deliberate way down.
+func (st *State) RaiseCeiling(ch Channel, v string) {
+	nv, err := ParseVersion(v)
+	if err != nil {
+		return
+	}
+	if cur := st.Ceiling(ch); cur != "" {
+		if cv, err := ParseVersion(cur); err == nil && Compare(nv, cv) <= 0 {
+			return
+		}
+	}
+	if st.HighestSeen == nil {
+		st.HighestSeen = map[string]string{}
+	}
+	st.HighestSeen[string(ch)] = v
+}
+
+// ResetCeiling overwrites the channel's record with v, lowering it if needed.
+// This is the accept-rollback recovery: once the user confirms upstream really
+// retracted a release, later checks must stop tripping over the old record.
+func (st *State) ResetCeiling(ch Channel, v string) {
+	if st.HighestSeen == nil {
+		st.HighestSeen = map[string]string{}
+	}
+	st.HighestSeen[string(ch)] = v
 }
 
 // Store is the directory the update state lives in. It is a value rather than a

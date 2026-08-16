@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"runtime"
@@ -37,10 +38,11 @@ var updateTrustRoots = update.TrustRoots
 var updateStore = update.DefaultStore
 
 type updateOptions struct {
-	checkOnly  bool
-	prerelease bool
-	assumeYes  bool
-	asJSON     bool
+	checkOnly      bool
+	prerelease     bool
+	assumeYes      bool
+	acceptRollback bool
+	asJSON         bool
 }
 
 func updateCmd() *cobra.Command {
@@ -66,6 +68,7 @@ manifest promised; every failure puts it back.`,
 	cmd.Flags().BoolVar(&opts.checkOnly, "check", false, "report what is available and make no changes")
 	cmd.Flags().BoolVar(&opts.prerelease, "prerelease", false, "use the beta channel, which includes prereleases")
 	cmd.Flags().BoolVarP(&opts.assumeYes, "yes", "y", false, "install without asking for confirmation")
+	cmd.Flags().BoolVar(&opts.acceptRollback, "accept-rollback", false, "accept a release older than the newest one this machine has authenticated (after an upstream retraction)")
 	markJSONSupported(cmd)
 	markQuietSupported(cmd)
 	cmd.AddCommand(updatePolicyCmd())
@@ -86,16 +89,43 @@ func runUpdate(opts updateOptions) error {
 	if opts.prerelease {
 		ch = update.ChannelBeta
 	}
+	// The freshness floor lives in the same state file as the policy. A store that
+	// cannot be read fails open (no floor): the ceiling is replay hardening on top
+	// of signature verification, and a broken config dir must not block updating.
+	store, storeErr := updateStore()
+	var st update.State
+	if storeErr == nil {
+		st, _ = store.Load()
+	}
+	floor := st.Ceiling(ch)
+	if opts.acceptRollback {
+		floor = ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), updateCheckTimeout)
 	res, err := update.Check(ctx, update.Options{
 		Build:   update.Build{Version: version, Kind: buildKind},
 		Channel: ch,
 		Source:  updateSource(),
 		Roots:   updateTrustRoots(),
+		Floor:   floor,
 	})
 	cancel()
+	if errors.Is(err, update.ErrStaleManifest) {
+		return fmt.Errorf("%w; if the release was genuinely retracted upstream, re-run with --accept-rollback", err)
+	}
 	if err != nil {
 		return err
+	}
+	// Only a fully authenticated manifest reaches this point with a version, so
+	// record it. --accept-rollback lowers the record to what upstream now serves;
+	// otherwise the ceiling only ever rises.
+	if storeErr == nil && res.AvailableVersion != "" {
+		if opts.acceptRollback {
+			st.ResetCeiling(ch, res.AvailableVersion)
+		} else {
+			st.RaiseCeiling(ch, res.AvailableVersion)
+		}
+		_ = store.Save(st)
 	}
 
 	report := updateReport{Result: res}

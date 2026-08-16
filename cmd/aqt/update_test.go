@@ -5,6 +5,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -20,8 +21,18 @@ import (
 const updateFixtureSeed = "aqt update cli fixture signing k" // exactly ed25519.SeedSize bytes
 
 // serveUpdateFixture publishes a signed manifest for one version on a local origin
-// and points the CLI at it, standing in for the release assets.
-func serveUpdateFixture(t *testing.T, released string) {
+// and points the CLI at it, standing in for the release assets. It also gives the
+// test its own update store, since runUpdate persists the freshness ceiling there.
+func serveUpdateFixture(t *testing.T, released string) update.Store {
+	t.Helper()
+	store := withUpdateStore(t)
+	serveUpdateManifest(t, released)
+	return store
+}
+
+// serveUpdateManifest is serveUpdateFixture without the store isolation, so a
+// test can change the served version while keeping the recorded state.
+func serveUpdateManifest(t *testing.T, released string) {
 	t.Helper()
 	key := ed25519.NewKeyFromSeed([]byte(updateFixtureSeed))
 
@@ -165,6 +176,7 @@ func TestUpdateCheckReportsUpToDate(t *testing.T) {
 // A source build must say so and offer no way to overwrite itself, without
 // contacting anything to find out.
 func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
+	withUpdateStore(t)
 	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
 	withBuild(t, "0.3.0-dev", "dev")
 
@@ -188,13 +200,67 @@ func TestUpdateCheckRefusesARollback(t *testing.T) {
 	}
 }
 
+// A signed manifest can be replayed: one older than the newest release this
+// machine ever authenticated — yet newer than the running build, so ErrRollback
+// is blind to it — must be refused, and `--accept-rollback` is the deliberate
+// way through after a real upstream retraction.
+func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
+	requirePublishedPlatform(t)
+	store := serveUpdateFixture(t, "v0.5.0")
+	withBuild(t, "v0.3.0", update.KindRelease)
+
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+			t.Fatalf("first check: %v", err)
+		}
+	})
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Ceiling(update.ChannelStable); got != "v0.5.0" {
+		t.Fatalf("ceiling after first check = %q, want v0.5.0", got)
+	}
+
+	// Upstream now serves v0.4.0 — newer than the running v0.3.0, older than the
+	// authenticated v0.5.0. Before the ceiling this replay was offered as an update.
+	serveUpdateManifest(t, "v0.4.0")
+	err = runUpdate(updateOptions{checkOnly: true})
+	if !errors.Is(err, update.ErrStaleManifest) {
+		t.Fatalf("replayed manifest: got %v, want ErrStaleManifest", err)
+	}
+	if !strings.Contains(err.Error(), "--accept-rollback") {
+		t.Fatalf("stale-manifest error does not name the recovery flag: %v", err)
+	}
+
+	// The explicit recovery: accept the retraction, which also lowers the record
+	// so the next plain check stops tripping.
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
+			t.Fatalf("--accept-rollback check: %v", err)
+		}
+	})
+	st, err = store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := st.Ceiling(update.ChannelStable); got != "v0.4.0" {
+		t.Fatalf("ceiling after accept-rollback = %q, want v0.4.0", got)
+	}
+	captureStdout(t, func() {
+		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+			t.Fatalf("check after accepted rollback: %v", err)
+		}
+	})
+}
+
 func TestUpdateCommandSurface(t *testing.T) {
 	root := rootCmd()
 	cmd := subcommand(t, root, "update")
 	if cmd.Annotations[jsonAnnotation] == "" {
 		t.Error("`aqt update` does not advertise --json support")
 	}
-	for _, name := range []string{"check", "prerelease", "yes"} {
+	for _, name := range []string{"check", "prerelease", "yes", "accept-rollback"} {
 		if cmd.Flags().Lookup(name) == nil {
 			t.Errorf("`aqt update` is missing --%s", name)
 		}
