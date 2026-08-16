@@ -529,8 +529,13 @@ type ResourceListItem struct {
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
 	MaxReads  int64 `json:"maxReads,omitempty"`
 	Reads     int64 `json:"reads,omitempty"`
-	CreatedAt int64 `json:"createdAt,omitempty"`
-	UpdatedAt int64 `json:"updatedAt,omitempty"`
+	// GrantCount is the number of account grants on the resource, echoed so
+	// `aqt share ls` can skip the grant listing for resources that have none. A
+	// pointer because absent and zero must stay distinguishable: nil means the
+	// server predates the field and the caller has to fetch grants to know.
+	GrantCount *int  `json:"grantCount,omitempty"`
+	CreatedAt  int64 `json:"createdAt,omitempty"`
+	UpdatedAt  int64 `json:"updatedAt,omitempty"`
 	// Reclaimed marks a link tombstone: the ciphertext is gone (every read 410s)
 	// and only `aqt rm` or a full content re-push can act on the id. Without this
 	// flag the state was invisible on the wire, so the row looked like a live
