@@ -19,10 +19,10 @@ are inherited from the resource model unchanged.
 The manifest is not the blob. It is chunked through the same pipeline as file content
 and stored as objects, and the resource blob is a compact sealed root naming those
 objects — so a one-file edit re-uploads a handful of manifest objects rather than the
-whole manifest, and the 64 MiB blob ceiling does not cap a folder by its size. Three
-root types exist: `TreeRoot` for a chunked folder, `PackRoot` for
-[pack-and-seal](#pack-and-seal), and `FileRoot` for a
-[streamed single file](#streamed-single-files).
+whole manifest, and the 64 MiB blob ceiling does not cap a folder by its size. Two
+root types exist: `TreeRoot` for a folder and `FileRoot` for a
+[streamed single file](#streamed-single-files). (A third, `PackRoot`, belonged to
+the [removed pack-and-seal format](#pack-and-seal-removed).)
 
 ## What sync preserves
 
@@ -76,10 +76,6 @@ restored as an independent file, so dedup keeps one copy on the server but the
 restore writes two files on disk. Sparse files are read and restored dense. Entries
 that are neither regular files, symlinks, nor directories — devices, FIFOs, sockets —
 are skipped by the scan entirely and never appear in a restore.
-
-[Pack-and-seal](#pack-and-seal) carries the same set through a tar archive, with one
-difference: every tar header is written at a fixed epoch so the archive stays
-deterministic, so a pack restore has no origin mtime to consider in the first place.
 
 ## Merkle DAG of directory nodes
 
@@ -314,27 +310,20 @@ then overwrite both remote copies with the survivor's bytes — and a pull or cl
 onto a case-insensitive filesystem refuses such a tree by name before writing
 anything.
 
-**One prologue, two adapters.** Both sync adapters — chunked and pack-and-seal —
-enter through the same `syncSession`: it loads `state.json` and the last-synced base,
-refuses a missing base unless `--reconcile`, and acquires the authenticated client
-and unlocked master key. Each reconcile attempt then runs the session's `openRemote`,
-which fetches the resource, classifies a server rollback, unwraps the content key,
-decodes the sealed metadata, and checks the folder's format. Every one of those is a
-safety guard, and a fix applied to one adapter's copy did not reach the other, so
-they are defined once.
+**One prologue.** Every sync enters through `syncSession`: it loads `state.json`
+and the last-synced base, refuses a missing base unless `--reconcile`, and acquires
+the authenticated client and unlocked master key. Each reconcile attempt then runs
+the session's `openRemote`, which fetches the resource, classifies a server
+rollback, unwraps the content key, decodes the sealed metadata, and checks the
+folder's format. Every one of those is a safety guard.
 
-Two details are load-bearing. A rollback is classified *before* the content key is
+One detail is load-bearing: a rollback is classified *before* the content key is
 unwrapped and the metadata decoded, so a server whose version regressed reports that
-rather than a cross-mode config typo or a keyless resource — a version regression is
-a statement about the server's integrity and outranks anything read out of the record
-it served. And the format guard is parameterized by the mode the caller expects,
-because a pack folder carries `packed` and never the chunked path's `tree` flag, so
-one shared check would reject either every pack folder or none.
-
-What stays per-adapter is what each does with the verdict: `openRemote` reports
-whether the base can be trusted, and the chunked path plans against an empty base
-while pack-and-seal drops into its baseless whole-folder reconcile — along with all
-planning, transfer, apply, and conflict behavior.
+rather than a config typo or a keyless resource — a version regression is a
+statement about the server's integrity and outranks anything read out of the record
+it served. The format check itself routes by the server's truth: a resource in the
+removed pack-and-seal format, or the pre-tree legacy format, is refused with
+recovery guidance rather than reconciled as an empty chunked manifest.
 
 ## Tracked state
 
@@ -369,10 +358,6 @@ was. `init` stages the local `.aqt` control state before registering the remote
 resource and deletes the just-created resource if the local commit fails, so a failed
 init is side-effect-free on both ends.
 
-A pack-and-seal pull is the one transfer that writes into a live tree, deliberately —
-staging the whole root would take the ignored files with it. It is made recoverable
-rather than atomic; see [pack-and-seal](#pack-and-seal).
-
 **Untracking.** `aqt untrack [dir]` removes `.aqt` and leaves both the working tree
 and the server-side resource alone (`--delete-remote` opts into deleting the
 resource too). It is the way out of a folder whose resource was deleted — by `aqt rm`
@@ -401,7 +386,6 @@ Per-folder options, in JSON:
 ```json
 {
   "version": 1,
-  "pack": false,
   "chunkProfile": "default",
   "conflicts": "merge",
   "watch": {
@@ -421,7 +405,8 @@ silently ignored.
 - `chunkProfile` is `"default"`, `"large"`, or `"huge"`. The rare tree a named
   profile does not fit can pin explicit byte sizes with
   `"chunk": { "min": …, "normal": …, "max": … }`, which overrides `chunkProfile`.
-- `pack` selects [pack-and-seal](#pack-and-seal) instead of the chunked default.
+- `pack` named the [removed pack-and-seal format](#pack-and-seal-removed); a config
+  still setting it is refused with recovery guidance.
 - `conflicts` is `"block"` (the default), `"copy"`, or `"merge"`; `--conflicts`
   overrides it per run.
 - `watch.interval` is the daemon's debounce floor (a Go duration; `--interval`
@@ -455,53 +440,27 @@ would invent a line, delete/modify pairs, and a GC'd base chunk.
 Both resolving modes are refused with `--force`, with a baseless reconcile or
 rollback, with a one-direction sync, and in pack mode.
 
-## Pack-and-seal
+## Pack-and-seal (removed)
 
-`"pack": true` seals the whole tree instead of chunking it per file. The tree is
-tarred and sealed under the folder content key into fixed-size segments, each with a
-fresh nonce (so there is no chunk-level dedup), streamed through the same packs as
-file content. Only the sealed `PackRoot` — a compact segment-id list — rides in the
-resource blob, so the 64 MiB blob ceiling does not cap the tree by its byte size; the
-practical bound moves to the segment count, hundreds of thousands of 4 MiB segments,
-i.e. ~TB scale. The chunked path's own bound is lower and different in kind — client
-memory for per-chunk records, see [What actually bounds sync
-memory](#what-actually-bounds-sync-memory).
+`"pack": true` used to seal the whole tree — tarred, zstd-compressed, and sealed
+into fixed-size segments — instead of chunking it per file. It existed primarily to
+sync Git internals, which the [encrypted Git remote](git-remote.md) now handles at
+the protocol level, and its remaining benefit (hiding file boundaries and directory
+structure) did not justify its costs: every change re-shipped the entire folder,
+there was no chunk-level dedup, conflicts were whole-folder last-writer-wins, and
+the alternate format added branches across sync, clone, sharing, diff, and recovery.
+The format has been removed.
 
-It leaks no per-file structure: the server sees only opaque, per-sync-unique
-segments. The costs are real, though. Any change re-ships the whole folder. `sync`
-reconciles it whole-folder last-writer-wins — a change on both sides is one conflict,
-`--force` resolves local-wins, and `--conflicts=copy`/`merge` are chunked-only and
-refused here since there is no per-file conflict to resolve. `clone` untars it.
-Subpath addressing and public links are refused for the same reason.
+A current client refuses a packed resource — and a stale `"pack": true` config —
+with recovery guidance: clone the folder with an aqt release that still reads the
+format (v0.5.x or earlier), remove the `pack` setting, and push the tree again as a
+normal chunked folder. The `packed` metadata flag and the `aqt-pack-v1` /
+`aqt-packroot-v1` AAD domains stay reserved so old ciphertext remains identifiable
+and those strings are never reassigned.
 
-The archive carries a header per tracked directory, not just per file and symlink:
-the extract side rebuilds its manifest from the tar alone, so a directory left out of
-the stream would lose its mode and — if empty — itself. An archive written before
-this carries no directory headers, so the first sync after upgrading re-ships such a
-folder once and then converges.
-
-**An interrupted pull is recognized, not guessed at.** A pack pull extracts in place
-rather than staging beside the root and renaming, because the root also holds ignored
-files — build output, caches — a swap would destroy. So an interrupted pull leaves a
-tree that is part new version and part old, and no scan can tell that from deliberate
-local edits: the next reconcile would read it as "changed on both sides" and offer
-`--force`, which means push, which would make the torn tree the authoritative version
-and destroy the intact remote folder. `.aqt/pull-in-progress` records the target
-version for the length of the extract and prune, and is cleared only once the base
-commits. While it exists, the folder pulls: `--force` cannot re-route that into a
-push, `--push-only` refuses with the reason, and `status` says the changes it is
-showing are a half-applied remote version. Re-running `sync` is the whole recovery:
-the resumed extract re-scans first, so paths already carrying the new version are
-re-verified and rewritten, and the prune still skips anything created since.
-
-An edit or a new file created *after* the interruption lands in the same fresh scan
-as the half-applied version, so the resumed pull cannot use that scan to tell them
-apart. It guards against the last-synced base instead: a path unchanged since the
-last completed sync (or already carrying the incoming version) is overwritten, and
-anything else — a post-interruption edit or creation — keeps its local bytes and is
-reported as a conflict, exactly as an edit racing an uninterrupted pull would be. A
-file *deleted* in the torn tree is the one case the base cannot distinguish from a
-not-yet-extracted path, so the resume re-materializes it.
+An interrupted pack pull from an older build leaves `.aqt/pull-in-progress` behind;
+`status` and `diff` still recognize the marker so the torn tree is not misread as
+local edits.
 
 ## Watch daemon
 

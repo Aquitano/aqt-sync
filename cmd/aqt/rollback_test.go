@@ -121,43 +121,6 @@ func TestSyncRefusesServerRollback(t *testing.T) {
 	}
 }
 
-// TestPackSyncRefusesServerRollback mirrors the guard on the pack-and-seal path,
-// where an unguarded rollback reads as "remote changed" and pulls the old tree
-// over newer local files.
-func TestPackSyncRefusesServerRollback(t *testing.T) {
-	h := newE2E(t)
-	origin := t.TempDir()
-	writePackConfig(t, origin)
-	h.init(origin)
-	writeTree(t, origin, "a.txt", "alpha")
-	h.sync(origin)
-
-	backup := h.snapshotServerData()
-	writeTree(t, origin, "newer.txt", "written after the backup")
-	h.sync(origin)
-
-	h.restoreServer(backup)
-
-	if err := runSync(origin, syncOptions{}); !errors.Is(err, errRollback) {
-		t.Fatalf("pack sync against a rolled-back server = %v, want errRollback", err)
-	}
-	if got := readTree(t, origin, "newer.txt"); got != "written after the backup" {
-		t.Fatalf("refused pack sync touched local files: %q", got)
-	}
-
-	if err := runSync(origin, syncOptions{acceptRollback: true}); !errors.Is(err, errConflictsRemain) {
-		t.Fatalf("accepted pack rollback = %v, want errConflictsRemain", err)
-	}
-	h.syncOpts(origin, syncOptions{acceptRollback: true, force: true})
-	h.sync(origin)
-	if got := readTree(t, origin, "newer.txt"); got != "written after the backup" {
-		t.Fatalf("newer.txt lost after the forced pack reconcile: %q", got)
-	}
-}
-
-// TestRollbackGuardSkipsLegacyState pins the migration behavior: a state.json
-// written by an older build carries no version pin, so the guard must not fire
-// (no false refusal on upgrade), and the next successful sync records one.
 func TestRollbackGuardSkipsLegacyState(t *testing.T) {
 	h := newE2E(t)
 	origin := t.TempDir()

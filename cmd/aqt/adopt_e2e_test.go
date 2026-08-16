@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -117,27 +118,15 @@ func TestAdoptGuards(t *testing.T) {
 		t.Fatal("plain clone into a non-empty directory did not error")
 	}
 
-	// Adopting a pack-and-seal folder is refused: hash reconcile does not apply.
-	packOrigin := t.TempDir()
-	writePackConfig(t, packOrigin)
-	h.init(packOrigin)
-	writeTree(t, packOrigin, "p.txt", "packed")
-	h.sync(packOrigin)
-	packID := h.folderID(packOrigin)
-
-	adoptee := t.TempDir()
-	writeTree(t, adoptee, "p.txt", "packed")
-	if err := runClone(packID, adoptee, true, ""); err == nil {
-		t.Fatal("adopt of a pack-and-seal folder did not error")
-	}
-
-	// A local .aqtconfig selecting pack against a chunked remote is refused up front,
-	// before any tracking is written.
+	// A local .aqtconfig naming the removed pack-and-seal format is refused up
+	// front, before any tracking is written.
 	mismatched := t.TempDir()
-	writePackConfig(t, mismatched)
+	if err := os.WriteFile(filepath.Join(mismatched, ".aqtconfig"), []byte(`{"pack": true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	writeTree(t, mismatched, "a.txt", "data")
-	if err := runClone(id, mismatched, true, ""); err == nil {
-		t.Fatal("adopt with a pack .aqtconfig against a chunked remote did not error")
+	if err := runClone(id, mismatched, true, ""); !errors.Is(err, errPackRemoved) {
+		t.Fatalf("adopt with a pack .aqtconfig: err = %v, want errPackRemoved", err)
 	}
 	if _, err := os.Stat(controlPath(mismatched, stateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("refused adopt still wrote tracking: %v", err)

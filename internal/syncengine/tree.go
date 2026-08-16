@@ -80,10 +80,10 @@ type TreeRoot struct {
 
 // SealTreeRoot serializes and encrypts a tree root under the folder content key
 // (the resource blob), domain-separated from the flat ManifestRoot's AADBlob and the
-// pack root's AADPackRoot. The distinct tag is mandatory, not cosmetic: a TreeRoot
+// removed pack format's AADPackRoot. The distinct tag is mandatory, not cosmetic: a TreeRoot
 // and a ManifestRoot are byte-compatible JSON under the same key, so without it an
 // old client could open a v2 root as an empty manifest and delete the whole tree —
-// the same footgun SealPackRoot guards. With it, the cross-open fails the AEAD check.
+// opened under another domain would parse as garbage; the cross-open fails the AEAD check.
 // The seal also binds the resource id when known (empty on create, before the
 // server assigns one).
 func SealTreeRoot(r TreeRoot, ck crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {

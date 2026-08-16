@@ -22,9 +22,9 @@ type Config struct {
 	// aqt already rejects fields it does not know.
 	Version int `json:"version,omitempty"`
 
-	// Pack selects pack-and-seal: the whole tree is tarred into one sealed blob
-	// rather than chunked. Simpler and leaks no structure, but loses chunk-level
-	// dedup, so any change re-ships the entire folder. Default false.
+	// Pack named the removed pack-and-seal format (the whole tree tarred into one
+	// sealed blob). The field is still parsed so a stale config is refused with a
+	// recovery hint instead of silently re-routing the folder as chunked.
 	Pack bool `json:"pack"`
 
 	// ChunkProfile pins one content-defined chunking granularity for every file in the

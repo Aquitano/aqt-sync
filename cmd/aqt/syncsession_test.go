@@ -3,43 +3,40 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// TestCheckSyncFormat pins the one guard that cannot be shared verbatim between the
-// adapters: a pack folder is created with Packed and no Tree flag, so applying the
-// chunked path's legacy !Tree check to both modes would reject every pack folder.
+// TestCheckSyncFormat pins the server-truth routing: a packed resource is the
+// removed pack-and-seal format (refused with the recovery hint), a legacy folder
+// without the Tree flag is unsupported, and a tree folder is accepted.
 func TestCheckSyncFormat(t *testing.T) {
 	cases := []struct {
-		name   string
-		meta   api.Metadata
-		format syncFormat
-		want   string // substring of the expected error; empty means the folder is accepted
+		name string
+		meta api.Metadata
+		want string // substring of the expected error; empty means accepted
 	}{
-		{"chunked folder as chunked", api.Metadata{Tree: true}, formatChunked, ""},
-		{"pack folder as chunked", api.Metadata{Packed: true}, formatChunked, "pack-and-seal on the server"},
-		{"legacy folder as chunked", api.Metadata{}, formatChunked, "unsupported legacy format"},
-		{"pack folder as pack", api.Metadata{Packed: true}, formatPacked, ""},
-		{"chunked folder as pack", api.Metadata{Tree: true}, formatPacked, "was created chunked"},
+		{"chunked tree folder", api.Metadata{Tree: true}, ""},
+		{"packed folder", api.Metadata{Packed: true}, "no longer supported"},
+		{"legacy folder", api.Metadata{}, "unsupported legacy format"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkSyncFormat(tc.meta, tc.format)
+			err := checkSyncFormat(tc.meta)
 			if tc.want == "" {
 				if err != nil {
 					t.Fatalf("checkSyncFormat(%+v) = %v, want accepted", tc.meta, err)
 				}
 				return
 			}
-			if err == nil {
-				t.Fatalf("checkSyncFormat(%+v) accepted the folder, want error containing %q", tc.meta, tc.want)
-			}
-			if !strings.Contains(err.Error(), tc.want) {
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
 				t.Fatalf("checkSyncFormat(%+v) = %v, want error containing %q", tc.meta, err, tc.want)
 			}
 		})
@@ -73,71 +70,85 @@ func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 	}
 }
 
-// TestOpenRemoteGuardsBothModes drives the shared per-attempt prologue against real
-// resources of both formats, so the guard the chunked and pack adapters now share is
-// verified through one surface.
-func TestOpenRemoteGuardsBothModes(t *testing.T) {
-	h := newE2E(t)
-
-	chunked := t.TempDir()
-	h.init(chunked)
-	writeTree(t, chunked, "a.txt", "A")
-	h.sync(chunked)
-
-	packed := t.TempDir()
-	writePackConfig(t, packed)
-	h.init(packed)
-	writeTree(t, packed, "b.txt", "B")
-	h.sync(packed)
-
-	cases := []struct {
-		name    string
-		root    string
-		format  syncFormat
-		wantErr string // empty means the resource is accepted in this mode
-	}{
-		{"chunked as chunked", chunked, formatChunked, ""},
-		{"chunked as pack", chunked, formatPacked, "was created chunked"},
-		{"pack as pack", packed, formatPacked, ""},
-		{"pack as chunked", packed, formatChunked, "pack-and-seal on the server"},
+// markResourcePacked flips a tracked folder's sealed metadata to the removed
+// pack-and-seal format server-side, emulating a resource written by an old client.
+func markResourcePacked(t *testing.T, root string) {
+	t.Helper()
+	st, err := loadState(root)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			sess, err := openSyncSession(tc.root, syncOptions{})
-			if err != nil {
-				t.Fatalf("openSyncSession: %v", err)
-			}
-			defer sess.Wipe()
+	cl, prof, err := authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	res, err := cl.GetResource(st.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Wipe()
+	meta, err := decodeMeta(res.EncryptedMeta, ck, st.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta.Packed, meta.Tree = true, false
+	plain, err := json.Marshal(meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := crypto.SealBound(plain, ck, crypto.AADMeta, st.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.UpdateResourceMetadata(st.ID, api.UpdateResourceMetadataRequest{
+		EncryptedMeta: sealed, ExpectedVersion: res.Version,
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
 
-			rs, err := sess.openRemote(syncOptions{}, tc.format)
-			if tc.wantErr != "" {
-				if err == nil {
-					rs.ck.Wipe()
-					t.Fatalf("openRemote accepted the resource, want error containing %q", tc.wantErr)
-				}
-				if !strings.Contains(err.Error(), tc.wantErr) {
-					t.Fatalf("openRemote = %v, want error containing %q", err, tc.wantErr)
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("openRemote: %v", err)
-			}
-			defer rs.ck.Wipe()
-			if !rs.trustBase {
-				t.Fatal("openRemote distrusted the base of a freshly synced folder")
-			}
-			if rs.meta.Packed != (tc.format == formatPacked) {
-				t.Fatalf("decoded meta %+v does not match mode %v", rs.meta, tc.format)
-			}
-		})
+// TestOpenRemoteRefusesPackedResource drives the shared per-attempt prologue
+// against a resource whose server-side metadata names the removed pack-and-seal
+// format: the sync must refuse with the recovery hint instead of reconciling the
+// opaque blob as an empty chunked manifest (the silent tree-wipe).
+func TestOpenRemoteRefusesPackedResource(t *testing.T) {
+	h := newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "a.txt", "A")
+	h.sync(origin)
+	markResourcePacked(t, origin)
+
+	sess, err := openSyncSession(origin, syncOptions{})
+	if err != nil {
+		t.Fatalf("openSyncSession: %v", err)
+	}
+	defer sess.Wipe()
+	if _, err := sess.openRemote(syncOptions{}); !errors.Is(err, errPackRemoved) {
+		t.Fatalf("openRemote on a packed resource = %v, want errPackRemoved", err)
+	}
+
+	// The full sync path refuses the same way and leaves local files untouched.
+	if err := runSync(origin, syncOptions{}); !errors.Is(err, errPackRemoved) {
+		t.Fatalf("sync of a packed resource = %v, want errPackRemoved", err)
+	}
+	if got := readTree(t, origin, "a.txt"); got != "A" {
+		t.Fatalf("refused sync touched local files: %q", got)
 	}
 }
 
 // TestOpenRemoteRollbackOutranksFormatMismatch pins the ordering the shared prologue
 // unified on: a rolled-back server is a data-integrity signal about the server, so it
-// must be reported even when a local .aqtconfig also names the wrong format. The pack
-// adapter used to decode metadata first and hide the rollback behind the mismatch.
+// must be reported before any format refusal.
 func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 	h := newE2E(t)
 	origin := t.TempDir()
@@ -156,15 +167,13 @@ func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 	}
 	defer sess.Wipe()
 
-	// The folder is chunked on the server, so the pack mode is a cross-mode mismatch
-	// as well as a rollback; the rollback must win.
-	if _, err := sess.openRemote(syncOptions{}, formatPacked); !errors.Is(err, errRollback) {
-		t.Fatalf("openRemote on a rolled-back cross-mode folder = %v, want errRollback", err)
+	if _, err := sess.openRemote(syncOptions{}); !errors.Is(err, errRollback) {
+		t.Fatalf("openRemote on a rolled-back folder = %v, want errRollback", err)
 	}
 
-	// Accepting the rollback drops the base for this pass, which is what makes each
-	// adapter reconcile from scratch instead of clobbering newer local files.
-	rs, err := sess.openRemote(syncOptions{acceptRollback: true}, formatChunked)
+	// Accepting the rollback drops the base for this pass, which is what makes the
+	// reconcile start from scratch instead of clobbering newer local files.
+	rs, err := sess.openRemote(syncOptions{acceptRollback: true})
 	if err != nil {
 		t.Fatalf("openRemote with --accept-rollback: %v", err)
 	}
@@ -174,26 +183,22 @@ func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 	}
 }
 
-// TestPackSyncReportsRollbackOverConfigMismatch is the end-to-end shape of the
-// ordering change: a stray pack=true on a chunked folder routes the sync to the pack
-// adapter, which now surfaces the rolled-back server rather than the config typo.
-func TestPackSyncReportsRollbackOverConfigMismatch(t *testing.T) {
+// TestSyncRefusesStalePackConfig: a stray pack=true in .aqtconfig names the removed
+// format and is refused up front with the recovery hint, before any server call.
+func TestSyncRefusesStalePackConfig(t *testing.T) {
 	h := newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "v1")
 	h.sync(origin)
 
-	backup := h.snapshotServerData()
-	writeTree(t, origin, "newer.txt", "written after the backup")
-	h.sync(origin)
-	h.restoreServer(backup)
-
-	writePackConfig(t, origin)
-	if err := runSync(origin, syncOptions{}); !errors.Is(err, errRollback) {
-		t.Fatalf("pack-routed sync of a rolled-back chunked folder = %v, want errRollback", err)
+	if err := os.WriteFile(filepath.Join(origin, ".aqtconfig"), []byte(`{"pack": true}`), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	if got := readTree(t, origin, "newer.txt"); got != "written after the backup" {
+	if err := runSync(origin, syncOptions{}); !errors.Is(err, errPackRemoved) {
+		t.Fatalf("sync with stale pack config = %v, want errPackRemoved", err)
+	}
+	if got := readTree(t, origin, "keep.txt"); got != "v1" {
 		t.Fatalf("refused sync touched local files: %q", got)
 	}
 }

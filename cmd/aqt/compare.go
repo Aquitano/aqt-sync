@@ -184,15 +184,7 @@ func remoteManifest(cl *client.Client, res api.GetResourceResponse, mk crypto.Ma
 		return zero, errors.New("remote resource is not a folder")
 	}
 	if meta.Packed {
-		root, err := syncengine.OpenPackRoot(res.Blob, ck, res.ID)
-		if err != nil {
-			return zero, fmt.Errorf("decrypt remote pack root: %w", err)
-		}
-		src, err := newPackSource(cl, root.SegmentIDs())
-		if err != nil {
-			return zero, err
-		}
-		return syncengine.PackTreeManifest(root, ck, src.get)
+		return zero, errPackRemoved
 	}
 	if !meta.Tree {
 		return zero, errors.New("unsupported remote folder format")

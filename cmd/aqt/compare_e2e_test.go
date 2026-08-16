@@ -249,41 +249,6 @@ func TestCompareRemoteIsReadOnly(t *testing.T) {
 	}
 }
 
-// TestCompareRemotePackAndSeal covers the folder shape with no per-file remote
-// metadata: the comparison streams the sealed segments back through memory and still
-// reports a truthful per-entry answer.
-func TestCompareRemotePackAndSeal(t *testing.T) {
-	h := newE2E(t)
-	origin := t.TempDir()
-	writePackConfig(t, origin)
-	h.init(origin)
-	writeTree(t, origin, "a.txt", "alpha\n")
-	writeTree(t, origin, "notes/todo.txt", "buy milk\n")
-	h.sync(origin)
-
-	if out := mustCompare(t, origin, nil); !strings.Contains(out, "no differences") {
-		t.Fatalf("synced pack folder is not reported clean:\n%s", out)
-	}
-
-	writeTree(t, origin, "a.txt", "alpha edited\n")
-	writeTree(t, origin, "fresh.txt", "new\n")
-	removeTree(t, origin, "notes/todo.txt")
-
-	before := controlSnapshot(t, origin)
-	out := mustCompare(t, origin, nil)
-	for _, want := range []string{"M  a.txt", "A  fresh.txt", "D  notes/todo.txt"} {
-		if !strings.Contains(out, want) {
-			t.Fatalf("pack comparison missing %q:\n%s", want, out)
-		}
-	}
-	if after := controlSnapshot(t, origin); after != before {
-		t.Fatal("pack comparison mutated .aqt control state")
-	}
-}
-
-// TestCompareRemoteUnreachableServer pins the failure mode that would be worst: a
-// server that cannot be reached must be an error, never an empty comparison a caller
-// would read as "the trees agree".
 func TestCompareRemoteUnreachableServer(t *testing.T) {
 	var down atomic.Bool
 	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {

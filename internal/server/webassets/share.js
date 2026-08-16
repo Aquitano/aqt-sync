@@ -863,7 +863,7 @@
         } else if (msg === "upgrade-required") {
           fail("This share needs a newer aqt.", upgradeText(err && err.minClient) + " No read was consumed.");
         } else if (msg === "unsupported:packed") {
-          fail("This folder needs the CLI.", "Packed or legacy folders are inspected without consuming a read.");
+          fail("This folder needs an older CLI.", "Pack-and-seal was removed; clone it with aqt v0.5.x or earlier.");
         } else if (msg === "unsupported:large") {
           fail("This resource needs the CLI.", "It is too large to assemble safely in a browser tab; no read was consumed.");
         } else {
@@ -938,7 +938,7 @@
         } else if (msg === "upgrade-required") {
           fail("This share needs a newer aqt.", upgradeText(err && err.minClient));
         } else if (msg.indexOf("unsupported:") === 0) {
-          fail("This is a packed folder.", "In-browser decryption covers chunked folders, single files, and streamed files.");
+          fail("This is a packed folder.", "Pack-and-seal was removed; clone it with aqt v0.5.x or earlier.");
         } else if (msg.indexOf("WebAssembly") !== -1 || msg.indexOf("crypto runtime") !== -1) {
           fail("Browser decryption is unavailable.", "This browser could not start the local crypto runtime.");
         } else {
