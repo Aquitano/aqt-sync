@@ -1203,7 +1203,8 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	// for every case-insensitive device — and a pull onto a case-folding filesystem
 	// must not land them locally. An inherited remote twin deliberately wedges the
 	// push too: renaming one member locally is the resolution, and the error says so.
-	if (push && remoteChanged) || syncengine.CaseInsensitiveDir(c.root) {
+	foldFS := syncengine.CaseInsensitiveDir(c.root)
+	if (push && remoteChanged) || foldFS {
 		if err := refuseCaseCollisions(manifestFrom(merged, 0).Entries, dirsFrom(mergedDirs)); err != nil {
 			return err
 		}
@@ -1304,12 +1305,28 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	}
 	conflicts = append(conflicts, mergeConflicts...)
 
+	// A case-only rename arrives as an add+delete pair whose two paths resolve to
+	// the same physical file on a case-folding filesystem: the download lands on the
+	// very file the late delete then destroys, and the next sync pushes that loss
+	// fleet-wide. Convert each such delete into a real rename (executed before any
+	// other byte moves, shallowest first so a renamed directory carries its subtree)
+	// and drop it from the delete lists.
+	if foldFS {
+		var caseRenames []caseRename
+		caseRenames, localDeletes, dirRemovals = planCaseOnlyRenames(localDeletes, dirRemovals, newBase, newBaseDirs)
+		for _, r := range caseRenames {
+			if err := syncengine.RenameCaseOnly(c.root, r.from, r.to); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Server is updated; now bring the local tree in line. A local file or symlink the
 	// remote turned into a directory must be removed before the download that creates
 	// that directory, or the download would write through the stale entry (refused) or
 	// the later delete would hit a now-populated directory. Every other delete stays
 	// after the downloads, so local data is never removed before its replacement lands.
-	earlyDeletes, lateDeletes := partitionDeletesByDownload(localDeletes, downloads)
+	earlyDeletes, lateDeletes := partitionDeletesByDownload(localDeletes, downloads, foldFS)
 	for _, p := range earlyDeletes {
 		if err := syncengine.RemoveFile(c.root, p); err != nil {
 			return err
@@ -2309,12 +2326,20 @@ func (c *packCache) touch(id string) {
 // remote turned into a directory, so the directory cannot be created until it is
 // gone), or the delete is a descendant of a download (a directory the remote turned
 // into a file, so the file cannot be materialized until the directory is emptied).
-func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry) (early, late []string) {
+// On a case-folding filesystem (fold) the nesting compares case-insensitively,
+// because that is how the filesystem will resolve the paths.
+func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry, fold bool) (early, late []string) {
+	key := func(p string) string {
+		if fold {
+			return strings.ToLower(p)
+		}
+		return p
+	}
 	for _, d := range deletes {
-		deletePrefix := d + "/"
+		deletePrefix := key(d) + "/"
 		races := false
 		for _, e := range downloads {
-			if strings.HasPrefix(e.Path, deletePrefix) || strings.HasPrefix(d, e.Path+"/") {
+			if strings.HasPrefix(key(e.Path), deletePrefix) || strings.HasPrefix(key(d), key(e.Path)+"/") {
 				races = true
 				break
 			}
@@ -2326,6 +2351,46 @@ func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry) 
 		}
 	}
 	return early, late
+}
+
+// caseRename is a local delete converted into a rename: its target survives the
+// merge under a name differing only by case, so on a case-folding filesystem the
+// delete and the survivor are one physical entry.
+type caseRename struct {
+	from, to string
+}
+
+// planCaseOnlyRenames pairs each pending local delete (file or directory) with a
+// surviving merged path that differs from it only by case, if one exists. Each pair
+// becomes a rename and leaves the delete lists; everything unpaired is kept. Only
+// meaningful on a case-folding filesystem, where applying such a delete after its
+// survivor lands would destroy the survivor. Renames come back sorted shallowest
+// first, so a renamed directory moves before its children are retargeted.
+func planCaseOnlyRenames(localDeletes, dirRemovals []string, newBase map[string]syncengine.Entry, newBaseDirs map[string]syncengine.DirEntry) (renames []caseRename, keptDeletes, keptDirRemovals []string) {
+	fileSurvivors := make(map[string]string, len(newBase))
+	for p := range newBase {
+		fileSurvivors[strings.ToLower(p)] = p
+	}
+	dirSurvivors := make(map[string]string, len(newBaseDirs))
+	for p := range newBaseDirs {
+		dirSurvivors[strings.ToLower(p)] = p
+	}
+	for _, d := range localDeletes {
+		if s, ok := fileSurvivors[strings.ToLower(d)]; ok && s != d {
+			renames = append(renames, caseRename{from: d, to: s})
+		} else {
+			keptDeletes = append(keptDeletes, d)
+		}
+	}
+	for _, d := range dirRemovals {
+		if s, ok := dirSurvivors[strings.ToLower(d)]; ok && s != d {
+			renames = append(renames, caseRename{from: d, to: s})
+		} else {
+			keptDirRemovals = append(keptDirRemovals, d)
+		}
+	}
+	sort.Slice(renames, func(i, j int) bool { return renames[i].from < renames[j].from })
+	return renames, keptDeletes, keptDirRemovals
 }
 
 func distinctChunkIDs(entries []syncengine.Entry) []string {
