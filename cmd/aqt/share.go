@@ -8,12 +8,12 @@ import (
 	"os"
 	"slices"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
@@ -167,8 +167,7 @@ func runShareList(ref string) error {
 		fmt.Println("nothing shared; `aqt share <id>` mints a link, `aqt share <id> --with <email>` grants an account")
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tACCESS\tGRANTED-TO\tID")
+	cells := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		access := "grant-only"
 		if r.Public {
@@ -181,9 +180,9 @@ func runShareList(ref string) error {
 		if len(r.Grantees) > 0 {
 			grantees = strings.Join(r.Grantees, ", ")
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", r.Name, access, grantees, r.ID)
+		cells = append(cells, []string{r.Name, access, grantees, r.ID})
 	}
-	return w.Flush()
+	return printTable(os.Stdout, []string{"NAME", "ACCESS", "GRANTED-TO", "ID"}, cells)
 }
 
 // linkPolicySummary renders the server-reported link lifecycle for one listed
@@ -191,7 +190,7 @@ func runShareList(ref string) error {
 func linkPolicySummary(it api.ResourceListItem) string {
 	var parts []string
 	if it.ExpiresAt > 0 {
-		parts = append(parts, "expires "+formatTime(it.ExpiresAt))
+		parts = append(parts, "expires "+cliutil.FormatUnix(it.ExpiresAt))
 	}
 	if it.MaxReads > 0 {
 		parts = append(parts, fmt.Sprintf("%d/%d reads", it.Reads, it.MaxReads))

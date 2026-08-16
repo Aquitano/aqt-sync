@@ -33,7 +33,7 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 	if err := os.WriteFile(src, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(src, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(src, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestStreamingSingleFilePushPull(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runPush(src, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(src, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	if h.countPacks() == 0 {

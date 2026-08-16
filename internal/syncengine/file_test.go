@@ -34,7 +34,7 @@ func TestFileRootRoundTrip(t *testing.T) {
 	}
 
 	sink := memSink{}
-	chunks, size, err := ChunkFile(bytes.NewReader(data), conv, DefaultChunker(), sink)
+	chunks, size, err := ChunkFile(bytes.NewReader(data), conv, testChunker(), sink)
 	if err != nil {
 		t.Fatalf("ChunkFile: %v", err)
 	}

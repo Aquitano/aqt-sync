@@ -19,6 +19,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
 
@@ -157,7 +158,7 @@ func adminAccountsQuotaCmd() *cobra.Command {
 					fmt.Fprintf(cmd.OutOrStdout(), "%s is now exempt from any storage quota\n", a.Email)
 				default:
 					fmt.Fprintf(cmd.OutOrStdout(), "%s quota set to %s (currently using %s)\n",
-						a.Email, formatBytes(*quota), formatBytes(a.Usage.StorageBytes))
+						a.Email, cliutil.HumanBytes(*quota), cliutil.HumanBytes(a.Usage.StorageBytes))
 				}
 				if quota != nil && *quota > 0 && a.Usage.StorageBytes > *quota {
 					fmt.Fprintf(cmd.ErrOrStderr(),
@@ -236,7 +237,7 @@ func adminAccountsDeleteCmd() *cobra.Command {
 				out := cmd.OutOrStdout()
 				fmt.Fprintf(out, "%s (%s)\n", a.Email, a.OwnerHandle)
 				fmt.Fprintf(out, "  %s across %d resource(s), %d snapshot(s), %d pack(s), %d object(s), %d device(s)\n",
-					formatBytes(a.Usage.StorageBytes), a.Usage.Resources, a.Usage.Snapshots,
+					cliutil.HumanBytes(a.Usage.StorageBytes), a.Usage.Resources, a.Usage.Snapshots,
 					a.Usage.Packs, a.Usage.Objects, a.Usage.Devices)
 				if dryRun {
 					fmt.Fprintln(out, "dry run: nothing was deleted")
@@ -249,7 +250,7 @@ func adminAccountsDeleteCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				fmt.Fprintf(out, "deleted %s: freed %s\n", deleted.Email, formatBytes(deleted.Bytes))
+				fmt.Fprintf(out, "deleted %s: freed %s\n", deleted.Email, cliutil.HumanBytes(deleted.Bytes))
 				for _, fe := range deleted.FileErrors {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: orphaned file, remove by hand: %s\n", fe)
 				}
@@ -319,28 +320,19 @@ func serverQuotaDefault() int64 {
 	return n
 }
 
-// confirm gates a destructive verb. Without --yes it requires a terminal: a piped
-// or scripted invocation must pass --yes explicitly rather than have a prompt
-// silently read EOF and be taken as consent.
+// confirm gates a destructive verb, asking on the command's own streams.
 func confirm(cmd *cobra.Command, prompt string, assumeYes bool) error {
-	if assumeYes {
-		return nil
-	}
-	in, ok := cmd.InOrStdin().(*os.File)
-	if !ok || !term.IsTerminal(int(in.Fd())) {
-		return errors.New("refusing to prompt without a terminal; pass --yes to confirm")
-	}
-	fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N] ", prompt)
-	line, err := bufio.NewReader(in).ReadString('\n')
-	if err != nil && line == "" {
-		return errors.New("aborted")
-	}
-	switch strings.ToLower(strings.TrimSpace(line)) {
-	case "y", "yes":
-		return nil
-	default:
-		return errors.New("aborted")
-	}
+	in, canPrompt := cmd.InOrStdin().(*os.File)
+	canPrompt = canPrompt && term.IsTerminal(int(in.Fd()))
+	return cliutil.Confirm(prompt, assumeYes, canPrompt, func(p string) (bool, error) {
+		fmt.Fprintf(cmd.OutOrStdout(), "%s [y/N] ", p)
+		line, err := bufio.NewReader(in).ReadString('\n')
+		if err != nil && line == "" {
+			return false, nil
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		return answer == "y" || answer == "yes", nil
+	})
 }
 
 // --- rendering ---
@@ -354,7 +346,7 @@ func printAccountTable(w io.Writer, accounts []server.AdminAccount, serverDefaul
 	fmt.Fprintln(tw, "EMAIL\tHANDLE\tSTORED\tQUOTA\tRES\tSNAP\tDEV\tSTATUS")
 	for _, a := range accounts {
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%d\t%d\t%s\n",
-			a.Email, a.OwnerHandle, formatBytes(a.Usage.StorageBytes),
+			a.Email, a.OwnerHandle, cliutil.HumanBytes(a.Usage.StorageBytes),
 			quotaColumn(a, serverDefault),
 			a.Usage.Resources, a.Usage.Snapshots, a.Usage.Devices, accountStatus(a))
 	}
@@ -366,9 +358,9 @@ func printAccountDetail(w io.Writer, a server.AdminAccount, serverDefault int64)
 	rows := [][2]string{
 		{"email", a.Email},
 		{"handle", a.OwnerHandle},
-		{"created", formatTime(a.CreatedAt)},
+		{"created", cliutil.FormatTime(a.CreatedAt)},
 		{"status", accountStatus(a)},
-		{"stored", formatBytes(a.Usage.StorageBytes)},
+		{"stored", cliutil.HumanBytes(a.Usage.StorageBytes)},
 		{"quota", quotaColumn(a, serverDefault)},
 		{"resources", strconv.FormatInt(a.Usage.Resources, 10)},
 		{"snapshots", strconv.FormatInt(a.Usage.Snapshots, 10)},
@@ -403,27 +395,7 @@ func formatQuota(n int64) string {
 	if n == 0 {
 		return "unlimited"
 	}
-	return formatBytes(n)
-}
-
-func formatTime(t time.Time) string {
-	if t.IsZero() {
-		return "unknown"
-	}
-	return t.Format(time.RFC3339)
-}
-
-func formatBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for v := n / unit; v >= unit && exp < 4; v /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTP"[exp])
+	return cliutil.HumanBytes(n)
 }
 
 // parseQuota reads the quota argument. A nil result means "clear the override";

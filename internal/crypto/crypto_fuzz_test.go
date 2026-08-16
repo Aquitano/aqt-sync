@@ -55,7 +55,7 @@ func FuzzFragmentRoundTrip(f *testing.F) {
 		if err != nil {
 			t.Fatalf("decode: %v", err)
 		}
-		if !ConstantTimeEqual(got, ck) {
+		if got != ck {
 			t.Fatalf("round-trip key mismatch")
 		}
 	})

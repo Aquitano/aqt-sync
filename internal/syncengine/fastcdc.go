@@ -65,9 +65,6 @@ func NewChunker(min, normal, max int) *Chunker {
 	return c
 }
 
-// DefaultChunker returns a chunker with the package default sizes.
-func DefaultChunker() *Chunker { return NewChunker(defaultMin, defaultNormal, defaultMax) }
-
 // ChunkSelector picks the chunking granularity for a file from its size. A single
 // *Chunker satisfies it (size-independent), so callers that want one fixed
 // granularity pass a Chunker directly; Config builds a size-scaling selector so a

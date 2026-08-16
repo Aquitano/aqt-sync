@@ -11,8 +11,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -20,7 +20,9 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -289,12 +291,14 @@ func filterSnapshots(snaps []api.SnapshotInfo, limit int, since, before time.Dur
 }
 
 func printSnapshotTable(rows []snapshotRow) error {
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "CREATED\tNAME\tLABEL\tANCHOR\tVERSION\tSNAPSHOT-ID\tRESOURCE")
+	cells := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", r.Created, r.Name, r.Label, anchorMark(r.Anchored), r.Version, r.ID, r.ResourceID)
+		cells = append(cells, []string{
+			r.Created, r.Name, r.Label, anchorMark(r.Anchored),
+			strconv.Itoa(r.Version), r.ID, r.ResourceID,
+		})
 	}
-	return w.Flush()
+	return printTable(os.Stdout, []string{"CREATED", "NAME", "LABEL", "ANCHOR", "VERSION", "SNAPSHOT-ID", "RESOURCE"}, cells)
 }
 
 // anchorMark renders the anchor column: a `*` for a protected snapshot, blank
@@ -334,7 +338,7 @@ func snapshotRows(snaps []api.SnapshotInfo, mk crypto.MasterKey) []snapshotRow {
 		name, label := snapshotNameLabel(s, mk)
 		rows = append(rows, snapshotRow{
 			ID: s.ID, ResourceID: s.ResourceID, Name: name, Label: label, Anchored: s.Anchored, Version: s.Version,
-			Created: formatTime(s.CreatedAt), CreatedAt: s.CreatedAt,
+			Created: cliutil.FormatUnix(s.CreatedAt), CreatedAt: s.CreatedAt,
 		})
 	}
 	return rows
@@ -528,7 +532,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	// half-emptied root scans as mass deletion, and the next sync (or watch tick)
 	// would push those deletions fleet-wide. It covers only the swap — once the
 	// tree is whole again the marker comes off, before the propagation sync.
-	if err := beginRestoreMarker(root, snap.Snapshot.ID); err != nil {
+	if err := writeMarker(root, restoreMarkerFile, interruptedRestore{SnapshotID: snap.Snapshot.ID}); err != nil {
 		return err
 	}
 	if err := swapTree(root, staging); err != nil {
@@ -537,10 +541,10 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	// The swap replaced the whole tree, so a tree an earlier interrupted pull had torn
 	// is whole again — and it is the snapshot's, not the remote's. Leaving the marker
 	// would send the sync below pulling the remote back over the restore.
-	if err := clearPullMarker(root); err != nil {
+	if err := clearMarker(root, pullMarkerFile); err != nil {
 		return err
 	}
-	if err := clearRestoreMarker(root); err != nil {
+	if err := clearMarker(root, restoreMarkerFile); err != nil {
 		return err
 	}
 	if !flagJSON && !flagQuiet {
@@ -550,46 +554,6 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	// copy or merge, which contradict --force — a wedge the user never caused, hit
 	// only after the tree was already swapped.
 	return runSync(root, syncOptions{force: true, conflicts: "block"})
-}
-
-// restoreMarkerFile is .aqt/restore-in-progress: written before swapTree moves the
-// live tree aside, removed once the swap completed. While present, the working tree
-// may be half-emptied, so syncs refuse instead of reading it as local deletions.
-const restoreMarkerFile = "restore-in-progress"
-
-type restoreMarker struct {
-	SnapshotID string `json:"snapshotId"`
-	present    bool
-}
-
-func beginRestoreMarker(root, snapshotID string) error {
-	b, err := json.MarshalIndent(restoreMarker{SnapshotID: snapshotID}, "", "  ")
-	if err != nil {
-		return err
-	}
-	return writeFileAtomic(controlPath(root, restoreMarkerFile), b, 0o600)
-}
-
-func clearRestoreMarker(root string) error {
-	if err := os.Remove(controlPath(root, restoreMarkerFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-// loadRestoreMarker reports whether an in-place restore was interrupted mid-swap. A
-// marker that will not parse still counts as present, like the pull marker.
-func loadRestoreMarker(root string) (restoreMarker, error) {
-	b, err := os.ReadFile(controlPath(root, restoreMarkerFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return restoreMarker{}, nil
-	}
-	if err != nil {
-		return restoreMarker{}, err
-	}
-	m := restoreMarker{present: true}
-	_ = json.Unmarshal(b, &m)
-	return m, nil
 }
 
 // swapTree replaces root's contents (everything but the .aqt control dir) with
@@ -1228,16 +1192,15 @@ func printAutoStatus(cl *client.Client, prof *identity.Profile) error {
 		fmt.Fprintln(os.Stderr, "no resources yet")
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tAUTO\tVERSION\tID")
+	cells := make([][]string, 0, len(rows))
 	for _, r := range rows {
 		state := "off"
 		if r.Auto {
 			state = "on"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%d\t%s\n", r.Name, state, r.Version, r.ID)
+		cells = append(cells, []string{r.Name, state, strconv.Itoa(r.Version), r.ID})
 	}
-	return w.Flush()
+	return printTable(os.Stdout, []string{"NAME", "AUTO", "VERSION", "ID"}, cells)
 }
 
 // --- shared ---
@@ -1325,7 +1288,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		if err != nil {
 			return meta, err
 		}
-		return meta, writeStreamAtomic(dest, 0o600, func(f *os.File) error {
+		return meta, fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
 			return syncengine.WriteFileRoot(f, chunks, src.get)
 		})
 	}
@@ -1333,7 +1296,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 	if err != nil {
 		return meta, fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
-	return meta, writeFileAtomic(dest, plain, 0o600)
+	return meta, fsatomic.WriteFile(dest, plain, 0o600)
 }
 
 // materializeWithMaster unwraps res's content key under the master key, then writes
@@ -1372,11 +1335,4 @@ func resolveResourceID(dir, id string) (string, error) {
 		return "", fmt.Errorf("%s has no synced resource yet; run `aqt sync` first", root)
 	}
 	return st.ID, nil
-}
-
-func formatTime(unix int64) string {
-	if unix == 0 {
-		return "-"
-	}
-	return time.Unix(unix, 0).Local().Format("2006-01-02 15:04")
 }

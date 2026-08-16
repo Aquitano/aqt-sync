@@ -25,7 +25,7 @@ func TestResourceRawWireRoundTrip(t *testing.T) {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	srv := httptest.NewServer(server.New(store).Router())
+	srv := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	t.Cleanup(srv.Close)
 
 	token, mk := signup(t, srv.URL, "wire@example.com", "correct horse battery staple")

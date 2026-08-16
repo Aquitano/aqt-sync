@@ -30,6 +30,9 @@ func (s *captureSink) Add(ch crypto.Chunk, ct []byte) error {
 	return nil
 }
 
+// testChunker returns a chunker with the package default sizes.
+func testChunker() *Chunker { return NewChunker(defaultMin, defaultNormal, defaultMax) }
+
 func testConv(t *testing.T) crypto.ConvergenceKey {
 	t.Helper()
 	p := cryptotest.KdfParams(t)
@@ -81,7 +84,7 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 	writeFile(t, dir, "nested/big.bin", big)
 
 	sink := newCaptureSink()
-	m, err := Take(dir, testConv(t), DefaultChunker(), nil, sink, false)
+	m, err := Take(dir, testConv(t), testChunker(), nil, sink, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,13 +110,13 @@ func TestTakeReusesUnchangedEntries(t *testing.T) {
 	writeFile(t, dir, "a.bin", big)
 
 	conv := testConv(t)
-	first, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink(), false)
+	first, err := Take(dir, conv, testChunker(), nil, newCaptureSink(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// A second snapshot against the first as base must re-seal nothing.
 	sink := newCaptureSink()
-	second, err := Take(dir, conv, DefaultChunker(), &first, sink, false)
+	second, err := Take(dir, conv, testChunker(), &first, sink, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +137,7 @@ func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
 	path := filepath.Join(dir, "a.bin")
 	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("fastpath"), 32<<10))
 	conv := testConv(t)
-	base, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink(), false)
+	base, err := Take(dir, conv, testChunker(), nil, newCaptureSink(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +156,7 @@ func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
 
 	// Default: trust the stat, reuse the stale entry, read nothing.
 	sink := newCaptureSink()
-	fast, err := Take(dir, conv, DefaultChunker(), &base, sink, false)
+	fast, err := Take(dir, conv, testChunker(), &base, sink, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +169,7 @@ func TestTakeStatFastPathTrustsMtimeUnlessRehash(t *testing.T) {
 
 	// --rehash forces the content read, catching the change.
 	sink2 := newCaptureSink()
-	full, err := Take(dir, conv, DefaultChunker(), &base, sink2, true)
+	full, err := Take(dir, conv, testChunker(), &base, sink2, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -196,7 +199,7 @@ func TestModeOnlyChangeSnapshottedAndPlanned(t *testing.T) {
 	writeFile(t, dir, "a.bin", bytes.Repeat([]byte("chmodme"), 32<<10)) // large -> chunked
 
 	conv := testConv(t)
-	base, err := Take(dir, conv, DefaultChunker(), nil, newCaptureSink(), false)
+	base, err := Take(dir, conv, testChunker(), nil, newCaptureSink(), false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +219,7 @@ func TestModeOnlyChangeSnapshottedAndPlanned(t *testing.T) {
 	}
 
 	sink := newCaptureSink()
-	next, err := Take(dir, conv, DefaultChunker(), &base, sink, false)
+	next, err := Take(dir, conv, testChunker(), &base, sink, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +343,7 @@ func TestSymlinkSnapshotAndMaterialize(t *testing.T) {
 		t.Skipf("symlinks unsupported on this filesystem: %v", err)
 	}
 
-	m, err := Take(dir, testConv(t), DefaultChunker(), nil, nil, false)
+	m, err := Take(dir, testConv(t), testChunker(), nil, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}

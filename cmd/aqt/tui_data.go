@@ -47,7 +47,7 @@ type tuiLocalMsg struct {
 	// torn reports an interrupted pack pull: the tree is part remote and part
 	// stale, so the changes above are not ordinary local edits. The CLI's status
 	// says so; the TUI must too.
-	torn pullMarker
+	torn marker[interruptedPull]
 	err  error
 }
 
@@ -148,7 +148,7 @@ func (c *tuiCtx) localStatusCmd() tea.Cmd {
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
-		torn, err := loadPullMarker(root)
+		torn, err := loadMarker[interruptedPull](root, pullMarkerFile)
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}

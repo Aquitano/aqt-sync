@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -200,12 +200,11 @@ func folderMembers(cl *client.Client, id string, mk crypto.MasterKey) ([]synceng
 }
 
 func printFindTable(entries []findEntry) error {
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tKIND\tSIZE\tVISIBILITY\tREF")
+	rows := make([][]string, 0, len(entries))
 	for _, e := range entries {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", e.Name, e.Kind, findSize(e), e.Visibility, e.Ref)
+		rows = append(rows, []string{e.Name, e.Kind, findSize(e), e.Visibility, e.Ref})
 	}
-	return w.Flush()
+	return printTable(os.Stdout, []string{"NAME", "KIND", "SIZE", "VISIBILITY", "REF"}, rows)
 }
 
 // fzfSelect feeds the index to fzf and prints the chosen entry's ref. Cancelling
@@ -253,5 +252,5 @@ func findSize(e findEntry) string {
 	if e.Kind == api.KindFolder {
 		return "-"
 	}
-	return humanBytes(e.Size)
+	return cliutil.HumanBytes(e.Size)
 }

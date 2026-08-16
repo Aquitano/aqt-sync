@@ -298,7 +298,7 @@ func TestWrapUnwrapRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ConstantTimeEqual(got, ck) {
+	if got != ck {
 		t.Fatal("unwrapped content key does not match original")
 	}
 }
@@ -374,7 +374,7 @@ func TestFragmentPublicRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ConstantTimeEqual(got, ck) {
+	if got != ck {
 		t.Fatal("public fragment round trip mismatch")
 	}
 }
@@ -406,7 +406,7 @@ func TestFragmentGatedRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ConstantTimeEqual(got, ck) {
+	if got != ck {
 		t.Fatal("gated fragment round trip mismatch")
 	}
 

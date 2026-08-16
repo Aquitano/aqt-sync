@@ -277,31 +277,16 @@ func SealTreeCiphertexts(m Manifest, conv crypto.ConvergenceKey) (map[string][]b
 	return sink, nil
 }
 
-// OpenTree reassembles a flat manifest from a DAG, fetching each directory node's
-// ciphertext by id via fetch and verifying it on open. It is the full-reassembly
-// reader used by clone, snapshot restore/diff, and the no-base reconcile path.
-func OpenTree(root TreeRoot, fetch func(id string) ([]byte, error)) (Manifest, error) {
-	m := Manifest{Version: root.Version}
-	if err := walkTree(root.Root, "", fetch, &m); err != nil {
-		return Manifest{}, err
-	}
-	sortEntries(m.Entries)
-	sortDirs(m.Dirs)
-	return m, nil
-}
-
-// OpenTreeBatched reassembles a flat manifest from a DAG the same way OpenTree does,
-// but walks it level by level instead of depth-first: it hands the whole frontier of
-// directory-node ids to fetchBatch in one call, so the transport can locate them in a
-// single round-trip and range-fetch their packs grouped, rather than paying 2 RTTs per
-// node. Node contents are verified against their address exactly as in OpenTree, so the
-// result is identical — batching only changes how the ciphertexts are fetched, never
-// what is accepted. Used by clone, reconcile, snapshot restore/diff, and find.
+// OpenTreeBatched reassembles a flat manifest from a DAG, walking it level by level:
+// it hands the whole frontier of directory-node ids to fetchBatch in one call, so the
+// transport can locate them in a single round-trip and range-fetch their packs grouped,
+// rather than paying 2 RTTs per node. Every node's ciphertext is verified against its
+// content address before its children are trusted. Used by clone, reconcile, snapshot
+// restore/diff, and find.
 func OpenTreeBatched(root TreeRoot, fetchBatch func(ids []string) (map[string][]byte, error)) (Manifest, error) {
 	m := Manifest{Version: root.Version}
 	// A file whose chunk list is indirected (ChunksRef) needs its list segments fetched
-	// by id; adapt the level-batch fetcher to a single-id fetch so an indirect list opens
-	// exactly as it does in the depth-first walkTree.
+	// by id; adapt the level-batch fetcher to a single-id fetch.
 	fetchOne := func(id string) ([]byte, error) {
 		got, err := fetchBatch([]string{id})
 		if err != nil {
@@ -384,51 +369,6 @@ func openNodeChildren(node crypto.Chunk, ct []byte) ([]TreeChild, error) {
 		return nil, fmt.Errorf("tree node %s has version %d, newer than this client supports (%d); upgrade aqt", node.ID, n.Version, TreeManifestVersion)
 	}
 	return n.Children, nil
-}
-
-func walkTree(node crypto.Chunk, prefix string, fetch func(id string) ([]byte, error), m *Manifest) error {
-	ct, err := fetch(node.ID)
-	if err != nil {
-		return fmt.Errorf("fetch tree node %s: %w", node.ID, err)
-	}
-	plain, err := crypto.OpenNode(ct, node)
-	if err != nil {
-		return err
-	}
-	var n TreeNode
-	if err := json.Unmarshal(plain, &n); err != nil {
-		return err
-	}
-	if n.Version > TreeManifestVersion {
-		return fmt.Errorf("tree node %s has version %d, newer than this client supports (%d); upgrade aqt", node.ID, n.Version, TreeManifestVersion)
-	}
-	for _, c := range n.Children {
-		path := joinChild(prefix, c.Name)
-		switch c.Type {
-		case ChildFile:
-			chunks := c.Chunks
-			if len(c.ChunksRef) > 0 {
-				chunks, err = openChunkList(c.ChunksRef, fetch)
-				if err != nil {
-					return fmt.Errorf("file %q: %w", path, err)
-				}
-			}
-			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Inline: c.Inline, InlineAlg: c.InlineAlg, Chunks: chunks})
-		case ChildSymlink:
-			m.Entries = append(m.Entries, Entry{Path: path, Mode: c.Mode, Size: c.Size, Hash: c.Hash, Link: c.Link})
-		case ChildDir:
-			m.Dirs = append(m.Dirs, DirEntry{Path: path, Mode: c.Mode})
-			if c.Node == nil {
-				return fmt.Errorf("directory child %q has no node reference", path)
-			}
-			if err := walkTree(*c.Node, path, fetch, m); err != nil {
-				return err
-			}
-		default:
-			return fmt.Errorf("unknown child type %q at %q", c.Type, path)
-		}
-	}
-	return nil
 }
 
 func joinChild(prefix, name string) string {

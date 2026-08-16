@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
@@ -76,16 +75,16 @@ func runDevicesList(asJSON bool) error {
 		fmt.Fprintln(os.Stderr, "no devices")
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tNAME\t")
+	rows := make([][]string, 0, len(devices))
 	for _, d := range devices {
 		marker := ""
 		if d.Current {
 			marker = "(this device)"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", d.ID, d.Name, marker)
+		rows = append(rows, []string{d.ID, d.Name, marker})
 	}
-	return w.Flush()
+	// The marker column carries no header, so the header line ends on an empty cell.
+	return printTable(os.Stdout, []string{"ID", "NAME", ""}, rows)
 }
 
 func runDevicesRemove(ids []string) error {

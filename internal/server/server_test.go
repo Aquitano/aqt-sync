@@ -44,7 +44,7 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	srv := New(store)
+	srv := NewWithConfig(store, Config{})
 	return &harness{t: t, router: srv.Router(), store: store, srv: srv}
 }
 

@@ -30,7 +30,7 @@ func pullFreshErr(t *testing.T, ref, password string) error {
 func TestPushBurnPullOnce(t *testing.T) {
 	newE2E(t)
 	id, data, ref := pushRandomStreamedFile(t, 1024, pushOptions{
-		public: true, noClip: true, quiet: true, policy: linkPolicy{maxReads: 1},
+		public: true, noClip: true, policy: linkPolicy{maxReads: 1},
 	})
 	_ = id
 
@@ -51,7 +51,7 @@ func TestPushBurnPullOnce(t *testing.T) {
 func TestPushMaxReadsInline(t *testing.T) {
 	newE2E(t)
 	_, data, ref := pushRandomStreamedFile(t, 512, pushOptions{
-		public: true, noClip: true, quiet: true, policy: linkPolicy{maxReads: 2},
+		public: true, noClip: true, policy: linkPolicy{maxReads: 2},
 	})
 
 	for i := 0; i < 2; i++ {
@@ -69,7 +69,7 @@ func TestPushMaxReadsInline(t *testing.T) {
 func TestStreamedBurnPull(t *testing.T) {
 	h := newE2E(t)
 	_, data, ref := pushRandomStreamedFile(t, 9<<20, pushOptions{
-		public: true, noClip: true, quiet: true, policy: linkPolicy{maxReads: 1},
+		public: true, noClip: true, policy: linkPolicy{maxReads: 1},
 	})
 	_ = h
 
@@ -92,7 +92,7 @@ func TestShareExpireAfterFact(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := strings.TrimSpace(captureStdout(t, func() {
-		if err := runPush(src, pushOptions{noClip: true, quiet: true}); err != nil {
+		if err := pushQuiet(src, pushOptions{noClip: true}); err != nil {
 			t.Fatalf("push: %v", err)
 		}
 	}))

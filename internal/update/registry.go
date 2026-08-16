@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
 const (
@@ -174,7 +176,7 @@ func (s Store) writeAgents(agents []Agent) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.agentsPath(), append(b, '\n'), 0o600)
+	return fsatomic.WriteFile(s.agentsPath(), append(b, '\n'), 0o600)
 }
 
 // withAgentLock serializes read-modify-write of the registry across processes.

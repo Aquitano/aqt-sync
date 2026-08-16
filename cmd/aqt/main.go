@@ -22,6 +22,7 @@ import (
 	"golang.org/x/term"
 
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/update"
@@ -341,36 +342,20 @@ func markSupported(annotation string, cmds ...*cobra.Command) {
 	}
 }
 
-// confirmDestructive gates a destructive action: --yes skips the prompt, a terminal
-// asks (defaulting to abort), and a non-interactive run without --yes aborts so a
-// piped invocation can never destroy anything by accident.
+// confirmDestructive gates a destructive action. The prompt carries its own [y/N]
+// hint and is answered on the stdin reader every other aqt prompt shares.
 func confirmDestructive(prompt string, assumeYes bool) error {
-	if assumeYes {
-		return nil
-	}
-	if err := requireConfirmable(assumeYes); err != nil {
-		return err
-	}
-	ok, err := promptYesNo(prompt, false)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return errors.New("aborted")
-	}
-	return nil
+	return cliutil.Confirm(prompt, assumeYes, interactiveStdin(), func(p string) (bool, error) {
+		return promptYesNo(p, false)
+	})
 }
-
-// errNotConfirmable means a destructive command needed a confirmation that the
-// run could never answer (no terminal, no -y/--yes).
-var errNotConfirmable = errors.New("confirmation required: pass -y/--yes to proceed non-interactively")
 
 // requireConfirmable fails fast when a later destructive confirmation could never
 // be answered, so commands that resolve refs before prompting abort before doing
 // any auth or network work.
 func requireConfirmable(assumeYes bool) error {
 	if !assumeYes && !interactiveStdin() {
-		return errNotConfirmable
+		return cliutil.ErrNotConfirmable
 	}
 	return nil
 }

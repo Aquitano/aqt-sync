@@ -11,7 +11,7 @@ import (
 // the two are interchangeable for cross-machine dedup.
 func TestSplitStreamMatchesSplit(t *testing.T) {
 	t.Parallel()
-	c := DefaultChunker()
+	c := testChunker()
 	for _, n := range []int{0, 1, c.Min, c.Min + 1, c.Max, c.Max + 7, 200 << 10, 333333} {
 		data := deterministicData(int64(n+1), n)
 		want := c.Split(data)

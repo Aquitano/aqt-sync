@@ -76,7 +76,7 @@ func TestSyncRefusesAfterInterruptedRestoreSwap(t *testing.T) {
 	writeTree(t, src, "a.txt", "x")
 	h.sync(src)
 
-	if err := beginRestoreMarker(src, "snapXYZ"); err != nil {
+	if err := writeMarker(src, restoreMarkerFile, interruptedRestore{SnapshotID: "snapXYZ"}); err != nil {
 		t.Fatal(err)
 	}
 	err := runSync(src, syncOptions{})
@@ -84,7 +84,7 @@ func TestSyncRefusesAfterInterruptedRestoreSwap(t *testing.T) {
 		t.Fatalf("sync with restore marker: %v", err)
 	}
 
-	if err := clearRestoreMarker(src); err != nil {
+	if err := clearMarker(src, restoreMarkerFile); err != nil {
 		t.Fatal(err)
 	}
 	h.sync(src)

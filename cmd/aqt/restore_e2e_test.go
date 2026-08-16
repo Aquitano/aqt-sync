@@ -428,5 +428,5 @@ func setConfigHome(t *testing.T, home string) {
 
 func newHTTPServer(t *testing.T, store *server.Store) *httptest.Server {
 	t.Helper()
-	return httptest.NewServer(server.New(store).Router())
+	return httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 }

@@ -47,17 +47,3 @@ func printJSONTo(w io.Writer, v any) error {
 	_, err = fmt.Fprintln(w, string(b))
 	return err
 }
-
-// humanBytes renders a byte count as a short human string (e.g. 1.2 KB).
-func humanBytes(n int64) string {
-	const unit = 1024
-	if n < unit {
-		return fmt.Sprintf("%d B", n)
-	}
-	div, exp := int64(unit), 0
-	for x := n / unit; x >= unit; x /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(n)/float64(div), "KMGTPE"[exp])
-}

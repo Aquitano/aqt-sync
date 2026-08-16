@@ -677,7 +677,7 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 	if err := os.WriteFile(fpath, []byte("API_KEY=xyz"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(fpath, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
@@ -800,7 +800,7 @@ func newE2E(t *testing.T) *e2eHarness {
 		t.Fatalf("open store: %v", err)
 	}
 	t.Cleanup(func() { store.Close() })
-	ts := httptest.NewServer(server.New(store).Router())
+	ts := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	t.Cleanup(ts.Close)
 
 	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir, store: store}
@@ -824,7 +824,7 @@ func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http
 	}
 	t.Cleanup(func() { store.Close() })
 
-	backend := httptest.NewServer(server.New(store).Router())
+	backend := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	t.Cleanup(backend.Close)
 	backendURL, err := url.Parse(backend.URL)
 	if err != nil {

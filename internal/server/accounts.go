@@ -776,10 +776,6 @@ func (s *Store) Owners() ([]string, error) {
 	return owners, rows.Err()
 }
 
-type queryRower interface {
-	QueryRow(query string, args ...any) *sql.Row
-}
-
 func idempotencyDigest(v any) ([]byte, error) {
 	b, err := json.Marshal(v)
 	if err != nil {
@@ -789,7 +785,7 @@ func idempotencyDigest(v any) ([]byte, error) {
 	return sum[:], nil
 }
 
-func lookupIdempotency(q queryRower, owner, kind, key string, digest []byte, out any) (bool, error) {
+func lookupIdempotency(q queryer, owner, kind, key string, digest []byte, out any) (bool, error) {
 	if key == "" {
 		return false, nil
 	}

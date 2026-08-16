@@ -9,11 +9,12 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
-	"text/tabwriter"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -182,7 +183,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	if perm == 0 {
 		perm = 0o600
 	}
-	if err := writeStreamAtomic(dest, perm, func(f *os.File) error {
+	if err := fsatomic.WriteStream(dest, perm, func(f *os.File) error {
 		return syncengine.WriteEntry(f, e, get)
 	}); err != nil {
 		return err
@@ -321,14 +322,13 @@ func runLsFolder(cl *client.Client, mk crypto.MasterKey, ref string) error {
 		fmt.Fprintln(os.Stderr, "empty directory")
 		return nil
 	}
-	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tTYPE\tSIZE")
+	cells := make([][]string, 0, len(rows))
 	for _, r := range rows {
-		name, size := r.Name, humanBytes(r.Size)
+		name, size := r.Name, cliutil.HumanBytes(r.Size)
 		if r.Type == string(syncengine.ChildDir) {
 			name, size = name+"/", "-"
 		}
-		fmt.Fprintf(w, "%s\t%s\t%s\n", name, r.Type, size)
+		cells = append(cells, []string{name, r.Type, size})
 	}
-	return w.Flush()
+	return printTable(os.Stdout, []string{"NAME", "TYPE", "SIZE"}, cells)
 }

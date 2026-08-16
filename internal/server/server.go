@@ -166,8 +166,6 @@ type Server struct {
 	accountLimits *keyedMutex
 }
 
-func New(store *Store) *Server { return NewWithConfig(store, Config{}) }
-
 func NewWithConfig(store *Store, cfg Config) *Server {
 	rps, burst := cfg.AuthedRatePerSec, cfg.AuthedBurst
 	if rps <= 0 {

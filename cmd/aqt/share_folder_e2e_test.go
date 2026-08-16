@@ -243,7 +243,7 @@ func TestFolderLinkIsReadOnly(t *testing.T) {
 
 	// A private streamed file of the same owner shares the pack space; its objects
 	// must not be readable through the public folder.
-	otherID, _, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true, quiet: true})
+	otherID, _, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 	neighborObj := ownerFileRoot(t, otherID).ChunkIDs()[0]
 
 	anon, err := client.New(h.url, "")
@@ -260,8 +260,8 @@ func TestFolderLinkIsReadOnly(t *testing.T) {
 	if _, err := anon.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Private}); err == nil {
 		t.Fatal("tokenless SetVisibility succeeded on a public folder")
 	}
-	if err := anon.DeleteResource(id); err == nil {
-		t.Fatal("tokenless DeleteResource succeeded on a public folder")
+	if err := anon.DeleteResourceVersion(id, 1); err == nil {
+		t.Fatal("tokenless delete succeeded on a public folder")
 	}
 
 	// The write attempts changed nothing: the owner still sees the folder public

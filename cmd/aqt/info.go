@@ -11,6 +11,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
@@ -122,7 +123,7 @@ func runInfo(ref, password string, asJSON bool) error {
 	fmt.Printf("%s · %s · %s · v%d · %s\n", row.Kind, sizeCell(kind, meta.Size), row.Visibility, res.Version, res.ID)
 	if res.ExpiresAt > 0 {
 		until := time.Until(time.Unix(res.ExpiresAt, 0)).Round(time.Second)
-		fmt.Printf("link expires %s (%s remaining)\n", formatTime(res.ExpiresAt), until)
+		fmt.Printf("link expires %s (%s remaining)\n", cliutil.FormatUnix(res.ExpiresAt), until)
 	}
 	if row.ReadsRemaining != nil {
 		fmt.Printf("link reads %d/%d (%d remaining)\n", res.Reads, res.MaxReads, *row.ReadsRemaining)

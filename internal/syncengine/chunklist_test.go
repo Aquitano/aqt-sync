@@ -39,7 +39,7 @@ func TestFileRootIndirectRoundTrip(t *testing.T) {
 	}
 
 	sink := mapSink{}
-	chunks, size, err := ChunkFile(bytes.NewReader(data), conv, DefaultChunker(), sink)
+	chunks, size, err := ChunkFile(bytes.NewReader(data), conv, testChunker(), sink)
 	if err != nil {
 		t.Fatalf("ChunkFile: %v", err)
 	}
@@ -185,7 +185,7 @@ func TestTreeIndirectChunkListRoundTrip(t *testing.T) {
 	if _, err := rand.Read(data); err != nil {
 		t.Fatal(err)
 	}
-	fileChunks, size, err := ChunkFile(bytes.NewReader(data), conv, DefaultChunker(), sink)
+	fileChunks, size, err := ChunkFile(bytes.NewReader(data), conv, testChunker(), sink)
 	if err != nil {
 		t.Fatalf("ChunkFile: %v", err)
 	}
@@ -204,9 +204,9 @@ func TestTreeIndirectChunkListRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SealTree: %v", err)
 	}
-	got, err := OpenTree(root, sink.get)
+	got, err := openTreeSingle(root, sink.get)
 	if err != nil {
-		t.Fatalf("OpenTree: %v", err)
+		t.Fatalf("open tree: %v", err)
 	}
 	want := normalize(in)
 	got = normalize(got)

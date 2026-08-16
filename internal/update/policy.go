@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
 // Policy decides what, if anything, ordinary commands do about updates. The
@@ -115,7 +117,7 @@ func (s Store) Save(st State) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(s.path(), append(b, '\n'), 0o600)
+	return fsatomic.WriteFile(s.path(), append(b, '\n'), 0o600)
 }
 
 // SetPolicy persists a new policy, leaving the rest of the state alone.
@@ -156,31 +158,4 @@ func (st State) DueForCheck(now time.Time) bool {
 // MarkChecked stamps the time a background check ran.
 func (st *State) MarkChecked(now time.Time) {
 	st.LastCheckAt = now.UTC().Truncate(time.Second).Format(time.RFC3339)
-}
-
-// writeFileAtomic writes data to a temp file in path's directory, fsyncs it, and
-// renames it over path.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".aqt-state-*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
 }

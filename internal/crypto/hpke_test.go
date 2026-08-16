@@ -36,7 +36,7 @@ func TestGrantWrapRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unwrap: %v", err)
 	}
-	if !ConstantTimeEqual(got, ck) {
+	if got != ck {
 		t.Fatal("unwrapped key differs from the original content key")
 	}
 }

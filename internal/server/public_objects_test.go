@@ -76,7 +76,7 @@ func decodeFrames(t *testing.T, body []byte, want int) [][]byte {
 func TestPublicObjectsServesExactSlicesInOrder(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	router := New(s).Router()
+	router := NewWithConfig(s, Config{}).Router()
 	owner := s.mustAccount(t, "share@example.com")
 
 	packID, data, ids := packOf("first object bytes", "second object bytes longer")
@@ -108,7 +108,7 @@ func TestPublicObjectsServesExactSlicesInOrder(t *testing.T) {
 func TestPublicObjectsRejectsPrivateAndUnknownResource(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	router := New(s).Router()
+	router := NewWithConfig(s, Config{}).Router()
 	owner := s.mustAccount(t, "private@example.com")
 
 	packID, data, ids := packOf("private object")
@@ -131,7 +131,7 @@ func TestPublicObjectsRejectsPrivateAndUnknownResource(t *testing.T) {
 func TestPublicObjectsRejectsUnreferencedObject(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	router := New(s).Router()
+	router := NewWithConfig(s, Config{}).Router()
 	owner := s.mustAccount(t, "oracle@example.com")
 
 	// Two packs: one object is referenced by the public resource, the other is a
@@ -167,7 +167,7 @@ func TestPublicObjectsRejectsUnreferencedObject(t *testing.T) {
 func TestPublicObjectsRejectsOverLimitIDCount(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	router := New(s).Router()
+	router := NewWithConfig(s, Config{}).Router()
 	owner := s.mustAccount(t, "toomany@example.com")
 	resID := s.publicResource(t, owner, nil)
 

@@ -299,7 +299,7 @@ func (s *sim) startServer() {
 	}
 	t.Cleanup(func() { store.Close() })
 
-	s.fault = &faultInjector{h: server.New(store).Router()}
+	s.fault = &faultInjector{h: server.NewWithConfig(store, server.Config{}).Router()}
 	ts := httptest.NewServer(s.fault)
 	t.Cleanup(ts.Close)
 	s.fault.url = ts.URL

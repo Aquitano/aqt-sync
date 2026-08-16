@@ -250,17 +250,12 @@ func placeholders(n int) string {
 	return strings.TrimPrefix(strings.Repeat(",?", n), ",")
 }
 
-// rowQueryer is the subset of *sql.DB and *sql.Tx that queryIDsBatched needs.
-type rowQueryer interface {
-	Query(query string, args ...any) (*sql.Rows, error)
-}
-
 // queryIDsBatched runs query once per batch-size group of ids, keeping the IN clause
 // well under SQLite's bound-variable limit. It prepends lead to the bound args and
 // splices the group's placeholder list plus closing paren onto query, so callers pass
 // the SELECT up to and including "IN (". Each batch's rows are closed before the next
 // runs, and the first scan error aborts.
-func queryIDsBatched(q rowQueryer, query string, lead []any, ids []string, batch int, scan func(*sql.Rows) error) error {
+func queryIDsBatched(q queryer, query string, lead []any, ids []string, batch int, scan func(*sql.Rows) error) error {
 	for start := 0; start < len(ids); start += batch {
 		end := min(start+batch, len(ids))
 		group := ids[start:end]

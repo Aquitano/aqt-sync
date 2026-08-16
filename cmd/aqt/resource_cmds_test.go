@@ -27,7 +27,7 @@ func TestInfoCatRm(t *testing.T) {
 	if err := os.WriteFile(fpath, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(fpath, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
@@ -103,7 +103,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := runPush(p, pushOptions{noClip: true, quiet: true}); err != nil {
+		if err := pushQuiet(p, pushOptions{noClip: true}); err != nil {
 			t.Fatalf("push %s: %v", name, err)
 		}
 		rows, err := collectResources(cl, mk)
@@ -175,7 +175,7 @@ func TestEverydayResourceRefsAndRename(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(path, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(path, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	if err := runShare("original.txt", "", true, linkPolicy{maxReads: 3, onExpiry: "retire"}); err != nil {
@@ -263,7 +263,7 @@ func TestFriendlyNameMustBeUnique(t *testing.T) {
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := runPush(path, pushOptions{name: "duplicate", noClip: true, quiet: true}); err != nil {
+		if err := pushQuiet(path, pushOptions{name: "duplicate", noClip: true}); err != nil {
 			t.Fatalf("push duplicate: %v", err)
 		}
 	}
@@ -290,7 +290,7 @@ func TestPullCatCloneLsResolveNames(t *testing.T) {
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runPush(path, pushOptions{noClip: true, quiet: true}); err != nil {
+	if err := pushQuiet(path, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	out := captureStdout(t, func() {

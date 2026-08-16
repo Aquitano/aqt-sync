@@ -157,6 +157,13 @@ func resolvePolicy(vis api.Visibility, expireSeconds, maxReads int64, onExpiry a
 	return expiresAt, max, action, nil
 }
 
+// queryer is the read subset shared by *sql.DB and *sql.Tx, so a query helper runs
+// unchanged inside or outside a write transaction.
+type queryer interface {
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 // Store persists accounts, devices, and resource metadata in SQLite, with the
 // ciphertext blobs and packs on the filesystem. It holds no plaintext and no live
 // keys.

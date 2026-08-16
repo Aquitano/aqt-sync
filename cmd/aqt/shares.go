@@ -8,7 +8,6 @@ import (
 	"os"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -283,16 +282,15 @@ func sharesBlockedCmd() *cobra.Command {
 				fmt.Println("no blocked senders; `aqt shares rm <ref> --block` adds one")
 				return nil
 			}
-			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-			fmt.Fprintln(w, "ACCOUNT\tHANDLE\tBLOCKED")
+			cells := make([][]string, 0, len(rows))
 			for _, r := range rows {
 				email := r.Email
 				if email == "" {
 					email = "(unknown)"
 				}
-				fmt.Fprintf(w, "%s\t%s\t%s\n", email, r.Handle, r.Blocked)
+				cells = append(cells, []string{email, r.Handle, r.Blocked})
 			}
-			return w.Flush()
+			return printTable(os.Stdout, []string{"ACCOUNT", "HANDLE", "BLOCKED"}, cells)
 		},
 	}
 	markJSONSupported(cmd)

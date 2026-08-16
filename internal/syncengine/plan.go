@@ -35,19 +35,8 @@ type DirAction struct {
 func Plan(local, base, remote Manifest) []Action {
 	lp, bp, rp := local.byPath(), base.byPath(), remote.byPath()
 
-	paths := map[string]struct{}{}
-	for p := range lp {
-		paths[p] = struct{}{}
-	}
-	for p := range rp {
-		paths[p] = struct{}{}
-	}
-	for p := range bp {
-		paths[p] = struct{}{}
-	}
-
 	var actions []Action
-	for p := range paths {
+	for _, p := range unionPaths(lp, bp, rp) {
 		l, lok := lp[p]
 		b, bok := bp[p]
 		r, rok := rp[p]
@@ -87,7 +76,6 @@ func Plan(local, base, remote Manifest) []Action {
 			actions = append(actions, Action{p, Conflict})
 		}
 	}
-	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
 	return actions
 }
 
@@ -100,16 +88,8 @@ func Plan(local, base, remote Manifest) []Action {
 func PlanReconcile(local, remote Manifest) []Action {
 	lp, rp := local.byPath(), remote.byPath()
 
-	paths := map[string]struct{}{}
-	for p := range lp {
-		paths[p] = struct{}{}
-	}
-	for p := range rp {
-		paths[p] = struct{}{}
-	}
-
 	var actions []Action
-	for p := range paths {
+	for _, p := range unionPaths(lp, rp) {
 		l, lok := lp[p]
 		r, rok := rp[p]
 		if lok && rok && !entryDiffers(l, r) {
@@ -117,8 +97,25 @@ func PlanReconcile(local, remote Manifest) []Action {
 		}
 		actions = append(actions, Action{p, Conflict})
 	}
-	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
 	return actions
+}
+
+// unionPaths returns every path present in any of the given manifests-by-path maps,
+// sorted. The planners walk it instead of a map, so their output comes out ordered
+// by path without a second sort and does not depend on map iteration order.
+func unionPaths[E any](sets ...map[string]E) []string {
+	seen := map[string]struct{}{}
+	for _, set := range sets {
+		for p := range set {
+			seen[p] = struct{}{}
+		}
+	}
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	sort.Strings(paths)
+	return paths
 }
 
 // changed reports whether an entry differs from its base (added, removed,
@@ -141,19 +138,9 @@ func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
 // sides converged (like a file deleted on both sides) and needs no action.
 func PlanDirs(local, base, remote Manifest) []DirAction {
 	lp, bp, rp := local.dirsByPath(), base.dirsByPath(), remote.dirsByPath()
-	paths := map[string]struct{}{}
-	for p := range lp {
-		paths[p] = struct{}{}
-	}
-	for p := range rp {
-		paths[p] = struct{}{}
-	}
-	for p := range bp {
-		paths[p] = struct{}{}
-	}
 
 	var actions []DirAction
-	for p := range paths {
+	for _, p := range unionPaths(lp, bp, rp) {
 		l, lok := lp[p]
 		b, bok := bp[p]
 		r, rok := rp[p]
@@ -183,7 +170,6 @@ func PlanDirs(local, base, remote Manifest) []DirAction {
 			actions = append(actions, DirAction{p, Conflict})
 		}
 	}
-	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
 	return actions
 }
 
@@ -191,15 +177,9 @@ func PlanDirs(local, base, remote Manifest) []DirAction {
 // becomes a Conflict, mirroring PlanReconcile for files.
 func PlanDirsReconcile(local, remote Manifest) []DirAction {
 	lp, rp := local.dirsByPath(), remote.dirsByPath()
-	paths := map[string]struct{}{}
-	for p := range lp {
-		paths[p] = struct{}{}
-	}
-	for p := range rp {
-		paths[p] = struct{}{}
-	}
+
 	var actions []DirAction
-	for p := range paths {
+	for _, p := range unionPaths(lp, rp) {
 		l, lok := lp[p]
 		r, rok := rp[p]
 		if lok && rok && l.Mode == r.Mode {
@@ -207,7 +187,6 @@ func PlanDirsReconcile(local, remote Manifest) []DirAction {
 		}
 		actions = append(actions, DirAction{p, Conflict})
 	}
-	sort.Slice(actions, func(i, j int) bool { return actions[i].Path < actions[j].Path })
 	return actions
 }
 

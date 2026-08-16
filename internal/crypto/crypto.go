@@ -12,7 +12,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -496,11 +495,6 @@ func DecodeFragment(fragment, password string) (ContentKey, error) {
 	default:
 		return ck, errors.New("unrecognized fragment format")
 	}
-}
-
-// ConstantTimeEqual reports whether two keys are equal without leaking timing.
-func ConstantTimeEqual(a, b ContentKey) bool {
-	return subtle.ConstantTimeCompare(a[:], b[:]) == 1
 }
 
 func randomNonce() ([]byte, error) {
