@@ -225,21 +225,33 @@ methods still return the whole slice to CLI callers.
 
 ## Error codes
 
-These are the conditions a client can branch on. Each carries a stable snake_case
-`code` in the `{ error, code }` body — `upgrade_required`, `version_conflict`,
-`idempotency_conflict`, `quota_exceeded`, `device_limit`, `bad_pack`, `gone`,
-`snapshot_anchored`, `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`,
-`block_limit`, `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
-`account_exists`, `account_disabled`, `drops_roots` — so a client that acts on one of
-them matches the code rather than the prose. A shipped code is never renamed or
-repurposed.
+Every error response carries a stable snake_case `code` in the `{ error, code }`
+body, at one of two levels of precision. A shipped code is never renamed or
+repurposed either way.
 
-Every other error carries prose and the HTTP status only: `code` is omitted, and the
-status is the whole machine-readable contract. A malformed body, a missing field, or
-an unreadable server-side state is a `400`/`500` with a message written for a human.
-Do not string-match those messages; they are not a contract. The server never echoes
-a raw Go error whose text might carry internal detail either way. `426` additionally
-carries `minClient`.
+Condition codes tag the conditions a client branches on more finely than the HTTP
+status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
+`quota_exceeded`, `device_limit`, `bad_pack`, `gone`, `snapshot_anchored`,
+`not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
+`invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
+`account_exists`, `account_disabled`, `drops_roots`, `invite_required`
+(signup on an invite-mode server without a valid token), `invalid_challenge`
+(request a fresh attach challenge and retry), `invalid_credentials` (the single
+401 a failed attach collapses to; retrying the same inputs cannot succeed),
+`proof_mismatch` (the passphrase-derived proof on a passphrase change, root-key
+rotation, or account deletion did not match), and `git_remote_policy` (the
+operation would share, publish, or reclassify a sealed Git remote resource) — so
+a client that acts on one of them matches the code rather than the prose.
+
+Every other error carries the bucket code for its status: `invalid_request`
+(400), `unauthorized` (401), `forbidden` (403), `not_acceptable` (406),
+`payload_too_large` (413), `unsupported_media_type` (415), and `internal` (any
+5xx). For these the status is the whole distinction; the bucket code exists so
+`code` is always present and a client never needs a missing-field special case.
+
+The `error` message stays written for a human either way. Do not string-match it;
+it is not a contract, and the server never echoes a raw Go error whose text might
+carry internal detail. `426` additionally carries `minClient`.
 
 ## Rate limiting
 

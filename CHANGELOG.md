@@ -6,6 +6,16 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- Every server error response now carries a stable machine-readable `code`. The
+  ~100 conditions that previously answered prose plus an HTTP status alone get a
+  status-bucket code (`invalid_request`, `unauthorized`, `forbidden`,
+  `not_acceptable`, `payload_too_large`, `unsupported_media_type`, `internal`),
+  attached centrally in the error helper so no future response can ship without
+  one. Five conditions a client branches on more finely than the status gained
+  condition codes: `invite_required`, `invalid_challenge`, `invalid_credentials`,
+  `proof_mismatch`, and `git_remote_policy`. Existing codes, statuses, and
+  messages are unchanged, and clients that ignore `code` see identical behavior.
+
 - `aqt untrack [dir]` stops tracking a folder: it removes the `.aqt` control
   directory behind a confirmation and touches neither the working tree nor the
   server-side resource, which `--delete-remote` opts into deleting as well. It is the

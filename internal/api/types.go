@@ -654,8 +654,10 @@ type SetAutoSnapshotRequest struct {
 
 type ErrorResponse struct {
 	Error string `json:"error"`
-	// Code is a stable machine-readable tag for errors a client acts on
-	// programmatically (e.g. ErrCodeUpgradeRequired on a 426). Absent on plain errors.
+	// Code is a stable machine-readable tag, present on every error the server
+	// writes: a condition code where a client branches more finely than the HTTP
+	// status (e.g. ErrCodeUpgradeRequired on a 426), the status-bucket code
+	// otherwise. omitempty stays for wire compatibility with older servers.
 	Code string `json:"code,omitempty"`
 	// MinClient accompanies an upgrade-required (426) error: the capability the
 	// resource needs, so the client can report exactly how far it is behind.

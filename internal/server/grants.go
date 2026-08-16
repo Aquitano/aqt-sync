@@ -641,7 +641,7 @@ func (s *Server) createGrant(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrGitRemotePolicy) {
-		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
+		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
 		return
 	}
 	if err != nil {

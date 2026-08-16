@@ -98,4 +98,51 @@ const (
 	// account. Distinct from a 401 so the client stops rather than looping through
 	// re-authentication that cannot succeed.
 	ErrCodeAccountDisabled = "account_disabled"
+	// ErrCodeInviteRequired accompanies a 403 when signup on an invite-mode server
+	// carries a missing or unrecognized invite token, so a client can prompt for a
+	// token instead of treating it as a terminal refusal.
+	ErrCodeInviteRequired = "invite_required"
+	// ErrCodeInvalidChallenge accompanies a 401 when a device-attach names a
+	// challenge that is expired, already consumed, or not the caller's. The
+	// remediation is to request a fresh challenge and retry, distinct from
+	// invalid_credentials where retrying the same inputs cannot succeed.
+	ErrCodeInvalidChallenge = "invalid_challenge"
+	// ErrCodeInvalidCredentials accompanies the single 401 a failed device-attach
+	// collapses to: a missing account, a bad signature, and a bad passphrase
+	// verifier are deliberately indistinguishable (no oracle), and the code tags
+	// that one condition.
+	ErrCodeInvalidCredentials = "invalid_credentials"
+	// ErrCodeProofMismatch accompanies a 403 when the passphrase-derived proof on a
+	// passphrase change, root-key rotation, or account deletion does not match, so a
+	// client re-prompts for the passphrase rather than failing the operation.
+	ErrCodeProofMismatch = "proof_mismatch"
+	// ErrCodeGitRemotePolicy accompanies a 400 when an operation would expose or
+	// reclassify a sealed Git remote resource (share it, make it public, or change
+	// its kind).
+	ErrCodeGitRemotePolicy = "git_remote_policy"
+)
+
+// Status-bucket codes: the generic Code an error carries when the HTTP status is
+// the whole distinction a client needs. Every error response carries a Code — a
+// condition a client branches on more finely than the status gets one of the
+// condition codes above; everything else gets the bucket for its status. Bucket
+// codes are as stable as condition codes: never renamed or repurposed.
+const (
+	// ErrCodeInvalidRequest is the bucket for any 400 without a more specific code:
+	// a malformed body, a missing or out-of-range field.
+	ErrCodeInvalidRequest = "invalid_request"
+	// ErrCodeUnauthorized is the bucket for a 401 without a more specific code: a
+	// missing, invalid, or expired bearer token.
+	ErrCodeUnauthorized = "unauthorized"
+	// ErrCodeForbidden is the bucket for a 403 without a more specific code.
+	ErrCodeForbidden = "forbidden"
+	// ErrCodeNotAcceptable is the bucket for a 406 content-negotiation failure.
+	ErrCodeNotAcceptable = "not_acceptable"
+	// ErrCodePayloadTooLarge is the bucket for a 413 body-size rejection.
+	ErrCodePayloadTooLarge = "payload_too_large"
+	// ErrCodeUnsupportedMedia is the bucket for a 415 Content-Type rejection.
+	ErrCodeUnsupportedMedia = "unsupported_media_type"
+	// ErrCodeInternal is the bucket for any 5xx: server-side state the request
+	// could not read or write. The message never carries internal detail.
+	ErrCodeInternal = "internal"
 )

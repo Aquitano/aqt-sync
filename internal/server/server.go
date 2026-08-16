@@ -441,7 +441,7 @@ func (s *Server) createAccount(c *gin.Context) {
 	// register (and thereby squat) an unclaimed email. The response is uniform whether
 	// the token is missing or wrong, so it leaks nothing about the token set.
 	if s.cfg.Registration == RegistrationInvite && !s.cfg.inviteAccepted(req.InviteToken) {
-		abort(c, http.StatusForbidden, "a valid invite token is required to register on this server")
+		abortCode(c, http.StatusForbidden, "a valid invite token is required to register on this server", api.ErrCodeInviteRequired)
 		return
 	}
 	// The enc key is optional (pre-grants clients omit it) but if present its
@@ -604,7 +604,7 @@ func (s *Server) attachDevice(c *gin.Context) {
 	// Consume the challenge first so a bad attempt can't be replayed against it.
 	nonce, err := s.store.ConsumeChallenge(req.ChallengeID, req.Email)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusUnauthorized, "invalid or expired challenge")
+		abortCode(c, http.StatusUnauthorized, "invalid or expired challenge", api.ErrCodeInvalidChallenge)
 		return
 	}
 	if err != nil {
@@ -636,7 +636,7 @@ func (s *Server) attachDevice(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	abort(c, http.StatusUnauthorized, "invalid credentials")
+	abortCode(c, http.StatusUnauthorized, "invalid credentials", api.ErrCodeInvalidCredentials)
 }
 
 // verifierMatches reports whether the presented auth verifier hashes to the stored
@@ -666,7 +666,7 @@ func (s *Server) changePassphrase(c *gin.Context) {
 	}
 	newEpoch, err := s.store.ChangePassphrase(owner, deviceID, req.Kdf, req.WrappedRoot, req.OldAuthVerifier, req.NewAuthVerifier, req.ExpectedEpoch)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusForbidden, "current passphrase proof did not match")
+		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
 		return
 	}
 	if errors.Is(err, ErrVersionConflict) {
@@ -702,7 +702,7 @@ func (s *Server) rotateRootKey(c *gin.Context) {
 	}
 	token, epoch, err := s.store.RotateRootKey(owner, deviceID, req)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusForbidden, "current passphrase proof did not match")
+		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
 		return
 	}
 	if errors.Is(err, ErrVersionConflict) {
@@ -741,7 +741,7 @@ func (s *Server) deleteAccount(c *gin.Context) {
 
 	acct, err := s.store.DeleteAccountWithProof(owner, req.AuthVerifier)
 	if errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusForbidden, "passphrase proof did not match")
+		abortCode(c, http.StatusForbidden, "passphrase proof did not match", api.ErrCodeProofMismatch)
 		return
 	}
 	// The middleware answered this from a cache an operator suspending in another
@@ -987,7 +987,7 @@ func (s *Server) putResource(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrGitRemotePolicy) {
-		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
+		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
 		return
 	}
 	if errors.Is(err, ErrNotFound) {
@@ -1310,7 +1310,7 @@ func (s *Server) setVisibility(c *gin.Context) {
 		return
 	}
 	if errors.Is(err, ErrGitRemotePolicy) {
-		abort(c, http.StatusBadRequest, ErrGitRemotePolicy.Error())
+		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
 		return
 	}
 	if errors.Is(err, ErrNotFound) {
@@ -1597,12 +1597,38 @@ func bindJSON(c *gin.Context, v any) bool {
 	return true
 }
 
+// abort answers with the status-bucket Code for its HTTP status, so every error
+// response carries a machine-readable code. Handlers use it for conditions where
+// the status is the whole distinction a client needs; a condition a client
+// branches on more finely goes through abortCode with a condition code.
 func abort(c *gin.Context, code int, msg string) {
-	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg})
+	abortCode(c, code, msg, statusErrCode(code))
 }
 
-// abortCode is abort with a stable machine-readable Code, so a client can branch on
-// the condition without string-matching the message. The message stays a fixed,
+// statusErrCode maps an HTTP status to its bucket code. Statuses that always
+// carry a condition code (404, 409, 410, 426, 429, 507) never reach here; an
+// unlisted status falls back by class so no response can ship without a code.
+func statusErrCode(status int) string {
+	switch status {
+	case http.StatusUnauthorized:
+		return api.ErrCodeUnauthorized
+	case http.StatusForbidden:
+		return api.ErrCodeForbidden
+	case http.StatusNotAcceptable:
+		return api.ErrCodeNotAcceptable
+	case http.StatusRequestEntityTooLarge:
+		return api.ErrCodePayloadTooLarge
+	case http.StatusUnsupportedMediaType:
+		return api.ErrCodeUnsupportedMedia
+	}
+	if status >= 500 {
+		return api.ErrCodeInternal
+	}
+	return api.ErrCodeInvalidRequest
+}
+
+// abortCode answers with a condition-specific Code, so a client can branch on the
+// condition without string-matching the message. The message stays a fixed,
 // user-facing string — never a raw Go error, which may carry internal detail.
 func abortCode(c *gin.Context, code int, msg, errCode string) {
 	c.AbortWithStatusJSON(code, api.ErrorResponse{Error: msg, Code: errCode})
