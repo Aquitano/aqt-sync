@@ -184,7 +184,7 @@ systemd unit, Docker and Compose, and the backup-and-restore procedure.
 asking. It verifies a signed release manifest against signing keys compiled into the
 binary before trusting any of its contents, checks the archive against the signed length
 and digest, and keeps the previous binary until the new one has run and reported the
-version it should. `--check` changes nothing, `--yes` skips the prompt, `--prerelease`
+version it should. `--check` reports without installing, `--yes` skips the prompt, `--prerelease`
 opts into the beta channel, and `--json` is machine-readable.
 
 Only a published release binary is replaced, which is what the install scripts produce.
