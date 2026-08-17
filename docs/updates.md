@@ -2,8 +2,9 @@
 
 Every tagged release publishes a signed description of itself. `aqt update` fetches
 that description, verifies it against signing keys compiled into the binary, and
-either reports what is available or installs it. `--check` keeps the whole path
-read-only.
+either reports what is available or installs it. `--check` never touches the
+binary; like every check, it still records the freshness ceiling it authenticated
+(see "Replayed manifests" below).
 
 The transport is not trusted. Whoever serves the metadata — GitHub's public release
 assets or an explicitly configured static origin — can only make the check fail,
@@ -15,7 +16,7 @@ refused until it verifies.
 ```
 aqt update                      # check, show the transition, ask, then install
 aqt update --yes                # install without asking (scripts, CI)
-aqt update --check              # report only, change nothing
+aqt update --check              # report only, install nothing
 aqt update --check --prerelease # beta channel, which includes prereleases
 aqt update --json               # machine-readable
 ```

@@ -39,10 +39,17 @@ func BenchmarkPutResourceCreate(b *testing.B) {
 				if tc.withKey {
 					req.IdempotencyKey = fmt.Sprintf("bench-key-%d", i)
 				}
-				if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, req); err != nil {
+				id, _, err := s.PutResource(owner, api.CapabilityIDBinding, req)
+				if err != nil {
 					b.Fatal(err)
 				}
 				i++
+				// Drop the resource so a long -benchtime run does not accumulate
+				// gigabytes of 4 MiB blobs in the temp dir. Timed, but identical in
+				// both variants, so the with/without-key comparison is unaffected.
+				if err := s.DeleteResource(owner, id); err != nil {
+					b.Fatal(err)
+				}
 			}
 		})
 	}
