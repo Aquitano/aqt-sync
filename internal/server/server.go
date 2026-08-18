@@ -806,14 +806,6 @@ func (s *Server) accountUsage(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "usage lookup failed")
 		return
 	}
-	// The mode is echoed in both states: its presence at all is what tells a client
-	// this server supports client-managed GC, which a huge first push (whose refs
-	// would not fit the envelope) probes here before creating anything.
-	mode, err := s.store.GCMode(owner)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "usage lookup failed")
-		return
-	}
 	c.JSON(http.StatusOK, api.UsageResponse{
 		StorageBytes: u.StorageBytes,
 		QuotaBytes:   quota,
@@ -824,7 +816,9 @@ func (s *Server) accountUsage(c *gin.Context) {
 		Devices:      u.Devices,
 		MaxResources: int64(s.cfg.MaxResources), MaxSnapshots: int64(s.cfg.MaxSnapshots),
 		MaxObjects: int64(s.cfg.MaxObjects), MaxDevices: int64(s.cfg.MaxDevices),
-		GCMode: mode,
+		// The support probe a first push consults when its refs cannot fit the
+		// envelope; a server that still sweeps by reachability omits the field.
+		GCMode: api.GCModeClient,
 	})
 }
 
@@ -956,14 +950,6 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
 		return
 	}
-	if !s.requireGCWriteCapability(c, owner) {
-		return
-	}
-	// An out-of-spec ClientGC flag from an under-capable client must neither flip
-	// the account nor relax the refs requirements.
-	if capability < api.CapabilityClientGC {
-		req.ClientGC = false
-	}
 	if req.CompactAt < 0 {
 		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
 		return
@@ -1019,10 +1005,6 @@ func (s *Server) putResource(c *gin.Context) {
 		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
 		return
 	}
-	if errors.Is(err, ErrDropsRoots) {
-		abortCode(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss", api.ErrCodeDropsRoots)
-		return
-	}
 	if errors.Is(err, ErrSharedNeedsRefs) {
 		abortCode(c, http.StatusBadRequest, "a public or granted resource must carry its chunk refs (they scope what its readers may fetch); re-push with refs before sharing", api.ErrCodeSharedNeedsRefs)
 		return
@@ -1057,17 +1039,13 @@ func (s *Server) putResource(c *gin.Context) {
 		status = http.StatusOK
 	}
 	expiresAt, maxReads := policyExpiresAt(req), policyMaxReads(req)
-	// Best-effort: a failed mode lookup hides the echo and the client keeps
-	// sending refs, the fail-closed direction.
-	var gcMode api.GCMode
-	if mode, gcErr := s.store.GCMode(owner); gcErr == nil && mode == api.GCModeClient {
-		gcMode = mode
-	}
 	c.JSON(status, api.PutResourceResponse{
 		ID: id, Version: version,
 		ExpiresAt: expiresAt, MaxReads: maxReads,
 		OnExpiry: echoedOnExpiry(req.OnExpiry, expiresAt, maxReads),
-		GCMode:   gcMode,
+		// The echo a client needs before it may omit ChunkRefs from private writes:
+		// only a server that never sweeps by reachability says this.
+		GCMode: api.GCModeClient,
 	})
 }
 

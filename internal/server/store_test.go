@@ -240,21 +240,21 @@ func TestPackStoreRoundTripAndGC(t *testing.T) {
 		t.Fatalf("corrupt pack: got %v, want ErrBadPack", err)
 	}
 
-	// A resource referencing one object in pack A roots that whole pack; pack B is
-	// fully unreferenced and swept.
+	// A prune that names pack B's object empties and sweeps that pack; pack A's
+	// objects are untouched.
 	s.rootResource(t, owner, []string{idsA[0]})
-	deleted, freed, err := s.GCPacks(owner, forceGC)
+	deleted, _, freed, err := s.DeleteOwnerChunks(owner, idsB, forceGC)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if deleted != 1 || freed != int64(len(dataB)) {
-		t.Fatalf("gc deleted %d freed %d, want 1 pack / %d bytes", deleted, freed, len(dataB))
+		t.Fatalf("prune deleted %d freed %d, want 1 object / %d bytes", deleted, freed, len(dataB))
 	}
 	if missing, _ := s.MissingChunks(owner, idsA); len(missing) != 0 {
-		t.Fatal("pack A objects must survive gc (one is referenced)")
+		t.Fatal("pack A objects must survive the prune")
 	}
 	if missing, _ := s.MissingChunks(owner, idsB); len(missing) != 1 {
-		t.Fatal("unreferenced pack B must be swept")
+		t.Fatal("pruned pack B object must be gone")
 	}
 }
 
@@ -302,22 +302,25 @@ func TestPartiallyReferencedPackSurvives(t *testing.T) {
 	}
 }
 
-// RepackOwner compacts a pack that mixes live and dead objects: the live object is
-// copied into a fresh pack and still decrypts, the dead object is dropped, and the
-// old pack file is removed.
+// RepackOwner compacts a pack a prune left sparse: the surviving object is copied
+// into a fresh pack and still decrypts, the pruned bytes are dropped, and the old
+// pack file is removed.
 func TestRepackCompactsPartiallyDeadPack(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	owner := s.mustAccount(t, "repack@example.com")
+	owner := s.mustAccount(t, "repack-old@example.com")
 	livePayload := "live-object-keep"
 	deadPayload := strings.Repeat("dead", 64) // 256 bytes of soon-to-be-reclaimed space
 	packID, data, ids := packOf(livePayload, deadPayload)
 	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
-	s.rootResource(t, owner, []string{ids[0]}) // only the first object is live
+	s.rootResource(t, owner, []string{ids[0]})
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, ids[1:], forceGC); err != nil || deleted != 1 {
+		t.Fatalf("prune deleted %d err=%v, want 1", deleted, err)
+	}
 
-	// GC alone cannot reclaim the dead bytes: the pack is still partly live.
+	// The sweep alone cannot reclaim the pruned bytes: the pack still holds an object.
 	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 0 {
 		t.Fatalf("gc deleted %d err=%v, want 0", deleted, err)
 	}
@@ -405,6 +408,9 @@ func TestRepackDoesNotDoubleCountExistingPack(t *testing.T) {
 		t.Fatal(err)
 	}
 	s.rootResource(t, owner, []string{ids[0]})
+	if _, _, _, err := s.DeleteOwnerChunks(owner, ids[1:], forceGC); err != nil {
+		t.Fatal(err)
+	}
 
 	// Store the pack the repack is about to build, so its id already has a row.
 	live, _, err := s.packLiveObjects(owner, packID)
@@ -940,27 +946,29 @@ func TestStaleResourceChunksSchemaFailsLoud(t *testing.T) {
 	}
 }
 
-// A freshly uploaded, not-yet-referenced pack must survive a real-age sweep: the
-// age guard is what keeps an in-flight push's packs alive until its manifest PUT
-// roots their objects. Only once aged and still unreferenced is it reaped.
+// A freshly uploaded pack must survive both the sweep and a prune's delete at the
+// real age guard: it is what keeps an in-flight push's packs alive until its
+// manifest PUT roots their objects. Only once aged does a prune reclaim it.
 func TestFreshPackSurvivesAgeGuard(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "ageguard@example.com")
-	packID, data, _ := packOf("in flight")
+	packID, data, ids := packOf("in flight")
 	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
-	// A sweep at the real guard must not touch a pack uploaded moments ago.
 	if deleted, _, err := s.GCPacks(owner, gcMinAge); err != nil || deleted != 0 {
 		t.Fatalf("gc deleted %d err=%v, want 0 (young pack must survive the age guard)", deleted, err)
 	}
 	if _, err := os.Stat(s.packPath(owner, packID)); err != nil {
 		t.Fatalf("young pack reaped: %v", err)
 	}
-	// Bypassing the guard, the still-unreferenced pack is collectable.
-	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 1 {
-		t.Fatalf("forced gc deleted %d err=%v, want 1", deleted, err)
+	// Bypassing the guard, a prune naming its object empties and sweeps it.
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, ids, forceGC); err != nil || deleted != 1 {
+		t.Fatalf("forced prune deleted %d err=%v, want 1", deleted, err)
+	}
+	if _, err := os.Stat(s.packPath(owner, packID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("emptied pack file should be gone, stat err=%v", err)
 	}
 }
 
@@ -1119,11 +1127,10 @@ func TestGCDoesNotCrossOwners(t *testing.T) {
 	}
 }
 
-// A replace that clears every GC root of a resource that still has some is the
-// `aqt private` data-loss bug: re-sealing an object-backed resource's root blob
-// without its ChunkRefs would orphan the still-referenced objects for the next GC.
-// The store refuses it and leaves the resource untouched.
-func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
+// A refs-less replace of a private object-backed resource is the ordinary
+// client-GC push: it lands, the stored ref rows stay as they were, and the
+// objects survive GC regardless — the server never sweeps by reachability.
+func TestUpdateWithoutRefsKeepsRowsAndObjects(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "roots@example.com")
@@ -1147,29 +1154,19 @@ func TestUpdateRejectsDroppingAllRoots(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// The root-dropping replace is rejected.
-	if _, _, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", nil)); !errors.Is(err, ErrDropsRoots) {
-		t.Fatalf("replace dropping all roots = %v, want ErrDropsRoots", err)
-	}
-
-	// And it changed nothing: version, roots, and the pack all survive a GC.
-	got, err := s.GetResource(id, owner)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Version != 1 {
-		t.Fatalf("version = %d after a refused replace, want 1", got.Version)
+	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", nil)); err != nil || v != 2 {
+		t.Fatalf("refs-less replace = v%d err=%v, want v2 nil", v, err)
 	}
 	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 0 {
-		t.Fatalf("gc deleted %d err=%v, want 0 (roots intact)", deleted, err)
+		t.Fatalf("gc deleted %d err=%v, want 0", deleted, err)
 	}
 	if missing, _ := s.MissingChunks(owner, ids); len(missing) != 0 {
-		t.Fatal("rooted objects must survive a refused root-dropping replace")
+		t.Fatal("objects must survive a refs-less replace and a GC pass")
 	}
 
-	// A replace that keeps the roots is unaffected (no false positive).
-	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 1, "v2", ids)); err != nil || v != 2 {
-		t.Fatalf("replace keeping roots = v%d err=%v, want v2 nil", v, err)
+	// A refs-full replace still works and replaces the rows.
+	if _, v, err := s.PutResource(owner, api.CapabilityIDBinding, mkReq(id, 2, "v3", ids[:1])); err != nil || v != 3 {
+		t.Fatalf("refs-full replace = v%d err=%v, want v3 nil", v, err)
 	}
 }
 
@@ -1325,10 +1322,10 @@ func TestConcurrentGCKeepsLivePack(t *testing.T) {
 }
 
 // assertPackCounters recomputes every pack's obj_count/live_count/live_bytes
-// straight from the objects and root tables and compares them to the maintained
-// columns, so a write path that forgot its recount fails the test that used it.
-// The reads run on the read pool: the single writer connection cannot serve a
-// nested query while a cursor is open.
+// straight from the object rows and compares them to the maintained columns, so a
+// write path that forgot its recount fails the test that used it. The reads run
+// on the read pool: the single writer connection cannot serve a nested query
+// while a cursor is open.
 func (s *Store) assertPackCounters(t *testing.T, owner string) {
 	t.Helper()
 	type counters struct {
@@ -1368,7 +1365,7 @@ func (s *Store) assertPackCounters(t *testing.T, owner string) {
 		}
 		if err := s.rdb.QueryRow(
 			`SELECT count(*), COALESCE(sum(o.length), 0) FROM objects o
-			 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+objectIsLive, owner, id,
+			 WHERE o.owner_handle = ? AND o.pack_id = ?`, owner, id,
 		).Scan(&want.liveCount, &want.liveBytes); err != nil {
 			t.Fatal(err)
 		}
@@ -1378,9 +1375,10 @@ func (s *Store) assertPackCounters(t *testing.T, owner string) {
 	}
 }
 
-// The per-pack counters GC selects on must stay exact through every write that can
-// move an object or flip its rooted state: pack ingest, manifest create/supersede,
-// snapshot pin/unpin, resource delete, sweep, and repack.
+// The per-pack counters GC selects on must stay exact through every write that
+// can move or delete an object row — pack ingest, chunk delete, sweep, and repack
+// — and must be undisturbed by the ref writes (manifest create/supersede,
+// snapshot pin/unpin, resource delete) that no longer touch them.
 func TestPackCountersStayConsistent(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
@@ -1401,10 +1399,10 @@ func TestPackCountersStayConsistent(t *testing.T) {
 		return rid
 	}
 
-	// pack1 will mix live and dead objects (the dead one big enough to make it a
-	// repack candidate); pack2 is never rooted.
+	// pack1's middle object (big, to make the pack a repack candidate) will be
+	// pruned; pack2's only object will be pruned outright.
 	pack1, data1, ids1 := packOf("alive-a", strings.Repeat("dead-b", 60), "alive-c")
-	pack2, data2, _ := packOf("never rooted")
+	pack2, data2, ids2 := packOf("never rooted")
 	if _, err := s.PutPack(owner, pack1, data1, 0); err != nil {
 		t.Fatal(err)
 	}
@@ -1413,8 +1411,8 @@ func TestPackCountersStayConsistent(t *testing.T) {
 	}
 	s.assertPackCounters(t, owner)
 
-	// Root a+b, snapshot the pin, then supersede to a+c: b stays live only through
-	// the snapshot, c flips live.
+	// Ref writes — root, snapshot, supersede, unpin — must leave the counters
+	// exactly as pack ingest wrote them.
 	id := put("", 0, []string{ids1[0], ids1[1]})
 	s.assertPackCounters(t, owner)
 	snap, err := s.CreateSnapshot(owner, id, nil, false)
@@ -1424,32 +1422,32 @@ func TestPackCountersStayConsistent(t *testing.T) {
 	s.assertPackCounters(t, owner)
 	put(id, 1, []string{ids1[0], ids1[2]})
 	s.assertPackCounters(t, owner)
-
-	// Dropping the snapshot unpins b: pack1 is now partly dead.
 	if err := s.DeleteSnapshot(owner, snap.ID); err != nil {
 		t.Fatal(err)
 	}
 	s.assertPackCounters(t, owner)
 
-	// Repack compacts pack1's live objects into a fresh pack; the sweep then takes
-	// the never-rooted pack2.
+	// A prune deletes b and pack2's object: pack2 empties and is swept in the same
+	// call, pack1 turns sparse and the repack compacts it.
+	if deleted, _, freed, err := s.DeleteOwnerChunks(owner, []string{ids1[1], ids2[0]}, forceGC); err != nil || deleted != 2 || freed != int64(len(data2)) {
+		t.Fatalf("prune = (%d, %d) err=%v, want 2 deleted and pack2's %d bytes freed", deleted, freed, err, len(data2))
+	}
+	s.assertPackCounters(t, owner)
 	if repacked, _, err := s.RepackOwner(owner, forceGC); err != nil || repacked != 1 {
 		t.Fatalf("repack = %d err=%v, want 1", repacked, err)
 	}
 	s.assertPackCounters(t, owner)
-	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 1 {
-		t.Fatalf("gc deleted %d err=%v, want 1 (pack2)", deleted, err)
-	}
-	s.assertPackCounters(t, owner)
 
-	// Deleting the resource unroots a+c; the final sweep leaves no packs at all.
+	// Deleting the resource only unroots; the surviving objects go when a prune
+	// names them, and that empties the last pack.
 	if err := s.DeleteResource(owner, id); err != nil {
 		t.Fatal(err)
 	}
 	s.assertPackCounters(t, owner)
-	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 1 {
-		t.Fatalf("final gc deleted %d err=%v, want 1", deleted, err)
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, []string{ids1[0], ids1[2]}, forceGC); err != nil || deleted != 2 {
+		t.Fatalf("final prune deleted %d err=%v, want 2", deleted, err)
 	}
+	s.assertPackCounters(t, owner)
 	var n int
 	if err := s.rdb.QueryRow(`SELECT count(*) FROM packs WHERE owner_handle = ?`, owner).Scan(&n); err != nil {
 		t.Fatal(err)
@@ -1559,54 +1557,47 @@ func TestAuthCacheInvalidation(t *testing.T) {
 	}
 }
 
-// RunGCAll (the scheduled sweep's tick body) covers every owner, so an account
-// whose devices stopped syncing still gets its dead packs reclaimed.
-func TestRunGCAllSweepsAllOwners(t *testing.T) {
+// RunGCAll (the scheduled sweep's tick body) covers every owner, so packs a prune
+// left sparse get compacted even on an account whose devices stopped syncing.
+func TestRunGCAllRepacksAllOwners(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	a := s.mustAccount(t, "idle-a@example.com")
 	b := s.mustAccount(t, "idle-b@example.com")
-	packA, dataA, _ := packOf("dead on a")
-	packB, dataB, _ := packOf("dead on b")
-	if _, err := s.PutPack(a, packA, dataA, 0); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := s.PutPack(b, packB, dataB, 0); err != nil {
-		t.Fatal(err)
+	for _, owner := range []string{a, b} {
+		packID, data, ids := packOf(strings.Repeat("pruned", 64), "tiny survivor")
+		if _, err := s.PutPack(owner, packID, data, 0); err != nil {
+			t.Fatal(err)
+		}
+		if deleted, _, _, err := s.DeleteOwnerChunks(owner, ids[:1], forceGC); err != nil || deleted != 1 {
+			t.Fatalf("prune for %s deleted %d err=%v, want 1", owner, deleted, err)
+		}
 	}
 
 	res, err := s.RunGCAll(forceGC)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if res.DeletedPacks != 2 || res.FreedBytes != int64(len(dataA)+len(dataB)) {
-		t.Fatalf("RunGCAll = %+v, want 2 packs / %d bytes across both owners",
-			res, len(dataA)+len(dataB))
-	}
-	for _, p := range []struct{ owner, id string }{{a, packA}, {b, packB}} {
-		if _, err := os.Stat(s.packPath(p.owner, p.id)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("pack %s of %s survived the all-owner sweep: %v", p.id, p.owner, err)
-		}
+	if res.RepackedPacks != 2 || res.ReclaimedBytes <= 0 {
+		t.Fatalf("RunGCAll = %+v, want both owners' sparse packs compacted", res)
 	}
 }
 
-// StartGC's timer path end-to-end: an aged, unrooted pack is reclaimed without any
-// client triggering POST /v1/gc.
-func TestStartGCSweepsAgedPacksOnTimer(t *testing.T) {
+// StartGC's timer path end-to-end: a pack a prune left sparse is compacted without
+// any client triggering POST /v1/gc.
+func TestStartGCRepacksOnTimer(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "sched-gc@example.com")
-	packID, data, _ := packOf("orphaned by an idle account")
+	packID, data, ids := packOf(strings.Repeat("pruned", 64), "tiny survivor")
 	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
 		t.Fatal(err)
 	}
-	// Age the pack past the guard: the state an idle account's dropped reference
-	// leaves behind.
-	if _, err := s.db.Exec(
-		`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`,
-		time.Now().Add(-2*time.Hour).Unix(), owner, packID,
-	); err != nil {
+	if err := s.BackdatePacksForTest(owner, 2*time.Hour); err != nil {
 		t.Fatal(err)
+	}
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, ids[:1], gcMinAge); err != nil || deleted != 1 {
+		t.Fatalf("prune deleted %d err=%v, want 1", deleted, err)
 	}
 
 	stop := make(chan struct{})
@@ -1620,7 +1611,7 @@ func TestStartGCSweepsAgedPacksOnTimer(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("scheduled gc never swept the aged dead pack")
+	t.Fatal("scheduled gc never compacted the sparse pack")
 }
 
 // TestUpdateResourceMetadataOnly verifies rename's store primitive cannot alter
@@ -2013,10 +2004,10 @@ func TestDeleteShareIsGranteeScoped(t *testing.T) {
 	}
 }
 
-// A manifest PUT whose refs name objects a GC sweep already reaped fails with the
+// A manifest PUT whose refs name objects the owner no longer stores fails with the
 // named ErrDanglingRefs (the 400 missing_chunks mapping) and rolls back whole,
 // rather than committing dangling refs or surfacing an opaque constraint error —
-// the slow-push/GC race (#177).
+// the slow-push race (#177), now with a concurrent prune as the reaper.
 func TestPutResourceWithSweptRefsFailsNamed(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
@@ -2025,9 +2016,10 @@ func TestPutResourceWithSweptRefsFailsNamed(t *testing.T) {
 	if _, err := s.PutPack(owner, pack, data, 0); err != nil {
 		t.Fatal(err)
 	}
-	// The push stalls past the age guard; an owner-wide sweep reaps the unrooted pack.
-	if deleted, _, err := s.GCPacks(owner, forceGC); err != nil || deleted != 1 {
-		t.Fatalf("gc deleted %d err=%v, want the unrooted pack swept", deleted, err)
+	// The push stalls past the age guard; another device's prune reaps the
+	// uploaded-but-unrooted objects.
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, ids, forceGC); err != nil || deleted != 1 {
+		t.Fatalf("prune deleted %d err=%v, want the unrooted object gone", deleted, err)
 	}
 	ck, _ := crypto.GenerateContentKey()
 	blob, _ := crypto.Seal([]byte("sealed manifest"), ck, crypto.AADBlob)

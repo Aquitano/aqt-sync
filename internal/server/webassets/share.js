@@ -9,7 +9,7 @@
    * the Go constant, so a bump there has to be repeated here or the browser starts
    * claiming to be older than it is and takes a 426 it did not need. It is declared
    * once, at the top, so the next bump finds it. */
-  var CLIENT_CAPABILITY = 5;
+  var CLIENT_CAPABILITY = 4;
 
   /* Crypto boundary. libsodium supplies audited XChaCha20-Poly1305, hash-wasm
    * supplies Argon2id with the same lane count as Go's argon2.IDKey, and fzstd

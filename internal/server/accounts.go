@@ -466,36 +466,6 @@ func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
 	return err
 }
 
-// GCMode reports who owns the account's garbage collection. Rows written before
-// migration 21 read as the column default, GCModeServer.
-func (s *Store) GCMode(owner string) (api.GCMode, error) {
-	var mode string
-	err := s.rdb.QueryRow(`SELECT gc_mode FROM accounts WHERE owner_handle = ?`, owner).Scan(&mode)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return api.GCMode(mode), err
-}
-
-func gcModeTx(tx *sql.Tx, owner string) (api.GCMode, error) {
-	var mode string
-	err := tx.QueryRow(`SELECT gc_mode FROM accounts WHERE owner_handle = ?`, owner).Scan(&mode)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", ErrNotFound
-	}
-	return api.GCMode(mode), err
-}
-
-// setGCModeClient flips the account to client-managed GC inside the caller's
-// transaction. The flip is one-way by design: once any device has pushed a
-// resource whose reachability the server does not track, a server sweep would
-// treat that resource's objects as garbage, so there is no safe road back.
-func setGCModeClient(tx *sql.Tx, owner string) error {
-	_, err := tx.Exec(`UPDATE accounts SET gc_mode = ? WHERE owner_handle = ?`,
-		string(api.GCModeClient), owner)
-	return err
-}
-
 // AccountUsage summarizes what one account has stored. StorageBytes is the
 // pack-byte quota counter; the rest are row counts. Resources counts live rows
 // only — a reclaimed tombstone holds no content and exists just to keep its link

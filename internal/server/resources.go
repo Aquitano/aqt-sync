@@ -70,11 +70,6 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
-	// A public resource's ChunkRefs are also its readers' fetch scope, so a
-	// client-GC create may omit them only while the resource stays private.
-	if req.ClientGC && len(req.ChunkRefs) == 0 && req.Visibility == api.Public {
-		return "", 0, ErrSharedNeedsRefs
-	}
 
 	// Write and fsync the blob before opening the transaction, mirroring
 	// updateResource: keep the durable write off the single writer connection (an
@@ -115,11 +110,6 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	}
 	if err := replaceResourceChunks(tx, id, owner, req.ChunkRefs); err != nil {
 		return "", 0, err
-	}
-	if req.ClientGC {
-		if err := setGCModeClient(tx, owner); err != nil {
-			return "", 0, err
-		}
 	}
 	if err := recordIdempotency(tx, owner, "resource.create", req.IdempotencyKey, digest, api.PutResourceResponse{ID: id, Version: version}); err != nil {
 		return "", 0, err
@@ -240,27 +230,13 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	if n, _ := res.RowsAffected(); n == 0 {
 		return "", 0, ErrVersionConflict
 	}
-	if len(req.ChunkRefs) == 0 && req.ClientGC {
-		// A public or granted resource needs refs even on a client-GC account: they
-		// scope what a non-owner reader may fetch, and a refs-less write would leave
-		// its readers a stale or empty scope.
-		var shared bool
-		if err := tx.QueryRow(
-			`SELECT ? OR EXISTS(SELECT 1 FROM grants WHERE resource_id = ? AND owner_handle = ?)`,
-			req.Visibility == api.Public, req.ID, owner,
-		).Scan(&shared); err != nil {
-			return "", 0, err
-		}
-		if shared {
-			return "", 0, ErrSharedNeedsRefs
-		}
-	} else if len(req.ChunkRefs) == 0 {
-		// Defense-in-depth against a client re-PUTting an object-backed resource without
-		// its roots (e.g. a buggy key rotation): clearing every ChunkRef while the prior
-		// version had some would orphan the still-referenced objects for the next GC. No
-		// legitimate replace does this — a folder/streamed update always carries at least
-		// its manifest/root objects — so reject it rather than commit the unrooting. The
-		// per-resource lock above makes this count-then-replace atomic.
+	if len(req.ChunkRefs) == 0 {
+		// A refs-less update of a resource that has refs is the private fast path:
+		// the rows are left untouched, since they only matter as a non-owner read
+		// scope. A shared resource is the one place stale rows would bite — its
+		// readers could fetch nothing pushed since — so there the write is refused.
+		// An inline resource (no rows) passes either way; the server cannot tell it
+		// from a folder, and does not need to.
 		var existing int
 		if err := tx.QueryRow(
 			`SELECT count(*) FROM resource_chunks WHERE resource_id = ?`, req.ID,
@@ -268,21 +244,19 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 			return "", 0, err
 		}
 		if existing > 0 {
-			return "", 0, ErrDropsRoots
+			var shared bool
+			if err := tx.QueryRow(
+				`SELECT ? OR EXISTS(SELECT 1 FROM grants WHERE resource_id = ? AND owner_handle = ?)`,
+				req.Visibility == api.Public, req.ID, owner,
+			).Scan(&shared); err != nil {
+				return "", 0, err
+			}
+			if shared {
+				return "", 0, ErrSharedNeedsRefs
+			}
 		}
-	}
-	// A refs-less client-GC write leaves any stored rows untouched: they no longer
-	// drive GC on such an account, and deleting them would cost a full-table diff
-	// on every private push for no behavioral difference.
-	if !(req.ClientGC && len(req.ChunkRefs) == 0) {
-		if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
-			return "", 0, err
-		}
-	}
-	if req.ClientGC {
-		if err := setGCModeClient(tx, owner); err != nil {
-			return "", 0, err
-		}
+	} else if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
+		return "", 0, err
 	}
 	// A revocation is a key rotation and a grant delete, and this is what makes them one
 	// operation. Split across two requests, a rotation that commits while the delete is
@@ -808,18 +782,9 @@ func (s *Store) DeleteResourceVersion(owner, id string, expectedVersion int) err
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	// Drop the GC roots; the chunks themselves are reclaimed by a later sweep
-	// (they may still be referenced by another of the owner's resources or pinned
-	// by a snapshot). The dropped ids are read before the delete so the pack
-	// counters can be recomputed for exactly the packs this unrooting touches.
-	dropped, err := resourceChunkIDs(tx, id)
-	if err != nil {
-		return err
-	}
+	// Drop the read-scope rows; the chunks themselves stay until a client prune
+	// determines they are unreachable from every remaining root.
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
-		return err
-	}
-	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

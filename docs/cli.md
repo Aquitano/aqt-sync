@@ -178,13 +178,11 @@ an incomplete comparison is never mistaken for a clean one.
 
 ## Reclaiming space
 
-On a server that supports client-managed garbage collection, the account flips to
-it on the first push from a current client, and from then on the server never
-decides for itself what is garbage — it cannot see which chunks a resource
-references. `aqt prune` makes that decision where the keys are: it decodes every
-resource and snapshot of the account, computes the full set of reachable chunks,
-and deletes what the server stores beyond it. Deleting a folder or a large file
-frees quota at the next prune, not immediately.
+A current server never decides for itself what is garbage — it cannot see which
+chunks a resource references. `aqt prune` makes that decision where the keys are:
+it decodes every resource and snapshot of the account, computes the full set of
+reachable chunks, and deletes what the server stores beyond it. Deleting a folder
+or a large file frees quota at the next prune, not immediately.
 
 `--dry-run` reports the diff without deleting. The command fails closed twice
 over: if any resource or snapshot cannot be decoded, nothing is deleted, and the

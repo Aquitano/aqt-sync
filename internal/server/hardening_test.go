@@ -237,25 +237,26 @@ func TestPackByteCounterAcrossGCAndDelete(t *testing.T) {
 		t.Fatalf("counter after two puts = %d, want %d", b, total)
 	}
 
-	// Root only pack A's objects; a sweep reclaims the now-dead pack B.
+	// A prune of pack B's object empties and reclaims that pack.
 	res := s.rootResource(t, owner, idsA)
-	if _, freed, err := s.GCPacks(owner, forceGC); err != nil || freed != int64(len(dataB)) {
-		t.Fatalf("sweep of B: freed=%d err=%v, want %d", freed, err, len(dataB))
+	_, _, idsB := packOf("b1")
+	if _, _, freed, err := s.DeleteOwnerChunks(owner, idsB, forceGC); err != nil || freed != int64(len(dataB)) {
+		t.Fatalf("prune of B: freed=%d err=%v, want %d", freed, err, len(dataB))
 	}
 	if b, _ := s.OwnerPackBytes(owner); b != int64(len(dataA)) {
-		t.Fatalf("counter after sweeping B = %d, want %d", b, len(dataA))
+		t.Fatalf("counter after pruning B = %d, want %d", b, len(dataA))
 	}
 
-	// Deleting the resource unroots A; the next sweep reclaims it and the counter
-	// returns to zero.
+	// Deleting the resource only unroots A; a prune of its objects returns the
+	// counter to zero.
 	if err := s.DeleteResource(owner, res); err != nil {
 		t.Fatal(err)
 	}
-	if _, freed, err := s.GCPacks(owner, forceGC); err != nil || freed != int64(len(dataA)) {
-		t.Fatalf("sweep of A: freed=%d err=%v, want %d", freed, err, len(dataA))
+	if _, _, freed, err := s.DeleteOwnerChunks(owner, idsA, forceGC); err != nil || freed != int64(len(dataA)) {
+		t.Fatalf("prune of A: freed=%d err=%v, want %d", freed, err, len(dataA))
 	}
 	if b, _ := s.OwnerPackBytes(owner); b != 0 {
-		t.Fatalf("counter after sweeping everything = %d, want 0", b)
+		t.Fatalf("counter after pruning everything = %d, want 0", b)
 	}
 }
 

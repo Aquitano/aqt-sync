@@ -21,12 +21,13 @@ and stored as objects, and the resource blob is a compact sealed root naming tho
 objects — so a one-file edit re-uploads a handful of manifest objects rather than the
 whole manifest, and the 64 MiB blob ceiling does not cap a folder by its size.
 
-What does cap it is `chunkRefs`. Every PUT carries the folder's *entire* object-id
-set in the 32 MiB wire header, so a folder is bounded at roughly 500k chunks — about
+What can cap it is `chunkRefs` — but only when shared. A public or granted
+folder's PUT carries its *entire* object-id set in the 32 MiB wire header as its
+readers' fetch scope, bounding a shared folder at roughly 500k chunks — about
 3.8 GiB at the default ~8 KiB profile, and proportionally more on a coarser one.
-Crossing the bound is `400 resource_too_large`, and the workaround is to split the
-folder or pin a coarser `chunkProfile`; segmenting the ref set is the real fix and is
-not built yet.
+Crossing the bound is `400 resource_too_large`; split the folder or pin a coarser
+`chunkProfile`. A private folder's PUT omits `chunkRefs` entirely (see
+[garbage collection](#garbage-collection)) and has no such ceiling.
 
 Two root types exist: `TreeRoot` for a folder and `FileRoot` for a
 [streamed single file](#streamed-single-files). (A third, `PackRoot`, belonged to
@@ -199,29 +200,26 @@ bytes — which is the other reason to pin a coarse `chunkProfile` on a media fo
 
 ### Garbage collection
 
-**Mark-and-sweep at pack granularity, per owner.** Roots are the object references of
-the owner's live resources **and of every retained snapshot** — file-chunk ids ∪
-manifest-object ids, folded from both root tables. A snapshot reuses the resource's
-ciphertext rather than copying it, so a snapshot's references have to keep objects
-alive on their own; otherwise syncing past a snapshot would collect the very objects
-that snapshot exists to preserve. A pack is deleted when **none** of its objects is
-reachable from any root *and* it is older than an age guard, so an in-flight upload is
-not reaped before its manifest commits.
+**Client-decided, at chunk granularity.**
+[Reachability is the client's call](api.md#client-managed-garbage-collection): only
+it holds the keys, so `aqt prune` decodes every resource and snapshot of the
+account (a snapshot's references keep objects alive exactly like a live
+resource's), computes the reachable closure, and explicitly deletes what the
+server stores beyond it. The server never chooses a victim itself.
 
-Dead objects inside a still-live pack are reclaimed separately by `RepackOwner`,
-which copies the live objects into a fresh pack under a bounded byte budget and swaps
-atomically after re-checking age and liveness against the same combined root set.
+Server-side pack maintenance only tidies after a prune: a pack whose objects were
+all deleted is swept once it is older than an age guard — the guard is what keeps
+an in-flight upload's packs alive until its manifest commits, since `CheckChunks`
+re-arms the packs holding objects a push is about to reference — and a pack a
+prune left sparse is compacted by `RepackOwner`, which copies the surviving
+objects into a fresh pack under a bounded byte budget and swaps atomically after
+re-checking age and the object set.
 
 There are no refcounts. The manifests are the source of truth, which survives
-crashes; the resource→objects foreign key is the backstop that rejects a root
-referencing an object the owner no longer stores.
-
-All of the above describes a server-managed account. Once an account flips to
-[client-managed GC](api.md#client-managed-garbage-collection), the flat root set is
-no longer shipped at all: reachability is computed by the client over its decrypted
-trees, the sweep treats every stored object as live, and reclamation happens
-through `aqt prune`'s explicit deletes. The pack machinery — the age guard,
-empty-pack sweep, and repack — is unchanged; only who decides liveness moves.
+crashes; the resource→objects foreign key is the backstop that rejects a shared
+resource's refs naming an object the owner no longer stores. Servers from before
+client-managed GC swept by the shipped `chunkRefs` instead; a current client keeps
+sending full refs to those (the `gcMode` echo is what licenses omitting them).
 
 ### Node cache
 

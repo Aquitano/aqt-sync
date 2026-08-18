@@ -29,22 +29,11 @@ var ErrVersionConflict = errors.New("version conflict")
 // ErrIdempotencyConflict is returned when a key is reused with another payload.
 var ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
 
-// ErrDropsRoots is returned when a replace would clear every GC root of a resource
-// that still has some: an object-backed resource (folder/streamed file) re-PUT with
-// no ChunkRefs. Committing it would orphan the still-referenced objects for the next
-// GC, so the store refuses it rather than lose data.
-var ErrDropsRoots = errors.New("replace drops all chunk roots")
-
 // ErrSharedNeedsRefs is returned when a refs-less write targets a public or granted
-// resource on a client-GC account. ChunkRefs double as the scope of object ids a
-// non-owner reader may fetch, so dropping them from a shared resource would leave
+// resource whose prior version carried refs. ChunkRefs are the scope of object ids
+// a non-owner reader may fetch, so dropping them from a shared resource would leave
 // its readers unable to fetch any new content. Handlers map it to 400.
 var ErrSharedNeedsRefs = errors.New("a public or granted resource must carry its chunk refs")
-
-// ErrServerManagedGC is returned when a chunk inventory or delete request reaches an
-// account still in server-managed GC mode, where a client-side deletion would race
-// the server's own sweep. Handlers map it to 409.
-var ErrServerManagedGC = errors.New("account garbage collection is server-managed")
 
 // ErrNonceReuse is returned when a replace carries the blob nonce the resource already
 // stores. Blobs are addressed by id+nonce and treated as immutable per nonce, so a
@@ -540,13 +529,6 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	 CREATE INDEX IF NOT EXISTS idx_grants_owner ON grants(owner_handle);
 	 CREATE INDEX IF NOT EXISTS idx_devices_owner ON devices(owner_handle);
 	 CREATE INDEX IF NOT EXISTS idx_snapshots_resource_version ON snapshots(resource_id, version_captured);`,
-	// 21: who owns the account's garbage collection. 'server' is the historical
-	// behavior (clients ship flat ChunkRefs, the sweep reclaims by reachability);
-	// 'client' means the account's clients compute reachability locally and prune
-	// unreachable chunks themselves, and the server never sweeps the account by
-	// reachability again. The flip is one-way and happens on the first capability-5
-	// write that declares client GC — see SetGCModeClient.
-	`ALTER TABLE accounts ADD COLUMN gc_mode TEXT NOT NULL DEFAULT 'server';`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the

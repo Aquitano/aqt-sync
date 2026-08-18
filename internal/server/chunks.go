@@ -54,42 +54,10 @@ func (s *Server) checkChunks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ChunkCheckResponse{Missing: missing})
 }
 
-// requireGCWriteCapability enforces the account-wide write gate of client-managed
-// GC: once an account has flipped, a content write from a client below
-// CapabilityClientGC is refused with a 426. Such a client still assumes the server
-// sweeps by reachability — it would delete files and wait for a reclamation that
-// never comes — so the refusal names the upgrade instead of quietly stranding its
-// expectations. Reads stay open to old clients. Reports false after aborting.
-func (s *Server) requireGCWriteCapability(c *gin.Context, owner string) bool {
-	if requestCapability(c) >= api.CapabilityClientGC {
-		return true
-	}
-	mode, err := s.store.GCMode(owner)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "account lookup failed")
-		return false
-	}
-	if mode == api.GCModeClient {
-		abortUpgradeRequired(c, api.CapabilityClientGC, requestCapability(c))
-		return false
-	}
-	return true
-}
-
 // listChunks pages the calling account's complete object inventory for a client
-// prune. Refused on a server-managed account: an inventory diff only means
-// something when the caller owns reachability.
+// prune.
 func (s *Server) listChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	mode, err := s.store.GCMode(owner)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "account lookup failed")
-		return
-	}
-	if mode != api.GCModeClient {
-		abortCode(c, http.StatusConflict, "account garbage collection is server-managed", api.ErrCodeServerManagedGC)
-		return
-	}
 	ids, next, err := s.store.ListOwnerChunks(owner, c.Query("cursor"))
 	if errors.Is(err, errBadCursor) {
 		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
@@ -103,8 +71,8 @@ func (s *Server) listChunks(c *gin.Context) {
 }
 
 // deleteChunks drops objects a client prune found unreachable from every root it
-// holds. The store enforces the client-GC mode and the pack age guard; ids it
-// skips as too young are reported, not failed, so the pruner retries them later.
+// holds. The store enforces the pack age guard; ids it skips as too young are
+// reported, not failed, so the pruner retries them later.
 func (s *Server) deleteChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.ChunkDeleteRequest
@@ -116,10 +84,6 @@ func (s *Server) deleteChunks(c *gin.Context) {
 		return
 	}
 	deleted, skipped, freed, err := s.store.DeleteOwnerChunks(owner, req.IDs, gcMinAge)
-	if errors.Is(err, ErrServerManagedGC) {
-		abortCode(c, http.StatusConflict, "account garbage collection is server-managed", api.ErrCodeServerManagedGC)
-		return
-	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "chunk delete failed")
 		return
@@ -132,9 +96,6 @@ func (s *Server) deleteChunks(c *gin.Context) {
 // corrupt or mislabeled pack is rejected wholesale.
 func (s *Server) putPack(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
-	if !s.requireGCWriteCapability(c, owner) {
-		return
-	}
 	packID := c.Param("id")
 	data, err := io.ReadAll(c.Request.Body)
 	if err != nil {

@@ -2613,7 +2613,7 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: refs, ClientGC: true,
+		WrappedKey: &wrapped, ChunkRefs: refs,
 		// Both seals above bind iff id is non-empty, so the declaration follows the
 		// same rule. In practice this is a create (callers pass id ""): the seals stay
 		// unbound and the first putFolderUpdate re-seals them id-bound.
@@ -2689,7 +2689,7 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, v
 	}
 	req := api.PutResourceRequest{
 		ID: id, Visibility: vis, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion, ClientGC: true,
+		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
 	}
 	if gcClient && vis == api.Private {

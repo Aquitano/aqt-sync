@@ -28,10 +28,11 @@ func (s *Store) supersede(t *testing.T, owner, id string, refs []string) {
 	}
 }
 
-// A snapshot must keep its objects alive through both a GC sweep and a repack after
-// the resource that referenced them has moved on. This is the core safety property:
-// the GC root queries union snapshot_chunks, so a chunk only a snapshot needs is
-// neither swept nor dropped during compaction.
+// A snapshot's objects must survive the server's own maintenance — sweep and
+// repack — after the resource that referenced them has moved on: nothing
+// server-side ever decides an object is garbage, so a chunk only a snapshot needs
+// is neither swept nor dropped during compaction. Reclaiming it takes a client
+// prune that names it, after the snapshot is gone.
 func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
@@ -83,18 +84,16 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 		t.Fatal("snapshot blob empty")
 	}
 
-	// Dropping the snapshot unroots the object; the next sweep reclaims it.
+	// Dropping the snapshot removes the last root; a prune naming the object
+	// reclaims it.
 	if err := s.DeleteSnapshot(owner, snap.ID); err != nil {
 		t.Fatalf("delete snapshot: %v", err)
 	}
-	if _, _, err := s.GCPacks(owner, forceGC); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.RepackOwner(owner, forceGC); err != nil {
-		t.Fatal(err)
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, []string{idsA[0]}, forceGC); err != nil || deleted != 1 {
+		t.Fatalf("prune deleted %d err=%v, want 1", deleted, err)
 	}
 	if missing, _ := s.MissingChunks(owner, []string{idsA[0]}); len(missing) != 1 {
-		t.Fatal("object should be reclaimed once the snapshot pinning it is gone")
+		t.Fatal("object should be gone once pruned")
 	}
 }
 

@@ -18,16 +18,8 @@ const (
 	// CapabilityGitRemote is the first release that understands sealed Git remote
 	// roots and the server-side policy attached to them.
 	CapabilityGitRemote = 4
-	// CapabilityClientGC is the first release that can own garbage collection for
-	// its account: it computes chunk reachability locally and prunes with
-	// `aqt prune` instead of shipping flat ChunkRefs for the server to sweep by.
-	// Unlike earlier levels this is a write contract, not a read format — once an
-	// account flips to client GC, content writes from clients below this level are
-	// refused with a 426, because they would rely on a server sweep that no longer
-	// runs for the account.
-	CapabilityClientGC = 5
-	// ClientCapability is the highest capability level this build implements.
-	ClientCapability = CapabilityClientGC
+	// ClientCapability is the highest format this build can read.
+	ClientCapability = CapabilityGitRemote
 )
 
 // CapabilityHeader carries a request's client capability. Missing or malformed
@@ -104,9 +96,6 @@ const (
 	ErrCodeInvalidPolicy = "invalid_policy"
 	// ErrCodeIdempotencyConflict means one key was reused for a different payload.
 	ErrCodeIdempotencyConflict = "idempotency_conflict"
-	// ErrCodeDropsRoots accompanies a 400 when a replace would clear every chunk root
-	// of an object-backed resource.
-	ErrCodeDropsRoots = "drops_roots"
 	// ErrCodeMissingChunks accompanies a 400 when a manifest's chunk refs name objects
 	// the server no longer stores: GC swept an uploaded-but-unrooted pack because the
 	// push outlived the age guard. Re-running sync re-uploads exactly the missing
@@ -139,14 +128,10 @@ const (
 	// its kind).
 	ErrCodeGitRemotePolicy = "git_remote_policy"
 	// ErrCodeSharedNeedsRefs accompanies a 400 when a refs-less write targets a
-	// public or granted resource. ChunkRefs double as the read-authorization scope
-	// for non-owner object fetches, so a shared resource must carry them even on an
-	// account that owns its garbage collection.
+	// public or granted resource that has chunk refs. ChunkRefs are the
+	// read-authorization scope for non-owner object fetches, so a shared resource
+	// must carry them even though private writes may omit them.
 	ErrCodeSharedNeedsRefs = "shared_needs_refs"
-	// ErrCodeServerManagedGC accompanies a 409 when a chunk inventory or delete
-	// request reaches an account still in server-managed GC mode, where a client
-	// deletion would race the server's own sweep.
-	ErrCodeServerManagedGC = "server_managed_gc"
 )
 
 // Status-bucket codes: the generic Code an error carries when the HTTP status is

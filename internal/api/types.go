@@ -294,18 +294,10 @@ type DeleteAccountResponse struct {
 // public resources the content key lives in the share-link fragment instead.
 //
 // ChunkRefs lists the chunk ids the blob (a folder's sealed manifest) references.
-// The server stores them as the resource's GC roots — and, for public or granted
-// resources, as the scope of chunk ids a non-owner reader may fetch; it never
-// inspects them. On an account that owns its garbage collection (ClientGC below)
-// they are optional for private resources, but a public or granted resource must
-// still carry them or the write is refused with ErrCodeSharedNeedsRefs.
-//
-// ClientGC declares that this client computes chunk reachability itself and prunes
-// with its own GC runs. The first capability-5 write carrying it permanently flips
-// the account to client-managed GC: the server stops sweeping by reachability and
-// refuses content writes from clients below CapabilityClientGC. A server that
-// predates the field ignores it and echoes no GCMode, so the client keeps sending
-// full ChunkRefs — the flag fails closed on both sides.
+// The server stores them opaquely as the scope of chunk ids a non-owner reader of a
+// public or granted resource may fetch — reachability itself is the client's job
+// (see GCMode). Private writes may omit them; a refs-less write against a shared
+// resource that has refs is refused with ErrCodeSharedNeedsRefs.
 //
 // ExpectedVersion, when > 0, is the version the client based this update on. The
 // server rejects the write (409) if the stored version differs, so a concurrent
@@ -334,7 +326,6 @@ type PutResourceRequest struct {
 	EncryptedMeta   crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
-	ClientGC        bool               `json:"clientGc,omitempty"`
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 	MinClient       int                `json:"minClient,omitempty"`
 	// CompactAt is non-zero only for a git-remote resource. It is deliberately
@@ -446,10 +437,11 @@ type GCResponse struct {
 // than mint a link the server will not actually expire — or, for OnExpiry, one whose
 // expiry would destroy content the client meant to keep.
 //
-// GCMode echoes the account's garbage-collection mode after the write, by the same
-// handshake: only a server that understands client-managed GC ever says
-// GCModeClient, so a client drops ChunkRefs from private writes exactly when this
-// echo has told it the server no longer sweeps for it.
+// GCMode is the same handshake for garbage collection: only a server whose GC is
+// client-managed ever echoes GCModeClient, so a client drops ChunkRefs from
+// private writes exactly when this echo has told it no server sweep will reap
+// them. Against an older, still-sweeping server the echo is absent and the client
+// keeps sending full refs.
 type PutResourceResponse struct {
 	ID        string   `json:"id"`
 	Version   int      `json:"version"`
@@ -459,11 +451,11 @@ type PutResourceResponse struct {
 	GCMode    GCMode   `json:"gcMode,omitempty"`
 }
 
-// GCMode names who owns an account's garbage collection. GCModeServer is the
-// historical default: clients ship flat ChunkRefs and the server sweeps by
-// reachability. GCModeClient means the account's clients compute reachability
-// locally and delete unreachable chunks with `aqt prune`; the server never sweeps
-// the account by reachability again. The flip is one-way.
+// GCMode names who owns garbage collection. Servers from this release on are
+// always GCModeClient: reachability is computed by the account's clients (which
+// hold the keys) and unreachable chunks are deleted with `aqt prune`; the server
+// only reclaims what a client explicitly deleted. GCModeServer is what the echo's
+// absence means — an older server that still sweeps by the shipped ChunkRefs.
 type GCMode string
 
 const (
@@ -480,11 +472,10 @@ type ChunkListResponse struct {
 	NextCursor string   `json:"nextCursor,omitempty"`
 }
 
-// ChunkDeleteRequest asks the server to drop the named objects. Only valid on an
-// account in client-managed GC mode. The server skips (rather than fails on) ids
-// it does not store and ids whose pack is inside the GC grace window — a
-// concurrent push may be about to reference those — and reports both counts so
-// the pruner knows a re-run is worthwhile.
+// ChunkDeleteRequest asks the server to drop the named objects. The server skips
+// (rather than fails on) ids it does not store and ids whose pack is inside the
+// GC grace window — a concurrent push may be about to reference those — and
+// reports both counts so the pruner knows a re-run is worthwhile.
 type ChunkDeleteRequest struct {
 	IDs []string `json:"ids"`
 }
@@ -637,10 +628,10 @@ type ListDevicesResponse struct {
 // against the server's per-owner quota (0 = unlimited) plus row counts.
 // Resources counts live entries only, not reclaimed link tombstones.
 //
-// GCMode reports who owns the account's garbage collection. A server that
-// predates client-managed GC omits it, which a client must read as
-// "server-managed, and client GC unsupported" — the field doubles as the support
-// probe for a first push whose ChunkRefs would not fit the envelope.
+// GCMode reports who owns garbage collection. A server that predates client GC
+// omits it, which a client must read as "server-managed, and client GC
+// unsupported" — the field doubles as the support probe for a first push whose
+// ChunkRefs would not fit the envelope.
 type UsageResponse struct {
 	StorageBytes int64  `json:"storageBytes"`
 	QuotaBytes   int64  `json:"quotaBytes,omitempty"`

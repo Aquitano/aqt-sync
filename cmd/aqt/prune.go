@@ -63,10 +63,7 @@ func runPrune(dryRun, asJSON bool) error {
 		return err
 	}
 	if u.GCMode != api.GCModeClient {
-		if u.GCMode == "" {
-			return errors.New("this server does not support client-managed garbage collection; it sweeps unreferenced data itself")
-		}
-		return errors.New("this account's garbage collection is still server-managed; it flips on the first push from this build (run `aqt sync` in a tracked folder first)")
+		return errors.New("this server still sweeps unreferenced data itself; upgrade aqt-server before pruning from a client")
 	}
 	mk, err := unlockMaster(prof)
 	if err != nil {

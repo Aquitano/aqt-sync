@@ -102,11 +102,6 @@ var ErrResourceTooLarge = errors.New("folder has more chunks than one manifest u
 // its readers may fetch. The caller re-pushes with full refs.
 var ErrSharedNeedsRefs = errors.New("a public or granted resource must carry its chunk refs; re-push with refs before sharing")
 
-// ErrServerManagedGC maps the server_managed_gc code (a 409 on a chunk inventory or
-// delete): the account has not flipped to client-managed GC, so a client-side prune
-// would race the server's own sweep.
-var ErrServerManagedGC = errors.New("this account's garbage collection is server-managed; push once with a client-GC build first")
-
 // ErrUpgradeRequired maps a 426: the resource is sealed in a format newer than this
 // build reads. Callers test errors.Is(err, ErrUpgradeRequired); the concrete
 // UpgradeRequiredError carries the server-declared min_client for messaging.
@@ -1100,8 +1095,6 @@ func statusError(status int, path string, body []byte) error {
 		return ErrResourceTooLarge
 	case api.ErrCodeSharedNeedsRefs:
 		return ErrSharedNeedsRefs
-	case api.ErrCodeServerManagedGC:
-		return ErrServerManagedGC
 	case api.ErrCodeNotFound:
 		return ErrNotFound
 	case api.ErrCodeRateLimited:

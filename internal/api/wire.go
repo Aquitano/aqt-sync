@@ -52,7 +52,6 @@ type resourceUploadHeader struct {
 	EncryptedMeta   crypto.SealedBlob  `json:"encryptedMeta"`
 	WrappedKey      *crypto.WrappedKey `json:"wrappedKey,omitempty"`
 	ChunkRefs       []string           `json:"chunkRefs,omitempty"`
-	ClientGC        bool               `json:"clientGc,omitempty"`
 	ExpectedVersion int                `json:"expectedVersion,omitempty"`
 	MinClient       int                `json:"minClient,omitempty"`
 	CompactAt       int                `json:"compactAt,omitempty"`
@@ -92,7 +91,6 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		EncryptedMeta:   req.EncryptedMeta,
 		WrappedKey:      req.WrappedKey,
 		ChunkRefs:       req.ChunkRefs,
-		ClientGC:        req.ClientGC,
 		ExpectedVersion: req.ExpectedVersion,
 		MinClient:       req.MinClient,
 		CompactAt:       req.CompactAt,
@@ -118,7 +116,6 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		EncryptedMeta:   h.EncryptedMeta,
 		WrappedKey:      h.WrappedKey,
 		ChunkRefs:       h.ChunkRefs,
-		ClientGC:        h.ClientGC,
 		ExpectedVersion: h.ExpectedVersion,
 		MinClient:       h.MinClient,
 		CompactAt:       h.CompactAt,

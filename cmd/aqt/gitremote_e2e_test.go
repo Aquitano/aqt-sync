@@ -502,16 +502,20 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 		t.Fatalf("root changed after helper crash: version=%d refs=%v bundles=%d", remote.res.Version, remote.root.Refs, len(remote.root.Bundles))
 	}
 	remote.close()
+	// The orphaned upload is invisible to every root, so a prune reclaims it.
 	profile, err := identity.Load(identity.DefaultProfile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	removed, removedBytes, err := harness.store.GCPacks(profile.OwnerHandle, -time.Hour)
-	if err != nil {
+	if err := harness.store.BackdatePacksForTest(profile.OwnerHandle, 2*time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if removed == 0 || removedBytes == 0 {
-		t.Fatalf("orphan upload was not GC-eligible: packs=%d bytes=%d", removed, removedBytes)
+	objectsBefore := harness.usageObjects()
+	if err := runPrune(false, false); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if after := harness.usageObjects(); after >= objectsBefore {
+		t.Fatalf("orphan upload was not prune-eligible: %d objects before, %d after", objectsBefore, after)
 	}
 
 	t.Setenv("AQT_TEST_GITREMOTE_EXIT_AFTER_UPLOAD", "")
