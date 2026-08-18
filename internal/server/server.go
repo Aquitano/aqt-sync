@@ -816,9 +816,6 @@ func (s *Server) accountUsage(c *gin.Context) {
 		Devices:      u.Devices,
 		MaxResources: int64(s.cfg.MaxResources), MaxSnapshots: int64(s.cfg.MaxSnapshots),
 		MaxObjects: int64(s.cfg.MaxObjects), MaxDevices: int64(s.cfg.MaxDevices),
-		// The support probe a first push consults when its refs cannot fit the
-		// envelope; a server that still sweeps by reachability omits the field.
-		GCMode: api.GCModeClient,
 	})
 }
 
@@ -1043,9 +1040,6 @@ func (s *Server) putResource(c *gin.Context) {
 		ID: id, Version: version,
 		ExpiresAt: expiresAt, MaxReads: maxReads,
 		OnExpiry: echoedOnExpiry(req.OnExpiry, expiresAt, maxReads),
-		// The echo a client needs before it may omit ChunkRefs from private writes:
-		// only a server that never sweeps by reachability says this.
-		GCMode: api.GCModeClient,
 	})
 }
 

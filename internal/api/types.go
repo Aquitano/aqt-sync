@@ -296,7 +296,7 @@ type DeleteAccountResponse struct {
 // ChunkRefs lists the chunk ids the blob (a folder's sealed manifest) references.
 // The server stores them opaquely as the scope of chunk ids a non-owner reader of a
 // public or granted resource may fetch — reachability itself is the client's job
-// (see GCMode). Private writes may omit them; a refs-less write against a shared
+// (`aqt prune`). Private writes omit them; a refs-less write against a shared
 // resource that has refs is refused with ErrCodeSharedNeedsRefs.
 //
 // ExpectedVersion, when > 0, is the version the client based this update on. The
@@ -437,31 +437,13 @@ type GCResponse struct {
 // than mint a link the server will not actually expire — or, for OnExpiry, one whose
 // expiry would destroy content the client meant to keep.
 //
-// GCMode is the same handshake for garbage collection: only a server whose GC is
-// client-managed ever echoes GCModeClient, so a client drops ChunkRefs from
-// private writes exactly when this echo has told it no server sweep will reap
-// them. Against an older, still-sweeping server the echo is absent and the client
-// keeps sending full refs.
 type PutResourceResponse struct {
 	ID        string   `json:"id"`
 	Version   int      `json:"version"`
 	ExpiresAt int64    `json:"expiresAt,omitempty"`
 	MaxReads  int64    `json:"maxReads,omitempty"`
 	OnExpiry  OnExpiry `json:"onExpiry,omitempty"`
-	GCMode    GCMode   `json:"gcMode,omitempty"`
 }
-
-// GCMode names who owns garbage collection. Servers from this release on are
-// always GCModeClient: reachability is computed by the account's clients (which
-// hold the keys) and unreachable chunks are deleted with `aqt prune`; the server
-// only reclaims what a client explicitly deleted. GCModeServer is what the echo's
-// absence means — an older server that still sweeps by the shipped ChunkRefs.
-type GCMode string
-
-const (
-	GCModeServer GCMode = "server"
-	GCModeClient GCMode = "client"
-)
 
 // ChunkListResponse is one page of an account's object inventory (every chunk id
 // the server stores for the owner, in lexical order). NextCursor is empty on the
@@ -627,24 +609,18 @@ type ListDevicesResponse struct {
 // UsageResponse summarizes the calling account's storage: pack bytes stored
 // against the server's per-owner quota (0 = unlimited) plus row counts.
 // Resources counts live entries only, not reclaimed link tombstones.
-//
-// GCMode reports who owns garbage collection. A server that predates client GC
-// omits it, which a client must read as "server-managed, and client GC
-// unsupported" — the field doubles as the support probe for a first push whose
-// ChunkRefs would not fit the envelope.
 type UsageResponse struct {
-	StorageBytes int64  `json:"storageBytes"`
-	QuotaBytes   int64  `json:"quotaBytes,omitempty"`
-	Packs        int64  `json:"packs"`
-	Objects      int64  `json:"objects"`
-	Resources    int64  `json:"resources"`
-	Snapshots    int64  `json:"snapshots"`
-	Devices      int64  `json:"devices"`
-	MaxResources int64  `json:"maxResources,omitempty"`
-	MaxSnapshots int64  `json:"maxSnapshots,omitempty"`
-	MaxObjects   int64  `json:"maxObjects,omitempty"`
-	MaxDevices   int64  `json:"maxDevices,omitempty"`
-	GCMode       GCMode `json:"gcMode,omitempty"`
+	StorageBytes int64 `json:"storageBytes"`
+	QuotaBytes   int64 `json:"quotaBytes,omitempty"`
+	Packs        int64 `json:"packs"`
+	Objects      int64 `json:"objects"`
+	Resources    int64 `json:"resources"`
+	Snapshots    int64 `json:"snapshots"`
+	Devices      int64 `json:"devices"`
+	MaxResources int64 `json:"maxResources,omitempty"`
+	MaxSnapshots int64 `json:"maxSnapshots,omitempty"`
+	MaxObjects   int64 `json:"maxObjects,omitempty"`
+	MaxDevices   int64 `json:"maxDevices,omitempty"`
 }
 
 // --- snapshots ---

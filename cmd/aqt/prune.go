@@ -58,13 +58,6 @@ func runPrune(dryRun, asJSON bool) error {
 	if err != nil {
 		return err
 	}
-	u, err := cl.Usage()
-	if err != nil {
-		return err
-	}
-	if u.GCMode != api.GCModeClient {
-		return errors.New("this server still sweeps unreferenced data itself; upgrade aqt-server before pruning from a client")
-	}
 	mk, err := unlockMaster(prof)
 	if err != nil {
 		return err
@@ -143,6 +136,25 @@ func runPrune(dryRun, asJSON bool) error {
 		DryRun: dryRun,
 	}
 	if !dryRun {
+		// The reachability view above can go stale while it is being computed: a
+		// push committing after a root was walked may re-reference a chunk this
+		// view calls unreachable, and once that chunk's pack ages past the server's
+		// grace window a delete would land. Re-listing closes the gap: any root
+		// added or moved since the walk aborts the prune, and a push landing after
+		// this check re-arms its packs recently enough that the grace window
+		// refuses the delete (the batches below run in minutes, the window is an
+		// hour).
+		itemsNow, err := cl.ListResources()
+		if err != nil {
+			return err
+		}
+		snapsNow, err := cl.ListSnapshots("")
+		if err != nil {
+			return err
+		}
+		if rootsDrifted(items, itemsNow, snaps, snapsNow) {
+			return errors.New("the account changed while prune was computing reachability; nothing was deleted — re-run `aqt prune`")
+		}
 		const batch = 10_000 // the server-side per-request id cap
 		for start := 0; start < len(unreachable); start += batch {
 			end := min(start+batch, len(unreachable))
@@ -183,6 +195,32 @@ func runPrune(dryRun, asJSON bool) error {
 		fmt.Fprintln(os.Stderr, "some chunks were uploaded or touched too recently to delete safely; re-run `aqt prune` in an hour")
 	}
 	return printTable(os.Stdout, nil, rows)
+}
+
+// rootsDrifted reports whether the account's root set moved between the two
+// listings: a resource that appeared or changed version, or a snapshot that
+// appeared, may root chunks the first listing's walk never saw. Removals are
+// fine — a vanished root only makes the computed reachable set conservative.
+func rootsDrifted(items, itemsNow []api.ResourceListItem, snaps, snapsNow []api.SnapshotInfo) bool {
+	versions := make(map[string]int, len(items))
+	for _, it := range items {
+		versions[it.ID] = it.Version
+	}
+	for _, it := range itemsNow {
+		if v, ok := versions[it.ID]; !ok || v != it.Version {
+			return true
+		}
+	}
+	snapIDs := make(map[string]bool, len(snaps))
+	for _, s := range snaps {
+		snapIDs[s.ID] = true
+	}
+	for _, s := range snapsNow {
+		if !snapIDs[s.ID] {
+			return true
+		}
+	}
+	return false
 }
 
 // addClosure decodes one root (a resource or a snapshot) and adds every chunk id

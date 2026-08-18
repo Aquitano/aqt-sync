@@ -268,17 +268,12 @@ func unshareCmd() *cobra.Command {
 	return cmd
 }
 
-// shareScopeRefs recomputes the read scope the share operation must carry. On a
-// client-GC account the stored refs go stale (private pushes omit them), so the
-// operation that mints a reader refreshes them; on a server-managed account the
-// stored refs are current and the walk is skipped. A scope that cannot be
-// recomputed fails the share — minting a reader against a stale scope would hand
-// them a folder they cannot fetch.
+// shareScopeRefs recomputes the read scope the share operation must carry: the
+// stored refs are stale or absent (private pushes omit them), so the operation
+// that mints a reader supplies the current set. A scope that cannot be recomputed
+// fails the share — minting a reader against a stale scope would hand them a
+// folder they cannot fetch.
 func shareScopeRefs(cl *client.Client, res api.GetResourceResponse, keys *resourceKeys, id string) ([]string, error) {
-	u, err := cl.Usage()
-	if err != nil || u.GCMode != api.GCModeClient {
-		return nil, nil
-	}
 	conv := crypto.DeriveConvergenceKey(keys.mk)
 	defer conv.Wipe()
 	refs, err := closureRefs(cl, res.Blob, keys.ck, id, keys.meta, conv)

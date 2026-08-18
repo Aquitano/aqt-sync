@@ -224,15 +224,12 @@ folder size — while a refs-less write against a shared resource that has refs 
 `400 shared_needs_refs`, and the operations that mint a reader (`SetVisibility`,
 `POST /v1/resources/:id/grants`) accept `chunkRefs` to refresh the scope.
 
-The compatibility handshake fails closed toward old servers, whose sweep would
-reap refs-less data: the server echoes `gcMode: "client"` in the resource-write
-response and in `GET /v1/account/usage`, and a client omits `chunkRefs` only after
-it has seen that echo. A pre-client-GC server echoes nothing, so a current client
-keeps sending full refs to it forever. In the other direction an old client
-against this server keeps working unchanged — its pushes and deletes are honored;
-its storage is simply not reclaimed until some device runs `aqt prune`. Deleting a
-resource only unroots it (bytes return at the next prune); `DELETE /v1/account`
-still erases everything immediately.
+A current client assumes a current server: it never sends refs on a private write,
+and a pre-client-GC server — whose sweep would read that as unreferenced data —
+must not be pointed at by one. There is no negotiation; server and clients upgrade
+together (pre-1.0 there is exactly one deployment). Deleting a resource only
+unroots it (bytes return at the next prune); `DELETE /v1/account` still erases
+everything immediately.
 
 `GET /livez` is the liveness probe and `GET /readyz` admits traffic only while
 storage is available and the server is not shutting down; `/healthz` remains a

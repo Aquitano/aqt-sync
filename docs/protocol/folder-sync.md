@@ -217,9 +217,7 @@ re-checking age and the object set.
 
 There are no refcounts. The manifests are the source of truth, which survives
 crashes; the resource→objects foreign key is the backstop that rejects a shared
-resource's refs naming an object the owner no longer stores. Servers from before
-client-managed GC swept by the shipped `chunkRefs` instead; a current client keeps
-sending full refs to those (the `gcMode` echo is what licenses omitting them).
+resource's refs naming an object the owner no longer stores.
 
 ### Node cache
 

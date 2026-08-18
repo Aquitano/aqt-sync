@@ -53,11 +53,6 @@ type folderState struct {
 	// refused unless --accept-rollback. 0 (state written by an older build)
 	// disables the guard until the next successful sync records a version.
 	RemoteVersion int `json:"remoteVersion,omitempty"`
-	// GCMode caches the server's gcMode echo from the last push. "client" means the
-	// account owns its garbage collection, so private pushes may omit ChunkRefs.
-	// Empty (never echoed, or an old server) keeps every push refs-full — the
-	// fail-closed default a new client must start from.
-	GCMode string `json:"gcMode,omitempty"`
 }
 
 const (
@@ -277,7 +272,6 @@ var commitInitState = func(abs string, prof *identity.Profile, resp api.PutResou
 		ID: resp.ID, Server: prof.Server,
 		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: resp.Version,
-		GCMode:        string(resp.GCMode),
 	}); err != nil {
 		return err
 	}
@@ -925,7 +919,6 @@ func runSync(dir string, opts syncOptions) error {
 			conv: conv, ck: rs.ck, mk: sess.mk, meta: rs.res.EncryptedMeta,
 			visibility: rs.res.Visibility, version: rs.res.Version, id: sess.st.ID,
 			mode: mode, host: copyHost, now: syncStart, pushStart: pushStart, copyMemo: copyMemo, selector: selector,
-			clientGC: sess.st.GCMode == string(api.GCModeClient),
 		}, actions, dirActions)
 	}
 
@@ -970,7 +963,6 @@ type applyCtx struct {
 	pushStart  time.Time        // when the snapshot upload pass began; arms the pre-PUT chunk re-check on long pushes
 	copyMemo   conflictCopyMemo // copies materialized by earlier retry attempts, shared across the retry loop
 	selector   syncengine.ChunkSelector
-	clientGC   bool // state.GCMode said "client": private pushes omit ChunkRefs
 }
 
 type cleanMerge struct {
@@ -1311,14 +1303,11 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
 			return err
 		}
-		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version, c.clientGC)
+		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
 		if err != nil {
 			return err // client.ErrConflict on a stale version: retried by the caller
 		}
 		syncedVersion = resp.Version
-		if resp.GCMode == api.GCModeClient && !c.clientGC {
-			recordServerGCMode(c.root, resp.GCMode)
-		}
 		reclaimPacks(c.root, c.cl)
 	}
 	// The root now durably references the merged entry. Land the same bytes locally
@@ -2581,7 +2570,7 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 }
 
 func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
-	root, refs, err := uploadTreeObjects(cl, conv, m)
+	root, _, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -2601,31 +2590,15 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	// A create sends full refs — the safe default against a server that predates
-	// client GC — unless they cannot fit the wire header at all; then the usage
-	// probe decides (any echoed gcMode means client GC is supported), and a server
-	// without it keeps today's too-large failure.
-	if len(refs) > maxWireChunkRefs {
-		u, uerr := cl.Usage()
-		if uerr == nil && u.GCMode != "" {
-			refs = nil
-		}
-	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: refs,
+		WrappedKey: &wrapped,
 		// Both seals above bind iff id is non-empty, so the declaration follows the
 		// same rule. In practice this is a create (callers pass id ""): the seals stay
 		// unbound and the first putFolderUpdate re-seals them id-bound.
 		MinClient: minClientForID(id),
 	})
 }
-
-// maxWireChunkRefs approximates how many chunk refs fit the 32 MiB envelope
-// header: one 64-hex id plus JSON quoting and comma per ref, with generous room
-// for the header's other few hundred bytes. Only a create close to the cap pays
-// the usage probe; everything under it keeps the refs-full fast path.
-const maxWireChunkRefs = (32 << 20) / 68 * 63 / 64 // ~485k, ~3% under the true cap
 
 // gcRearmThreshold is how long a push may run before the pre-PUT chunk re-check
 // fires. The server keeps an uploaded-but-unrooted pack alive for a fixed grace
@@ -2665,12 +2638,11 @@ func rearmUploadedChunks(check func([]string) ([]string, error), ids []string, s
 // the first sync after `aqt share` silently kill the link (the server takes visibility
 // from every PUT). The link's lifecycle policy is preserved server-side, since this
 // request carries none.
-// gcClient says the account is known (from a prior push's echo) to own its
-// garbage collection: a private update then omits ChunkRefs, which is what frees
-// folder size from the wire-header cap. A shared resource still needs them — the
-// server refuses the refs-less write — so that one case falls back to full refs
-// rather than plumbing grant knowledge into every sync.
-func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int, gcClient bool) (api.PutResourceResponse, error) {
+// A private update omits ChunkRefs — reachability is the client's job, and the
+// refs would otherwise cap folder size at the wire header. A public resource, and
+// a private one carrying grants this device did not know about (the server
+// refuses the refs-less write), send the full set as its readers' fetch scope.
+func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
@@ -2692,13 +2664,12 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, v
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
 	}
-	if gcClient && vis == api.Private {
+	if vis == api.Private {
 		req.ChunkRefs = nil
 		resp, err := cl.PutResource(req)
 		if !errors.Is(err, client.ErrSharedNeedsRefs) {
 			return resp, err
 		}
-		// The resource carries grants this device did not know about; retry refs-full.
 		req.ChunkRefs = refs
 	}
 	return cl.PutResource(req)
@@ -2784,19 +2755,6 @@ func recordRemoteVersion(root string, version int) {
 	}
 }
 
-// recordServerGCMode caches the server's gcMode echo so the next push can go
-// refs-less without re-learning it. Best-effort like recordRemoteVersion: a failed
-// write only costs the next push one refs-full round.
-func recordServerGCMode(root string, mode api.GCMode) {
-	st, err := loadState(root)
-	if err != nil || st.GCMode == string(mode) {
-		return
-	}
-	st.GCMode = string(mode)
-	if err := saveState(root, st); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: recording server GC mode failed: %v\n", err)
-	}
-}
 
 func saveState(root string, st folderState) error {
 	b, err := json.MarshalIndent(st, "", "  ")

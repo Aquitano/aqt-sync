@@ -39,11 +39,10 @@ One server-behavior break rides outside the capability ladder because it changes
 sealed format:
 [client-managed garbage collection](protocol/api.md#client-managed-garbage-collection).
 A current server never sweeps by reachability; reclamation happens through
-`aqt prune`. Older clients keep reading and writing unchanged — their storage is
-simply not reclaimed until some device on the account runs a current client's
-prune — and a current client keeps sending full `chunkRefs` to an older,
-still-sweeping server (the `gcMode` echo is what licenses omitting them), so no
-pairing loses data.
+`aqt prune`, and a current client never sends refs on a private write. There is no
+negotiation between the two: server and clients upgrade together, and a current
+client pointed at a pre-client-GC server would have its refs-less data swept.
+Pre-1.0 there is exactly one deployment, upgraded as a unit.
 
 ## Support policy
 
