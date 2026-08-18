@@ -97,6 +97,16 @@ var ErrBadPack = errors.New("uploaded pack is malformed or fails verification")
 // that spends fewer chunks per byte.
 var ErrResourceTooLarge = errors.New("folder has more chunks than one manifest upload can carry (~3.8 GiB at the default chunk profile); split it into smaller folders, or pin a coarser chunkProfile in .aqtconfig")
 
+// ErrSharedNeedsRefs maps the shared_needs_refs code (a 400 on a resource PUT): a
+// refs-less write targeted a public or granted resource, whose ChunkRefs scope what
+// its readers may fetch. The caller re-pushes with full refs.
+var ErrSharedNeedsRefs = errors.New("a public or granted resource must carry its chunk refs; re-push with refs before sharing")
+
+// ErrServerManagedGC maps the server_managed_gc code (a 409 on a chunk inventory or
+// delete): the account has not flipped to client-managed GC, so a client-side prune
+// would race the server's own sweep.
+var ErrServerManagedGC = errors.New("this account's garbage collection is server-managed; push once with a client-GC build first")
+
 // ErrUpgradeRequired maps a 426: the resource is sealed in a format newer than this
 // build reads. Callers test errors.Is(err, ErrUpgradeRequired); the concrete
 // UpgradeRequiredError carries the server-declared min_client for messaging.
@@ -627,6 +637,28 @@ func (c *Client) GC() (api.GCResponse, error) {
 	return r, err
 }
 
+// ListChunks fetches one page of the account's complete object inventory (client-GC
+// accounts only). Pass the previous response's NextCursor to continue; "" starts
+// from the beginning, and an empty NextCursor in the response ends the listing.
+func (c *Client) ListChunks(cursor string) (api.ChunkListResponse, error) {
+	path := "/v1/chunks"
+	if cursor != "" {
+		path += "?cursor=" + url.QueryEscape(cursor)
+	}
+	var r api.ChunkListResponse
+	err := c.do(http.MethodGet, path, nil, &r)
+	return r, err
+}
+
+// DeleteChunks asks the server to drop the named objects (client-GC accounts only).
+// The server skips unknown ids and ids inside the GC grace window; the response
+// reports what was dropped, what was skipped as too young, and the pack bytes freed.
+func (c *Client) DeleteChunks(ids []string) (api.ChunkDeleteResponse, error) {
+	var r api.ChunkDeleteResponse
+	err := c.do(http.MethodPost, "/v1/chunks/delete", api.ChunkDeleteRequest{IDs: ids}, &r)
+	return r, err
+}
+
 // --- snapshots ---
 
 // CreateSnapshot pins the current version of a resource the caller owns, returning
@@ -1066,6 +1098,10 @@ func statusError(status int, path string, body []byte) error {
 		return ErrBadPack
 	case api.ErrCodeResourceTooLarge:
 		return ErrResourceTooLarge
+	case api.ErrCodeSharedNeedsRefs:
+		return ErrSharedNeedsRefs
+	case api.ErrCodeServerManagedGC:
+		return ErrServerManagedGC
 	case api.ErrCodeNotFound:
 		return ErrNotFound
 	case api.ErrCodeRateLimited:

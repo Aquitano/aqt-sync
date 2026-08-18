@@ -46,13 +46,14 @@ Public DTO fields are lower camel case and do not depend on Go field names.
 The resource envelope is a four-byte unsigned big-endian JSON-header length, a
 lower-camel JSON header of at most 32 MiB, then the sealed blob ciphertext as the
 remainder. The request header carries visibility, sealed metadata, wrapped key, blob
-nonce, chunk roots, expected version, minimum client capability, and lifecycle
-policy. `chunkRefs` is the only header field that grows with the resource — one
-64-hex id per chunk root — so the 32 MiB header bound doubles as a ceiling on a
-tracked folder's chunk count: roughly 500k chunks, about 3.8 GiB at the official
-client's default ~8 KiB chunk profile. A header past the bound is
-`400 resource_too_large`. The response header also carries the resource id and
-accepted version.
+nonce, chunk roots, expected version, minimum client capability, lifecycle policy,
+and the `clientGc` declaration. `chunkRefs` is the only header field that grows with
+the resource — one 64-hex id per chunk root — so the 32 MiB header bound doubles as
+a ceiling on a tracked folder's chunk count: roughly 500k chunks, about 3.8 GiB at
+the official client's default ~8 KiB chunk profile. A header past the bound is
+`400 resource_too_large`. On a client-GC account (below) a private write omits
+`chunkRefs` entirely, which lifts that ceiling for private folders. The response
+header also carries the resource id and accepted version.
 Object-frame responses repeat a four-byte unsigned big-endian length followed by
 exactly that object ciphertext, in request order. Object requests are capped at
 10,000 ids and every decoded length is bounds-checked before allocation or slicing.
@@ -195,7 +196,38 @@ PUT    /v1/packs/:id                  Body: raw pack bytes (octet-stream). id = 
 GET    /v1/packs/:id                  → raw pack bytes; supports Range (pull fetches only the needed span)
 POST   /v1/gc                        Pack-level mark-and-sweep, which also repacks partially dead packs
                                      → { deletedPacks, freedBytes, repackedPacks, reclaimedBytes }
+
+# Client-managed GC (capability 5): the account's clients compute reachability over
+# their decrypted roots and prune; the server never sweeps such an account by
+# reachability. Both routes answer 409 server_managed_gc until the account flips:
+GET    /v1/chunks                    Complete object inventory, 10,000 ids per fixed page (?cursor=)
+                                     → { ids, nextCursor }
+POST   /v1/chunks/delete             Body: { ids } (≤10,000) → { deleted, skippedRecent, freedBytes }.
+                                     Ids in packs inside the GC grace window are skipped, not failed —
+                                     a concurrent push may be about to reference them.
 ```
+
+## Client-managed garbage collection
+
+`chunkRefs` gives the server two things: GC roots, and — for public or granted
+resources — the scope of object ids a non-owner reader may fetch. Only the client
+can compute true reachability (it holds the keys), so an account may take GC over:
+the first write from a capability-5 client that declares `clientGc` permanently
+flips the account, the server stops sweeping it by reachability, and reclamation
+happens through `POST /v1/chunks/delete` (the official client's `aqt prune`).
+
+After the flip, private writes may omit `chunkRefs`; public and granted resources
+must still carry them for the read scope, and a refs-less write against one is
+`400 shared_needs_refs`. Content writes (`/v1/resources`, `/v1/packs/:id`) from
+clients below capability 5 are `426` — they would delete files and wait for a
+server sweep that no longer runs. Reads stay open to every capability.
+
+The handshake fails closed in both directions: the server echoes `gcMode` in the
+resource-write response and in `GET /v1/account/usage`, and a client drops
+`chunkRefs` only after it has seen `"client"` echoed. A server that predates the
+field ignores `clientGc` and echoes nothing, so such a client keeps sending full
+refs forever. Deleting a resource on a flipped account only unroots it; the bytes
+return at the next prune, and `DELETE /v1/account` still erases everything.
 
 `GET /livez` is the liveness probe and `GET /readyz` admits traffic only while
 storage is available and the server is not shutting down; `/healthz` remains a
@@ -256,7 +288,10 @@ uploaded; re-running sync re-uploads them), `invite_required`
 `proof_mismatch` (the passphrase-derived proof on a passphrase change, root-key
 rotation, or account deletion did not match), `git_remote_policy` (the
 operation would share, publish, or reclassify a sealed Git remote resource), and
-`resource_too_large` (the upload's `chunkRefs` set overran the 32 MiB header) — so
+`resource_too_large` (the upload's `chunkRefs` set overran the 32 MiB header),
+`shared_needs_refs` (a refs-less write targeted a public or granted resource, whose
+`chunkRefs` scope non-owner reads), and `server_managed_gc` (a chunk inventory or
+delete reached an account that has not flipped to client-managed GC) — so
 a client that acts on one of them matches the code rather than the prose.
 
 Every other error carries the bucket code for its status: `invalid_request`

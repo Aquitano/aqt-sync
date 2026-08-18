@@ -159,8 +159,16 @@ func recountPacksForChunks(tx *sql.Tx, owner string, chunkIDs []string) error {
 // recountPacks recomputes obj_count/live_count/live_bytes for the named packs from
 // the objects and root tables as they stand inside the caller's transaction. Every
 // write that can flip an object's rooted state or move object rows funnels through
-// this, so the counters GC selects on are exact, not approximations.
+// this, so the counters GC selects on are exact, not approximations. The liveness
+// predicate is mode-aware: on a client-GC account the root tables no longer track
+// reachability, so counting by them here would zero live_count and hand live packs
+// to the sweep.
 func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
+	mode, err := gcModeTx(tx, owner)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return err
+	}
+	live := livePredicate(mode)
 	const batch = 400
 	for start := 0; start < len(packIDs); start += batch {
 		end := min(start+batch, len(packIDs))
@@ -176,10 +184,10 @@ func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
 			                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
 			   live_count = (SELECT count(*) FROM objects o
 			                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id
-			                   AND `+objectIsLive+`),
+			                   AND `+live+`),
 			   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
 			                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id
-			                   AND `+objectIsLive+`), 0)
+			                   AND `+live+`), 0)
 			 WHERE owner_handle = ? AND pack_id IN (`+placeholders(len(group))+`)`,
 			args...,
 		); err != nil {
@@ -194,6 +202,19 @@ const objectIsLive = `(EXISTS(SELECT 1 FROM resource_chunks rc
 	                           WHERE rc.owner_handle = o.owner_handle AND rc.chunk_id = o.chunk_id)
 	                   OR EXISTS(SELECT 1 FROM snapshot_chunks sc
 	                             WHERE sc.owner_handle = o.owner_handle AND sc.chunk_id = o.chunk_id))`
+
+// everyObjectLive replaces objectIsLive on client-GC accounts, where the root
+// tables no longer track reachability: a stored object is live until its owner
+// deletes its row. Pack maintenance then works unchanged — an emptied pack reads
+// live_count = 0 and is swept, a sparse one repacks.
+const everyObjectLive = `1=1`
+
+func livePredicate(mode api.GCMode) string {
+	if mode == api.GCModeClient {
+		return everyObjectLive
+	}
+	return objectIsLive
+}
 
 // MissingChunks returns the subset of object ids the owner does not already store,
 // and re-arms the GC age guard on the packs holding the ids it does (the dedup-hit
@@ -928,6 +949,167 @@ func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	}, nil
 }
 
+// BackdatePacksForTest shifts every pack's created_at into the past, so a test can
+// step over the GC age guard without waiting it out.
+func (s *Store) BackdatePacksForTest(owner string, by time.Duration) error {
+	_, err := s.db.Exec(
+		`UPDATE packs SET created_at = created_at - ? WHERE owner_handle = ?`,
+		int64(by/time.Second), owner,
+	)
+	return err
+}
+
+// ResourceChunkRowsForTest counts a resource's stored chunk-ref rows, so a test can
+// tell a refs-less write (rows untouched) from a refs-full one (rows replaced).
+func (s *Store) ResourceChunkRowsForTest(id string) (int, error) {
+	var n int
+	err := s.db.QueryRow(`SELECT count(*) FROM resource_chunks WHERE resource_id = ?`, id).Scan(&n)
+	return n, err
+}
+
+// chunkListPageSize is the fixed page size of the client-GC object inventory. A
+// page is ids only (64 hex each), so this stays well under a MiB of JSON; the
+// ?limit clamp of the row-listing endpoints would make a full-inventory read of a
+// large account absurdly chatty, hence a per-endpoint constant instead.
+const chunkListPageSize = 10000
+
+// ListOwnerChunks returns one lexically-ordered page of every object id the owner
+// stores, plus the cursor for the next page ("" on the last). This is the
+// inventory a client prune diffs against the closure of its decrypted roots, so it
+// must be complete — it deliberately has no filter.
+func (s *Store) ListOwnerChunks(owner, cursor string) ([]string, string, error) {
+	after := ""
+	if cursor != "" {
+		parts, err := decodeCursor(cursor, 1)
+		if err != nil {
+			return nil, "", err
+		}
+		after = parts[0]
+	}
+	rows, err := s.rdb.Query(
+		`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id > ?
+		 ORDER BY chunk_id LIMIT ?`,
+		owner, after, chunkListPageSize+1,
+	)
+	if err != nil {
+		return nil, "", err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, "", err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(ids) > chunkListPageSize {
+		ids = ids[:chunkListPageSize]
+		next = encodeCursor(ids[len(ids)-1])
+	}
+	return ids, next, nil
+}
+
+// DeleteOwnerChunks drops the named objects for a client-GC owner: the client has
+// computed reachability over its decrypted roots and these ids fell outside it.
+// Only ids in packs older than minAge are dropped — a young pack's created_at was
+// re-armed by CheckChunks on behalf of a push that is about to reference it, and
+// deleting under it would strand that push's committed manifest. Skipped-young ids
+// are counted, not failed, so a pruner retries them on its next run. Stale
+// resource_chunks/snapshot_chunks rows naming a dropped id are removed in the same
+// transaction: on this account they carry no liveness meaning (a shared resource's
+// scope rows are only ever stale here, since a reachable id is never handed to this
+// function by a correct pruner), and leaving them would trip the objects FK.
+// Unknown ids are ignored — another device's prune got there first.
+//
+// The GC lock serializes this against the pack sweep and repack, whose plans read
+// object rows outside their commit transactions. After the row deletes, the
+// fully-emptied aged packs are swept immediately so the response can report bytes
+// actually freed.
+func (s *Store) DeleteOwnerChunks(owner string, ids []string, minAge time.Duration) (deleted, skippedRecent int, freed int64, err error) {
+	defer s.gcLocks.lock(owner)()
+	cutoff := time.Now().Add(-minAge).Unix()
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	defer tx.Rollback()
+	mode, err := gcModeTx(tx, owner)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if mode != api.GCModeClient {
+		return 0, 0, 0, ErrServerManagedGC
+	}
+	var (
+		drop     []string
+		packSeen = map[string]bool{}
+		packs    []string
+	)
+	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
+	err = queryIDsBatched(tx,
+		`SELECT o.chunk_id, o.pack_id, p.created_at FROM objects o
+		 JOIN packs p ON p.owner_handle = o.owner_handle AND p.pack_id = o.pack_id
+		 WHERE o.owner_handle = ? AND o.chunk_id IN (`,
+		[]any{owner}, ids, batch,
+		func(rows *sql.Rows) error {
+			var (
+				id, packID string
+				createdAt  int64
+			)
+			if err := rows.Scan(&id, &packID, &createdAt); err != nil {
+				return err
+			}
+			if createdAt >= cutoff {
+				skippedRecent++
+				return nil
+			}
+			drop = append(drop, id)
+			if !packSeen[packID] {
+				packSeen[packID] = true
+				packs = append(packs, packID)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	if len(drop) == 0 {
+		return 0, skippedRecent, 0, nil
+	}
+	for _, table := range []string{"resource_chunks", "snapshot_chunks", "objects"} {
+		for start := 0; start < len(drop); start += batch {
+			end := min(start+batch, len(drop))
+			group := drop[start:end]
+			args := make([]any, 0, len(group)+1)
+			args = append(args, owner)
+			for _, id := range group {
+				args = append(args, id)
+			}
+			if _, err := tx.Exec(
+				`DELETE FROM `+table+` WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
+				args...,
+			); err != nil {
+				return 0, 0, 0, err
+			}
+		}
+	}
+	if err := recountPacks(tx, owner, packs); err != nil {
+		return 0, 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, 0, err
+	}
+	deleted = len(drop)
+	_, freed, err = s.GCPacks(owner, minAge)
+	return deleted, skippedRecent, freed, err
+}
+
 // RunGCAll runs the owner-scoped GC for every account and returns the aggregate,
 // so space reclamation does not depend on a client happening to sync (the
 // POST /v1/gc trigger). A per-owner failure must not block the rest of the sweep;
@@ -1160,10 +1342,22 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 // row is read here; the caller loads each candidate's live objects only when it
 // actually processes that pack.
 func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, error) {
+	// On a client-GC account a deleted object loses its row entirely, so a sparse
+	// pack reads live_count == obj_count and the mixed-liveness filter would never
+	// fire; there the dead bytes are the row-less holes, and the live-fraction check
+	// below is the only economic filter needed.
+	mode, err := s.GCMode(owner)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	mixed := `AND live_count < obj_count`
+	if mode == api.GCModeClient {
+		mixed = ``
+	}
 	rows, err := s.rdb.Query(
 		`SELECT pack_id, length, live_bytes FROM packs
 		 WHERE owner_handle = ? AND created_at < ?
-		   AND live_count > 0 AND live_count < obj_count
+		   AND live_count > 0 `+mixed+`
 		 ORDER BY pack_id`,
 		owner, cutoff,
 	)
@@ -1192,9 +1386,13 @@ func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, erro
 // the live set inside its transaction, so a root change between the two only makes
 // the swap skip the pack.
 func (s *Store) packLiveObjects(owner, packID string) ([]liveObj, int64, error) {
+	mode, err := s.GCMode(owner)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return nil, 0, err
+	}
 	rows, err := s.rdb.Query(
 		`SELECT o.chunk_id, o."offset", o.length FROM objects o
-		 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+objectIsLive+`
+		 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+livePredicate(mode)+`
 		 ORDER BY o."offset"`,
 		owner, packID,
 	)
@@ -1280,10 +1478,14 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	if curCreated >= cutoff {
 		return false, 0, nil // re-armed age guard: an in-flight read may still use this pack
 	}
+	mode, err := gcModeTx(tx, owner)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return false, 0, err
+	}
 	liveNow := map[string]bool{}
 	lrows, err := tx.Query(
 		`SELECT o.chunk_id FROM objects o
-		 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+objectIsLive,
+		 WHERE o.owner_handle = ? AND o.pack_id = ? AND `+livePredicate(mode),
 		owner, cand.packID,
 	)
 	if err != nil {

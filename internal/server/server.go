@@ -298,7 +298,10 @@ func (s *Server) Router() *gin.Engine {
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
 			authed.PUT("/resources/:id/metadata", limitBody(maxControlBody), s.updateResourceMetadata)
-			authed.POST("/resources/:id/visibility", limitBody(maxControlBody), s.setVisibility)
+			// Visibility flips and grants take the chunk-size body cap, not the control
+			// cap: on a client-GC account they may carry the resource's full ChunkRefs
+			// to refresh the read scope they mint.
+			authed.POST("/resources/:id/visibility", limitBody(maxChunkBody), s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
 
 			// Device management. Attach (POST /devices) is unauthenticated above
@@ -330,7 +333,7 @@ func (s *Server) Router() *gin.Engine {
 			// in place of public visibility; it shares the chunk body cap.
 			authed.GET("/account/keys", s.accountKeys)
 			authed.PUT("/account/enc-key", limitBody(maxControlBody), s.publishEncKey)
-			authed.POST("/resources/:id/grants", limitBody(maxControlBody), s.createGrant)
+			authed.POST("/resources/:id/grants", limitBody(maxChunkBody), s.createGrant)
 			authed.GET("/resources/:id/grants", s.listResourceGrants)
 			authed.DELETE("/resources/:id/grants/:grantee", s.deleteGrant)
 			authed.GET("/shares", s.listShares)
@@ -353,6 +356,13 @@ func (s *Server) Router() *gin.Engine {
 			// GC is expensive (its planning scans the owner's object table), so it gets a
 			// second, owner-keyed limiter far tighter than the general authed budget.
 			authed.POST("/gc", s.gcLimiter.middlewareKeyed(ownerKey), s.runGC)
+			// Client-managed GC: a prune reads the full object inventory, diffs it
+			// against the closure of its decrypted roots, and deletes the remainder.
+			// Unlike POST /gc these are bounded per request (one indexed page, one
+			// capped batch), so the general authed limiter is the right budget — the
+			// gcLimiter's drip-rate would stretch a large account's prune into minutes.
+			authed.GET("/chunks", s.listChunks)
+			authed.POST("/chunks/delete", limitBody(maxChunkBody), s.deleteChunks)
 
 			// Snapshots: immutable, GC-pinned copies of a resource version. Owner-only;
 			// a snapshot is never public, so unlike a resource there is no unauth read.
@@ -796,6 +806,14 @@ func (s *Server) accountUsage(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "usage lookup failed")
 		return
 	}
+	// The mode is echoed in both states: its presence at all is what tells a client
+	// this server supports client-managed GC, which a huge first push (whose refs
+	// would not fit the envelope) probes here before creating anything.
+	mode, err := s.store.GCMode(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
 	c.JSON(http.StatusOK, api.UsageResponse{
 		StorageBytes: u.StorageBytes,
 		QuotaBytes:   quota,
@@ -806,6 +824,7 @@ func (s *Server) accountUsage(c *gin.Context) {
 		Devices:      u.Devices,
 		MaxResources: int64(s.cfg.MaxResources), MaxSnapshots: int64(s.cfg.MaxSnapshots),
 		MaxObjects: int64(s.cfg.MaxObjects), MaxDevices: int64(s.cfg.MaxDevices),
+		GCMode: mode,
 	})
 }
 
@@ -937,6 +956,14 @@ func (s *Server) putResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
 		return
 	}
+	if !s.requireGCWriteCapability(c, owner) {
+		return
+	}
+	// An out-of-spec ClientGC flag from an under-capable client must neither flip
+	// the account nor relax the refs requirements.
+	if capability < api.CapabilityClientGC {
+		req.ClientGC = false
+	}
 	if req.CompactAt < 0 {
 		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
 		return
@@ -996,6 +1023,10 @@ func (s *Server) putResource(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss", api.ErrCodeDropsRoots)
 		return
 	}
+	if errors.Is(err, ErrSharedNeedsRefs) {
+		abortCode(c, http.StatusBadRequest, "a public or granted resource must carry its chunk refs (they scope what its readers may fetch); re-push with refs before sharing", api.ErrCodeSharedNeedsRefs)
+		return
+	}
 	if errors.Is(err, ErrDanglingRefs) {
 		abortCode(c, http.StatusBadRequest, "manifest references chunks the server no longer stores (they were garbage-collected before this push committed); re-run sync to re-upload them", api.ErrCodeMissingChunks)
 		return
@@ -1026,10 +1057,17 @@ func (s *Server) putResource(c *gin.Context) {
 		status = http.StatusOK
 	}
 	expiresAt, maxReads := policyExpiresAt(req), policyMaxReads(req)
+	// Best-effort: a failed mode lookup hides the echo and the client keeps
+	// sending refs, the fail-closed direction.
+	var gcMode api.GCMode
+	if mode, gcErr := s.store.GCMode(owner); gcErr == nil && mode == api.GCModeClient {
+		gcMode = mode
+	}
 	c.JSON(status, api.PutResourceResponse{
 		ID: id, Version: version,
 		ExpiresAt: expiresAt, MaxReads: maxReads,
 		OnExpiry: echoedOnExpiry(req.OnExpiry, expiresAt, maxReads),
+		GCMode:   gcMode,
 	})
 }
 

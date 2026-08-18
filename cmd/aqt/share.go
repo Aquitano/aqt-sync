@@ -268,6 +268,26 @@ func unshareCmd() *cobra.Command {
 	return cmd
 }
 
+// shareScopeRefs recomputes the read scope the share operation must carry. On a
+// client-GC account the stored refs go stale (private pushes omit them), so the
+// operation that mints a reader refreshes them; on a server-managed account the
+// stored refs are current and the walk is skipped. A scope that cannot be
+// recomputed fails the share — minting a reader against a stale scope would hand
+// them a folder they cannot fetch.
+func shareScopeRefs(cl *client.Client, res api.GetResourceResponse, keys *resourceKeys, id string) ([]string, error) {
+	u, err := cl.Usage()
+	if err != nil || u.GCMode != api.GCModeClient {
+		return nil, nil
+	}
+	conv := crypto.DeriveConvergenceKey(keys.mk)
+	defer conv.Wipe()
+	refs, err := closureRefs(cl, res.Blob, keys.ck, id, keys.meta, conv)
+	if err != nil {
+		return nil, fmt.Errorf("recomputing the folder's object set failed (%v); run `aqt sync` in the folder, then retry", err)
+	}
+	return refs, nil
+}
+
 // checkShareableFolder rejects the folder formats no non-owner transport can serve.
 // A link holder and a grantee both read exact object slices, so they need a folder
 // whose entries ARE objects: a pack-and-seal folder stores one opaque pack with no
@@ -328,7 +348,11 @@ func runShareWith(idArg, email string) error {
 	if err != nil {
 		return err
 	}
-	if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: contact.Handle, WrappedKey: wrap}); err != nil {
+	scope, err := shareScopeRefs(cl, res, keys, id)
+	if err != nil {
+		return err
+	}
+	if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: contact.Handle, WrappedKey: wrap, ChunkRefs: scope}); err != nil {
 		if errors.Is(err, client.ErrSenderBlocked) {
 			// A recipient-side block. Nothing about the grant can be fixed to get past it,
 			// so say who declined rather than leaving it as a bare 403.
@@ -507,11 +531,16 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	// re-share of an already-public resource still skips the call.
 	wasPublic := res.Visibility == api.Public
 	if !wasPublic || policy.requested() {
+		scope, err := shareScopeRefs(cl, res, keys, id)
+		if err != nil {
+			return err
+		}
 		resp, err := cl.SetVisibility(id, api.SetVisibilityRequest{
 			Visibility:    api.Public,
 			ExpireSeconds: policy.expireSeconds,
 			MaxReads:      policy.maxReads,
 			OnExpiry:      policy.onExpiry,
+			ChunkRefs:     scope,
 		})
 		if err != nil {
 			return err

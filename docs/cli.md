@@ -176,6 +176,23 @@ text diff streams both sides' bytes per entry. The working tree is never written
 The same completeness fields appear in the human output as an explicit sentence, so
 an incomplete comparison is never mistaken for a clean one.
 
+## Reclaiming space
+
+On a server that supports client-managed garbage collection, the account flips to
+it on the first push from a current client, and from then on the server never
+decides for itself what is garbage — it cannot see which chunks a resource
+references. `aqt prune` makes that decision where the keys are: it decodes every
+resource and snapshot of the account, computes the full set of reachable chunks,
+and deletes what the server stores beyond it. Deleting a folder or a large file
+frees quota at the next prune, not immediately.
+
+`--dry-run` reports the diff without deleting. The command fails closed twice
+over: if any resource or snapshot cannot be decoded, nothing is deleted, and the
+server refuses to drop chunks whose pack was uploaded or touched within the last
+hour — a concurrent push from another device may be about to reference them. Those
+show up as skipped; re-run later. `--json` prints the same summary
+machine-readably.
+
 ## Getting a folder unstuck
 
 `aqt untrack [dir]` removes the folder's `.aqt` control directory after a

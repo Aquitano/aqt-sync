@@ -23,6 +23,7 @@ API layer, *before* any payload is served.
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
+| `5` (client GC) | unreleased | client-managed garbage collection: refs-less private writes, `aqt prune` |
 
 The release column names the first version a user could install. Root-key rotation
 appears under `v0.3.0` in the changelog, which was never tagged, and shipped in the
@@ -30,10 +31,22 @@ appears under `v0.3.0` in the changelog, which was never tagged, and shipped in 
 recorded as such in the changelog. Capability 3 therefore first reached clients in
 v0.4.1.
 
-`api.ClientCapability` is `4` today. Capability 3 is required for root-key recovery;
+`api.ClientCapability` is `5` today. Capability 3 is required for root-key recovery;
 capability 4 is required for encrypted Git remote resources. `aqt repo create` declares
 `minClient: 4`, so older clients receive `426 Upgrade Required` before the server
 serves or overwrites a root they cannot interpret.
+
+Capability 5 is a write contract rather than a read format: a capability-5 client
+computes chunk reachability itself and prunes with `aqt prune`, instead of shipping
+flat `chunkRefs` for the server to sweep by. Its first write against a supporting
+server permanently flips the whole account to client-managed GC, and from then on
+*content writes* from clients below capability 5 — not reads — are refused with a
+`426`, because they would delete files and wait for a server sweep that no longer
+runs for the account. On a multi-device account this means upgrading one device
+commits every writing device to the upgrade; the sealed formats are untouched, so
+reading (and `aqt pull`/`clone`) keeps working from any capability. See
+[`protocol/api.md`](protocol/api.md#client-managed-garbage-collection) for the wire
+mechanism and the fail-closed handshake.
 
 ## Support policy
 

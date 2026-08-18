@@ -213,7 +213,7 @@ func TestDeleteGrantRollsBackOnExecFailure(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("create = %d", code)
 	}
-	if err := h.store.PutGrant(owner, res.ID, granteeOwner, []byte("wrap"), 0); err != nil {
+	if err := h.store.PutGrant(owner, res.ID, granteeOwner, []byte("wrap"), nil, 0); err != nil {
 		t.Fatalf("put grant: %v", err)
 	}
 	// Make the DELETE inside the transaction fail the way SQLITE_BUSY or an I/O
@@ -232,7 +232,7 @@ func TestDeleteGrantRollsBackOnExecFailure(t *testing.T) {
 
 	// The writer must still be usable.
 	done := make(chan error, 1)
-	go func() { done <- h.store.PutGrant(owner, res.ID, granteeOwner, []byte("wrap2"), 0) }()
+	go func() { done <- h.store.PutGrant(owner, res.ID, granteeOwner, []byte("wrap2"), nil, 0) }()
 	select {
 	case err := <-done:
 		if err != nil {

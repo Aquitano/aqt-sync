@@ -173,7 +173,7 @@ func TestGitRemoteResourcePolicy(t *testing.T) {
 	if _, version, err = s.PutResource(owner, api.ClientCapability, update); err != nil || version != 2 {
 		t.Fatalf("update git remote: version=%d err=%v", version, err)
 	}
-	if err := s.PutGrant(owner, id, "grantee", []byte("wrap"), version); !errors.Is(err, ErrGitRemotePolicy) {
+	if err := s.PutGrant(owner, id, "grantee", []byte("wrap"), nil, version); !errors.Is(err, ErrGitRemotePolicy) {
 		t.Fatalf("grant error = %v, want ErrGitRemotePolicy", err)
 	}
 	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, ExpectedVersion: version}); !errors.Is(err, ErrGitRemotePolicy) {
@@ -1793,10 +1793,10 @@ func TestMutationsRejectStaleResourceVersions(t *testing.T) {
 	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Private, ExpectedVersion: version - 1}); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("stale visibility = %v", err)
 	}
-	if err := s.PutGrant(owner, id, "grantee", []byte("wrapped"), version); err != nil {
+	if err := s.PutGrant(owner, id, "grantee", []byte("wrapped"), nil, version); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PutGrant(owner, id, "other", []byte("wrapped"), version); !errors.Is(err, ErrVersionConflict) {
+	if err := s.PutGrant(owner, id, "other", []byte("wrapped"), nil, version); !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("stale grant = %v", err)
 	}
 	if err := s.DeleteResourceVersion(owner, id, version); !errors.Is(err, ErrVersionConflict) {
@@ -1931,7 +1931,7 @@ func TestShareBlockRefusesFurtherGrants(t *testing.T) {
 	}
 	first, second := put("first"), put("second")
 	for _, id := range []string{first, second} {
-		if err := s.PutGrant(owner, id, grantee, []byte("wrap")); err != nil {
+		if err := s.PutGrant(owner, id, grantee, []byte("wrap"), nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -1940,7 +1940,7 @@ func TestShareBlockRefusesFurtherGrants(t *testing.T) {
 	if _, removed, err := s.DeleteShare(grantee, first, false); err != nil || removed != 1 {
 		t.Fatalf("DeleteShare = (%d, %v), want (1, nil)", removed, err)
 	}
-	if err := s.PutGrant(owner, first, grantee, []byte("wrap")); err != nil {
+	if err := s.PutGrant(owner, first, grantee, []byte("wrap"), nil); err != nil {
 		t.Fatalf("re-grant after a plain removal: %v", err)
 	}
 
@@ -1955,12 +1955,12 @@ func TestShareBlockRefusesFurtherGrants(t *testing.T) {
 	if removed != 2 {
 		t.Fatalf("removed = %d, want both of the sender's shares", removed)
 	}
-	if err := s.PutGrant(owner, first, grantee, []byte("wrap")); !errors.Is(err, ErrSenderBlocked) {
+	if err := s.PutGrant(owner, first, grantee, []byte("wrap"), nil); !errors.Is(err, ErrSenderBlocked) {
 		t.Fatalf("grant from a blocked sender = %v, want ErrSenderBlocked", err)
 	}
 	// The block is per-pair: another account is unaffected.
 	third := s.mustAccount(t, "someone-else@example.com")
-	if err := s.PutGrant(owner, first, third, []byte("wrap")); err != nil {
+	if err := s.PutGrant(owner, first, third, []byte("wrap"), nil); err != nil {
 		t.Fatalf("grant to an unrelated account: %v", err)
 	}
 
@@ -1974,7 +1974,7 @@ func TestShareBlockRefusesFurtherGrants(t *testing.T) {
 	if err := s.DeleteShareBlock(grantee, owner); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("lifting a lifted block = %v, want ErrNotFound", err)
 	}
-	if err := s.PutGrant(owner, first, grantee, []byte("wrap")); err != nil {
+	if err := s.PutGrant(owner, first, grantee, []byte("wrap"), nil); err != nil {
 		t.Fatalf("grant after the block was lifted: %v", err)
 	}
 }
@@ -1997,7 +1997,7 @@ func TestDeleteShareIsGranteeScoped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := s.PutGrant(owner, id, grantee, []byte("wrap")); err != nil {
+	if err := s.PutGrant(owner, id, grantee, []byte("wrap"), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.DeleteShare(stranger, id, true); !errors.Is(err, ErrNotFound) {

@@ -216,6 +216,13 @@ There are no refcounts. The manifests are the source of truth, which survives
 crashes; the resource→objects foreign key is the backstop that rejects a root
 referencing an object the owner no longer stores.
 
+All of the above describes a server-managed account. Once an account flips to
+[client-managed GC](api.md#client-managed-garbage-collection), the flat root set is
+no longer shipped at all: reachability is computed by the client over its decrypted
+trees, the sweep treats every stored object as live, and reclamation happens
+through `aqt prune`'s explicit deletes. The pack machinery — the age guard,
+empty-pack sweep, and repack — is unchanged; only who decides liveness moves.
+
 ### Node cache
 
 Every remote tree walk — clone, cold reconcile, `find`, `snapshot diff` — shares an

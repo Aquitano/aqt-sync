@@ -77,7 +77,7 @@ func TestListResourcesReportsGrantCount(t *testing.T) {
 	plain := s.rootResource(t, owner, nil)
 	shared := s.rootResource(t, owner, nil)
 	for _, grantee := range []string{"g1", "g2"} {
-		if err := s.PutGrant(owner, shared, grantee, []byte("wrap")); err != nil {
+		if err := s.PutGrant(owner, shared, grantee, []byte("wrap"), nil); err != nil {
 			t.Fatalf("put grant %s: %v", grantee, err)
 		}
 	}
@@ -116,7 +116,7 @@ func TestListResourceGrantsPaginationWalksAllPages(t *testing.T) {
 	id := s.rootResource(t, owner, nil)
 	const total = 5
 	for i := 0; i < total; i++ {
-		if err := s.PutGrant(owner, id, fmt.Sprintf("grantee-%d", i), []byte("wrap")); err != nil {
+		if err := s.PutGrant(owner, id, fmt.Sprintf("grantee-%d", i), []byte("wrap"), nil); err != nil {
 			t.Fatalf("put grant %d: %v", i, err)
 		}
 	}
