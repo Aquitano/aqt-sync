@@ -37,8 +37,8 @@ serves or overwrites a root they cannot interpret.
 
 ## Support policy
 
-aqt is pre-1.0 and has one maintainer. This is what that can actually keep, stated
-narrowly so it is not quietly broken later.
+aqt has one maintainer. This is what that can actually keep, stated narrowly so it
+is not quietly broken later.
 
 - **The current capability level and the one below it stay readable.** A client at
   `ClientCapability` reads everything sealed at `ClientCapability` or one level below.
@@ -64,8 +64,8 @@ client from before it). Both are recorded in `CHANGELOG.md`.
 Negotiation is one-directional: a client announces its capability in a header and no
 route reports back what the server supports, so every server-side feature that is not
 a sealed format needs its own
-[enforcement echo](#public-link-lifecycle-no-capability-bump) to probe for — a server
-capability discovery endpoint is an open item.
+[enforcement echo](#public-link-lifecycle-no-capability-bump) to probe for. There is
+no discovery endpoint; the echo is the supported probe.
 
 ## Negotiation flow
 
