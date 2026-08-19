@@ -694,14 +694,9 @@ func (s *Server) changePassphrase(c *gin.Context) {
 	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Epoch: newEpoch})
 }
 
-// rotateRootKey performs the account-wide recovery operation. It requires the
-// current capability because old clients cannot safely recover a post-rotation
-// account identity.
+// rotateRootKey performs the account-wide recovery operation: it mints a new account
+// identity and re-wraps everything derived from the old one.
 func (s *Server) rotateRootKey(c *gin.Context) {
-	if requestCapability(c) < api.CapabilityRootKeyRotation {
-		abortUpgradeRequired(c, api.CapabilityRootKeyRotation, requestCapability(c))
-		return
-	}
 	owner := c.GetString(ownerContextKey)
 	deviceID := c.GetString(deviceContextKey)
 	var req api.RootKeyRotationRequest
@@ -1701,11 +1696,10 @@ func policyErrorMessage(err error) string {
 	return "link lifecycle policy values must be non-negative"
 }
 
-// requestCapability fails closed for clients that predate capability headers.
-// The old header-less fallback made a pre-v0.2 binary indistinguishable from a
-// v0.2 reader and could hand it an id-bound root that only failed at AEAD open.
-// Treating absent or malformed values as baseline makes the server gate that
-// boundary before any encrypted payload is served.
+// requestCapability fails closed for a caller that announces nothing — a bare curl
+// of a public link, or any tool that is not aqt. Reading absent or malformed values
+// as baseline gates such a request at the format boundary, before any encrypted
+// payload is served, instead of handing it ciphertext that fails at AEAD open.
 func requestCapability(c *gin.Context) int {
 	v := c.GetHeader(api.CapabilityHeader)
 	n, err := strconv.Atoi(v)

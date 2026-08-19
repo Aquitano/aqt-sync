@@ -21,7 +21,7 @@ API layer, *before* any payload is served.
 | ---------- | ------- | ------------------- |
 | `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata — no site writes this any more |
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
-| `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities |
+| `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities — nothing declares or enforces it |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
 
 The release column names the first version a user could install. Root-key rotation
@@ -30,10 +30,13 @@ appears under `v0.3.0` in the changelog, which was never tagged, and shipped in 
 recorded as such in the changelog. Capability 3 therefore first reached clients in
 v0.4.1.
 
-`api.ClientCapability` is `4` today. Capability 3 is required for root-key recovery;
-capability 4 is required for encrypted Git remote resources. `aqt repo create` declares
-`minClient: 4`, so older clients receive `426 Upgrade Required` before the server
-serves or overwrites a root they cannot interpret.
+`api.ClientCapability` is `4` today, and every request the deployment makes carries it.
+Capability 4 is what the Git-remote format needs: `aqt repo create` declares
+`minClient: 4`, so a client below it receives `426 Upgrade Required` before the server
+serves or overwrites a root it cannot interpret. Capability 3 is a historical rung —
+`rotate-root` used to gate on it, but the only clients that reach the route are
+capability 4, so the gate was removed and the number stays as a record of when
+rotation landed.
 
 One server-behavior break rides outside the capability ladder because it changes no
 sealed format:
@@ -46,29 +49,32 @@ Pre-1.0 there is exactly one deployment, upgraded as a unit.
 
 ## Support policy
 
-aqt is pre-1.0 and has one maintainer. This is what that can actually keep, stated
-narrowly so it is not quietly broken later.
+aqt is pre-1.0, has one maintainer, and runs as a single deployment: one server, and
+clients that upgrade with it. That is the whole policy, and the capability ladder is
+built for it.
 
-- **The current capability level and the one below it stay readable.** A client at
-  `ClientCapability` reads everything sealed at `ClientCapability` or one level below.
+- **Server and clients upgrade together.** A mixed fleet is an upgrade in progress,
+  not a supported mode. A client older than the resource it reads is refused with a
+  `426`; that is the signal to finish the upgrade.
 - **A format break lands only behind a capability bump.** Nothing changes an encrypted
   format without incrementing `ClientCapability` and declaring the higher `min_client`
-  at the sealing site, so an under-capable client gets a `426` naming what to install
-  rather than a decrypt failure it cannot diagnose.
-- **A level stays readable for at least two minor releases, and is never dropped in a
-  patch release.** Dropping one is a `### Breaking Changes` entry in `CHANGELOG.md`,
-  announced at least one release before the one that does it.
-- **Servers are backward compatible over the same window.** Nothing server-side
-  refuses a client for being old except a resource's own `min_client`, so a current
-  server serves a client one capability behind.
-- **Nothing beyond that is promised.** There is no LTS line, no backport of fixes to
-  old tags, and no support for a fleet running mixed versions longer than an upgrade
-  takes. Fixes ship on `main` and in the next release.
+  at the sealing site, so a client that has not been upgraded yet gets a `426` naming
+  what to install rather than a decrypt failure it cannot diagnose.
+- **Capability numbers stage the next break; they do not carry old peers.** The rungs
+  below `ClientCapability` record which release introduced a format. Nothing writes
+  capability 1 any more, and a resource sealed at the current level is not expected to
+  open on anything older.
+- **A break gets a `### Breaking Changes` entry in `CHANGELOG.md`**, naming what the
+  deployment has to re-push or re-clone, and in which order server and clients move.
+- **Nothing beyond that is promised.** There is no LTS line and no backport of fixes
+  to old tags. Fixes ship on `main` and in the next release.
 
-Two clean breaks predate this policy and are not covered by it: tree v2 (first-class
-directories and subtree dedup — folders written before it are not read at all) and
-the v2 AAD id binding (a folder synced by an id-binding client no longer opens on a
-client from before it). Both are recorded in `CHANGELOG.md`.
+Three clean breaks have happened so far, each recorded in `CHANGELOG.md` at its
+release: tree v2 (first-class directories and subtree dedup — folders written before
+it are not read at all), the v2 AAD id binding (a folder synced by an id-binding
+client no longer opens on a client from before it), and the removal of the
+unbound-AAD read fallback (every resource is sealed bound to its id, so anything
+sealed before that has to be re-pushed).
 
 Negotiation is one-directional: a client announces its capability in a header and no
 route reports back what the server supports, so every server-side feature that is not
@@ -96,9 +102,9 @@ capability discovery endpoint is an open item.
   [Recovering from a 426](#recovering-from-a-426) for what it prints.
 - Write-side validation: a declared `minClient` above the writer's own capability is
   `400` (a client cannot write content it could never read back); an omitted
-  declaration stores `1` (a legacy writer never over-restricts a resource). An update
-  *may* lower `min_client` — a capable client legitimately rewrites a resource in an
-  older format, making it readable by older clients again.
+  declaration stores `1`, so a caller that declares nothing never over-restricts a
+  resource. An update *may* lower `min_client`: the declaration describes the format
+  the write actually seals, and the server does not second-guess it.
 - `GET /v1/resources` never `426`s: refusing an account's whole listing over one
   too-new row would hide everything else in it. Each row carries its `minClient`, and
   `aqt ls` renders a row above this build's capability as
@@ -139,13 +145,15 @@ declared) and `Detail` (the sanitized server text).
 ### The missing-header rule
 
 Missing or malformed `X-Aqt-Capability` values are treated as capability **1**
-(baseline), not as v0.2. This deliberately ends header-less compatibility at the
-id-binding boundary: a legacy client trying to read a capability-2 or newer resource
-receives `426 Upgrade Required` before any ciphertext is served, rather than a
-downstream AEAD failure.
+(baseline). A caller that does not announce itself is never handed a format it may not
+be able to read: it receives `426 Upgrade Required` before any ciphertext is served,
+rather than a downstream AEAD failure.
 
-This is a breaking server policy for header-less v0.2-era binaries. Upgrade every
-client before deploying it.
+The rule is kept for what still sends no header: a bare `curl` of a public link, or
+any tool that is not aqt. It is refused up front instead of being handed ciphertext it
+may not be able to interpret, and adding `X-Aqt-Capability: <n>` is all it takes to
+opt in. The browser share page is unaffected — it sends the header, derived from its
+own `CLIENT_CAPABILITY`.
 
 ## Public-link lifecycle (no capability bump)
 
@@ -189,14 +197,14 @@ cannot tell a folder from an ephemeral paste.
 
 ## Rollout rules
 
-- **Upgrade the server before clients.** Older servers have no `min_client` column and
-  ignore the header, so they neither store nor enforce; new clients still interoperate
-  (an old server returns `min_client` `0`, treated as baseline).
+- **Upgrade the server first, then every client, in one pass.** Migrations are
+  forward-only and a new client may declare a `min_client` the running server does not
+  yet understand. The gap between the two is an upgrade in progress: keep it short.
 - **A new capability `N` is only safe to *write* once every reading device runs a
-  client with capability ≥ `N`.** The server now enforces this: a write in the new
-  format declares `min_client = N`, and any device below `N` reading it gets `426`
-  instead of a silent AEAD failure. Stage a format bump by upgrading all readers
-  first, then letting writers start declaring the higher `min_client`.
+  client with capability ≥ `N`.** The server enforces this: a write in the new format
+  declares `min_client = N`, and any device below `N` reading it gets `426` instead of
+  a silent AEAD failure. Stage a format bump by upgrading all readers first, then
+  letting writers start declaring the higher `min_client`.
 
 ## Bumping the capability in a future PR
 
@@ -233,5 +241,5 @@ as the body fallback, and the client's shared cooldown, jitter, and retry budget
 is specified in [`protocol/api.md`](protocol/api.md#rate-limiting).
 
 Neither signal changes an encrypted format, so `api.ClientCapability` is not bumped.
-An older server that sends only `Retry-After` interoperates unchanged; an older
-client that ignores `retryAfterSeconds` reads the header as it always did.
+`Retry-After` stays authoritative and `retryAfterSeconds` is the body fallback for a
+caller that only parses JSON.
