@@ -217,7 +217,7 @@ func runLogin(email string, ttl time.Duration) error {
 		}
 		if err := validateAttachedDevice(authed, prof.DeviceID); err == nil {
 			prof.Kdf, prof.WrappedRoot = boot.Kdf, boot.WrappedRoot
-			prof.SessionTTLSeconds, prof.SessionTTLSet = int64(ttl/time.Second), true
+			prof.SessionTTLSeconds = int64(ttl / time.Second)
 			if err := identity.Save(prof); err != nil {
 				return err
 			}
@@ -450,7 +450,6 @@ func saveProfile(server, email, fingerprint string, kdf crypto.KdfParams, wrappe
 		WrappedRoot:       wrappedRoot,
 		AuthEpoch:         resp.Epoch,
 		SessionTTLSeconds: int64(ttl / time.Second),
-		SessionTTLSet:     true,
 	}
 	if err := identity.Save(p); err != nil {
 		return err

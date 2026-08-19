@@ -58,55 +58,43 @@ func TestBindingRejectsConflictingServer(t *testing.T) {
 	}
 }
 
-// Legacy state (written before the binding fields existed) is adopted by the
-// active profile when that profile talks to the folder's recorded server, and the
-// adoption is written back.
-func TestBindingMigratesLegacyState(t *testing.T) {
+// State written before the binding fields existed carries no owner, so the active
+// profile must not adopt it — the folder is refused until it is re-tracked.
+func TestBindingRefusesStateWithoutOwner(t *testing.T) {
 	h := newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "a.txt", "hi")
 	h.sync(dir)
 
-	st, err := loadState(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.Profile, st.Fingerprint = "", ""
-	if err := saveState(dir, st); err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range []struct {
+		name  string
+		clear func(*folderState)
+	}{
+		{"no profile", func(st *folderState) { st.Profile = "" }},
+		{"no account", func(st *folderState) { st.Account = "" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, err := os.ReadFile(controlPath(dir, stateFile))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { os.WriteFile(controlPath(dir, stateFile), b, 0o600) })
 
-	h.sync(dir)
-	st, err = loadState(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if st.Profile != identity.DefaultProfile {
-		t.Fatalf("legacy state not migrated: profile = %q", st.Profile)
-	}
-}
+			st, err := loadState(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			tc.clear(&st)
+			if err := saveState(dir, st); err != nil {
+				t.Fatal(err)
+			}
 
-// Legacy state recorded against a different server must not silently bind to the
-// active profile's account.
-func TestBindingRefusesLegacyStateFromOtherServer(t *testing.T) {
-	h := newE2E(t)
-	dir := t.TempDir()
-	h.init(dir)
-
-	st, err := loadState(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.Profile, st.Fingerprint = "", ""
-	st.Server = "http://elsewhere.invalid"
-	if err := saveState(dir, st); err != nil {
-		t.Fatal(err)
-	}
-
-	err = runSync(dir, syncOptions{})
-	if err == nil || !strings.Contains(err.Error(), "predates profile binding") {
-		t.Fatalf("sync of a foreign-server legacy folder = %v, want a binding error", err)
+			err = runSync(dir, syncOptions{})
+			if err == nil || !strings.Contains(err.Error(), "records no owning profile and account") {
+				t.Fatalf("sync of unbound state = %v, want a re-track error", err)
+			}
+		})
 	}
 }
 
@@ -123,36 +111,6 @@ func TestBindingRefusesAccountMismatch(t *testing.T) {
 	}
 	st.Account = "recorded-owner-handle"
 	if err := saveState(dir, st); err != nil {
-		t.Fatal(err)
-	}
-
-	err = runSync(dir, syncOptions{})
-	if err == nil || !strings.Contains(err.Error(), "different account") {
-		t.Fatalf("sync under a swapped account = %v, want a binding error", err)
-	}
-}
-
-// Legacy state that predates the recorded owner handle still binds on the
-// fingerprint, which is the only evidence it carries.
-func TestBindingRefusesFingerprintMismatchWithoutAccount(t *testing.T) {
-	h := newE2E(t)
-	dir := t.TempDir()
-	h.init(dir)
-
-	st, err := loadState(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.Account, st.Fingerprint = "", "recorded-owner-key"
-	if err := saveState(dir, st); err != nil {
-		t.Fatal(err)
-	}
-	prof, err := identity.Load(identity.DefaultProfile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prof.Fingerprint = "different-account-key"
-	if err := identity.Save(prof); err != nil {
 		t.Fatal(err)
 	}
 

@@ -133,9 +133,7 @@ func buildFindIndex(cl *client.Client, mk crypto.MasterKey) ([]findEntry, error)
 			Visibility: string(it.Visibility), Ref: "aqt://" + it.ID, ID: it.ID,
 		})
 
-		// A pack-and-seal folder's blob is an opaque tarball, not a per-file
-		// manifest, so its members can't be listed without untarring; skip them.
-		if kind != api.KindFolder || it.WrappedKey == nil || meta.Packed {
+		if kind != api.KindFolder || it.WrappedKey == nil {
 			continue
 		}
 		jobs = append(jobs, folderJob{id: it.ID, name: name, vis: string(it.Visibility)})

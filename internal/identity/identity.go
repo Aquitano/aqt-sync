@@ -43,11 +43,9 @@ type Profile struct {
 	// AuthEpoch is the account auth epoch this device's token was issued under. A
 	// passphrase change bumps it; the server rejects a token whose epoch is behind.
 	AuthEpoch int `json:"authEpoch,omitempty"`
-	// SessionTTLSeconds is the cache lifetime selected at signup/login. The
-	// companion boolean distinguishes an explicit zero (cache until lock/logout)
-	// from an older profile that predates this field and should use the default.
+	// SessionTTLSeconds is the cache lifetime selected at signup/login; zero means
+	// cache until lock or logout.
 	SessionTTLSeconds int64 `json:"sessionTtlSeconds,omitempty"`
-	SessionTTLSet     bool  `json:"sessionTtlSet,omitempty"`
 }
 
 // Unlock recovers the account's master (root) key from the passphrase: it derives

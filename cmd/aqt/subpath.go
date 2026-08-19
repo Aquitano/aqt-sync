@@ -63,8 +63,8 @@ func joinSubpath(a, b string) string {
 }
 
 // openFolderRoot validates that res is a chunked tree folder and opens its sealed
-// root. Pack-and-seal folders have no per-entry objects, so subpath reads and
-// member listings are structurally impossible for them.
+// root. A pre-tree folder has no per-entry objects, so subpath reads and member
+// listings are structurally impossible for it.
 func openFolderRoot(res api.GetResourceResponse, ck crypto.ContentKey) (syncengine.TreeRoot, error) {
 	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
@@ -72,10 +72,6 @@ func openFolderRoot(res api.GetResourceResponse, ck crypto.ContentKey) (syncengi
 	}
 	if meta.Kind != api.KindFolder {
 		return syncengine.TreeRoot{}, errNotAFolder
-	}
-	if meta.Packed {
-		return syncengine.TreeRoot{}, errors.New("this folder is pack-and-seal: it stores no per-file objects, " +
-			"so entries cannot be read or listed without the whole pack; `aqt clone` it instead")
 	}
 	if !meta.Tree {
 		return syncengine.TreeRoot{}, errors.New("this folder uses an unsupported legacy format; re-create it with a current client")

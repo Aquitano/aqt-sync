@@ -71,7 +71,6 @@ type tuiModel struct {
 	folderID  string
 	local     changeSet
 	conflicts []string
-	torn      marker[interruptedPull] // an interrupted pack pull left the tree part remote, part stale
 	remote    tuiRemoteMsg
 	remoteOK  bool
 	resources []lsRow
@@ -259,7 +258,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.panels[tuiPanelFiles].loading = false
 		m.panels[tuiPanelFiles].err = msg.err
 		if msg.err == nil {
-			m.local, m.conflicts, m.torn = msg.changes, msg.conflicts, msg.torn
+			m.local, m.conflicts = msg.changes, msg.conflicts
 		}
 		m.retireComparison()
 		m.rebuildFilesPanel()
@@ -1188,17 +1187,11 @@ func (m *tuiModel) statusVerdict() (string, lipgloss.Style) {
 	if m.remoteOK && m.remote.fileLevel {
 		incomingN = m.remote.incoming.total()
 	}
-	// A chunked/pack folder reports only a version delta, not per-file incoming;
-	// any note other than the up-to-date one means the server holds more.
+	// Without an entry-level breakdown (no base, or the incoming diff failed) the
+	// remote half reports only a version delta, so any note other than the
+	// up-to-date one means the server holds more.
 	coarseAhead := m.remoteOK && m.remote.err == nil && !m.remote.stale &&
 		!m.remote.fileLevel && m.remote.note != "up to date with the server"
-
-	// A torn tree outranks everything: half of it is already the remote's, so the
-	// local-change counts below are not the user's edits (the CLI's status makes
-	// the same call).
-	if m.torn.Present {
-		return fmt.Sprintf("! interrupted pull (version %d) — sync to finish it", m.torn.Payload.Version), tuiStyleErr
-	}
 
 	if conflictN > 0 {
 		noun := "conflict copies"

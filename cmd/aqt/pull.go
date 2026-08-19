@@ -346,8 +346,8 @@ func parseRef(ref string) (id, fragment, origin string) {
 // decodeMeta decrypts and parses a resource's sealed metadata. A decrypt or parse
 // failure is returned rather than swallowed: in an owner flow the content key is
 // correct, so a failure means corruption (or a blob/meta mix-up), and treating it as
-// a default (unpacked, unstreamed) resource silently misroutes the resource — e.g.
-// cloning a pack-and-seal folder through the chunked path and writing nothing.
+// a default (unstreamed file) resource silently misroutes it — e.g. pulling a
+// chunked folder through the inline-file path and writing its sealed root to disk.
 func decodeMeta(blob crypto.SealedBlob, ck crypto.ContentKey, resourceID string) (api.Metadata, error) {
 	plain, err := crypto.OpenBound(blob, ck, crypto.AADMeta, resourceID)
 	if err != nil {

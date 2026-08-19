@@ -555,9 +555,12 @@ func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
 	return mk, nil
 }
 
+// sessionTTL is the cache lifetime the profile recorded at signup/login, where zero
+// means cache until lock or logout. Without a profile there is nothing recorded, so
+// the flag default stands in.
 func sessionTTL(prof *identity.Profile) time.Duration {
-	if prof != nil && prof.SessionTTLSet {
-		return time.Duration(prof.SessionTTLSeconds) * time.Second
+	if prof == nil {
+		return defaultSessionTTL
 	}
-	return defaultSessionTTL
+	return time.Duration(prof.SessionTTLSeconds) * time.Second
 }

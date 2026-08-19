@@ -96,7 +96,8 @@ func TestAdoptDivergenceConflicts(t *testing.T) {
 }
 
 // TestAdoptGuards covers the refusals: adopting an already-tracked directory, a plain
-// (non-adopt) clone into a non-empty directory, and adopting a pack-and-seal folder.
+// (non-adopt) clone into a non-empty directory, and adopting a directory whose
+// .aqtconfig does not parse.
 func TestAdoptGuards(t *testing.T) {
 	h := newE2E(t)
 
@@ -118,15 +119,15 @@ func TestAdoptGuards(t *testing.T) {
 		t.Fatal("plain clone into a non-empty directory did not error")
 	}
 
-	// A local .aqtconfig naming the removed pack-and-seal format is refused up
-	// front, before any tracking is written.
+	// A local .aqtconfig that does not parse is refused up front, before any
+	// tracking is written.
 	mismatched := t.TempDir()
 	if err := os.WriteFile(filepath.Join(mismatched, ".aqtconfig"), []byte(`{"pack": true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	writeTree(t, mismatched, "a.txt", "data")
-	if err := runClone(id, mismatched, true, ""); !errors.Is(err, errPackRemoved) {
-		t.Fatalf("adopt with a pack .aqtconfig: err = %v, want errPackRemoved", err)
+	if err := runClone(id, mismatched, true, ""); err == nil {
+		t.Fatal("adopt with an unparsable .aqtconfig did not error")
 	}
 	if _, err := os.Stat(controlPath(mismatched, stateFile)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("refused adopt still wrote tracking: %v", err)
