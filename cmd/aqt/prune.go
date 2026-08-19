@@ -260,8 +260,6 @@ func closureRefs(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey
 			return nil, fmt.Errorf("decrypt git-remote root: %w", err)
 		}
 		return root.SegmentIDs(), nil
-	case meta.Packed:
-		return nil, errors.New("packed folder format is no longer readable; export it with an aqt release that reads it (v0.7.x or earlier)")
 	case meta.Kind == api.KindFolder && meta.Tree:
 		root, err := syncengine.OpenTreeRoot(blob, ck, id)
 		if err != nil {

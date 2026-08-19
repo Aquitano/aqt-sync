@@ -58,9 +58,10 @@ func runUntrack(dir string, deleteRemote, assumeYes bool) error {
 		return fmt.Errorf("a watch agent is running here (pid %d); stop it with `aqt agent stop` first", pid)
 	}
 
-	// A folder worth untracking often has broken control state, so an unreadable
-	// state.json must not block the escape hatch — it only costs the prompt the
-	// resource id.
+	// Untracking is the escape hatch for exactly the folders loadState refuses, so a
+	// bad state.json must not block it. State that decoded but failed validation still
+	// carries the resource id, which is what the prompt names; only an unreadable file
+	// costs it.
 	st, stateErr := loadState(root)
 
 	remoteLine := "the server-side resource is kept"
@@ -68,7 +69,7 @@ func runUntrack(dir string, deleteRemote, assumeYes bool) error {
 		remoteLine = "the server-side resource is deleted too"
 	}
 	target := "this folder"
-	if stateErr == nil && st.ID != "" {
+	if st.ID != "" {
 		target = st.ID
 	}
 	if err := confirmDestructive(fmt.Sprintf(

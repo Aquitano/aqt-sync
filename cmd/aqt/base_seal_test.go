@@ -79,13 +79,13 @@ func TestBaseSealRoundTrip(t *testing.T) {
 	}
 }
 
-func TestLoadBaseReadsLegacyPlaintextAndUpgrades(t *testing.T) {
+// A bare manifest is not a base: reading one would trust chunk keys and inline
+// plaintext that nothing sealed. The sync degrades to --reconcile instead.
+func TestLoadBaseRefusesUnsealedManifest(t *testing.T) {
 	root := t.TempDir()
 	mkControlDir(t, root)
-	want := sampleBase()
 
-	// A pre-seal base.json: the raw Manifest JSON with no envelope.
-	plain, err := json.Marshal(want)
+	plain, err := json.Marshal(sampleBase())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,24 +93,15 @@ func TestLoadBaseReadsLegacyPlaintextAndUpgrades(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := loadBase(root)
+	if _, err := loadBase(root); err == nil {
+		t.Fatal("loadBase read an unsealed manifest, want a refusal")
+	}
+	m, exists, err := loadBaseForSync(root)
 	if err != nil {
-		t.Fatalf("loadBase(legacy): %v", err)
+		t.Fatalf("loadBaseForSync: %v", err)
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("legacy read mismatch:\n got %+v\nwant %+v", got, want)
-	}
-
-	// The next save upgrades the on-disk form to a sealed envelope.
-	if err := saveBase(root, got); err != nil {
-		t.Fatalf("saveBase(upgrade): %v", err)
-	}
-	b, err := os.ReadFile(controlPath(root, baseFile))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !bytes.Contains(b, []byte(`"sealed"`)) || bytes.Contains(b, []byte("secret.env")) {
-		t.Errorf("base.json was not upgraded to sealed form: %s", b)
+	if exists || len(m.Entries) != 0 {
+		t.Errorf("unsealed base reported usable: exists=%v entries=%d", exists, len(m.Entries))
 	}
 }
 

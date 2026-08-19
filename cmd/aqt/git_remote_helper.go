@@ -357,7 +357,7 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 			remote.close()
 			return err
 		}
-		meta, err := resealMetaBound(remote.res.EncryptedMeta, remote.key, remote.res.ID)
+		meta, err := verifiedMetaBound(remote.res.EncryptedMeta, remote.key, remote.res.ID)
 		if err != nil {
 			remote.close()
 			return err
@@ -459,7 +459,7 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 			remote.close()
 			return false, 0, 0, err
 		}
-		meta, err := resealMetaBound(remote.res.EncryptedMeta, remote.key, remote.res.ID)
+		meta, err := verifiedMetaBound(remote.res.EncryptedMeta, remote.key, remote.res.ID)
 		if err != nil {
 			remote.close()
 			return false, 0, 0, err

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/identity"
@@ -121,18 +122,14 @@ func TestSyncRefusesServerRollback(t *testing.T) {
 	}
 }
 
-func TestRollbackGuardSkipsLegacyState(t *testing.T) {
+// State carrying no version pin cannot detect a rollback, so it is refused rather
+// than synced with the guard silently off.
+func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 	h := newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "v1")
 	h.sync(origin)
-
-	backup := h.snapshotServerData()
-	writeTree(t, origin, "newer.txt", "gone after the legacy pull")
-	h.sync(origin)
-
-	h.restoreServer(backup)
 
 	st, err := loadState(origin)
 	if err != nil {
@@ -143,13 +140,19 @@ func TestRollbackGuardSkipsLegacyState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h.sync(origin) // unpinned: legacy behavior, the rollback is pulled
-	assertAbsent(t, origin, "newer.txt")
-	st, err = loadState(origin)
-	if err != nil {
+	err = runSync(origin, syncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "records no synced server version") {
+		t.Fatalf("sync of unpinned state = %v, want a refusal", err)
+	}
+
+	// A negative pin is equally unusable: every server version would read as an
+	// advance, so the guard could never trip.
+	st.RemoteVersion = -1
+	if err := saveState(origin, st); err != nil {
 		t.Fatal(err)
 	}
-	if st.RemoteVersion == 0 {
-		t.Fatal("sync did not record a fresh version pin")
+	err = runSync(origin, syncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "records no synced server version") {
+		t.Fatalf("sync of a negative pin = %v, want a refusal", err)
 	}
 }

@@ -140,9 +140,11 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	var injected atomic.Bool
+	// The conflict belongs to the push's root update; arming it only after the remote
+	// exists keeps it off the create's own id-binding write.
+	var armed, injected atomic.Bool
 	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
-		if r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && injected.CompareAndSwap(false, true) {
+		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && injected.CompareAndSwap(false, true) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			_ = json.NewEncoder(w).Encode(api.ErrorResponse{Error: "injected version conflict", Code: api.ErrCodeVersionConflict})
@@ -154,6 +156,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	if err := runRepoCreate("retry", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
+	armed.Store(true)
 	source := t.TempDir()
 	gitRun(t, source, "init", "-b", "main")
 	gitRun(t, source, "config", "user.email", "e2e@example.com")
@@ -493,11 +496,14 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 	gitRun(t, source, "add", "crash.txt")
 	gitRun(t, source, "commit", "-m", "crash boundary")
 	gitRun(t, source, "remote", "add", "origin", "aqt::crash")
+	created := openRemoteForTest(t, "crash")
+	createdVersion := created.res.Version
+	created.close()
 
 	t.Setenv("AQT_TEST_GITREMOTE_EXIT_AFTER_UPLOAD", "1")
 	gitMustFail(t, source, "push", "origin", "main")
 	remote := openRemoteForTest(t, "crash")
-	if remote.res.Version != 1 || len(remote.root.Refs) != 0 || len(remote.root.Bundles) != 0 {
+	if remote.res.Version != createdVersion || len(remote.root.Refs) != 0 || len(remote.root.Bundles) != 0 {
 		remote.close()
 		t.Fatalf("root changed after helper crash: version=%d refs=%v bundles=%d", remote.res.Version, remote.root.Refs, len(remote.root.Bundles))
 	}

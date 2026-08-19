@@ -44,11 +44,7 @@ type tuiUnlockResultMsg struct {
 type tuiLocalMsg struct {
 	changes   changeSet
 	conflicts []string
-	// torn reports an interrupted pack pull: the tree is part remote and part
-	// stale, so the changes above are not ordinary local edits. The CLI's status
-	// says so; the TUI must too.
-	torn marker[interruptedPull]
-	err  error
+	err       error
 }
 
 // tuiRemoteMsg is the server half: version freshness plus, when the folder key
@@ -148,11 +144,7 @@ func (c *tuiCtx) localStatusCmd() tea.Cmd {
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
-		torn, err := loadMarker[interruptedPull](root, pullMarkerFile)
-		if err != nil {
-			return tuiLocalMsg{err: err}
-		}
-		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts, torn: torn}
+		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts}
 	}
 }
 
@@ -185,9 +177,9 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 			return tuiRemoteMsg{err: err, note: tuiRemoteErrNote(err)}
 		}
 		switch {
-		case st.RemoteVersion > 0 && res.Version < st.RemoteVersion:
+		case res.Version < st.RemoteVersion:
 			return tuiRemoteMsg{stale: true, note: fmt.Sprintf("server reports an older version (%d < %d) — restored from backup?", res.Version, st.RemoteVersion)}
-		case st.RemoteVersion > 0 && res.Version == st.RemoteVersion:
+		case res.Version == st.RemoteVersion:
 			return tuiRemoteMsg{note: "up to date with the server"}
 		}
 		// Server is ahead: try the entry-level breakdown.
@@ -204,9 +196,6 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 					return tuiRemoteMsg{incoming: inc, fileLevel: true, note: note}
 				}
 			}
-		}
-		if st.RemoteVersion == 0 {
-			return tuiRemoteMsg{note: "the server may hold changes to pull"}
 		}
 		return tuiRemoteMsg{note: fmt.Sprintf("server is ahead by %d version(s)", res.Version-st.RemoteVersion)}
 	}

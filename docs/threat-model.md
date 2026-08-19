@@ -207,7 +207,7 @@ carries, and how large they are. Nothing in the design hides that.
 AEAD additional-data domain separation across blob, wrap, and gated-wrap has been in
 since v1. The resource id is bound into the AAD as well (`SealBound`/`OpenBound`, tag
 form `aqt-<role>-v2:<id>`) over the metadata, the inline body, the
-`FileRoot`/`TreeRoot`/`PackRoot` resource blobs, and snapshot labels — so a server
+`FileRoot`/`TreeRoot` resource blobs, and snapshot labels — so a server
 swapping whole records between ids fails the tag check, even though a record's blob,
 meta, and wrapped key are mutually consistent under the per-resource key.
 
@@ -220,18 +220,17 @@ Chunk objects, directory nodes, and pack segments stay id-free. They are
 content-addressed, client-verified against their address, and reachable only through
 an id-bound root; binding them would kill cross-resource dedup.
 
-Four bounded caveats:
+A create still seals before the server assigns the id, but that unbound form never
+becomes readable state: every create re-seals its root and metadata bound to the
+assigned id as its second write, and a create that cannot complete that write deletes
+itself. Reads open bound-only — there is no v1 fallback for a server to downgrade to.
 
-1. A create seals before the server assigns the id, so a resource is unbound until
-   its first re-seal. Folder syncs upgrade the root — and, once, the metadata — on
-   the next update; a one-shot `push` stays unbound.
-2. The v1 fallback that keeps old blobs readable means a server can serve a stale
-   unbound blob. It still cannot forge or cross-open one. Full strictness would need
-   client-generated ids and a fallback cut-off.
-3. A snapshot browsed without naming a resource has no client-side expectation to pin
+Two bounded caveats:
+
+1. A snapshot browsed without naming a resource has no client-side expectation to pin
    its claimed resource id to. An in-place restore checks the tracked folder's id;
    `--out` restores trust the claim.
-4. Once a folder has synced with an id-binding client, its root no longer opens on
+2. Once a resource has been sealed by an id-binding client, it no longer opens on
    clients from before that change — upgrade every device together.
 
 Capability negotiation gates every declared format boundary: a client below a
@@ -288,8 +287,8 @@ small-file plaintext, so it is sealed at rest under the **same** per-profile sea
 key, with a distinct `aqt-base-at-rest-v1` AAD. A backed-up, cloud-synced, or
 stolen-disk copy is therefore useless off-machine. The seal is read offline by
 `status` and before the master key is unlocked, so it uses the sealing key, not the
-master key. Old plaintext bases are read transparently and upgraded on the next sync
-(disjoint top-level keys make the two forms unambiguous).
+master key. A `base.json` that is not the sealed envelope is refused rather than read
+as a bare manifest; the sync degrades to `--reconcile`, which rebuilds it.
 
 Both inherit the same residual: a process running as the same user can reach the
 keychain, or re-derive the machine-bound key.
@@ -327,9 +326,12 @@ you from":
   contact who can read their fingerprint out over a separate channel: the pin lands
   only if the server presents that key, which is a check no decoy passes. Without a
   fingerprint to check against, the pin is still trust-on-first-use.
-- **Pre-migration plaintext residue.** Upgrading an old plaintext `.aqt/base.json`
-  writes the sealed form through an atomic rename; the freed disk blocks holding the
-  old plaintext are not scrubbed. Forensic-only, and local to that disk.
+- **Plaintext base residue.** Refusing an unsealed `.aqt/base.json` stops this build
+  from reading one, but it does not erase what an older build already wrote: the file
+  sits there until a reconcile replaces it through an atomic rename, and the freed
+  disk blocks holding the old plaintext are not scrubbed. `aqt sync --reconcile`
+  overwrites the file; scrubbing the blocks is the disk's job. Forensic-only, and
+  local to that disk.
 
 Nothing here changes an interface, which is why they are recorded as limits rather
 than blocking work.

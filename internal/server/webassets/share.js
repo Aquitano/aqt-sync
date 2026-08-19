@@ -124,14 +124,13 @@
     return null;
   }
 
-  // Open a {nonce, ciphertext} blob, trying the id-bound v2 AAD first
-  // (rotated resources), then the unbound v1 tag (one-shot pushes).
+  // Open a {nonce, ciphertext} blob under the id-bound v2 AAD. Every resource is
+  // sealed bound to its id, so there is no unbound form to fall back to — and a
+  // server therefore cannot strip the binding by serving one.
   function openBound(sealed, key, role, id) {
     var nonce = b64Decode(sealed.nonce);
     var ct = b64Decode(sealed.ciphertext);
-    var plain = AqtCrypto.xchachaOpen(key, nonce, ct, utf8("aqt-" + role + "-v2:" + id));
-    if (plain === null) plain = AqtCrypto.xchachaOpen(key, nonce, ct, utf8("aqt-" + role + "-v1"));
-    return plain;
+    return AqtCrypto.xchachaOpen(key, nonce, ct, utf8("aqt-" + role + "-v2:" + id));
   }
 
   /* ---------------- content-addressed object crypto ------------------ */

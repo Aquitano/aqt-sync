@@ -292,18 +292,17 @@ type WrappedKey struct {
 // a hostile server cannot reinterpret one field as another — e.g. move a resource
 // blob into the wrappedKey slot, or swap a body blob for its metadata blob (both
 // sealed under the same content key). SealBound/OpenBound additionally bind the
-// resource id when it is known, so a whole record (blob + meta + wrapped key)
-// served under a different id fails the tag check too.
+// resource id, so a whole record (blob + meta + wrapped key) served under a
+// different id fails the tag check too.
 var (
 	AADBlob          = []byte("aqt-blob-v1")      // resource body (file bytes or chunked-folder manifest root)
 	AADMeta          = []byte("aqt-meta-v1")      // resource metadata
 	AADSnapshotLabel = []byte("aqt-snaplabel-v1") // a snapshot's optional user label, sealed under the resource content key
-	// AADPack and AADPackRoot belong to the removed pack-and-seal folder format.
-	// The constants stay reserved: old ciphertext sealed under them still exists,
-	// so these strings must never be reassigned to a new domain.
-	AADPack        = []byte("aqt-pack-v1")      // historical: a pack-and-seal tarball segment
-	AADPackRoot    = []byte("aqt-packroot-v1")  // historical: a pack-and-seal folder's sealed root blob
-	AADTreeRoot    = []byte("aqt-treeroot-v1")  // a Merkle-DAG folder's sealed root blob (distinct from AADBlob, like AADPackRoot)
+	// Tombstone: "aqt-pack-v1" and "aqt-packroot-v1" were the removed pack-and-seal
+	// folder format's tags. The constants are gone, but the strings stay retired
+	// forever — reassigning either to a new role would let any surviving packed
+	// ciphertext open under the new meaning.
+	AADTreeRoot    = []byte("aqt-treeroot-v1")  // a Merkle-DAG folder's sealed root blob (distinct from AADBlob, so a root cannot be swapped for a body)
 	AADGitRefsRoot = []byte("aqt-gitrefs-v1")   // a git-remote resource's sealed refs and bundle-chain root
 	AADGitBundle   = []byte("aqt-gitbundle-v1") // one opaque, per-push-unique git bundle segment
 	aadKeyWrap     = []byte("aqt-keywrap-v1")   // content key wrapped under the master key
@@ -344,8 +343,8 @@ func Open(blob SealedBlob, ck ContentKey, aad []byte) ([]byte, error) {
 // BoundAAD is the id-bound (v2) form of a v1 role tag: "aqt-blob-v1" plus id
 // "abc" becomes "aqt-blob-v2:abc". The version bump keeps it disjoint from every
 // v1 tag; the id makes the ciphertext openable only under the id it was stored
-// for. Exposed for callers that need to distinguish a bound blob from a legacy
-// one (e.g. to upgrade the latter in place); sealing goes through SealBound.
+// for. Exposed so a caller can name the exact tag a stored blob must carry (a test
+// asserting the stored form); sealing and opening go through SealBound/OpenBound.
 func BoundAAD(role []byte, resourceID string) []byte {
 	base, ok := strings.CutSuffix(string(role), "-v1")
 	if !ok {
@@ -357,8 +356,9 @@ func BoundAAD(role []byte, resourceID string) []byte {
 // SealBound is Seal with the resource id bound into the additional data, so the
 // ciphertext only opens under the id it is stored under and a server swapping
 // whole records between ids is detected. An empty id seals with the plain role
-// tag: on create the id is server-assigned and does not exist yet, so a create
-// seal is unbound until the resource is next re-sealed (e.g. a folder sync).
+// tag, which is only ever the first half of a create: the id is server-assigned
+// and does not exist yet, so the create path re-seals the resource bound to the
+// id the moment the server returns it (nothing reads the unbound form).
 func SealBound(plaintext []byte, ck ContentKey, role []byte, resourceID string) (SealedBlob, error) {
 	if resourceID == "" {
 		return Seal(plaintext, ck, role)
@@ -366,18 +366,14 @@ func SealBound(plaintext []byte, ck ContentKey, role []byte, resourceID string) 
 	return Seal(plaintext, ck, BoundAAD(role, resourceID))
 }
 
-// OpenBound reverses SealBound, falling back to the unbound v1 role tag so
-// pre-binding blobs and create-time seals still open. The fallback means a server
-// can strip the binding by serving an unbound blob (it cannot forge one — the key
-// is still required); the binding therefore detects record swaps between ids for
-// any blob sealed with the id in hand, not a deliberate downgrade.
+// OpenBound reverses SealBound: a blob fetched under an id opens only under that
+// id's v2 tag. There is no unbound fallback, so a server cannot strip the binding
+// by serving the v1 form of a record it moved between ids.
 func OpenBound(blob SealedBlob, ck ContentKey, role []byte, resourceID string) ([]byte, error) {
-	if resourceID != "" {
-		if plain, err := Open(blob, ck, BoundAAD(role, resourceID)); err == nil {
-			return plain, nil
-		}
+	if resourceID == "" {
+		return Open(blob, ck, role)
 	}
-	return Open(blob, ck, role)
+	return Open(blob, ck, BoundAAD(role, resourceID))
 }
 
 // WrapKey encrypts a content key under a 32-byte wrapping key (the master key),

@@ -39,7 +39,8 @@ names the release the row needs rather than rendering it as unreadable.
 `Accept` selection honors media parameters and quality values; if none of the
 offered representations is supported the server returns `406`; the unversioned
 `application/json` and `application/octet-stream` forms are accepted there as
-aliases. Requests are stricter than responses: a resource write must declare
+aliases, so a hand-rolled request (`curl`) does not have to name a versioned media
+type. Requests are stricter than responses: a resource write must declare
 `application/vnd.aqt.resource+octet-stream; version=1`, and anything else — an
 unlabelled body, a JSON body, the unversioned octet-stream form — is `415`.
 Public DTO fields are lower camel case and do not depend on Go field names.
@@ -356,8 +357,8 @@ that sees both must prefer the header.
   treat throttling as "try again later" rather than a permanent failure.
 
 Neither signal changes an encrypted format, so `api.ClientCapability` is not bumped.
-An older server that sends only `Retry-After` interoperates unchanged; an older
-client that ignores `retryAfterSeconds` reads the header as it always did.
+`Retry-After` is authoritative; `retryAfterSeconds` is the body fallback for a caller
+that only parses JSON.
 
 ## Public-link lifecycle
 

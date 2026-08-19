@@ -35,11 +35,6 @@ type Metadata struct {
 	// Streamed marks a file whose blob is a sealed FileRoot over chunk objects rather
 	// than the inline ciphertext, so pull reconstructs it from the objects.
 	Streamed bool `json:"streamed,omitempty"`
-	// Packed marks a folder written in the removed pack-and-seal format (one sealed
-	// tarball of the whole tree). Current clients refuse such resources with a
-	// recovery hint; the field survives so they can tell, and so old metadata still
-	// parses. Recover the data with an aqt release that still reads the format.
-	Packed bool `json:"packed,omitempty"`
 	// Tree marks a chunked folder whose blob is a sealed TreeRoot over a Merkle DAG of
 	// directory nodes, so a moved/copied subtree dedups and a diff can skip
 	// unchanged subtrees. A chunked folder created by a current client always sets it.
@@ -508,8 +503,8 @@ type GetResourceResponse struct {
 	Owner    string `json:"owner,omitempty"`
 	Version  int    `json:"version"`
 	// MinClient is the lowest client capability that can read this resource's sealed
-	// formats, so a current client can explain an incompatible remote instead of
-	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).
+	// formats, so a client can explain an unreadable resource instead of failing to
+	// decrypt. An absent value reads as 0 and is treated as baseline.
 	MinClient int   `json:"minClient,omitempty"`
 	CompactAt int   `json:"compactAt,omitempty"`
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
@@ -546,8 +541,8 @@ type ResourceListItem struct {
 	// MinClient is the lowest client capability that can read this resource's sealed
 	// formats. The list itself never gates on it — a listing that 426'd would hide the
 	// account's own resources — so it is echoed instead, and a client below the bar
-	// says which release the row needs rather than rendering it as unreadable. 0 from
-	// a server predating this field means "unknown" (treat as baseline).
+	// says which release the row needs rather than rendering it as unreadable. An
+	// absent value reads as 0 and is treated as baseline.
 	MinClient int `json:"minClient,omitempty"`
 	// AutoSnapshot reports whether the server's scheduled snapshot job covers this
 	// resource, so `snapshot auto` can show coverage without a per-resource fetch.

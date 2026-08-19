@@ -281,19 +281,14 @@ func shareScopeRefs(cl *client.Client, res api.GetResourceResponse, keys *resour
 	return refs, nil
 }
 
-// checkShareableFolder rejects the folder formats no non-owner transport can serve.
+// checkShareableFolder rejects the folder format no non-owner transport can serve.
 // A link holder and a grantee both read exact object slices, so they need a folder
-// whose entries ARE objects: a pack-and-seal folder stores one opaque pack with no
-// per-entry objects, and a legacy folder predates the tree format entirely. Neither
-// can be walked with only the content key, and both are equally unrotatable. A
-// non-folder passes untouched.
+// whose entries ARE objects: a legacy folder predates the tree format entirely, so
+// it can neither be walked with only the content key nor rotated. A non-folder
+// passes untouched.
 func checkShareableFolder(meta api.Metadata) error {
 	if meta.Kind != api.KindFolder {
 		return nil
-	}
-	if meta.Packed {
-		return errors.New("cannot share a pack-and-seal folder (the format was removed): it stores no per-file objects, " +
-			"so a link holder or grantee could never walk it; re-create it as a chunked folder")
 	}
 	if !meta.Tree {
 		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
@@ -741,7 +736,7 @@ func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse, id st
 // grantee, and the next rotation would re-wrap the new key straight back to it.
 func rotateResourceKey(cl *client.Client, id string, res api.GetResourceResponse, oldCK crypto.ContentKey, mk crypto.MasterKey, meta api.Metadata, revoke string) (crypto.ContentKey, error) {
 	if meta.Kind == api.KindFolder {
-		if meta.Packed || !meta.Tree {
+		if !meta.Tree {
 			return crypto.ContentKey{}, errors.New("this folder format cannot rotate its key")
 		}
 		return rotateTree(cl, id, res, oldCK, mk, revoke)
@@ -948,7 +943,6 @@ func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, o
 				return resealed{}, err
 			}
 		}
-		// SealFileRoot binds the root to the id even if the original create was unbound.
 		blob, err := syncengine.SealFileRoot(root, newCK, id)
 		if err != nil {
 			return resealed{}, err

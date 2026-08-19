@@ -124,7 +124,7 @@ func runPush(path string, opts pushOptions) error {
 	}
 	defer ck.Wipe()
 	// A create's seals cannot bind the resource id: the server assigns it only in
-	// the PutResource response below. OpenBound's v1 fallback reads them.
+	// the PutResource response below, after which bindCreated re-seals both bound.
 	blob, err := crypto.Seal(data, ck, crypto.AADBlob)
 	if err != nil {
 		return err
@@ -138,9 +138,10 @@ func runPush(path string, opts pushOptions) error {
 		return err
 	}
 
-	// Inline push seals unbound (AADBlob, no id): a create has no server-assigned id
-	// to bind yet, so it stays baseline-readable.
-	req := api.PutResourceRequest{Blob: blob, EncryptedMeta: metaBlob, MinClient: api.CapabilityBaseline}
+	req := api.PutResourceRequest{
+		Blob: blob, EncryptedMeta: metaBlob,
+		MinClient: api.CapabilityIDBinding, // the bind below seals body and meta id-bound (v2)
+	}
 	if opts.public || opts.password != "" {
 		req.Visibility = api.Public
 		req.ExpireSeconds = opts.policy.expireSeconds
@@ -168,7 +169,14 @@ func runPush(path string, opts pushOptions) error {
 	if err != nil {
 		return err
 	}
+	// The policy echo is the create's own answer, so it is checked before the bind
+	// write replaces the version confirmPolicy would delete.
 	if err := confirmPolicy(cl, resp, opts.policy); err != nil {
+		return err
+	}
+	if _, err := bindCreated(cl, req, resp, ck, metaJSON, func(id string) (crypto.SealedBlob, error) {
+		return crypto.SealBound(data, ck, crypto.AADBlob, id)
+	}); err != nil {
 		return err
 	}
 
@@ -234,7 +242,9 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		return err
 	}
 
-	blob, err := syncengine.SealFileRoot(root, ck, "") // create: id not assigned yet
+	// The create seals unbound (the id is assigned by the PUT below) and bindCreated
+	// re-seals root and metadata under it, which is the form every read expects.
+	blob, err := syncengine.SealFileRoot(root, ck, "")
 	if err != nil {
 		return err
 	}
@@ -265,21 +275,29 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		onExpiry = opts.policy.onExpiry
 	}
 
-	resp, err := cl.PutResource(api.PutResourceRequest{
+	req := api.PutResourceRequest{
 		Visibility:    visibility,
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
 		ChunkRefs:     refs,
-		MinClient:     api.CapabilityBaseline, // create seals the FileRoot unbound (id not assigned yet)
+		MinClient:     api.CapabilityIDBinding, // the bind below seals the FileRoot and meta id-bound (v2)
 		ExpireSeconds: expireSeconds,
 		MaxReads:      maxReads,
 		OnExpiry:      onExpiry,
-	})
+	}
+	resp, err := cl.PutResource(req)
 	if err != nil {
 		return err
 	}
+	// The policy echo is the create's own answer, so it is checked before the bind
+	// write replaces the version confirmPolicy would delete.
 	if err := confirmPolicy(cl, resp, opts.policy); err != nil {
+		return err
+	}
+	if _, err := bindCreated(cl, req, resp, ck, metaJSON, func(id string) (crypto.SealedBlob, error) {
+		return syncengine.SealFileRoot(root, ck, id)
+	}); err != nil {
 		return err
 	}
 	ref, err := buildRef(prof.Server, resp.ID, visibility, ck, opts.password)
