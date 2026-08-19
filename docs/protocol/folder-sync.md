@@ -252,9 +252,6 @@ entry's chunks. Pulling a directory materializes its subtree from the subtree's 
 content-addressed node without touching the rest of the folder, and
 `aqt ls <folder>[/<path>]` lists one directory by fetching the spine plus that node.
 
-Pack-and-seal folders refuse with guidance: no per-entry objects exist, which is the
-privacy trade-off working as intended.
-
 ## Public folder links
 
 `aqt share <folder-id>` works for chunked (tree) folders and needed no new object
@@ -274,8 +271,6 @@ Zero-knowledge is unchanged: the server still stores and serves only ciphertext,
 there is no unauthenticated write route, so links are pull-only by construction.
 `aqt unshare <folder-id>` rotates root-only — see
 [what revocation guarantees](../threat-model.md#what-revocation-actually-guarantees).
-Pack-and-seal folders stay unshareable, for the same reason subpath addressing
-refuses them.
 
 ## Reconcile
 

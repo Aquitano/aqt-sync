@@ -770,8 +770,8 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 // which turns the old "download both trees, hash them on disk" diff into a
 // metadata-only walk of the changed spines. Anything else (single files, a mixed
 // pair) still materializes both sides to temp dirs; that fallback scans each side
-// back into a manifest so both routes report
-// the same classification rather than the old regular-files-only comparison.
+// back into a manifest so both routes report the same classification rather than the
+// old regular-files-only comparison.
 func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.Delta, error) {
 	var zero syncengine.Delta
 	leftRoot, leftOK, err := treeRootOf(left, mk)

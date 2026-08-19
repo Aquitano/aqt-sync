@@ -280,6 +280,17 @@ func TestBoundAADDisjointAcrossRoles(t *testing.T) {
 		}
 		seen[bound] = true
 	}
+	// The removed pack-and-seal format's tags are retired, not free: ciphertext
+	// sealed under them may still exist, so handing either string to a new role
+	// would let it open under the new meaning.
+	live := append([][]byte{aadKeyWrap, aadGated, aadRootWrap}, roles...)
+	for _, retired := range []string{"aqt-pack-v1", "aqt-packroot-v1"} {
+		for _, tag := range live {
+			if string(tag) == retired {
+				t.Fatalf("retired AAD tag %q was reassigned to a live role", retired)
+			}
+		}
+	}
 }
 
 func TestWrapUnwrapRoundTrip(t *testing.T) {

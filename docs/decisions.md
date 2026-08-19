@@ -39,8 +39,7 @@ release each landed in.
   because none can be needed. See [node cache](protocol/folder-sync.md#node-cache).
 
 - **Subpath addressing.** `aqt://<id>/<path>` walks only the path's spine instead of
-  materializing the folder. Pack-and-seal folders refuse it, which is the privacy
-  trade-off working as intended. See
+  materializing the folder. See
   [subpath addressing](protocol/folder-sync.md#subpath-addressing).
 
 - **Repack.** Chunk-granular pruning leaves dead bytes inside still-populated
