@@ -364,19 +364,19 @@ func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
 	}
 }
 
-// A pre-retire server (lifecycle-capable, but it ignores onExpiry and would reclaim)
+// A server that records a lifecycle policy but ignores onExpiry — so its links reclaim —
 // must not be left holding an armed reclaim policy after a failed `aqt share --expire`.
 // The fail-closed check errors, but the visibility flip already stored the policy, so
 // erroring without disarming would still destroy an already-public folder on expiry.
 // The proxy here strips onExpiry from the visibility response to imitate that server.
-func TestShareExpireDisarmsPolicyOnPreRetireServer(t *testing.T) {
+func TestShareExpireDisarmsPolicyWhenTheServerDropsOnExpiry(t *testing.T) {
 	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/visibility") {
 			rec := httptest.NewRecorder()
 			pass(rec, r)
 			var body map[string]any
 			if json.Unmarshal(rec.Body.Bytes(), &body) == nil {
-				delete(body, "onExpiry") // an old server never echoes it
+				delete(body, "onExpiry") // as if the server never recorded the action
 			}
 			out, _ := json.Marshal(body)
 			for k, vs := range rec.Header() {
@@ -398,12 +398,12 @@ func TestShareExpireDisarmsPolicyOnPreRetireServer(t *testing.T) {
 	// Share it plain first, so the resource is already public with a live link.
 	shareFolder(t, id, "", linkPolicy{})
 
-	// Now attach an expiry. The stripped echo makes the client see a pre-retire server.
+	// Now attach an expiry. The stripped echo makes the client see a reclaiming server.
 	cmd := shareCmd()
 	cmd.SetArgs([]string{id, "--expire", "1h", "--no-clip"})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("share --expire against a pre-retire server should fail closed")
+		t.Fatal("share --expire against a reclaiming server should fail closed")
 	}
 	if !errors.Is(err, errNoRetire) {
 		t.Fatalf("share --expire error = %v, want errNoRetire", err)

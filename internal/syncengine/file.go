@@ -10,8 +10,8 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// FileRootVersion 2 adds ChunkList (the indirect chunk-list form); version 1 roots
-// carry the list inline and still open.
+// FileRootVersion is the file-root format this client writes. It rides in every root
+// so a root written by a newer client is detected and refused rather than misread.
 const FileRootVersion = 2
 
 // FileRoot is the sealed resource blob of a streamed single file: it names the

@@ -350,7 +350,8 @@ func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
 	if err != nil {
 		return api.GetResourceResponse{}, err
 	}
-	// Opt into the raw envelope; without this the server answers legacy JSON.
+	// Select the raw envelope. The server also serves a JSON form of the same record
+	// (the browser share page reads that one), so the Accept header picks between them.
 	req.Header.Set("Accept", api.ResourceEnvelopeMediaType)
 	_, data, err := c.send(req, path)
 	if err != nil {

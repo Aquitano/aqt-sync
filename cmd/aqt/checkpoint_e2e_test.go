@@ -201,10 +201,10 @@ func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 }
 
 // setSnapshotAnchor fails closed when the server echoes a state that does not match the
-// requested one — an old server that ignores the anchor field entirely.
+// requested one — a server that ignores the anchor field entirely.
 func TestSetSnapshotAnchorFailsClosed(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Echo a snapshot with no anchored field (an old server's response shape).
+		// Echo a snapshot with no anchored field, so it reads back as unanchored.
 		json.NewEncoder(w).Encode(map[string]any{"id": "s1"})
 	}))
 	t.Cleanup(stub.Close)
@@ -212,15 +212,15 @@ func TestSetSnapshotAnchorFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setSnapshotAnchor(cl, "s1", true); err == nil || !strings.Contains(err.Error(), "too old") {
-		t.Fatalf("setSnapshotAnchor against old server = %v, want a too-old error", err)
+	if err := setSnapshotAnchor(cl, "s1", true); err == nil || !strings.Contains(err.Error(), "did not apply the anchor change") {
+		t.Fatalf("setSnapshotAnchor against an unanchoring server = %v, want a fail-closed error", err)
 	}
 }
 
-// oldServerProxy fronts the real server but strips the "anchor" field from every
-// create-snapshot request, so the backend stores an unanchored snapshot — exactly what
-// a pre-anchor server would do with the unknown field.
-func oldServerProxy(t *testing.T, backend string) *httptest.Server {
+// anchorStrippingProxy fronts the real server but strips the "anchor" field from every
+// create-snapshot request, so the backend stores an unanchored snapshot — what a server
+// that dropped the field on the floor would leave behind.
+func anchorStrippingProxy(t *testing.T, backend string) *httptest.Server {
 	t.Helper()
 	target, err := url.Parse(backend)
 	if err != nil {
@@ -252,10 +252,10 @@ func oldServerProxy(t *testing.T, backend string) *httptest.Server {
 	return ts
 }
 
-// Against an old server that ignores the anchor field, checkpoint must fail closed:
-// it deletes the unprotected snapshot it just created and errors, so no prunable
+// Against a server that ignores the anchor field, checkpoint must fail closed: it
+// deletes the unprotected snapshot it just created and errors, so no prunable
 // "checkpoint" is left behind.
-func TestCheckpointFailsClosedOnOldServer(t *testing.T) {
+func TestCheckpointFailsClosedWhenTheServerDropsTheAnchor(t *testing.T) {
 	h := newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -275,7 +275,7 @@ func TestCheckpointFailsClosedOnOldServer(t *testing.T) {
 	// Point the profile at the anchor-stripping proxy (an explicit --server that
 	// contradicts the folder's recorded server is rejected by the identity binding,
 	// so the proxy has to look like the profile's own server moving).
-	proxy := oldServerProxy(t, h.url)
+	proxy := anchorStrippingProxy(t, h.url)
 	prof, err := identity.Load(identity.DefaultProfile)
 	if err != nil {
 		t.Fatal(err)
@@ -288,8 +288,8 @@ func TestCheckpointFailsClosedOnOldServer(t *testing.T) {
 	cmd := checkpointCmd()
 	cmd.SetArgs([]string{"release-1", src})
 	err = cmd.Execute()
-	if err == nil || !strings.Contains(err.Error(), "too old") {
-		t.Fatalf("checkpoint against old server = %v, want a too-old error", err)
+	if err == nil || !strings.Contains(err.Error(), "did not anchor the checkpoint") {
+		t.Fatalf("checkpoint against an anchor-dropping server = %v, want a fail-closed error", err)
 	}
 
 	// The half-checkpoint was cleaned up: no snapshot lingers.

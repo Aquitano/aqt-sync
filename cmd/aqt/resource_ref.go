@@ -14,7 +14,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
-// resolveOwnedResourceID accepts the legacy id/ref forms plus a tracked local path
+// resolveOwnedResourceID accepts a bare id or an aqt:// ref, plus a tracked local path
 // or an exact, uniquely matching decrypted resource name.
 func resolveOwnedResourceID(cl *client.Client, mk crypto.MasterKey, ref string) (string, error) {
 	if id, ok, err := trackedResourceID(ref); ok || err != nil {
@@ -42,8 +42,8 @@ func resolveOwnedResourceIDFromItems(items []api.ResourceListItem, mk crypto.Mas
 	}
 	switch len(matches) {
 	case 0:
-		// Preserve the legacy server-side not-found behavior for an opaque id or
-		// URL that does not belong to this account.
+		// Nothing matched by name: hand the id back so the server answers the 404 for an
+		// id or URL that does not belong to this account.
 		return id, nil
 	case 1:
 		return matches[0].ID, nil

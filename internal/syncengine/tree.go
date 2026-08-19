@@ -19,8 +19,9 @@ import (
 // a three-way diff skips any subtree whose hashes agree. See
 // docs/protocol/folder-sync.md (Merkle DAG of directory nodes).
 
-// TreeManifestVersion is the Merkle-DAG manifest version, bumped from the flat
-// manifest's 1 so the format is detectable.
+// TreeManifestVersion is the manifest format this client writes. It rides in every
+// node and root so one written by a newer client is detected and refused rather than
+// misread as a shallower tree.
 const TreeManifestVersion = 2
 
 // ChildType discriminates a directory child, the way Entry.IsSymlink does for a

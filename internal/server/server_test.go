@@ -76,19 +76,19 @@ func (h *harness) do(method, path, token string, body, out any) int {
 	return rec.Code
 }
 
-// TestHealthzIsPublic covers the liveness probe: it answers 200 without a token so
+// TestLivezIsPublic covers the liveness probe: it answers 200 without a token so
 // load balancers and container healthchecks can reach it before any device exists.
-func TestHealthzIsPublic(t *testing.T) {
+func TestLivezIsPublic(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	var body struct {
 		Status string `json:"status"`
 	}
-	if code := h.do(http.MethodGet, "/healthz", "", nil, &body); code != http.StatusOK {
-		t.Fatalf("healthz status = %d, want 200", code)
+	if code := h.do(http.MethodGet, "/livez", "", nil, &body); code != http.StatusOK {
+		t.Fatalf("livez status = %d, want 200", code)
 	}
 	if body.Status != "ok" {
-		t.Fatalf("healthz body status = %q, want \"ok\"", body.Status)
+		t.Fatalf("livez body status = %q, want \"ok\"", body.Status)
 	}
 }
 

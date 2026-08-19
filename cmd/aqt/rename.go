@@ -84,10 +84,9 @@ func runRename(ref, newName string) error {
 		return errors.New("resource changed while renaming it; retry the command")
 	}
 	if errors.Is(err, client.ErrNotFound) {
-		// GetResource for this id succeeded moments ago, so the resource exists; a 404 on
-		// the metadata endpoint means the server predates it. (A server that has the route
-		// but lost the resource in between would also land here, hence the combined note.)
-		return errors.New("this server does not support rename: it has no resource-metadata endpoint (upgrade the server), or the resource was just deleted")
+		// GetResource for this id succeeded moments ago, so the resource was deleted in
+		// between — by another device, or by its link's lifecycle policy firing.
+		return fmt.Errorf("resource %s was deleted while renaming it", id)
 	}
 	if err != nil {
 		return err

@@ -32,14 +32,13 @@ func multiCallArgs(argv []string) ([]string, bool) {
 	return append([]string{"git-remote-helper"}, argv[1:]...), true
 }
 
-// rootArgs is the command line the root command runs. Git's arguments belong to the
-// remote-helper protocol and reach it verbatim; the legacy dash-id rewrite applies
-// only to what a user typed, where a dash-leading id cannot be told from a flag.
-func rootArgs(root *cobra.Command, argv []string) []string {
+// rootArgs is the command line the root command runs: the multi-call rewrite when
+// Git exec'd this binary under the helper name, and what the user typed otherwise.
+func rootArgs(argv []string) []string {
 	if args, ok := multiCallArgs(argv); ok {
 		return args
 	}
-	return escapeLeadingDashIDs(root, argv[1:])
+	return argv[1:]
 }
 
 func isHelperName(base string) bool {

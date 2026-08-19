@@ -198,8 +198,7 @@ POST   /v1/gc                        Pack-level mark-and-sweep, which also repac
 ```
 
 `GET /livez` is the liveness probe and `GET /readyz` admits traffic only while
-storage is available and the server is not shutting down; `/healthz` remains a
-liveness compatibility alias.
+storage is available and the server is not shutting down.
 
 ## Account deletion
 

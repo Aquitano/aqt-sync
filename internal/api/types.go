@@ -664,7 +664,8 @@ type ErrorResponse struct {
 	// Code is a stable machine-readable tag, present on every error the server
 	// writes: a condition code where a client branches more finely than the HTTP
 	// status (e.g. ErrCodeUpgradeRequired on a 426), the status-bucket code
-	// otherwise. omitempty stays for wire compatibility with older servers.
+	// otherwise. omitempty never fires on that path; it only keeps a meaningless
+	// "" off the wire should a writer ever leave the tag unset.
 	Code string `json:"code,omitempty"`
 	// MinClient accompanies an upgrade-required (426) error: the capability the
 	// resource needs, so the client can report exactly how far it is behind.
