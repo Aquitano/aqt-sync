@@ -288,8 +288,8 @@ small-file plaintext, so it is sealed at rest under the **same** per-profile sea
 key, with a distinct `aqt-base-at-rest-v1` AAD. A backed-up, cloud-synced, or
 stolen-disk copy is therefore useless off-machine. The seal is read offline by
 `status` and before the master key is unlocked, so it uses the sealing key, not the
-master key. Old plaintext bases are read transparently and upgraded on the next sync
-(disjoint top-level keys make the two forms unambiguous).
+master key. A `base.json` that is not the sealed envelope is refused rather than read
+as a bare manifest; the sync degrades to `--reconcile`, which rebuilds it.
 
 Both inherit the same residual: a process running as the same user can reach the
 keychain, or re-derive the machine-bound key.
@@ -327,9 +327,12 @@ you from":
   contact who can read their fingerprint out over a separate channel: the pin lands
   only if the server presents that key, which is a check no decoy passes. Without a
   fingerprint to check against, the pin is still trust-on-first-use.
-- **Pre-migration plaintext residue.** Upgrading an old plaintext `.aqt/base.json`
-  writes the sealed form through an atomic rename; the freed disk blocks holding the
-  old plaintext are not scrubbed. Forensic-only, and local to that disk.
+- **Plaintext base residue.** Refusing an unsealed `.aqt/base.json` stops this build
+  from reading one, but it does not erase what an older build already wrote: the file
+  sits there until a reconcile replaces it through an atomic rename, and the freed
+  disk blocks holding the old plaintext are not scrubbed. `aqt sync --reconcile`
+  overwrites the file; scrubbing the blocks is the disk's job. Forensic-only, and
+  local to that disk.
 
 Nothing here changes an interface, which is why they are recorded as limits rather
 than blocking work.

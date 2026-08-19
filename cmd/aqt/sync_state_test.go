@@ -19,11 +19,14 @@ func TestSaveStateRoundTripAtomic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := saveState(root, folderState{ID: "res-1", Server: "https://one.example"}); err != nil {
+	first := folderState{ID: "res-1", Server: "https://one.example", Profile: "default", Account: "acct-1", RemoteVersion: 1}
+	if err := saveState(root, first); err != nil {
 		t.Fatal(err)
 	}
 	// Overwrite with new content; the file must end up holding the new state.
-	if err := saveState(root, folderState{ID: "res-2", Server: "https://two.example"}); err != nil {
+	second := first
+	second.ID, second.Server = "res-2", "https://two.example"
+	if err := saveState(root, second); err != nil {
 		t.Fatal(err)
 	}
 
