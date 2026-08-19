@@ -26,10 +26,23 @@ func bindCreated(cl *client.Client, create api.PutResourceRequest, resp api.PutR
 			return out, nil
 		}
 	}
-	// The unbound first version opens for nobody and nothing references it yet, so
-	// drop it rather than leave the owner an orphan they cannot read.
-	if delErr := cl.DeleteResourceVersion(resp.ID, resp.Version); delErr != nil {
-		return resp, fmt.Errorf("bind resource %s to its id: %w (the unreadable resource could not be removed: %v; `aqt rm %s` deletes it)", resp.ID, err, delErr, resp.ID)
+	// A bind write that commits and then loses its response is indistinguishable from
+	// one that never happened, so the cleanup asks the server what it holds rather
+	// than trusting err: a bound record is a readable resource — and, for a public
+	// push, a live share link — and must survive the failure that reported it lost.
+	stored, cleanupErr := cl.GetResource(resp.ID)
+	if cleanupErr == nil {
+		if _, openErr := crypto.OpenBound(stored.EncryptedMeta, ck, crypto.AADMeta, resp.ID); openErr == nil {
+			return api.PutResourceResponse{ID: stored.ID, Version: stored.Version}, nil
+		}
+		// The unbound first version opens for nobody and nothing references it yet, so
+		// drop it rather than leave the owner an orphan they cannot read. The delete
+		// pins the version just read, so a bind landing in between is refused by the
+		// server instead of destroying the resource it made readable.
+		cleanupErr = cl.DeleteResourceVersion(stored.ID, stored.Version)
+	}
+	if cleanupErr != nil {
+		return resp, fmt.Errorf("bind resource %s to its id: %w (the unreadable resource could not be removed: %v; `aqt rm %s` deletes it)", resp.ID, err, cleanupErr, resp.ID)
 	}
 	return resp, fmt.Errorf("bind resource %s to its id: %w", resp.ID, err)
 }

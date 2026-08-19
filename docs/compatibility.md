@@ -49,9 +49,8 @@ Pre-1.0 there is exactly one deployment, upgraded as a unit.
 
 ## Support policy
 
-aqt is pre-1.0, has one maintainer, and runs as a single deployment: one server, and
-clients that upgrade with it. That is the whole policy, and the capability ladder is
-built for it.
+aqt has one maintainer and runs as a single deployment: one server, and clients that
+upgrade with it. That is the whole policy, and the capability ladder is built for it.
 
 - **Server and clients upgrade together.** A mixed fleet is an upgrade in progress,
   not a supported mode. A client older than the resource it reads is refused with a
@@ -79,8 +78,8 @@ sealed before that has to be re-pushed).
 Negotiation is one-directional: a client announces its capability in a header and no
 route reports back what the server supports, so every server-side feature that is not
 a sealed format needs its own
-[enforcement echo](#public-link-lifecycle-no-capability-bump) to probe for — a server
-capability discovery endpoint is an open item.
+[enforcement echo](#public-link-lifecycle-no-capability-bump) to probe for. There is
+no discovery endpoint; the echo is the supported probe.
 
 ## Negotiation flow
 

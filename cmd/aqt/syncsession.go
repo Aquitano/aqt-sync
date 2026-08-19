@@ -99,7 +99,7 @@ func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 	// remote edits/deletes and clobber local files. A baseless reconcile turns them
 	// into conflicts to review instead.
 	trustBase := s.baseExists
-	if s.st.RemoteVersion > 0 && res.Version < s.st.RemoteVersion {
+	if res.Version < s.st.RemoteVersion {
 		if !opts.acceptRollback {
 			return remoteSync{}, rollbackErr(res.Version, s.st.RemoteVersion)
 		}
@@ -127,13 +127,10 @@ func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 }
 
 // checkSyncFormat routes by the server's truth, not just local .aqtconfig: a
-// pack-and-seal folder reconciled as chunked would read an empty manifest and
-// delete the whole tree. (AAD domain separation also makes that read fail, but
-// this gives the actionable message.)
+// pre-tree folder reconciled as chunked would read an empty manifest and delete
+// the whole tree. (AAD domain separation also makes that read fail, but this
+// gives the actionable message.)
 func checkSyncFormat(meta api.Metadata) error {
-	if meta.Packed {
-		return errPackRemoved
-	}
 	if !meta.Tree {
 		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 	}

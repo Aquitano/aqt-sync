@@ -80,8 +80,7 @@ browser runtimes are self-hosted, and the fragment is never sent to the server.
 
 Tracked folders default to **private**. `aqt share <folder-id>` flips a chunked folder
 public and mints a fragment link, and a link holder clones or subpath-pulls it
-read-only through the public object endpoint. Folders written by the removed
-pack-and-seal format are refused.
+read-only through the public object endpoint.
 
 Run locally: `go run ./cmd/aqt-server` (listens on `127.0.0.1:8080` and stores under
 `./aqt-data`; `AQT_DATA_DIR` and `AQT_ADDR` override), then

@@ -214,22 +214,6 @@ func TestTUIExitNotes(t *testing.T) {
 	}
 }
 
-// A torn tree (interrupted pack pull) outranks every other verdict: the local
-// change counts are not the user's edits, and the CLI's status says so too.
-func TestTUIStatusVerdictTornPull(t *testing.T) {
-	m := testModel(t)
-	m.local = testChanges([]string{"a"}, nil)
-	m.conflicts = []string{"x.conflict-h-1"}
-	m.torn = marker[interruptedPull]{Payload: interruptedPull{Version: 7}, Present: true}
-	txt, style := m.statusVerdict()
-	if !strings.Contains(txt, "interrupted pull") || !strings.Contains(txt, "7") {
-		t.Fatalf("torn verdict = %q", txt)
-	}
-	if style.GetForeground() != tuiStyleErr.GetForeground() {
-		t.Fatal("torn verdict not error-styled")
-	}
-}
-
 func TestTUIBoxGeometry(t *testing.T) {
 	box := tuiBox("Files", "a\nb", 30, 6, true)
 	lines := strings.Split(box, "\n")

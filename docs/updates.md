@@ -47,12 +47,12 @@ checked against the size and digest that signed manifest declares.
 
 ```json
 {
-  "currentVersion": "v0.5.0",
-  "availableVersion": "v0.6.0",
+  "currentVersion": "v0.7.0",
+  "availableVersion": "v0.8.0",
   "channel": "stable",
   "status": "updateAvailable",
-  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.6.0",
-  "publishedAt": "2026-08-09T21:47:59Z",
+  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.8.0",
+  "publishedAt": "2026-08-16T17:30:02Z",
   "installed": false
 }
 ```
@@ -276,17 +276,17 @@ Published as the release asset `aqt-update.json`:
 {
   "schema": 1,
   "channel": "stable",
-  "version": "v0.6.0",
-  "publishedAt": "2026-08-09T21:47:59Z",
-  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.6.0",
+  "version": "v0.8.0",
+  "publishedAt": "2026-08-16T17:30:02Z",
+  "releaseUrl": "https://github.com/Aquitano/aqt-sync/releases/tag/v0.8.0",
   "artifacts": [
     {
       "os": "linux",
       "arch": "amd64",
-      "name": "aqt_v0.6.0_linux_amd64.tar.gz",
-      "size": 8123456,
+      "name": "aqt_v0.8.0_linux_amd64.tar.gz",
+      "size": 4622204,
       "sha256": "3b1f…",
-      "url": "https://github.com/Aquitano/aqt-sync/releases/download/v0.6.0/aqt_v0.6.0_linux_amd64.tar.gz"
+      "url": "https://github.com/Aquitano/aqt-sync/releases/download/v0.8.0/aqt_v0.8.0_linux_amd64.tar.gz"
     }
   ]
 }
@@ -356,11 +356,15 @@ operational private half exists only as the `AQT_UPDATE_SIGNING_KEYS` secret in 
 access-controlled maintainer key and outside the repository; never store the seed as
 plaintext, in agent memory, or in an ordinary shared password vault.
 
-### Provisioning (one-time)
+### Provisioning a key
 
-1. `go run ./cmd/updatectl keygen --comment "release signing key 2" --added-in v0.4.1`
-   on a trusted machine. It prints the key id, the public key, the private key, and
-   the `trustroots.go` entry to paste.
+1. `go run ./cmd/updatectl keygen --comment "release signing key 3" --added-in vX.Y.Z`
+   on a trusted machine. Replace `vX.Y.Z` with the actual version of the first release
+   that will carry the key before running it — the value is copied verbatim into the
+   `trustroots.go` entry, so a literal placeholder ships as one. The comment names the
+   key in `trustroots.go` (the shipped root is "release signing key 2", added in
+   v0.4.1). It prints the key id, the public key, the private key, and the
+   `trustroots.go` entry to paste.
 2. Store the private key as the `AQT_UPDATE_SIGNING_KEYS` secret in the
    `release-signing` environment. Never put it in a repository secret or a plaintext
    file.
@@ -431,12 +435,13 @@ installation. A forged manifest can misreport a version, not install anything.
 ## Verifying a release by hand
 
 ```
-gh release download v0.6.0 --pattern 'aqt-update.json*' --dir /tmp/aqt
+gh release download --pattern 'aqt-update.json*' --dir /tmp/aqt
 go run ./cmd/updatectl verify --in /tmp/aqt/aqt-update.json --sig /tmp/aqt/aqt-update.json.sig
 ```
 
-`verify` uses the trust roots compiled into the checkout. Pass `--pubkey <base64>` to
-check against a specific key instead.
+Without a tag, `gh release download` takes the latest release; name a tag to check an
+older one. `verify` uses the trust roots compiled into the checkout. Pass
+`--pubkey <base64>` to check against a specific key instead.
 
 ## Privacy
 

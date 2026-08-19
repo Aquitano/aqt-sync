@@ -298,12 +298,11 @@ var (
 	AADBlob          = []byte("aqt-blob-v1")      // resource body (file bytes or chunked-folder manifest root)
 	AADMeta          = []byte("aqt-meta-v1")      // resource metadata
 	AADSnapshotLabel = []byte("aqt-snaplabel-v1") // a snapshot's optional user label, sealed under the resource content key
-	// AADPack and AADPackRoot belong to the removed pack-and-seal folder format.
-	// The constants stay reserved: old ciphertext sealed under them still exists,
-	// so these strings must never be reassigned to a new domain.
-	AADPack        = []byte("aqt-pack-v1")      // historical: a pack-and-seal tarball segment
-	AADPackRoot    = []byte("aqt-packroot-v1")  // historical: a pack-and-seal folder's sealed root blob
-	AADTreeRoot    = []byte("aqt-treeroot-v1")  // a Merkle-DAG folder's sealed root blob (distinct from AADBlob, like AADPackRoot)
+	// Tombstone: "aqt-pack-v1" and "aqt-packroot-v1" were the removed pack-and-seal
+	// folder format's tags. The constants are gone, but the strings stay retired
+	// forever — reassigning either to a new role would let any surviving packed
+	// ciphertext open under the new meaning.
+	AADTreeRoot    = []byte("aqt-treeroot-v1")  // a Merkle-DAG folder's sealed root blob (distinct from AADBlob, so a root cannot be swapped for a body)
 	AADGitRefsRoot = []byte("aqt-gitrefs-v1")   // a git-remote resource's sealed refs and bundle-chain root
 	AADGitBundle   = []byte("aqt-gitbundle-v1") // one opaque, per-push-unique git bundle segment
 	aadKeyWrap     = []byte("aqt-keywrap-v1")   // content key wrapped under the master key

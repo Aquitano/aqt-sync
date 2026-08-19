@@ -10,11 +10,10 @@ import (
 )
 
 // FuzzDecodeBase feeds arbitrary bytes to the base.json decoder, which reads a control
-// file that a hostile actor with local access could tamper with. It probes for a sealed
-// envelope and otherwise falls through to a plaintext manifest, so the invariant is that
-// no byte sequence panics either branch. Keychain access is disabled so the sealed
-// branch resolves deterministically to a decrypt failure rather than reaching the host
-// keyring.
+// file that a hostile actor with local access could tamper with. The invariant is that
+// no byte sequence panics: anything but an openable sealed envelope is an error.
+// Keychain access is disabled so the sealed branch resolves deterministically to a
+// decrypt failure rather than reaching the host keyring.
 func FuzzDecodeBase(f *testing.F) {
 	f.Add([]byte(`{"entries":[{"path":"a","hash":"x"}]}`))
 	f.Add([]byte(`{"sealed":{"nonce":"AAAA","ciphertext":"AAAA"}}`))

@@ -160,12 +160,8 @@ func remoteSide(res api.GetResourceResponse) diffSide {
 }
 
 // remoteManifest reconstructs the remote folder's manifest without writing anything
-// to disk. A chunked folder is read straight from its Merkle DAG, reusing the base
-// tree's node ciphertexts so an unchanged subtree costs no fetch. A pack-and-seal
-// folder carries no per-file remote metadata at all — its whole tree is one opaque
-// stream — so the only truthful per-entry answer comes from streaming the segments
-// back and hashing them in memory: it costs the folder's full download, but still
-// touches no disk.
+// to disk: the folder is read straight from its Merkle DAG, reusing the base tree's
+// node ciphertexts so an unchanged subtree costs no fetch.
 func remoteManifest(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterKey, base syncengine.Manifest) (syncengine.Manifest, error) {
 	var zero syncengine.Manifest
 	if res.WrappedKey == nil {
@@ -182,9 +178,6 @@ func remoteManifest(cl *client.Client, res api.GetResourceResponse, mk crypto.Ma
 	}
 	if meta.Kind != api.KindFolder {
 		return zero, errors.New("remote resource is not a folder")
-	}
-	if meta.Packed {
-		return zero, errPackRemoved
 	}
 	if !meta.Tree {
 		return zero, errors.New("unsupported remote folder format")

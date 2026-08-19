@@ -22,11 +22,6 @@ type Config struct {
 	// aqt already rejects fields it does not know.
 	Version int `json:"version,omitempty"`
 
-	// Pack named the removed pack-and-seal format (the whole tree tarred into one
-	// sealed blob). The field is still parsed so a stale config is refused with a
-	// recovery hint instead of silently re-routing the folder as chunked.
-	Pack bool `json:"pack"`
-
 	// ChunkProfile pins one content-defined chunking granularity for every file in the
 	// folder, overriding the default size-scaling. "large" is the big-binary profile
 	// (64K/256K/1M, ~256K average) and "huge" the coarsest (256K/1M/4M, ~1M average);
