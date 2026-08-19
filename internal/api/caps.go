@@ -4,15 +4,22 @@ package api
 
 // Capability is a small, monotonically increasing integer describing which
 // encrypted-resource formats a client can read. Bump it whenever a write format
-// becomes unreadable by an older release, so the server can turn an under-capable
-// client's read into an actionable HTTP 426 "upgrade required" instead of letting
-// it surface as an opaque AEAD failure.
+// becomes unreadable by an older release, so the server can turn a read it cannot
+// serve into an actionable HTTP 426 "upgrade required" instead of letting it
+// surface as an opaque AEAD failure.
+//
+// The ladder stages the next format break; it is not a support window. There is one
+// deployment, and its server and clients upgrade together, so the rungs below
+// ClientCapability are history — they record which release introduced a format, not
+// a peer that is still served.
 const (
 	// CapabilityBaseline is v0.1.0: unbound (v1 AAD) resource roots and metadata.
+	// Nothing writes this format any more; it is also what an undeclared min_client
+	// and a request without a capability header are read as.
 	CapabilityBaseline = 1
 	// CapabilityIDBinding is v0.2.0: resource-id-bound (v2 AAD) roots and metadata.
 	CapabilityIDBinding = 2
-	// CapabilityRootKeyRotation is the first release that can rotate an account
+	// CapabilityRootKeyRotation is the first release that could rotate an account
 	// root key and migrate the identities derived from it.
 	CapabilityRootKeyRotation = 3
 	// CapabilityGitRemote is the first release that understands sealed Git remote
@@ -23,8 +30,9 @@ const (
 )
 
 // CapabilityHeader carries a request's client capability. Missing or malformed
-// values are treated as baseline-only: legacy clients can never receive a format
-// they cannot read.
+// values are read as baseline: a caller that does not announce itself — a bare curl
+// of a public link, or any tool that is not aqt — is never handed a format it may
+// not be able to read.
 const CapabilityHeader = "X-Aqt-Capability"
 
 // ErrCodeUpgradeRequired is the stable ErrorResponse.Code the server returns with an

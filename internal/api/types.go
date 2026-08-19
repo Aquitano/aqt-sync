@@ -304,9 +304,8 @@ type DeleteAccountResponse struct {
 // tax.
 //
 // MinClient declares the lowest client capability that can read the sealed formats
-// this write stores (Capability* constants). A create/update leaves it 0 for a
-// baseline (v1) write; a server treats 0 as CapabilityBaseline and never lets a
-// client declare above its own capability.
+// this write stores (Capability* constants). An undeclared 0 is stored as
+// CapabilityBaseline, and no client may declare above its own capability.
 //
 // ExpireSeconds and MaxReads carry an optional server-enforced lifecycle policy for a
 // public link. ExpireSeconds is a TTL in seconds (not an absolute time, so server
@@ -512,8 +511,8 @@ type GetResourceResponse struct {
 	Owner    string `json:"owner,omitempty"`
 	Version  int    `json:"version"`
 	// MinClient is the lowest client capability that can read this resource's sealed
-	// formats, so a current client can explain an incompatible remote instead of
-	// failing to decrypt. 0 from an older server means "unknown" (treat as baseline).
+	// formats, so a client can explain an unreadable resource instead of failing to
+	// decrypt. An absent value reads as 0 and is treated as baseline.
 	MinClient int   `json:"minClient,omitempty"`
 	CompactAt int   `json:"compactAt,omitempty"`
 	ExpiresAt int64 `json:"expiresAt,omitempty"`
@@ -550,8 +549,8 @@ type ResourceListItem struct {
 	// MinClient is the lowest client capability that can read this resource's sealed
 	// formats. The list itself never gates on it — a listing that 426'd would hide the
 	// account's own resources — so it is echoed instead, and a client below the bar
-	// says which release the row needs rather than rendering it as unreadable. 0 from
-	// a server predating this field means "unknown" (treat as baseline).
+	// says which release the row needs rather than rendering it as unreadable. An
+	// absent value reads as 0 and is treated as baseline.
 	MinClient int `json:"minClient,omitempty"`
 	// AutoSnapshot reports whether the server's scheduled snapshot job covers this
 	// resource, so `snapshot auto` can show coverage without a per-resource fetch.

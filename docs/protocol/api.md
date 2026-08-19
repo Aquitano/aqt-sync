@@ -40,7 +40,8 @@ names the release the row needs rather than rendering it as unreadable.
 offered representations is supported the server returns `406`. Resource writes accept
 the versioned JSON or envelope media type and return `415` for unsupported or
 malformed `Content-Type` values. The unversioned `application/json` and
-`application/octet-stream` forms remain compatibility aliases for pre-v1 clients.
+`application/octet-stream` forms stay accepted as aliases, so a hand-rolled request
+(`curl`) does not have to name a versioned media type.
 Public DTO fields are lower camel case and do not depend on Go field names.
 
 The resource envelope is a four-byte unsigned big-endian JSON-header length, a
@@ -97,8 +98,8 @@ DELETE /v1/account                   Erase the account and everything under it. 
                                          grants, bytes?, fileErrors? }  (a receipt; every token dies)
 
 POST   /v1/resources                 Create (server-assigned id). Same body/echo as PUT below.
-PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). Also still
-                                     accepts a create (id omitted) so an older client keeps working.
+PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). An id-less body
+                                     is also accepted here and dispatched as a create.
                                      Body: { blob, encryptedMeta, visibility,
                                              wrappedKey?, expireSeconds?, maxReads? }  // blob = { nonce, ciphertext };
                                                                                        // wrappedKey only for private;
@@ -354,8 +355,8 @@ that sees both must prefer the header.
   treat throttling as "try again later" rather than a permanent failure.
 
 Neither signal changes an encrypted format, so `api.ClientCapability` is not bumped.
-An older server that sends only `Retry-After` interoperates unchanged; an older
-client that ignores `retryAfterSeconds` reads the header as it always did.
+`Retry-After` is authoritative; `retryAfterSeconds` is the body fallback for a caller
+that only parses JSON.
 
 ## Public-link lifecycle
 
