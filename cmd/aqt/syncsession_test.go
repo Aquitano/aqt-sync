@@ -3,7 +3,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,12 +10,11 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// TestCheckSyncFormat pins the server-truth routing: a packed resource is the
-// removed pack-and-seal format (refused with the recovery hint), a legacy folder
-// without the Tree flag is unsupported, and a tree folder is accepted.
+// TestCheckSyncFormat pins the server-truth routing: a pre-tree folder is refused
+// rather than reconciled as an empty chunked manifest (the silent tree-wipe), and a
+// tree folder is accepted.
 func TestCheckSyncFormat(t *testing.T) {
 	cases := []struct {
 		name string
@@ -24,7 +22,6 @@ func TestCheckSyncFormat(t *testing.T) {
 		want string // substring of the expected error; empty means accepted
 	}{
 		{"chunked tree folder", api.Metadata{Tree: true}, ""},
-		{"packed folder", api.Metadata{Packed: true}, "no longer supported"},
 		{"legacy folder", api.Metadata{}, "unsupported legacy format"},
 	}
 	for _, tc := range cases {
@@ -70,82 +67,6 @@ func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 	}
 }
 
-// markResourcePacked flips a tracked folder's sealed metadata to the removed
-// pack-and-seal format server-side, emulating a resource written by an old client.
-func markResourcePacked(t *testing.T, root string) {
-	t.Helper()
-	st, err := loadState(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cl, prof, err := authedClient()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mk.Wipe()
-	res, err := cl.GetResource(st.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, st.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	meta.Packed, meta.Tree = true, false
-	plain, err := json.Marshal(meta)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sealed, err := crypto.SealBound(plain, ck, crypto.AADMeta, st.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cl.UpdateResourceMetadata(st.ID, api.UpdateResourceMetadataRequest{
-		EncryptedMeta: sealed, ExpectedVersion: res.Version,
-	}); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestOpenRemoteRefusesPackedResource drives the shared per-attempt prologue
-// against a resource whose server-side metadata names the removed pack-and-seal
-// format: the sync must refuse with the recovery hint instead of reconciling the
-// opaque blob as an empty chunked manifest (the silent tree-wipe).
-func TestOpenRemoteRefusesPackedResource(t *testing.T) {
-	h := newE2E(t)
-	origin := t.TempDir()
-	h.init(origin)
-	writeTree(t, origin, "a.txt", "A")
-	h.sync(origin)
-	markResourcePacked(t, origin)
-
-	sess, err := openSyncSession(origin, syncOptions{})
-	if err != nil {
-		t.Fatalf("openSyncSession: %v", err)
-	}
-	defer sess.Wipe()
-	if _, err := sess.openRemote(syncOptions{}); !errors.Is(err, errPackRemoved) {
-		t.Fatalf("openRemote on a packed resource = %v, want errPackRemoved", err)
-	}
-
-	// The full sync path refuses the same way and leaves local files untouched.
-	if err := runSync(origin, syncOptions{}); !errors.Is(err, errPackRemoved) {
-		t.Fatalf("sync of a packed resource = %v, want errPackRemoved", err)
-	}
-	if got := readTree(t, origin, "a.txt"); got != "A" {
-		t.Fatalf("refused sync touched local files: %q", got)
-	}
-}
-
 // TestOpenRemoteRollbackOutranksFormatMismatch pins the ordering the shared prologue
 // unified on: a rolled-back server is a data-integrity signal about the server, so it
 // must be reported before any format refusal.
@@ -183,9 +104,11 @@ func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 	}
 }
 
-// TestSyncRefusesStalePackConfig: a stray pack=true in .aqtconfig names the removed
-// format and is refused up front with the recovery hint, before any server call.
-func TestSyncRefusesStalePackConfig(t *testing.T) {
+// TestSyncRefusesUnparsableConfig: .aqtconfig is synced content, so a bad one can
+// arrive from another device. Sync must refuse it up front — before any server work
+// — rather than silently falling back to defaults. `{"pack": true}` is the stale
+// config left by the removed pack-and-seal format; it is now just an unknown field.
+func TestSyncRefusesUnparsableConfig(t *testing.T) {
 	h := newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -195,8 +118,9 @@ func TestSyncRefusesStalePackConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(origin, ".aqtconfig"), []byte(`{"pack": true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := runSync(origin, syncOptions{}); !errors.Is(err, errPackRemoved) {
-		t.Fatalf("sync with stale pack config = %v, want errPackRemoved", err)
+	err := runSync(origin, syncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "pack") {
+		t.Fatalf("sync with an unparsable config = %v, want an error naming the offending field", err)
 	}
 	if got := readTree(t, origin, "keep.txt"); got != "v1" {
 		t.Fatalf("refused sync touched local files: %q", got)

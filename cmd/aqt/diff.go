@@ -97,13 +97,6 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	if err != nil {
 		return err
 	}
-	// Same warning status prints: a torn tree renders as ordinary edits otherwise.
-	if torn, err := loadMarker[interruptedPull](root, pullMarkerFile); err != nil {
-		return err
-	} else if torn.Present {
-		fmt.Fprintf(os.Stderr, "warning: a pull was interrupted here (version %d), so this diff "+
-			"includes a half-applied remote version, not just local edits; `aqt sync` finishes the pull\n", torn.Payload.Version)
-	}
 	cl, prof, err := authedClient()
 	if err != nil {
 		return err

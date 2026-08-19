@@ -268,7 +268,7 @@ func TestOpenBoundFallsBackToUnbound(t *testing.T) {
 func TestBoundAADDisjointAcrossRoles(t *testing.T) {
 	// The id-bound tags must stay disjoint per role and never collide with a v1
 	// tag, or the domain separation the roles exist for silently vanishes.
-	roles := [][]byte{AADBlob, AADMeta, AADSnapshotLabel, AADPack, AADPackRoot, AADTreeRoot}
+	roles := [][]byte{AADBlob, AADMeta, AADSnapshotLabel, AADTreeRoot, AADGitRefsRoot, AADGitBundle}
 	seen := map[string]bool{}
 	for _, role := range roles {
 		seen[string(role)] = true
@@ -279,6 +279,17 @@ func TestBoundAADDisjointAcrossRoles(t *testing.T) {
 			t.Fatalf("bound AAD %q collides", bound)
 		}
 		seen[bound] = true
+	}
+	// The removed pack-and-seal format's tags are retired, not free: ciphertext
+	// sealed under them may still exist, so handing either string to a new role
+	// would let it open under the new meaning.
+	live := append([][]byte{aadKeyWrap, aadGated, aadRootWrap}, roles...)
+	for _, retired := range []string{"aqt-pack-v1", "aqt-packroot-v1"} {
+		for _, tag := range live {
+			if string(tag) == retired {
+				t.Fatalf("retired AAD tag %q was reassigned to a live role", retired)
+			}
+		}
 	}
 }
 

@@ -199,14 +199,11 @@ func runInit(dir string, gitChoice *bool) error {
 		}
 	}
 
-	cfg, err := syncengine.LoadConfig(abs)
-	if err != nil {
+	// Parse .aqtconfig before anything remote exists, so a broken config fails here
+	// rather than on the first sync. Nothing in init consults its values.
+	if _, err := syncengine.LoadConfig(abs); err != nil {
 		return err
 	}
-	if cfg.Pack {
-		return errPackRemoved
-	}
-	_ = cfg
 
 	// Stage the local control state before touching the server: creating .aqt and
 	// the starter ignore up front surfaces permission problems while there is still
@@ -308,14 +305,6 @@ func runStatus(dir string, opts statusOptions) error {
 	// manifest. Conflicts (both sides changed) still surface only during `sync`.
 	ch := computeLocalChanges(local, base)
 
-	// An interrupted pack pull leaves a tree that is part remote and part stale, and
-	// the changes above render it as ordinary local edits. Say which it is, or the
-	// user acts on a diff that is not theirs.
-	torn, err := loadMarker[interruptedPull](root, pullMarkerFile)
-	if err != nil {
-		return err
-	}
-
 	if flagJSON {
 		out := map[string]any{
 			"clean":    ch.total() == 0,
@@ -329,9 +318,6 @@ func runStatus(dir string, opts statusOptions) error {
 			// it is, so a caller never has to guess why a path is "modified".
 			"changes": nonNilChanges(ch.changes),
 		}
-		if torn.Present {
-			out["interruptedPull"] = map[string]any{"version": torn.Payload.Version}
-		}
 		if !opts.offline {
 			if rep := collectIncoming(root, base); rep != nil {
 				out["incoming"] = rep
@@ -340,10 +326,6 @@ func runStatus(dir string, opts statusOptions) error {
 		return printJSON(out)
 	}
 
-	if torn.Present {
-		fmt.Fprintf(os.Stderr, "warning: a pull was interrupted here (version %d), so the changes "+
-			"below are a half-applied remote version, not local edits; `aqt sync` finishes the pull\n", torn.Payload.Version)
-	}
 	if ch.total() == 0 {
 		fmt.Println("clean (no local changes since last sync)")
 	} else {
@@ -622,18 +604,7 @@ var errSyncNoBase = errors.New("no last-synced state found (.aqt/base.json missi
 // documented "sync conflict" exit code (4).
 var (
 	errConflictsRemain = errors.New("conflicts changed on both sides; resolve them or re-run with --force (local wins)")
-
-	// errPackRemoved explains the removed pack-and-seal format and how to recover
-	// data still stored in it. The encrypted Git remote replaced its main use case
-	// (syncing Git internals); the format's remaining cost — whole-folder
-	// re-uploads, no dedup, a parallel branch through sync/clone/share/diff — was
-	// not worth its narrow structure-hiding benefit.
-	errPackRemoved = errors.New("pack-and-seal folders are no longer supported: " +
-		"if only .aqtconfig carries a stale \"pack\": true (the folder itself is chunked), removing that " +
-		"line is the whole fix; if the resource is actually packed, recover the data by cloning it with " +
-		"an aqt release that still reads the format (v0.5.x or earlier) and pushing the tree again as a " +
-		"normal chunked folder")
-	errSyncRace = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
+	errSyncRace        = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
 )
 
 // errRollback marks a remote whose version regressed below what this machine has
@@ -750,11 +721,6 @@ func runSync(dir string, opts syncOptions) error {
 	cfg, err := syncengine.LoadConfig(root)
 	if err != nil {
 		return err
-	}
-	// A stray pack=true names the removed pack-and-seal format; refuse with the
-	// recovery hint rather than silently syncing the tree as chunked.
-	if cfg.Pack {
-		return errPackRemoved
 	}
 	mode, err := effectiveConflictMode(opts, cfg)
 	if err != nil {
@@ -1565,7 +1531,7 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		return err
 	}
 	if adopt {
-		return adoptClone(id, abs, prof, res.Version, meta)
+		return adoptClone(id, abs, prof, res.Version)
 	}
 	// Content and control state are staged together and committed with one rename,
 	// so an interrupted clone leaves no destination at all rather than a partial
@@ -1574,7 +1540,7 @@ func runClone(ref, dir string, adopt bool, password string) error {
 	profileName, account, fingerprint := stateIdentity(prof)
 	if err := materializeStaged(abs, func(staging string) error {
 		var mErr error
-		base, mErr = materializeClone(cl, staging, res, ck, meta)
+		base, mErr = materializeClone(cl, staging, res, ck)
 		if mErr != nil {
 			return mErr
 		}
@@ -1640,7 +1606,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 	if meta.Kind != api.KindFolder {
 		return fmt.Errorf("%s is a single file, not a folder; `aqt pull` fetches it", meta.Name)
 	}
-	if meta.Packed || !meta.Tree {
+	if !meta.Tree {
 		return errors.New("this folder's format cannot be read through a share; ask the owner to re-share it as a chunked folder")
 	}
 	// Decrypt the root before creating the destination, so a wrong password or
@@ -1686,23 +1652,14 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 // surface as conflicts, exactly like `sync --reconcile`. Tracking is written before
 // the reconcile so it survives a conflict abort: the user can resolve and re-run
 // `aqt sync --reconcile`.
-func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Metadata) error {
-	// Hash-level reconcile does not apply to a sealed pack (whole-folder last-writer-wins);
-	// adopting one would compare an empty base against opaque segments.
-	if meta.Packed {
-		return errors.New("cannot adopt a pack-and-seal folder; use plain clone into a fresh directory")
-	}
+func adoptClone(id, abs string, prof *identity.Profile, version int) error {
 	if _, err := os.Stat(filepath.Join(abs, syncengine.ControlDir)); err == nil {
 		return errors.New("already a tracked folder")
 	}
-	// .aqtconfig is itself synced content, so an adopted copy may carry one; a
-	// stale pack=true names a removed format and is refused with the recovery hint.
-	cfg, err := syncengine.LoadConfig(abs)
-	if err != nil {
+	// .aqtconfig is itself synced content, so an adopted copy may carry one; parse it
+	// before any tracking is written, so a broken config fails without side effects.
+	if _, err := syncengine.LoadConfig(abs); err != nil {
 		return err
-	}
-	if cfg.Pack {
-		return errPackRemoved
 	}
 	if err := os.MkdirAll(abs, 0o755); err != nil {
 		return err
@@ -1735,32 +1692,23 @@ func adoptClone(id, abs string, prof *identity.Profile, version int, meta api.Me
 	return runSync(abs, syncOptions{reconcile: true, conflicts: "block"})
 }
 
-// validateCloneRoot confirms the resource's sealed root decrypts under ck, using the
-// root type the metadata selects. The AAD is domain-separated per type, so a folder
-// mis-flagged fails here rather than opening as an empty tree. A folder with neither
-// flag predates the v2 tree format and is no longer supported.
+// validateCloneRoot confirms the resource's sealed root decrypts under ck as a tree
+// root. The AAD is domain-separated per root type, so a folder mis-flagged as a tree
+// fails here rather than opening as an empty tree.
 func validateCloneRoot(blob crypto.SealedBlob, ck crypto.ContentKey, meta api.Metadata, resourceID string) error {
-	switch {
-	case meta.Packed:
-		return errPackRemoved
-	case meta.Tree:
-		if _, err := syncengine.OpenTreeRoot(blob, ck, resourceID); err != nil {
-			return fmt.Errorf("decrypt folder root: %w", err)
-		}
-		return nil
-	default:
+	if !meta.Tree {
 		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
 	}
+	if _, err := syncengine.OpenTreeRoot(blob, ck, resourceID); err != nil {
+		return fmt.Errorf("decrypt folder root: %w", err)
+	}
+	return nil
 }
 
 // materializeClone writes a freshly cloned folder's content under abs and returns
 // the manifest to record as its base: it reassembles the Merkle DAG, streams each
 // file from its packs, and materializes (empty) directories with their modes.
-// Packed resources were refused by validateCloneRoot before this runs.
-func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse, ck crypto.ContentKey, meta api.Metadata) (syncengine.Manifest, error) {
-	if meta.Packed {
-		return syncengine.Manifest{}, errPackRemoved
-	}
+func materializeClone(cl *client.Client, abs string, res api.GetResourceResponse, ck crypto.ContentKey) (syncengine.Manifest, error) {
 	manifest, err := openRemoteTree(cl, res.Blob, ck, res.ID)
 	if err != nil {
 		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)

@@ -207,7 +207,7 @@ carries, and how large they are. Nothing in the design hides that.
 AEAD additional-data domain separation across blob, wrap, and gated-wrap has been in
 since v1. The resource id is bound into the AAD as well (`SealBound`/`OpenBound`, tag
 form `aqt-<role>-v2:<id>`) over the metadata, the inline body, the
-`FileRoot`/`TreeRoot`/`PackRoot` resource blobs, and snapshot labels — so a server
+`FileRoot`/`TreeRoot` resource blobs, and snapshot labels — so a server
 swapping whole records between ids fails the tag check, even though a record's blob,
 meta, and wrapped key are mutually consistent under the per-resource key.
 
