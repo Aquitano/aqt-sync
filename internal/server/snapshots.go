@@ -335,12 +335,6 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if anchored {
 		return ErrSnapshotAnchored
 	}
-	// snapshot_chunks rows exist only on data dirs written by a pre-client-GC
-	// server (snapshots no longer copy the resource's refs); clear any so the
-	// objects FK never blocks a later chunk delete.
-	if _, err := tx.Exec(`DELETE FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID); err != nil {
-		return err
-	}
 	res, err := tx.Exec(`DELETE FROM snapshots WHERE snapshot_id = ? AND owner_handle = ? AND anchored = 0`, snapshotID, owner)
 	if err != nil {
 		return err

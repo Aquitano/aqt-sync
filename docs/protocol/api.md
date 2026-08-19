@@ -140,7 +140,8 @@ GET    /v1/account/usage             → { storageBytes, quotaBytes?, packs, obj
                                      devices, max*? }  What `aqt usage` reports, including the caps that
                                      actually apply to this account.
 
-# Snapshots (owner token): immutable, GC-pinned copies of a resource version. The
+# Snapshots (owner token): immutable copies of a resource version, held as roots by
+# a client prune's reachability walk. The
 # ciphertext is reused, not re-uploaded, and min_client is copied from the source at
 # capture time so a restore is gated exactly like a resource read:
 POST   /v1/snapshots                 Body: { resourceId, encryptedLabel?, anchor?, automatic? } → SnapshotInfo

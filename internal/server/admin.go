@@ -326,7 +326,6 @@ func (s *Store) deleteAccount(owner string, authVerifier []byte) (DeletedAccount
 		{"grants", `DELETE FROM grants WHERE owner_handle = ? OR grantee_handle = ?`, 2, &acct.Grants},
 		// Both directions: a block the deleted account set, and any block set against it.
 		{"share_blocks", `DELETE FROM share_blocks WHERE grantee_handle = ? OR owner_handle = ?`, 2, nil},
-		{"snapshot_chunks", `DELETE FROM snapshot_chunks WHERE owner_handle = ?`, 1, nil},
 		{"resource_chunks", `DELETE FROM resource_chunks WHERE owner_handle = ?`, 1, nil},
 		{"snapshots", `DELETE FROM snapshots WHERE owner_handle = ?`, 1, &acct.Snapshots},
 		{"resources", `DELETE FROM resources WHERE owner_handle = ?`, 1, &acct.Resources},

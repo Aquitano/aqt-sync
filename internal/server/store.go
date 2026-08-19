@@ -529,6 +529,21 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	 CREATE INDEX IF NOT EXISTS idx_grants_owner ON grants(owner_handle);
 	 CREATE INDEX IF NOT EXISTS idx_devices_owner ON devices(owner_handle);
 	 CREATE INDEX IF NOT EXISTS idx_snapshots_resource_version ON snapshots(resource_id, version_captured);`,
+	// 21: client-managed GC. Reachability moved into the client (`aqt prune`), whose
+	// walk treats every snapshot as a root, so snapshot_chunks — the pin set the
+	// server-side sweep unioned in — has no reader left. live_count counted a pack's
+	// rooted objects; without server-side root tracking an object row is live until
+	// its owner deletes it, making the column obj_count under another name. The
+	// recount trues up counters on a data dir whose values still exclude objects the
+	// old root tables did not reach.
+	`DROP INDEX IF EXISTS idx_snapshot_chunks_chunk;
+	 DROP TABLE IF EXISTS snapshot_chunks;
+	 ALTER TABLE packs DROP COLUMN live_count;
+	 UPDATE packs SET
+	   obj_count = (SELECT count(*) FROM objects o
+	                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
+	   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
+	                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id), 0);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the

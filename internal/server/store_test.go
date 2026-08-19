@@ -1321,20 +1321,20 @@ func TestConcurrentGCKeepsLivePack(t *testing.T) {
 	}
 }
 
-// assertPackCounters recomputes every pack's obj_count/live_count/live_bytes
-// straight from the object rows and compares them to the maintained columns, so a
-// write path that forgot its recount fails the test that used it. The reads run
-// on the read pool: the single writer connection cannot serve a nested query
-// while a cursor is open.
+// assertPackCounters recomputes every pack's obj_count/live_bytes straight from
+// the object rows and compares them to the maintained columns, so a write path
+// that forgot its recount fails the test that used it. The reads run on the read
+// pool: the single writer connection cannot serve a nested query while a cursor
+// is open.
 func (s *Store) assertPackCounters(t *testing.T, owner string) {
 	t.Helper()
 	type counters struct {
-		objCount, liveCount int
-		liveBytes           int64
+		objCount  int
+		liveBytes int64
 	}
 	got := map[string]counters{}
 	rows, err := s.rdb.Query(
-		`SELECT pack_id, obj_count, live_count, live_bytes FROM packs WHERE owner_handle = ?`, owner,
+		`SELECT pack_id, obj_count, live_bytes FROM packs WHERE owner_handle = ?`, owner,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -1344,7 +1344,7 @@ func (s *Store) assertPackCounters(t *testing.T, owner string) {
 			id string
 			c  counters
 		)
-		if err := rows.Scan(&id, &c.objCount, &c.liveCount, &c.liveBytes); err != nil {
+		if err := rows.Scan(&id, &c.objCount, &c.liveBytes); err != nil {
 			rows.Close()
 			t.Fatal(err)
 		}
@@ -1359,14 +1359,9 @@ func (s *Store) assertPackCounters(t *testing.T, owner string) {
 	for id, c := range got {
 		var want counters
 		if err := s.rdb.QueryRow(
-			`SELECT count(*) FROM objects o WHERE o.owner_handle = ? AND o.pack_id = ?`, owner, id,
-		).Scan(&want.objCount); err != nil {
-			t.Fatal(err)
-		}
-		if err := s.rdb.QueryRow(
 			`SELECT count(*), COALESCE(sum(o.length), 0) FROM objects o
 			 WHERE o.owner_handle = ? AND o.pack_id = ?`, owner, id,
-		).Scan(&want.liveCount, &want.liveBytes); err != nil {
+		).Scan(&want.objCount, &want.liveBytes); err != nil {
 			t.Fatal(err)
 		}
 		if c != want {

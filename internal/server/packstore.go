@@ -70,12 +70,11 @@ func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) 
 	return nil
 }
 
-// recountPacks recomputes obj_count/live_count/live_bytes for the named packs from
-// the object rows as they stand inside the caller's transaction. A stored object
-// is live until its owner deletes its row (reachability is the client's job), so
-// live_count tracks obj_count and live_bytes the rows' total — kept as separate
-// columns because the sweep and repack select on them, and because rows written by
-// a pre-client-GC server carry root-table-derived values until their next recount.
+// recountPacks recomputes obj_count/live_bytes for the named packs from the
+// object rows as they stand inside the caller's transaction. A stored object is
+// live until its owner deletes its row (reachability is the client's job), so the
+// counters are simply the rows' count and total length; the sweep and repack
+// select on them so their plans never scan the objects table.
 func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
 	const batch = 400
 	for start := 0; start < len(packIDs); start += batch {
@@ -89,8 +88,6 @@ func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
 		if _, err := tx.Exec(
 			`UPDATE packs SET
 			   obj_count = (SELECT count(*) FROM objects o
-			                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
-			   live_count = (SELECT count(*) FROM objects o
 			                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
 			   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
 			                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id), 0)
@@ -901,11 +898,11 @@ func (s *Store) ListOwnerChunks(owner, cursor string) ([]string, string, error) 
 // than minAge are dropped — a young pack's created_at was re-armed by CheckChunks
 // on behalf of a push that is about to reference it, and deleting under it would
 // strand that push's committed manifest. Skipped-young ids are counted, not
-// failed, so a pruner retries them on its next run. resource_chunks and
-// snapshot_chunks rows naming a dropped id are removed in the same transaction —
-// a reachable id is never handed to this function by a correct pruner, so such
-// rows are stale scope, and leaving them would trip the objects FK. Unknown ids
-// are ignored — another device's prune got there first.
+// failed, so a pruner retries them on its next run. resource_chunks rows naming a
+// dropped id are removed in the same transaction — a reachable id is never handed
+// to this function by a correct pruner, so such rows are stale scope, and leaving
+// them would trip the objects FK. Unknown ids are ignored — another device's
+// prune got there first.
 //
 // The GC lock serializes this against the pack sweep and repack, whose plans read
 // object rows outside their commit transactions. After the row deletes, the
@@ -956,7 +953,7 @@ func (s *Store) DeleteOwnerChunks(owner string, ids []string, minAge time.Durati
 	if len(drop) == 0 {
 		return 0, skippedRecent, 0, nil
 	}
-	for _, table := range []string{"resource_chunks", "snapshot_chunks", "objects"} {
+	for _, table := range []string{"resource_chunks", "objects"} {
 		for start := 0; start < len(drop); start += batch {
 			end := min(start+batch, len(drop))
 			group := drop[start:end]
@@ -1033,13 +1030,13 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		return 0, 0, err
 	}
 	defer tx.Rollback()
-	// A pack is dead only if none of its objects are rooted by a live resource OR a
-	// snapshot. live_count folds both root tables in and is maintained inside every
-	// transaction that moves objects or roots (see recountPacks), so selection reads
-	// the packs table alone instead of joining every object row per sweep.
+	// A pack is dead once every one of its object rows has been deleted (a client
+	// prune, or the resource churn that preceded it). obj_count is maintained inside
+	// every transaction that moves object rows (see recountPacks), so selection
+	// reads the packs table alone instead of joining every object row per sweep.
 	rows, err := tx.Query(
 		`SELECT pack_id, length FROM packs
-		 WHERE owner_handle = ? AND created_at < ? AND live_count = 0`,
+		 WHERE owner_handle = ? AND created_at < ? AND obj_count = 0`,
 		owner, cutoff,
 	)
 	if err != nil {
@@ -1219,7 +1216,7 @@ func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, r
 func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, error) {
 	rows, err := s.rdb.Query(
 		`SELECT pack_id, length, live_bytes FROM packs
-		 WHERE owner_handle = ? AND created_at < ? AND live_count > 0
+		 WHERE owner_handle = ? AND created_at < ? AND obj_count > 0
 		 ORDER BY pack_id`,
 		owner, cutoff,
 	)
