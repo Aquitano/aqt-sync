@@ -2755,7 +2755,6 @@ func recordRemoteVersion(root string, version int) {
 	}
 }
 
-
 func saveState(root string, st folderState) error {
 	b, err := json.MarshalIndent(st, "", "  ")
 	if err != nil {

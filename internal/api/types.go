@@ -436,7 +436,6 @@ type GCResponse struct {
 // the policy request fields echoes nothing, so a new client can fail closed rather
 // than mint a link the server will not actually expire — or, for OnExpiry, one whose
 // expiry would destroy content the client meant to keep.
-//
 type PutResourceResponse struct {
 	ID        string   `json:"id"`
 	Version   int      `json:"version"`
