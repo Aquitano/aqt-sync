@@ -950,7 +950,6 @@ func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, o
 				return resealed{}, err
 			}
 		}
-		// SealFileRoot binds the root to the id even if the original create was unbound.
 		blob, err := syncengine.SealFileRoot(root, newCK, id)
 		if err != nil {
 			return resealed{}, err

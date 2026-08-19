@@ -175,7 +175,10 @@ func runRepoCreate(name string, compactAt int) error {
 		return err
 	}
 	defer ck.Wipe()
-	rootBlob, err := gitremote.SealRefsRoot(gitremote.NewRefsRoot(), ck, "")
+	// The create seals unbound (the id is assigned by the PUT below) and bindCreated
+	// re-seals refs root and metadata under it, which is the form every read expects.
+	emptyRoot := gitremote.NewRefsRoot()
+	rootBlob, err := gitremote.SealRefsRoot(emptyRoot, ck, "")
 	if err != nil {
 		return err
 	}
@@ -191,11 +194,17 @@ func runRepoCreate(name string, compactAt int) error {
 	if err != nil {
 		return err
 	}
-	resp, err := cl.PutResource(api.PutResourceRequest{
+	req := api.PutResourceRequest{
 		Visibility: api.Private, Blob: rootBlob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, MinClient: api.CapabilityGitRemote, CompactAt: compactAt,
-	})
+	}
+	resp, err := cl.PutResource(req)
 	if err != nil {
+		return err
+	}
+	if _, err := bindCreated(cl, req, resp, ck, metaJSON, func(id string) (crypto.SealedBlob, error) {
+		return gitremote.SealRefsRoot(emptyRoot, ck, id)
+	}); err != nil {
 		return err
 	}
 	url := "aqt::" + name

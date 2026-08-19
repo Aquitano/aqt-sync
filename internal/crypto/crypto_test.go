@@ -240,19 +240,20 @@ func TestOpenBoundRejectsWrongID(t *testing.T) {
 	}
 }
 
-func TestOpenBoundFallsBackToUnbound(t *testing.T) {
+func TestOpenBoundRefusesUnbound(t *testing.T) {
 	ck, _ := GenerateContentKey()
-	// Pre-binding blobs (and create-time seals, where the id does not exist yet)
-	// carry the plain v1 tag; OpenBound must still read them under any id.
+	// There is no v1 fallback: a blob fetched under an id opens only under that id's
+	// tag, so a server cannot strip the binding by serving the unbound form.
 	legacy, err := Seal([]byte("legacy"), ck, AADMeta)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenBound(legacy, ck, AADMeta, "res-a"); err != nil {
-		t.Fatalf("v1 blob must open via fallback: %v", err)
+	if _, err := OpenBound(legacy, ck, AADMeta, "res-a"); err == nil {
+		t.Fatal("an unbound v1 blob must not open under a resource id")
 	}
 
-	// SealBound with an empty id is the create path and must equal a v1 seal.
+	// SealBound with an empty id is the first half of a create — before the server
+	// assigns an id — and must equal a v1 seal. The create binds it right after.
 	createTime, err := SealBound([]byte("created"), ck, AADMeta, "")
 	if err != nil {
 		t.Fatal(err)
@@ -260,8 +261,8 @@ func TestOpenBoundFallsBackToUnbound(t *testing.T) {
 	if _, err := Open(createTime, ck, AADMeta); err != nil {
 		t.Fatalf("empty-id seal must open under the v1 tag: %v", err)
 	}
-	if _, err := OpenBound(createTime, ck, AADMeta, "res-a"); err != nil {
-		t.Fatalf("empty-id seal must open when later fetched by id: %v", err)
+	if _, err := OpenBound(createTime, ck, AADMeta, ""); err != nil {
+		t.Fatalf("empty-id seal must open with an empty id: %v", err)
 	}
 }
 
