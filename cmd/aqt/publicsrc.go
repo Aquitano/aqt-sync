@@ -151,7 +151,7 @@ func publicReadErr(err error) error {
 		return fmt.Errorf("this link has expired or reached its read limit: %w", err)
 	}
 	if errors.Is(err, client.ErrNotFound) {
-		return errors.New("public objects unavailable: the resource is no longer public, or the server predates public streamed sharing")
+		return errors.New("public objects unavailable: the resource is no longer public, or the owner deleted it")
 	}
 	return err
 }

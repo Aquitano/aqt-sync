@@ -435,8 +435,7 @@ via `aqt usage` (`GET /v1/account/usage`).
 
 ## Health checks and upgrades
 
-- **Liveness.** `GET /livez` (and the compatibility alias `/healthz`) returns `200`
-  without touching storage.
+- **Liveness.** `GET /livez` returns `200` without touching storage.
 - **Readiness.** `GET /readyz` checks storage and returns `503` during shutdown or
   when storage is unavailable. Use it for traffic admission.
 - **Upgrades.** Fetch the new binary (install script or a build from the checkout),

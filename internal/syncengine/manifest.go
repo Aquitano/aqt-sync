@@ -28,7 +28,7 @@ type Entry struct {
 	Hash      string         `json:"hash"`
 	Link      string         `json:"link,omitempty"` // symlink target; set => this entry is a symlink
 	Inline    []byte         `json:"inline,omitempty"`
-	InlineAlg string         `json:"inlineAlg,omitempty"` // compression of Inline; empty = raw (pre-compression entries)
+	InlineAlg string         `json:"inlineAlg,omitempty"` // compression of Inline; empty = raw
 	Chunks    []crypto.Chunk `json:"chunks,omitempty"`
 }
 

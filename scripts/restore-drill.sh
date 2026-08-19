@@ -71,15 +71,15 @@ start_server() {
 	echo "http://$addr"
 }
 
-# wait_health polls /healthz until the server answers (best effort: skipped if curl
+# wait_health polls /livez until the server answers (best effort: skipped if curl
 # is absent, since the listen address already implies the socket is bound).
 wait_health() {
 	command -v curl >/dev/null 2>&1 || return 0
 	for _ in $(seq 1 50); do
-		curl -fsS "$1/healthz" >/dev/null 2>&1 && return 0
+		curl -fsS "$1/livez" >/dev/null 2>&1 && return 0
 		sleep 0.1
 	done
-	fail "server health check never passed at $1/healthz"
+	fail "server health check never passed at $1/livez"
 }
 
 # build_tree writes a spread of file shapes a real backup must survive.

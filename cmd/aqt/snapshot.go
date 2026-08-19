@@ -78,10 +78,10 @@ func snapshotUnanchorCmd() *cobra.Command {
 	return cmd
 }
 
-// setSnapshotAnchor toggles a snapshot's anchor and fails closed on an older server.
-// An older server silently ignores the anchor field and echoes the old state, so a
-// mismatch between the requested and returned anchor is treated as a hard error rather
-// than a silently unprotected (or still-protected) snapshot.
+// setSnapshotAnchor toggles a snapshot's anchor and fails closed unless the server
+// echoes the state that was asked for. A server that ignored the anchor field echoes
+// the old state, so a mismatch is treated as a hard error rather than a silently
+// unprotected (or still-protected) snapshot.
 func setSnapshotAnchor(cl *client.Client, id string, want bool) error {
 	info, err := cl.SetSnapshotAnchor(id, want)
 	if errors.Is(err, client.ErrNotFound) {
@@ -91,7 +91,7 @@ func setSnapshotAnchor(cl *client.Client, id string, want bool) error {
 		return err
 	}
 	if info.Anchored != want {
-		return fmt.Errorf("server did not apply the anchor change (it is too old to support anchors); upgrade the server")
+		return fmt.Errorf("server did not apply the anchor change to %s; this is a server bug, report it", id)
 	}
 	if flagJSON {
 		return printJSON(map[string]any{"id": info.ID, "anchored": info.Anchored})

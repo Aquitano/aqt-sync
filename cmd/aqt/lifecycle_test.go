@@ -95,16 +95,16 @@ func TestVerifyPolicyEcho(t *testing.T) {
 }
 
 // A share asks for a link whose expiry only retires the link. A server that would
-// instead reclaim the content — an old one, which echoes no action at all, or any server
-// answering with `reclaim` — must be refused: honoring it would destroy the resource
-// (a synced folder, say) when the link expired.
+// instead reclaim the content — one that echoes no action at all, or one answering with
+// `reclaim` — must be refused: honoring it would destroy the resource (a synced folder,
+// say) when the link expired.
 func TestVerifyPolicyEchoRequiresRetire(t *testing.T) {
 	retire := linkPolicy{expireSeconds: 3600, onExpiry: api.ExpiryRetire}
 	echo := api.PutResourceResponse{ExpiresAt: time.Now().Unix() + 3600}
 
-	// A lifecycle-capable but pre-retire server echoes the expiry but no action.
+	// A server that echoes the expiry but no action would reclaim.
 	if err := verifyPolicyEcho(retire, echo); !errors.Is(err, errNoRetire) {
-		t.Fatalf("pre-retire server (expiry echoed, no onExpiry): got %v, want errNoRetire", err)
+		t.Fatalf("expiry echoed, no onExpiry: got %v, want errNoRetire", err)
 	}
 	// A server with no lifecycle at all echoes nothing: errNoLifecycle is the accurate
 	// message, not errNoRetire — the retire check must not preempt the existence check.
@@ -121,7 +121,7 @@ func TestVerifyPolicyEchoRequiresRetire(t *testing.T) {
 	if err := verifyPolicyEcho(retire, retireEcho); err != nil {
 		t.Fatalf("valid retire echo rejected: %v", err)
 	}
-	// A push asks for reclaim, and an old server's silence means exactly that.
+	// A push asks for reclaim, and silence on the action means exactly that.
 	reclaim := linkPolicy{expireSeconds: 3600, onExpiry: api.ExpiryReclaim}
 	if err := verifyPolicyEcho(reclaim, echo); err != nil {
 		t.Fatalf("reclaim policy against a silent server rejected: %v", err)
@@ -129,7 +129,7 @@ func TestVerifyPolicyEchoRequiresRetire(t *testing.T) {
 }
 
 // confirmPolicy fails closed and deletes the just-created resource when the server does
-// not echo the requested policy (a stubbed old server).
+// not echo the requested policy.
 func TestConfirmPolicyDeletesOnMissingEcho(t *testing.T) {
 	var deleted string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +146,7 @@ func TestConfirmPolicyDeletesOnMissingEcho(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// An old server echoes {id, version} with no policy fields.
+	// The stub echoes {id, version} with no policy fields.
 	resp := api.PutResourceResponse{ID: "abc123", Version: 1}
 	err = confirmPolicy(cl, resp, linkPolicy{maxReads: 1})
 	if !errors.Is(err, errNoLifecycle) {

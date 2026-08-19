@@ -13,18 +13,18 @@ import (
 )
 
 // errNoLifecycle is returned when the caller asked for a lifecycle policy but the
-// server did not echo it back, meaning it does not enforce one. The client fails
+// server did not echo it back, meaning it did not record one. The client fails
 // closed rather than mint a link that never actually expires.
 var errNoLifecycle = errors.New(
-	"server does not enforce link lifecycle policies; upgrade the server or drop --expire/--max-reads/--burn")
+	"server did not record the requested link lifecycle policy, so the link would never expire; this is a server bug, report it")
 
 // errNoRetire is returned when the caller asked for a link whose expiry only takes the
-// link down, but the server would destroy the resource's content instead. Failing
-// closed here is the whole point: the alternative is a folder that quietly disappears
-// from every device a week after it was shared.
+// link down, but the server answered that it would destroy the resource's content
+// instead. Failing closed here is the whole point: the alternative is a folder that
+// quietly disappears from every device a week after it was shared.
 var errNoRetire = errors.New(
-	"this server destroys a resource's content when its link expires (it predates retire-on-expiry); " +
-		"upgrade the server, or share without --expire/--max-reads/--burn")
+	"server answered that this link's expiry would destroy the resource's content, not just take the link down; " +
+		"this is a server bug, report it")
 
 // linkPolicy is a parsed, validated lifecycle request: a TTL in seconds and a read
 // cap, either of which may be zero (no limit), plus what firing the policy does to the
@@ -90,9 +90,9 @@ func parseDuration(s string) (time.Duration, error) {
 const echoTolerance = time.Hour
 
 // verifyPolicyEcho fails closed unless the server echoed back the lifecycle policy the
-// caller requested. An old server ignores the request fields and echoes zeros, so a
-// missing echo means the link would never be enforced — or, for a retire policy, that
-// the server would reclaim the resource's content when the link dies.
+// caller requested. A server that ignores the request fields echoes zeros, so a missing
+// echo means the link would never be enforced — or, for a retire policy, that the server
+// would reclaim the resource's content when the link dies.
 func verifyPolicyEcho(p linkPolicy, resp api.PutResourceResponse) error {
 	if !p.requested() {
 		return nil
@@ -116,9 +116,9 @@ func verifyPolicyEcho(p linkPolicy, resp api.PutResourceResponse) error {
 		}
 	}
 	// Checked last, and only once the policy itself is confirmed enforced: a server that
-	// echoed the expiry/read-cap above but not the action is lifecycle-capable yet
-	// predates retire-on-expiry, so it would reclaim. A server that echoed no policy at
-	// all already returned errNoLifecycle, the more accurate message for it.
+	// echoed the expiry/read-cap above but not the action recorded a policy that would
+	// reclaim. A server that echoed no policy at all already returned errNoLifecycle,
+	// the more accurate message for it.
 	if p.onExpiry == api.ExpiryRetire && resp.OnExpiry != api.ExpiryRetire {
 		return errNoRetire
 	}

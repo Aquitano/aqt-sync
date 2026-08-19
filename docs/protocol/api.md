@@ -236,8 +236,7 @@ unroots it (bytes return at the next prune); `DELETE /v1/account` still erases
 everything immediately.
 
 `GET /livez` is the liveness probe and `GET /readyz` admits traffic only while
-storage is available and the server is not shutting down; `/healthz` remains a
-liveness compatibility alias.
+storage is available and the server is not shutting down.
 
 ## Account deletion
 

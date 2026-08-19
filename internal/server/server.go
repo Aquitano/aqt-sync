@@ -238,7 +238,6 @@ func (s *Server) Router() *gin.Engine {
 	// reads no state and needs no auth, so it stays cheap and can be hit before a
 	// device token exists (e.g. a deploy readiness check).
 	r.GET("/livez", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
-	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 	r.GET("/readyz", func(c *gin.Context) {
 		if !s.ready.Load() || s.store.Ping() != nil {
 			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "not ready"})

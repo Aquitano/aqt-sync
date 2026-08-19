@@ -169,10 +169,9 @@ an offsite server has to serve HTTPS. `http://localhost:8080` is exempt for loca
 development.
 
 `GET /livez` is the liveness probe, and `GET /readyz` admits traffic only while storage is
-available and the server is not shutting down. `/healthz` remains a liveness compatibility
-alias. `AQT_METRICS_ADDR` exposes Prometheus metrics (request rates, GC activity,
-per-account storage) on a private listener, and `aqt usage` shows an account its own
-storage footprint.
+available and the server is not shutting down. `AQT_METRICS_ADDR` exposes Prometheus
+metrics (request rates, GC activity, per-account storage) on a private listener, and
+`aqt usage` shows an account its own storage footprint.
 
 The full operator runbook is in **[docs/deploy.md](docs/deploy.md)**: every environment
 variable, TLS options (static certs, built-in Let's Encrypt, or a reverse proxy), a

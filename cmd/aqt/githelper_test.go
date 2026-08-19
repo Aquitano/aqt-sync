@@ -63,16 +63,11 @@ func TestMultiCallArgsReachTheHelperSubcommand(t *testing.T) {
 	}
 }
 
-// Git's arguments are protocol: aqt's own rewrite of dash-leading legacy ids must
-// not reach them, or a remote whose name has that shape resolves to something else.
-func TestHelperArgumentsBypassTheLegacyIDRewrite(t *testing.T) {
-	root := rootCmd()
+// Git's arguments are protocol: a remote whose name looks like a flag has to reach
+// the helper subcommand verbatim, or it resolves to something else.
+func TestHelperArgumentsReachTheHelperVerbatim(t *testing.T) {
 	remote := "-9_8_7_6_54"
-	if got := escapeLeadingDashIDs(root, []string{"cat", remote}); got[1] == remote {
-		t.Fatalf("premise broken: %q is no longer rewritten for a client invocation", remote)
-	}
-
-	args := rootArgs(root, []string{helperLinkName(), remote, "aqt::notes"})
+	args := rootArgs([]string{helperLinkName(), remote, "aqt::notes"})
 	if got, want := strings.Join(args, " "), "git-remote-helper "+remote+" aqt::notes"; got != want {
 		t.Fatalf("helper args = %q, want %q", got, want)
 	}
