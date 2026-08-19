@@ -538,12 +538,6 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err := swapTree(root, staging); err != nil {
 		return fmt.Errorf("swap restored tree into place: %w", err)
 	}
-	// The swap replaced the whole tree, so a tree an earlier interrupted pull had torn
-	// is whole again — and it is the snapshot's, not the remote's. Leaving the marker
-	// would send the sync below pulling the remote back over the restore.
-	if err := clearMarker(root, pullMarkerFile); err != nil {
-		return err
-	}
 	if err := clearMarker(root, restoreMarkerFile); err != nil {
 		return err
 	}
@@ -774,9 +768,9 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 // folders it diffs their Merkle DAGs by content address — identical subtrees are
 // pruned by hash without a fetch, and no file-content chunk is ever downloaded —
 // which turns the old "download both trees, hash them on disk" diff into a
-// metadata-only walk of the changed spines. Anything else (single files,
-// pack-and-seal folders, a mixed pair) still materializes both sides to temp
-// dirs; that fallback scans each side back into a manifest so both routes report
+// metadata-only walk of the changed spines. Anything else (single files, a mixed
+// pair) still materializes both sides to temp dirs; that fallback scans each side
+// back into a manifest so both routes report
 // the same classification rather than the old regular-files-only comparison.
 func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.Delta, error) {
 	var zero syncengine.Delta
@@ -814,8 +808,8 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 }
 
 // treeRootOf opens a resource's sealed TreeRoot when it is a chunked tree folder;
-// ok=false routes every other shape (single file, pack-and-seal, legacy, or a
-// public resource with no owner key) to the materialize fallback.
+// ok=false routes every other shape (single file, pre-tree folder, or a public
+// resource with no owner key) to the materialize fallback.
 func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.TreeRoot, bool, error) {
 	if res.WrappedKey == nil {
 		return syncengine.TreeRoot{}, false, nil
@@ -829,7 +823,7 @@ func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.Tr
 	if err != nil {
 		return syncengine.TreeRoot{}, false, err
 	}
-	if meta.Kind != api.KindFolder || !meta.Tree || meta.Packed {
+	if meta.Kind != api.KindFolder || !meta.Tree {
 		return syncengine.TreeRoot{}, false, nil
 	}
 	root, err := syncengine.OpenTreeRoot(res.Blob, ck, res.ID)
@@ -1251,7 +1245,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 	}
 	if meta.Kind == api.KindFolder {
 		return meta, materializeStaged(destDir, func(staging string) error {
-			_, err := materializeClone(cl, staging, res, ck, meta)
+			_, err := materializeClone(cl, staging, res, ck)
 			return err
 		})
 	}

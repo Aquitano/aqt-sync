@@ -20,14 +20,6 @@ type marker[T any] struct {
 	Present bool
 }
 
-// interruptedPull is .aqt/pull-in-progress: a pack-and-seal pull left the working
-// tree part remote, part stale. Pack-and-seal itself was removed, so nothing writes
-// this marker anymore — but a folder last touched by an older build may still carry
-// one, and its torn tree must not be misread as local edits.
-type interruptedPull struct {
-	Version int `json:"version"`
-}
-
 // interruptedRestore is .aqt/restore-in-progress: written before swapTree moves the
 // live tree aside, removed once the swap completed. While present, the working tree
 // may be half-emptied, so syncs refuse instead of reading it as local deletions.
@@ -35,10 +27,7 @@ type interruptedRestore struct {
 	SnapshotID string `json:"snapshotId"`
 }
 
-const (
-	pullMarkerFile    = "pull-in-progress"
-	restoreMarkerFile = "restore-in-progress"
-)
+const restoreMarkerFile = "restore-in-progress"
 
 func writeMarker[T any](root, name string, payload T) error {
 	b, err := json.MarshalIndent(payload, "", "  ")

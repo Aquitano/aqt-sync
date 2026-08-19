@@ -268,7 +268,7 @@ func TestOpenBoundFallsBackToUnbound(t *testing.T) {
 func TestBoundAADDisjointAcrossRoles(t *testing.T) {
 	// The id-bound tags must stay disjoint per role and never collide with a v1
 	// tag, or the domain separation the roles exist for silently vanishes.
-	roles := [][]byte{AADBlob, AADMeta, AADSnapshotLabel, AADPack, AADPackRoot, AADTreeRoot}
+	roles := [][]byte{AADBlob, AADMeta, AADSnapshotLabel, AADTreeRoot, AADGitRefsRoot, AADGitBundle}
 	seen := map[string]bool{}
 	for _, role := range roles {
 		seen[string(role)] = true

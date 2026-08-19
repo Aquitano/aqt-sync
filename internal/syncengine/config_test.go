@@ -205,8 +205,8 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 		{"bad chunk ordering", `{"chunk": {"min": 10, "normal": 5, "max": 20}}`},
 		{"bad watch interval", `{"watch": {"interval": "fast"}}`},
 		{"negative watch interval", `{"watch": {"interval": "-2s"}}`},
-		{"wrong value type", `{"pack": "yes"}`},
-		{"trailing data", `{"pack": true} {"pack": false}`},
+		{"wrong value type", `{"chunkProfile": 3}`},
+		{"trailing data", `{"conflicts": "copy"} {"conflicts": "block"}`},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -218,7 +218,7 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 
 	good := []string{
 		`{}`,
-		`{"version": 1, "pack": true}`,
+		`{"version": 1}`,
 		`{"chunkProfile": "large", "watch": {"interval": "2s", "gitGuard": false}, "conflicts": "copy"}`,
 		`{"conflicts": "merge"}`,
 	}

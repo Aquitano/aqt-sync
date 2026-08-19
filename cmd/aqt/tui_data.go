@@ -44,11 +44,7 @@ type tuiUnlockResultMsg struct {
 type tuiLocalMsg struct {
 	changes   changeSet
 	conflicts []string
-	// torn reports an interrupted pack pull: the tree is part remote and part
-	// stale, so the changes above are not ordinary local edits. The CLI's status
-	// says so; the TUI must too.
-	torn marker[interruptedPull]
-	err  error
+	err       error
 }
 
 // tuiRemoteMsg is the server half: version freshness plus, when the folder key
@@ -148,11 +144,7 @@ func (c *tuiCtx) localStatusCmd() tea.Cmd {
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
-		torn, err := loadMarker[interruptedPull](root, pullMarkerFile)
-		if err != nil {
-			return tuiLocalMsg{err: err}
-		}
-		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts, torn: torn}
+		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts}
 	}
 }
 

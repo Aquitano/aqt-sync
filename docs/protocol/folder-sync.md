@@ -30,8 +30,7 @@ Crossing the bound is `400 resource_too_large`; split the folder or pin a coarse
 [garbage collection](#garbage-collection)) and has no such ceiling.
 
 Two root types exist: `TreeRoot` for a folder and `FileRoot` for a
-[streamed single file](#streamed-single-files). (A third, `PackRoot`, belonged to
-the [removed pack-and-seal format](#pack-and-seal-removed).)
+[streamed single file](#streamed-single-files).
 
 ## What sync preserves
 
@@ -335,8 +334,8 @@ unwrapped and the metadata decoded, so a server whose version regressed reports 
 rather than a config typo or a keyless resource — a version regression is a
 statement about the server's integrity and outranks anything read out of the record
 it served. The format check itself routes by the server's truth: a resource in the
-removed pack-and-seal format, or the pre-tree legacy format, is refused with
-recovery guidance rather than reconciled as an empty chunked manifest.
+pre-tree legacy format is refused rather than reconciled as an empty chunked
+manifest.
 
 ## Tracked state
 
@@ -419,8 +418,6 @@ silently ignored.
 - `chunkProfile` is `"default"`, `"large"`, or `"huge"`. The rare tree a named
   profile does not fit can pin explicit byte sizes with
   `"chunk": { "min": …, "normal": …, "max": … }`, which overrides `chunkProfile`.
-- `pack` named the [removed pack-and-seal format](#pack-and-seal-removed); a config
-  still setting it is refused with recovery guidance.
 - `conflicts` is `"block"` (the default), `"copy"`, or `"merge"`; `--conflicts`
   overrides it per run.
 - `watch.interval` is the daemon's debounce floor (a Go duration; `--interval`
@@ -465,16 +462,16 @@ there was no chunk-level dedup, conflicts were whole-folder last-writer-wins, an
 the alternate format added branches across sync, clone, sharing, diff, and recovery.
 The format has been removed.
 
-A current client refuses a packed resource — and a stale `"pack": true` config —
-with recovery guidance: clone the folder with an aqt release that still reads the
-format (v0.5.x or earlier), remove the `pack` setting, and push the tree again as a
-normal chunked folder. The `packed` metadata flag and the `aqt-pack-v1` /
-`aqt-packroot-v1` AAD domains stay reserved so old ciphertext remains identifiable
-and those strings are never reassigned.
+Nothing in a current client knows the format any more: the `packed` metadata flag,
+the `pack` config key, the `PackRoot` blob type, the `.aqt/pull-in-progress` marker
+an interrupted pack pull used to leave, and the refusal branches that named them are
+all gone. A stale `"pack": true` in `.aqtconfig` is now just an unknown field, which
+the config parser rejects like any other. The `aqt-pack-v1` and `aqt-packroot-v1` AAD
+domains stay permanently retired: the constants are deleted, but the strings must
+never be reassigned to a new role.
 
-An interrupted pack pull from an older build leaves `.aqt/pull-in-progress` behind;
-`status` and `diff` still recognize the marker so the torn tree is not misread as
-local edits.
+Data still stored in the format is recovered by cloning it with an aqt release that
+reads it (v0.7.x or earlier) and pushing the tree again as a normal chunked folder.
 
 ## Watch daemon
 
