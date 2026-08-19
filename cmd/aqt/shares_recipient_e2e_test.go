@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -15,29 +16,6 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
-
-// publishEncKey backfills the current profile's X25519 key, the way `aqt login`
-// does for an account created before grants existed. The e2e harness signs up
-// without one, so a lookup of that account would otherwise return a decoy.
-func publishEncKey(t *testing.T) {
-	t.Helper()
-	cl, prof, err := authedClient()
-	if err != nil {
-		t.Fatal(err)
-	}
-	mk, err := unlockMaster(prof)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer mk.Wipe()
-	encPub := crypto.DeriveEncKey(mk).Public()
-	if err := cl.PublishEncKey(api.PublishEncKeyRequest{
-		EncPublicKey: encPub,
-		EncKeySig:    crypto.SignEncKey(crypto.DeriveSigningKey(mk), encPub),
-	}); err != nil {
-		t.Fatalf("publish enc key: %v", err)
-	}
-}
 
 // TestIncomingShareNameIsRenderedInert covers the grantor-controlled metadata that
 // lands in the recipient's terminal: an escape sequence there can erase the line and
@@ -137,7 +115,6 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 // an unknown sender rather than presented as an identity.
 func TestIncomingShareNamesItsSender(t *testing.T) {
 	h := newE2E(t)
-	publishEncKey(t)
 	id := pushSecretFile(t, "shared.txt", "hello")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 	if err := runShareWith(id, "bob@example.com"); err != nil {
@@ -193,7 +170,6 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 // share, then block the account so it cannot immediately re-append the row.
 func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 	h := newE2E(t)
-	publishEncKey(t)
 	first := pushSecretFile(t, "first.txt", "one")
 	second := pushSecretFile(t, "second.txt", "two")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
@@ -438,28 +414,39 @@ func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 		t.Fatalf("confirming an unchanged pin: %v", err)
 	}
 
-	// Bob republishes a different enc key, as an account root-key rotation does.
+	// Bob rotates his account root key, which republishes his enc key under the new
+	// root. Bob owns nothing and holds no grants, so the rotation carries no re-wraps.
 	asProfile("bob", func() {
 		bobClient, bobProf, err := authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
-		mk, err := unlockMaster(bobProf)
+		uk, err := crypto.DeriveUnlockKey("bob horse battery staple", bobProf.Kdf)
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer mk.Wipe()
-		signing := crypto.DeriveSigningKey(mk)
-		other, err := crypto.GenerateMasterKey()
+		defer uk.Wipe()
+		newRoot, err := crypto.GenerateMasterKey()
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer other.Wipe()
-		encPub := crypto.DeriveEncKey(other).Public()
-		if err := bobClient.PublishEncKey(api.PublishEncKeyRequest{
-			EncPublicKey: encPub, EncKeySig: crypto.SignEncKey(signing, encPub),
+		defer newRoot.Wipe()
+		wrappedRoot, err := crypto.WrapRoot(newRoot, uk)
+		if err != nil {
+			t.Fatal(err)
+		}
+		signing := crypto.DeriveSigningKey(newRoot)
+		encPub := crypto.DeriveEncKey(newRoot).Public()
+		if _, err := bobClient.RotateRootKey(api.RootKeyRotationRequest{
+			Kdf: bobProf.Kdf, WrappedRoot: wrappedRoot,
+			OldAuthVerifier: crypto.DeriveAuthVerifier(uk),
+			NewAuthVerifier: crypto.DeriveAuthVerifier(uk),
+			ExpectedEpoch:   bobProf.AuthEpoch,
+			PublicKey:       signing.Public().(ed25519.PublicKey),
+			EncPublicKey:    encPub,
+			EncKeySig:       crypto.SignEncKey(signing, encPub),
 		}); err != nil {
-			t.Fatalf("republish enc key: %v", err)
+			t.Fatalf("rotate bob's root key: %v", err)
 		}
 	})
 

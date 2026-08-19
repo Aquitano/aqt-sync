@@ -22,12 +22,6 @@ func (c *Client) AccountKeys(email string) (api.AccountKeysResponse, error) {
 	return out, err
 }
 
-// PublishEncKey uploads the account's X25519 encryption key and its identity
-// self-signature — the lazy backfill for accounts created before grants existed.
-func (c *Client) PublishEncKey(req api.PublishEncKeyRequest) error {
-	return c.do(http.MethodPut, "/v1/account/enc-key", req, nil)
-}
-
 // CreateGrant stores a client-sealed grant wrap on a resource the caller owns.
 // Re-granting an existing grantee replaces the wrap.
 func (c *Client) CreateGrant(resourceID string, req api.CreateGrantRequest) error {

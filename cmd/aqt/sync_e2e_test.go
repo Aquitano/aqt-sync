@@ -888,13 +888,17 @@ func (h *e2eHarness) signup(email, pass string) {
 	if err != nil {
 		h.t.Fatalf("client.New: %v", err)
 	}
+	signing := crypto.DeriveSigningKey(mk)
+	encPub := crypto.DeriveEncKey(mk).Public()
 	resp, err := cl.CreateAccount(api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
-		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		PublicKey:    signing.Public().(ed25519.PublicKey),
 		WrappedRoot:  wrappedRoot,
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   "e2e",
+		EncPublicKey: encPub,
+		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	})
 	if err != nil {
 		h.t.Fatalf("signup: %v", err)

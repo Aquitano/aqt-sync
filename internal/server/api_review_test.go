@@ -89,10 +89,7 @@ func TestListResourcesReportsGrantCount(t *testing.T) {
 		}
 		got := map[string]int{}
 		for _, it := range items {
-			if it.GrantCount == nil {
-				t.Fatalf("resource %s has no grant count; nil is reserved for servers predating the field", it.ID)
-			}
-			got[it.ID] = *it.GrantCount
+			got[it.ID] = it.GrantCount
 		}
 		return got
 	}

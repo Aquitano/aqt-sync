@@ -65,23 +65,15 @@ type CreateAccountRequest struct {
 	// EncPublicKey is the X25519 half of the account's published identity (derived
 	// from the master key like the signing key), the target other accounts wrap
 	// grant keys to. EncKeySig is its Ed25519 self-signature (crypto.SignEncKey),
-	// so a client can verify the two halves belong together. Optional: an older
-	// client omits both and backfills via PUT /v1/account/enc-key on next login.
-	EncPublicKey []byte `json:"encPublicKey,omitempty"`
-	EncKeySig    []byte `json:"encKeySig,omitempty"`
-}
-
-// PublishEncKeyRequest backfills the account's X25519 encryption key (and its
-// identity self-signature) for accounts created before grants existed. The
-// server verifies the signature against the stored Ed25519 key before storing.
-type PublishEncKeyRequest struct {
+	// so a client can verify the two halves belong together. Both are required:
+	// an account without them is not a grant target.
 	EncPublicKey []byte `json:"encPublicKey"`
 	EncKeySig    []byte `json:"encKeySig"`
 }
 
 // AccountKeysResponse is the grant-target lookup: the opaque owner handle plus
 // both published public keys and the binding signature. Like the bootstrap
-// endpoint, an unknown email (or one whose account predates enc keys) yields an
+// endpoint, an unknown email (or an account with no published enc key) yields an
 // indistinguishable decoy, so the lookup is not an account-existence oracle;
 // a grant wrapped to a decoy key simply never decrypts for anyone.
 type AccountKeysResponse struct {
@@ -309,9 +301,8 @@ type DeleteAccountResponse struct {
 // tax.
 //
 // MinClient declares the lowest client capability that can read the sealed formats
-// this write stores (Capability* constants). A create/update leaves it 0 for a
-// baseline (v1) write; a server treats 0 as CapabilityBaseline and never lets a
-// client declare above its own capability.
+// this write stores (Capability* constants). Every write declares one: the server
+// refuses a value below CapabilityBaseline or above the writer's own capability.
 //
 // ExpireSeconds and MaxReads carry an optional server-enforced lifecycle policy for a
 // public link. ExpireSeconds is a TTL in seconds (not an absolute time, so server
@@ -569,10 +560,8 @@ type ResourceListItem struct {
 	MaxReads  int64 `json:"maxReads,omitempty"`
 	Reads     int64 `json:"reads,omitempty"`
 	// GrantCount is the number of account grants on the resource, echoed so
-	// `aqt share ls` can skip the grant listing for resources that have none. A
-	// pointer because absent and zero must stay distinguishable: nil means the
-	// server predates the field and the caller has to fetch grants to know.
-	GrantCount *int  `json:"grantCount,omitempty"`
+	// `aqt share ls` can skip the grant listing for resources that have none.
+	GrantCount int   `json:"grantCount,omitempty"`
 	CreatedAt  int64 `json:"createdAt,omitempty"`
 	UpdatedAt  int64 `json:"updatedAt,omitempty"`
 	// Reclaimed marks a link tombstone: the ciphertext is gone (every read 410s)

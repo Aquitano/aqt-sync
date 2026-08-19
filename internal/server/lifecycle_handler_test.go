@@ -22,7 +22,7 @@ func (h *harness) putPublicViaAPI(token string, mk crypto.MasterKey, expireSecon
 	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 	var put api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 		ExpireSeconds: expireSeconds, MaxReads: maxReads,
 	}, &put); code != http.StatusCreated {
@@ -59,7 +59,7 @@ func TestSetVisibilityEchoesPolicy(t *testing.T) {
 	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 	var put api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, &put); code != http.StatusCreated {
 		t.Fatalf("create: %d", code)

@@ -49,20 +49,41 @@ func newHarness(t *testing.T) *harness {
 	return &harness{t: t, router: srv.Router(), store: store, srv: srv}
 }
 
-// do issues a request and decodes the JSON response into out (if non-nil).
+// do issues a request and decodes the JSON response into out (if non-nil). A
+// resource upload is encoded as the envelope the wire demands, so tests write it
+// the way the client does; anything else is JSON.
 func (h *harness) do(method, path, token string, body, out any) int {
 	h.t.Helper()
-	var reader *bytes.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	var (
+		reader      *bytes.Reader
+		contentType string
+	)
+	switch b := body.(type) {
+	case nil:
+		reader = bytes.NewReader(nil)
+	case api.PutResourceRequest:
+		// Every real client declares a min_client, and the server refuses a write
+		// below the baseline; fill it in rather than repeating it at every call site.
+		// Tests that exercise the refusal build their own body.
+		if b.MinClient == 0 {
+			b.MinClient = api.CapabilityBaseline
+		}
+		raw, err := api.EncodeResourceUpload(b)
 		if err != nil {
 			h.t.Fatal(err)
 		}
-		reader = bytes.NewReader(b)
-	} else {
-		reader = bytes.NewReader(nil)
+		reader, contentType = bytes.NewReader(raw), api.ResourceEnvelopeMediaType
+	default:
+		raw, err := json.Marshal(body)
+		if err != nil {
+			h.t.Fatal(err)
+		}
+		reader = bytes.NewReader(raw)
 	}
 	req := httptest.NewRequest(method, path, reader)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
@@ -90,6 +111,15 @@ func TestLivezIsPublic(t *testing.T) {
 	if body.Status != "ok" {
 		t.Fatalf("livez body status = %q, want \"ok\"", body.Status)
 	}
+}
+
+// createOrReplace picks the method a resource write takes: POST when the server
+// assigns the id, PUT when the request names the resource it replaces.
+func createOrReplace(id string) string {
+	if id == "" {
+		return http.MethodPost
+	}
+	return http.MethodPut
 }
 
 // get issues an unauthenticated GET and returns the raw recorder (for non-JSON
@@ -122,13 +152,17 @@ func (h *harness) signup(email, passphrase string) (token string, mk crypto.Mast
 		h.t.Fatal(err)
 	}
 	var resp api.AuthResponse
+	signing := crypto.DeriveSigningKey(mk)
+	encPub := crypto.DeriveEncKey(mk).Public()
 	code := h.do(http.MethodPost, "/v1/account", "", api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
-		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		PublicKey:    signing.Public().(ed25519.PublicKey),
 		WrappedRoot:  wrappedRoot,
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   "test-device",
+		EncPublicKey: encPub,
+		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	}, &resp)
 	if code != http.StatusCreated {
 		h.t.Fatalf("signup: got status %d", code)
@@ -171,7 +205,7 @@ func TestPrivatePushPullRoundTrip(t *testing.T) {
 	}
 
 	var put api.PutResourceResponse
-	code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility:    api.Private,
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
@@ -220,7 +254,7 @@ func TestPublicResourceReadableWithoutAuth(t *testing.T) {
 	metaBlob, _ := crypto.Seal([]byte(`{"name":"note.txt","size":14}`), ck, crypto.AADMeta)
 
 	var put api.PutResourceResponse
-	code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility:    api.Public,
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
@@ -441,7 +475,7 @@ func TestUpdateResourceReplacesInPlace(t *testing.T) {
 		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 		var resp api.PutResourceResponse
-		code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		code := h.do(createOrReplace(id), "/v1/resources", token, api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 		}, &resp)
 		if id == "" && code != http.StatusCreated {
@@ -487,7 +521,7 @@ func TestSetVisibilityStripsWrappedKeyForNonOwner(t *testing.T) {
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	var put api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, &put); code != http.StatusCreated {
 		t.Fatalf("create: %d", code)
@@ -534,7 +568,7 @@ func TestPublicPutKeepsOwnerWrappedKey(t *testing.T) {
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	var put api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, &put); code != http.StatusCreated {
 		t.Fatalf("public put with wrapped key: %d", code)
@@ -566,7 +600,7 @@ func TestShareViewLandingPage(t *testing.T) {
 
 	put := func(vis api.Visibility) string {
 		var resp api.PutResourceResponse
-		if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 			Visibility: vis, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 		}, &resp); code != http.StatusCreated {
 			t.Fatalf("put %s: status %d", vis, code)
@@ -608,7 +642,7 @@ func TestPutResourceVersionConflictReturns409(t *testing.T) {
 		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 		var resp api.PutResourceResponse
-		code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+		code := h.do(createOrReplace(id), "/v1/resources", token, api.PutResourceRequest{
 			ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta,
 			WrappedKey: &wrapped, ExpectedVersion: expected,
 		}, &resp)
@@ -729,7 +763,7 @@ func TestResourceBodyAllowsBlobAboveControlCap(t *testing.T) {
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	var resp api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, &resp); code != http.StatusCreated {
 		t.Fatalf("1 MiB resource PUT: got %d, want 201", code)
@@ -849,7 +883,7 @@ func TestListResourcesReturnsWrappedKey(t *testing.T) {
 	meta, _ := crypto.Seal(metaJSON, ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, nil); code != http.StatusCreated {
 		t.Fatalf("put: %d", code)
@@ -891,15 +925,18 @@ func TestListResourcesReturnsWrappedKey(t *testing.T) {
 // returns the recorder; the caller asserts the status.
 func (h *harness) putCap(token, capHdr string, req api.PutResourceRequest) *httptest.ResponseRecorder {
 	h.t.Helper()
-	body, err := json.Marshal(req)
+	if req.MinClient == 0 {
+		req.MinClient = api.CapabilityBaseline
+	}
+	body, err := api.EncodeResourceUpload(req)
 	if err != nil {
 		h.t.Fatal(err)
 	}
-	header := map[string]string{"Content-Type": "application/json"}
+	header := map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}
 	if capHdr != "" {
 		header[api.CapabilityHeader] = capHdr
 	}
-	return h.raw(http.MethodPut, "/v1/resources", token, header, body)
+	return h.raw(createOrReplace(req.ID), "/v1/resources", token, header, body)
 }
 
 // getCap GETs a resource with an explicit capability header.

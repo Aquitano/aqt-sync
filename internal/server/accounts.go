@@ -26,8 +26,9 @@ type Account struct {
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
 // and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
 // already taken. The new account starts at auth epoch 1. encPublicKey/encKeySig are
-// the optional published X25519 key and its identity self-signature (empty from a
-// pre-grants client; the caller validates the signature before storing).
+// the published X25519 key and its identity self-signature; the handler requires and
+// verifies them, and the empty case is stored NULL only for a keyless row a test or
+// a pre-grants dir carries.
 func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier, encPublicKey, encKeySig []byte) (Account, error) {
 	email = api.NormalizeEmail(email)
 	handle := newID(12)
@@ -574,48 +575,73 @@ func (s *Store) ResourceCreateKeyRecorded(owner string, req api.PutResourceReque
 }
 
 // ownerBlobBytes totals the resource and snapshot blob bytes an account holds.
-// Rows written since migration 16 carry their size, so the common case is one
-// aggregate query; only rows predating it (blob_size = -1) are stat'ed, and each
-// such stat is replaced by a recorded size the next time that row is rewritten.
+// Every row records its own size — written on insert since migration 16, and
+// backfilled at startup for rows older than it — so this is one aggregate query
+// on a path (metrics, pack/resource puts, auto-snapshots) that runs constantly.
 func (s *Store) ownerBlobBytes(owner string) (int64, error) {
-	var recorded int64
-	if err := s.rdb.QueryRow(
+	var total int64
+	err := s.rdb.QueryRow(
 		`SELECT COALESCE(SUM(blob_size), 0) FROM (
-		   SELECT blob_size FROM resources WHERE owner_handle = ? AND reclaimed = 0 AND blob_size >= 0
+		   SELECT blob_size FROM resources WHERE owner_handle = ? AND reclaimed = 0
 		   UNION ALL
-		   SELECT blob_size FROM snapshots WHERE owner_handle = ? AND blob_size >= 0
+		   SELECT blob_size FROM snapshots WHERE owner_handle = ?
 		 )`, owner, owner,
-	).Scan(&recorded); err != nil {
-		return 0, err
-	}
-	rows, err := s.rdb.Query(
-		`SELECT id, blob_nonce FROM resources WHERE owner_handle = ? AND reclaimed = 0 AND blob_size < 0
-		 UNION ALL
-		 SELECT snapshot_id, blob_nonce FROM snapshots WHERE owner_handle = ? AND blob_size < 0`, owner, owner)
-	if err != nil {
-		return 0, err
-	}
-	defer rows.Close()
-	total := recorded
-	for rows.Next() {
-		var id string
-		var nonce []byte
-		if err := rows.Scan(&id, &nonce); err != nil {
-			return 0, err
+	).Scan(&total)
+	return total, err
+}
+
+// backfillBlobSizes records a size for every row that predates migration 16, which
+// added the column with a -1 ("not recorded") default. It runs once per data dir,
+// at startup: after it, blob_size is authoritative and usage never has to stat a
+// blob. A row whose file is missing (operator deletion, crash window) records 0
+// rather than failing the boot — it holds no bytes.
+func (s *Store) backfillBlobSizes() error {
+	for _, t := range []struct{ table, idColumn string }{
+		{"resources", "id"},
+		{"snapshots", "snapshot_id"},
+	} {
+		// Collect first: the store runs a single writer connection, so the UPDATEs
+		// cannot share it with an open cursor.
+		type sized struct {
+			id   string
+			size int64
 		}
-		info, err := os.Stat(s.blobPath(id, nonce))
-		if errors.Is(err, os.ErrNotExist) {
-			// An orphaned row (operator-deleted file, crash window) holds no bytes.
-			// Failing here would wedge every usage-dependent path account-wide:
-			// metrics, pack/resource puts, and auto-snapshots all call AccountUsage.
-			continue
-		}
+		rows, err := s.db.Query(`SELECT ` + t.idColumn + `, blob_nonce FROM ` + t.table + ` WHERE blob_size < 0`)
 		if err != nil {
-			return 0, err
+			return err
 		}
-		total += info.Size()
+		var pending []sized
+		for rows.Next() {
+			var id string
+			var nonce []byte
+			if err := rows.Scan(&id, &nonce); err != nil {
+				rows.Close()
+				return err
+			}
+			var size int64
+			switch info, err := os.Stat(s.blobPath(id, nonce)); {
+			case err == nil:
+				size = info.Size()
+			case errors.Is(err, os.ErrNotExist):
+			default:
+				rows.Close()
+				return err
+			}
+			pending = append(pending, sized{id: id, size: size})
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, row := range pending {
+			if _, err := s.db.Exec(
+				`UPDATE `+t.table+` SET blob_size = ? WHERE `+t.idColumn+` = ?`, row.size, row.id,
+			); err != nil {
+				return err
+			}
+		}
 	}
-	return total, rows.Err()
+	return nil
 }
 
 // AccountUsageAll returns the storage summary for every account, for the metrics

@@ -50,13 +50,17 @@ func createReq(t *testing.T, email, passphrase string) api.CreateAccountRequest 
 	if err != nil {
 		t.Fatal(err)
 	}
+	signing := crypto.DeriveSigningKey(mk)
+	encPub := crypto.DeriveEncKey(mk).Public()
 	return api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
-		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		PublicKey:    signing.Public().(ed25519.PublicKey),
 		WrappedRoot:  wrappedRoot,
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   "test-device",
+		EncPublicKey: encPub,
+		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	}
 }
 

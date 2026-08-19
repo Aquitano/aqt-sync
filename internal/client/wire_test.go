@@ -45,6 +45,7 @@ func TestResourceRawWireRoundTrip(t *testing.T) {
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
+		MinClient:     api.CapabilityBaseline,
 	})
 	if err != nil {
 		t.Fatalf("PutResource: %v", err)
@@ -121,13 +122,17 @@ func signup(t *testing.T, baseURL, email, passphrase string) (string, crypto.Mas
 	if err != nil {
 		t.Fatal(err)
 	}
+	signing := crypto.DeriveSigningKey(mk)
+	encPub := crypto.DeriveEncKey(mk).Public()
 	resp, err := cl.CreateAccount(api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
-		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		PublicKey:    signing.Public().(ed25519.PublicKey),
 		WrappedRoot:  wrappedRoot,
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   "wire-test",
+		EncPublicKey: encPub,
+		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	})
 	if err != nil {
 		t.Fatalf("create account: %v", err)

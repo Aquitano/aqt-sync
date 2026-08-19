@@ -133,14 +133,12 @@ func runShareList(ref string) error {
 	var rows []shareListRow
 	for _, it := range items {
 		// The list endpoint echoes each resource's grant count, so the common
-		// case — a private resource never shared — costs no grant fetch. A nil
-		// count means a server predating the field, where only fetching can
-		// distinguish "no grants" from "unknown".
-		if it.Visibility != api.Public && it.GrantCount != nil && *it.GrantCount == 0 {
+		// case — a private resource never shared — costs no grant fetch.
+		if it.Visibility != api.Public && it.GrantCount == 0 {
 			continue
 		}
 		var grants []api.GrantEntry
-		if it.GrantCount == nil || *it.GrantCount > 0 {
+		if it.GrantCount > 0 {
 			grants, err = cl.ListGrants(it.ID)
 			if err != nil {
 				return fmt.Errorf("list grants of %s: %w", it.ID, err)

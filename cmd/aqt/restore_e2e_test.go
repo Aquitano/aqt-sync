@@ -194,13 +194,17 @@ func signupAt(t *testing.T, serverURL, email, pass string) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	signing := crypto.DeriveSigningKey(mk)
+	encPub := crypto.DeriveEncKey(mk).Public()
 	resp, err := cl.CreateAccount(api.CreateAccountRequest{
 		Email:        email,
 		Kdf:          kdf,
-		PublicKey:    crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey),
+		PublicKey:    signing.Public().(ed25519.PublicKey),
 		WrappedRoot:  wrappedRoot,
 		AuthVerifier: crypto.DeriveAuthVerifier(uk),
 		DeviceName:   "machine-a",
+		EncPublicKey: encPub,
+		EncKeySig:    crypto.SignEncKey(signing, encPub),
 	})
 	if err != nil {
 		t.Fatalf("signup: %v", err)

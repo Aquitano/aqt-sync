@@ -290,9 +290,9 @@ func (s *Server) Router() *gin.Engine {
 		{
 			// The blob (a file's ciphertext or a folder's sealed manifest) is the one
 			// large payload; it keeps the engine-wide maxResourceBody.
-			// POST creates a resource (server-assigned id); PUT replaces one in place.
-			// The single handler dispatches on whether the request carries an id, and the
-			// legacy PUT-create path stays wired so an older client keeps working.
+			// POST creates a resource (server-assigned id); PUT replaces the one its
+			// envelope names. The single handler dispatches on the id, and refuses a PUT
+			// that carries none.
 			authed.POST("/resources", s.putResource)
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
@@ -331,7 +331,6 @@ func (s *Server) Router() *gin.Engine {
 			// read reuses the public endpoint's exact-slice framing with a grant check
 			// in place of public visibility; it shares the chunk body cap.
 			authed.GET("/account/keys", s.accountKeys)
-			authed.PUT("/account/enc-key", limitBody(maxControlBody), s.publishEncKey)
 			authed.POST("/resources/:id/grants", limitBody(maxChunkBody), s.createGrant)
 			authed.GET("/resources/:id/grants", s.listResourceGrants)
 			authed.DELETE("/resources/:id/grants/:grantee", s.deleteGrant)
@@ -452,14 +451,13 @@ func (s *Server) createAccount(c *gin.Context) {
 		abortCode(c, http.StatusForbidden, "a valid invite token is required to register on this server", api.ErrCodeInviteRequired)
 		return
 	}
-	// The enc key is optional (pre-grants clients omit it) but if present its
-	// identity self-signature must verify, or a bad key would poison future grants.
-	if len(req.EncPublicKey) > 0 {
-		if len(req.EncPublicKey) != crypto.EncPublicKeySize ||
-			!crypto.VerifyEncKey(req.PublicKey, req.EncPublicKey, req.EncKeySig) {
-			abort(c, http.StatusBadRequest, "enc public key must be 32 bytes and self-signed by the identity key")
-			return
-		}
+	// The enc key is what makes the account a grant target, so it is registered at
+	// signup rather than backfilled later. Its identity self-signature must verify,
+	// or a bad key would poison every future grant.
+	if len(req.EncPublicKey) != crypto.EncPublicKeySize ||
+		!crypto.VerifyEncKey(req.PublicKey, req.EncPublicKey, req.EncKeySig) {
+		abort(c, http.StatusBadRequest, "enc public key must be 32 bytes and self-signed by the identity key")
+		return
 	}
 	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
 	if errors.Is(err, ErrConflict) {
@@ -934,6 +932,12 @@ func (s *Server) putResource(c *gin.Context) {
 	if !ok {
 		return
 	}
+	// Create is POST, so it can be replayed under an Idempotency-Key without the
+	// client having to guess an id; PUT names the resource it replaces.
+	if c.Request.Method == http.MethodPut && req.ID == "" {
+		abort(c, http.StatusBadRequest, "PUT /v1/resources requires the id of the resource to replace; POST to create one")
+		return
+	}
 	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
 		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
 		return
@@ -944,6 +948,13 @@ func (s *Server) putResource(c *gin.Context) {
 	// it just wrote but could never read back. Reject it as a client bug.
 	if req.MinClient > capability {
 		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
+		return
+	}
+	// Nor can it declare less than the format every release reads. Every client
+	// declares its own capability, so a lower value is a client bug rather than
+	// something for the server to quietly floor.
+	if req.MinClient < api.CapabilityBaseline {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("declared min_client is below the capability baseline (%d)", api.CapabilityBaseline))
 		return
 	}
 	if req.CompactAt < 0 {
@@ -1163,22 +1174,15 @@ func (s *Server) getResource(c *gin.Context) {
 	c.JSON(http.StatusOK, res)
 }
 
-// decodePutResource reads a resource upload by content negotiation: an
-// octet-stream body is the raw envelope (blob ciphertext single-buffered, never
-// JSON-decoded); anything else is the legacy JSON body, so old clients keep
-// working. Both paths sit behind the same maxResourceBody cap.
+// decodePutResource reads a resource upload. The body is always the raw envelope
+// (JSON header + blob ciphertext, single-buffered and never JSON-decoded), so it
+// must declare the envelope media type; it sits behind the maxResourceBody cap.
+// Responses are still negotiated — see negotiateResourceResponse — because the
+// browser share page reads the JSON form.
 func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
-	format, ok := resourceRequestFormat(c.GetHeader("Content-Type"))
-	if !ok {
-		abort(c, http.StatusUnsupportedMediaType, "unsupported resource Content-Type; send version=1 JSON or envelope media type")
+	if !isResourceEnvelope(c.GetHeader("Content-Type")) {
+		abort(c, http.StatusUnsupportedMediaType, "resource uploads must be sent as "+api.ResourceEnvelopeMediaType)
 		return api.PutResourceRequest{}, false
-	}
-	if format == resourceJSON {
-		var req api.PutResourceRequest
-		if !bindJSON(c, &req) {
-			return api.PutResourceRequest{}, false
-		}
-		return req, true
 	}
 	req, err := api.DecodeResourceUpload(c.Request.Body)
 	if err != nil {
@@ -1187,8 +1191,9 @@ func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
 		case errors.As(err, &tooLarge):
 			abort(c, http.StatusRequestEntityTooLarge, "resource body exceeds limit")
 		case errors.Is(err, api.ErrHeaderTooLarge):
-			// Status stays 400 so existing clients see no change; only the code and the
-			// message move, from "invalid resource body" to the actual cause.
+			// 400 rather than 413: the request as a whole is within the cap, it is the
+			// manifest's chunk-ref set that cannot be expressed in one upload. The code
+			// and the message name that instead of saying "invalid resource body".
 			abortCode(c, http.StatusBadRequest,
 				"resource header exceeds the 32 MiB request cap; the chunk-ref set of this manifest is too large to upload in one request",
 				api.ErrCodeResourceTooLarge)
@@ -1200,34 +1205,23 @@ func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
 	return req, true
 }
 
+// isResourceEnvelope reports whether a request Content-Type declares the version=1
+// resource envelope. Nothing else is accepted on a write: an unlabelled or
+// generically-labelled body is a client that has not been taught the format.
+func isResourceEnvelope(header string) bool {
+	mediaType, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/vnd.aqt.resource+octet-stream" && params["version"] == "1"
+}
+
 type resourceFormat int
 
 const (
 	resourceJSON resourceFormat = iota
 	resourceEnvelope
 )
-
-func resourceRequestFormat(header string) (resourceFormat, bool) {
-	if strings.TrimSpace(header) == "" {
-		return resourceJSON, true
-	}
-	mediaType, params, err := mime.ParseMediaType(header)
-	if err != nil {
-		return 0, false
-	}
-	switch mediaType {
-	case "application/json":
-		return resourceJSON, true
-	case "application/octet-stream":
-		return resourceEnvelope, true
-	case "application/vnd.aqt.resource+json":
-		return resourceJSON, params["version"] == "1"
-	case "application/vnd.aqt.resource+octet-stream":
-		return resourceEnvelope, params["version"] == "1"
-	default:
-		return 0, false
-	}
-}
 
 func negotiateResourceResponse(header string) (resourceFormat, bool) {
 	if strings.TrimSpace(header) == "" {

@@ -23,7 +23,7 @@ func (h *harness) putSized(token string, mk crypto.MasterKey, id string, n int) 
 	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 	var resp api.PutResourceResponse
-	code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	code := h.do(createOrReplace(id), "/v1/resources", token, api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 	}, &resp)
 	return resp, code
@@ -83,19 +83,20 @@ func TestIdempotentCreateReplayNotChargedAgain(t *testing.T) {
 	blob, _ := crypto.Seal(make([]byte, 64*1024), ck, crypto.AADBlob)
 	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
-	body, err := json.Marshal(api.PutResourceRequest{
+	body, err := api.EncodeResourceUpload(api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+		MinClient: api.CapabilityBaseline,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	hdr := map[string]string{"Idempotency-Key": "retry-me", "Content-Type": "application/json"}
+	hdr := map[string]string{"Idempotency-Key": "retry-me", "Content-Type": api.ResourceEnvelopeMediaType}
 
-	first := h.raw(http.MethodPut, "/v1/resources", token, hdr, body)
+	first := h.raw(http.MethodPost, "/v1/resources", token, hdr, body)
 	if first.Code != http.StatusCreated {
 		t.Fatalf("first create = %d: %s", first.Code, first.Body.String())
 	}
-	replay := h.raw(http.MethodPut, "/v1/resources", token, hdr, body)
+	replay := h.raw(http.MethodPost, "/v1/resources", token, hdr, body)
 	if replay.Code != http.StatusCreated {
 		t.Fatalf("replayed create = %d (507 means it was charged as a fresh create): %s", replay.Code, replay.Body.String())
 	}
@@ -116,16 +117,17 @@ func TestConflictingIdempotencyKeyWinsOverQuota(t *testing.T) {
 	ck, _ := crypto.GenerateContentKey()
 	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
-	hdr := map[string]string{"Idempotency-Key": "reused-key", "Content-Type": "application/json"}
+	hdr := map[string]string{"Idempotency-Key": "reused-key", "Content-Type": api.ResourceEnvelopeMediaType}
 	put := func(n int) *httptest.ResponseRecorder {
 		blob, _ := crypto.Seal(make([]byte, n), ck, crypto.AADBlob)
-		body, err := json.Marshal(api.PutResourceRequest{
+		body, err := api.EncodeResourceUpload(api.PutResourceRequest{
 			Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+			MinClient: api.CapabilityBaseline,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
-		return h.raw(http.MethodPut, "/v1/resources", token, hdr, body)
+		return h.raw(http.MethodPost, "/v1/resources", token, hdr, body)
 	}
 
 	if first := put(16); first.Code != http.StatusCreated {
