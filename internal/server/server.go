@@ -298,7 +298,10 @@ func (s *Server) Router() *gin.Engine {
 			authed.PUT("/resources", s.putResource)
 			authed.GET("/resources", s.listResources)
 			authed.PUT("/resources/:id/metadata", limitBody(maxControlBody), s.updateResourceMetadata)
-			authed.POST("/resources/:id/visibility", limitBody(maxControlBody), s.setVisibility)
+			// Visibility flips and grants take the chunk-size body cap, not the control
+			// cap: on a client-GC account they may carry the resource's full ChunkRefs
+			// to refresh the read scope they mint.
+			authed.POST("/resources/:id/visibility", limitBody(maxChunkBody), s.setVisibility)
 			authed.DELETE("/resources/:id", s.deleteResource)
 
 			// Device management. Attach (POST /devices) is unauthenticated above
@@ -330,7 +333,7 @@ func (s *Server) Router() *gin.Engine {
 			// in place of public visibility; it shares the chunk body cap.
 			authed.GET("/account/keys", s.accountKeys)
 			authed.PUT("/account/enc-key", limitBody(maxControlBody), s.publishEncKey)
-			authed.POST("/resources/:id/grants", limitBody(maxControlBody), s.createGrant)
+			authed.POST("/resources/:id/grants", limitBody(maxChunkBody), s.createGrant)
 			authed.GET("/resources/:id/grants", s.listResourceGrants)
 			authed.DELETE("/resources/:id/grants/:grantee", s.deleteGrant)
 			authed.GET("/shares", s.listShares)
@@ -353,6 +356,13 @@ func (s *Server) Router() *gin.Engine {
 			// GC is expensive (its planning scans the owner's object table), so it gets a
 			// second, owner-keyed limiter far tighter than the general authed budget.
 			authed.POST("/gc", s.gcLimiter.middlewareKeyed(ownerKey), s.runGC)
+			// Client-managed GC: a prune reads the full object inventory, diffs it
+			// against the closure of its decrypted roots, and deletes the remainder.
+			// Unlike POST /gc these are bounded per request (one indexed page, one
+			// capped batch), so the general authed limiter is the right budget — the
+			// gcLimiter's drip-rate would stretch a large account's prune into minutes.
+			authed.GET("/chunks", s.listChunks)
+			authed.POST("/chunks/delete", limitBody(maxChunkBody), s.deleteChunks)
 
 			// Snapshots: immutable, GC-pinned copies of a resource version. Owner-only;
 			// a snapshot is never public, so unlike a resource there is no unauth read.
@@ -992,8 +1002,8 @@ func (s *Server) putResource(c *gin.Context) {
 		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
 		return
 	}
-	if errors.Is(err, ErrDropsRoots) {
-		abortCode(c, http.StatusBadRequest, "replace would drop every chunk root of an object-backed resource; refused to prevent data loss", api.ErrCodeDropsRoots)
+	if errors.Is(err, ErrSharedNeedsRefs) {
+		abortCode(c, http.StatusBadRequest, "a public or granted resource must carry its chunk refs (they scope what its readers may fetch); re-push with refs before sharing", api.ErrCodeSharedNeedsRefs)
 		return
 	}
 	if errors.Is(err, ErrDanglingRefs) {

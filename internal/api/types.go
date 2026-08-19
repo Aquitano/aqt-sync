@@ -100,6 +100,11 @@ type CreateGrantRequest struct {
 	GranteeHandle   string `json:"granteeHandle"`
 	WrappedKey      []byte `json:"wrappedKey"`
 	ExpectedVersion int    `json:"expectedVersion,omitempty"`
+	// ChunkRefs refreshes the resource's read scope in the same transaction as the
+	// grant. On a client-GC account private pushes leave the stored refs stale, so
+	// the operation that mints a reader must carry the current set — otherwise the
+	// grantee could not fetch anything pushed since the resource was last refs-full.
+	ChunkRefs []string `json:"chunkRefs,omitempty"`
 }
 
 // GrantEntry is one grant on a resource, as listed for its owner.
@@ -289,7 +294,10 @@ type DeleteAccountResponse struct {
 // public resources the content key lives in the share-link fragment instead.
 //
 // ChunkRefs lists the chunk ids the blob (a folder's sealed manifest) references.
-// The server stores them as the resource's GC roots; it never inspects them.
+// The server stores them opaquely as the scope of chunk ids a non-owner reader of a
+// public or granted resource may fetch — reachability itself is the client's job
+// (`aqt prune`). Private writes omit them; a refs-less write against a shared
+// resource that has refs is refused with ErrCodeSharedNeedsRefs.
 //
 // ExpectedVersion, when > 0, is the version the client based this update on. The
 // server rejects the write (409) if the stored version differs, so a concurrent
@@ -436,6 +444,34 @@ type PutResourceResponse struct {
 	OnExpiry  OnExpiry `json:"onExpiry,omitempty"`
 }
 
+// ChunkListResponse is one page of an account's object inventory (every chunk id
+// the server stores for the owner, in lexical order). NextCursor is empty on the
+// final page. A client prune diffs this inventory against the closure of all its
+// decrypted roots.
+type ChunkListResponse struct {
+	IDs        []string `json:"ids"`
+	NextCursor string   `json:"nextCursor,omitempty"`
+}
+
+// ChunkDeleteRequest asks the server to drop the named objects. The server skips
+// (rather than fails on) ids it does not store and ids whose pack is inside the
+// GC grace window — a concurrent push may be about to reference those — and
+// reports both counts so the pruner knows a re-run is worthwhile.
+type ChunkDeleteRequest struct {
+	IDs []string `json:"ids"`
+}
+
+// ChunkDeleteResponse reports a chunk delete: Deleted object rows were dropped,
+// SkippedRecent were left alone because their pack was touched within the grace
+// window. FreedBytes counts pack bytes actually released to disk in this call
+// (whole packs emptied and swept); bytes in packs that still hold live objects
+// are reclaimed by the repack step of a later GC run.
+type ChunkDeleteResponse struct {
+	Deleted       int   `json:"deleted"`
+	SkippedRecent int   `json:"skippedRecent"`
+	FreedBytes    int64 `json:"freedBytes"`
+}
+
 // SetVisibilityRequest flips a resource public/private without re-uploading its
 // blob. Used by `share` (private → public); making private again instead rotates
 // the content key via a full PutResource.
@@ -451,6 +487,9 @@ type SetVisibilityRequest struct {
 	ExpireSeconds int64    `json:"expireSeconds,omitempty"`
 	MaxReads      int64    `json:"maxReads,omitempty"`
 	OnExpiry      OnExpiry `json:"onExpiry,omitempty"`
+	// ChunkRefs refreshes the resource's read scope in the same transaction as the
+	// flip — see CreateGrantRequest.ChunkRefs.
+	ChunkRefs []string `json:"chunkRefs,omitempty"`
 }
 
 // UpdateResourceMetadataRequest replaces only the client-sealed metadata blob.

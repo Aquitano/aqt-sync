@@ -464,16 +464,21 @@ func TestSyncConflictMergeMissingBaseChunkFallsBackToCopy(t *testing.T) {
 	writeTree(t, origin, "chunked.txt", remote)
 	h.sync(origin)
 
+	// Under client-managed GC the replaced base chunks disappear via a prune, not a
+	// server sweep; back over the age guard, then prune them away.
 	profile, err := identity.Load(identity.DefaultProfile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	removed, _, err := h.store.GCPacks(profile.OwnerHandle, -time.Hour)
-	if err != nil {
+	if err := h.store.BackdatePacksForTest(profile.OwnerHandle, 2*time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	if removed == 0 {
-		t.Fatal("forced GC removed no packs; test did not make the base content unavailable")
+	objectsBefore := h.usageObjects()
+	if err := runPrune(false, false); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	if h.usageObjects() >= objectsBefore {
+		t.Fatal("prune removed no objects; test did not make the base content unavailable")
 	}
 
 	replicaLines := append([]string(nil), lines...)

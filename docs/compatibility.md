@@ -35,6 +35,15 @@ capability 4 is required for encrypted Git remote resources. `aqt repo create` d
 `minClient: 4`, so older clients receive `426 Upgrade Required` before the server
 serves or overwrites a root they cannot interpret.
 
+One server-behavior break rides outside the capability ladder because it changes no
+sealed format:
+[client-managed garbage collection](protocol/api.md#client-managed-garbage-collection).
+A current server never sweeps by reachability; reclamation happens through
+`aqt prune`, and a current client never sends refs on a private write. There is no
+negotiation between the two: server and clients upgrade together, and a current
+client pointed at a pre-client-GC server would have its refs-less data swept.
+Pre-1.0 there is exactly one deployment, upgraded as a unit.
+
 ## Support policy
 
 aqt is pre-1.0 and has one maintainer. This is what that can actually keep, stated

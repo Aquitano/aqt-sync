@@ -2570,7 +2570,7 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 }
 
 func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
-	root, refs, err := uploadTreeObjects(cl, conv, m)
+	root, _, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -2592,7 +2592,7 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	}
 	return cl.PutResource(api.PutResourceRequest{
 		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped, ChunkRefs: refs,
+		WrappedKey: &wrapped,
 		// Both seals above bind iff id is non-empty, so the declaration follows the
 		// same rule. In practice this is a create (callers pass id ""): the seals stay
 		// unbound and the first putFolderUpdate re-seals them id-bound.
@@ -2638,6 +2638,10 @@ func rearmUploadedChunks(check func([]string) ([]string, error), ids []string, s
 // the first sync after `aqt share` silently kill the link (the server takes visibility
 // from every PUT). The link's lifecycle policy is preserved server-side, since this
 // request carries none.
+// A private update omits ChunkRefs — reachability is the client's job, and the
+// refs would otherwise cap folder size at the wire header. A public resource, and
+// a private one carrying grants this device did not know about (the server
+// refuses the refs-less write), send the full set as its readers' fetch scope.
 func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
 	root, refs, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
@@ -2655,11 +2659,20 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, v
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	return cl.PutResource(api.PutResourceRequest{
+	req := api.PutResourceRequest{
 		ID: id, Visibility: vis, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
 		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
-	})
+	}
+	if vis == api.Private {
+		req.ChunkRefs = nil
+		resp, err := cl.PutResource(req)
+		if !errors.Is(err, client.ErrSharedNeedsRefs) {
+			return resp, err
+		}
+		req.ChunkRefs = refs
+	}
+	return cl.PutResource(req)
 }
 
 // minClientForID reports the capability a folder write requires: a create (empty id)

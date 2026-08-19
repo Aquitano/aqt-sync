@@ -46,13 +46,14 @@ Public DTO fields are lower camel case and do not depend on Go field names.
 The resource envelope is a four-byte unsigned big-endian JSON-header length, a
 lower-camel JSON header of at most 32 MiB, then the sealed blob ciphertext as the
 remainder. The request header carries visibility, sealed metadata, wrapped key, blob
-nonce, chunk roots, expected version, minimum client capability, and lifecycle
+nonce, chunk refs, expected version, minimum client capability, and lifecycle
 policy. `chunkRefs` is the only header field that grows with the resource — one
-64-hex id per chunk root — so the 32 MiB header bound doubles as a ceiling on a
-tracked folder's chunk count: roughly 500k chunks, about 3.8 GiB at the official
-client's default ~8 KiB chunk profile. A header past the bound is
-`400 resource_too_large`. The response header also carries the resource id and
-accepted version.
+64-hex id per ref — so the 32 MiB header bound caps a *shared* folder's chunk
+count at roughly 500k (about 3.8 GiB at the official client's default ~8 KiB chunk
+profile); a header past the bound is `400 resource_too_large`. A private write
+omits `chunkRefs` entirely (see client-managed GC below), so private folders have
+no such ceiling. The response header also carries the resource id and accepted
+version.
 Object-frame responses repeat a four-byte unsigned big-endian length followed by
 exactly that object ciphertext, in request order. Object requests are capped at
 10,000 ids and every decoded length is bounds-checked before allocation or slicing.
@@ -111,9 +112,11 @@ GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrap
                                      410 Gone (code "gone") if the public link has expired, exhausted its
                                      read limit, or been reclaimed. Owner reads are never counted or expired
                                      (until reclaimed).
-POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxReads? }
+POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxReads?, chunkRefs? }
                                      Used by `share`/`unshare`; rotation just replaces the blob. Echoes the
-                                     accepted policy; a private flip clears it.
+                                     accepted policy; a private flip clears it. A public flip sends the
+                                     resource's current chunkRefs: refs-less private pushes leave the stored
+                                     read scope stale, and this is the operation that mints readers.
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility + minClient +
                                      grantCount, so `share ls` skips grant fetches for ungranted resources).
@@ -139,7 +142,8 @@ GET    /v1/account/usage             → { storageBytes, quotaBytes?, packs, obj
                                      devices, max*? }  What `aqt usage` reports, including the caps that
                                      actually apply to this account.
 
-# Snapshots (owner token): immutable, GC-pinned copies of a resource version. The
+# Snapshots (owner token): immutable copies of a resource version, held as roots by
+# a client prune's reachability walk. The
 # ciphertext is reused, not re-uploaded, and min_client is copied from the source at
 # capture time so a restore is gated exactly like a resource read:
 POST   /v1/snapshots                 Body: { resourceId, encryptedLabel?, anchor?, automatic? } → SnapshotInfo
@@ -162,9 +166,10 @@ GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, e
                                      correctly self-signed decoy — no existence oracle.
 PUT    /v1/account/enc-key           Backfill the caller's X25519 enc key; the Ed25519 self-signature is
                                      verified against the account identity key before storing.
-POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey }. Upsert (rotation
-                                     re-wraps by re-posting). No grantee-existence check (decoy handles
-                                     must be accepted indistinguishably).
+POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs? }. Upsert
+                                     (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
+                                     like the visibility flip above, for the same reason. No grantee-
+                                     existence check (decoy handles must be accepted indistinguishably).
 GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, createdAt }], nextCursor? }.
                                      Paginated (see below).
 DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
@@ -184,18 +189,51 @@ POST   /v1/resources/:id/objects     Authed. Same body/framing/caps as the publi
                                      the owner's other resources).
 
 # Tracked folders: the folder's blob is a sealed root pointing at the manifest
-# objects, so it uses the resource routes above; PUT additionally carries chunkRefs
-# (file-object ids ∪ manifest-object ids the new root references) so the server can
-# root GC. Objects ship inside raw packs; all routes require the owner token:
+# objects, so it uses the resource routes above; a PUT of a public or granted
+# resource additionally carries chunkRefs (file-object ids ∪ manifest-object ids
+# the root references) as its readers' fetch scope. Objects ship inside raw packs;
+# all routes require the owner token:
 POST   /v1/chunks/check              Body: { ids } → { missing }   (have/want before packing). ≤10,000 ids/call.
 POST   /v1/chunks/locate             Body: { ids } → { locations: [{ id, packId, off, len }] }. ≤10,000 ids/call.
 PUT    /v1/packs/:id                  Body: raw pack bytes (octet-stream). id = sha256(pack);
                                      server verifies the address and every object slice. Range-able GET.
                                      → { storedObjects }
 GET    /v1/packs/:id                  → raw pack bytes; supports Range (pull fetches only the needed span)
-POST   /v1/gc                        Pack-level mark-and-sweep, which also repacks partially dead packs
+POST   /v1/gc                        Pack maintenance: sweeps packs a prune emptied, repacks sparse ones
                                      → { deletedPacks, freedBytes, repackedPacks, reclaimedBytes }
+
+# Client-managed GC: clients compute reachability over their decrypted roots and
+# prune; the server never decides an object is garbage on its own.
+GET    /v1/chunks                    Complete object inventory, 10,000 ids per fixed page (?cursor=)
+                                     → { ids, nextCursor }
+POST   /v1/chunks/delete             Body: { ids } (≤10,000) → { deleted, skippedRecent, freedBytes }.
+                                     Ids in packs inside the GC grace window are skipped, not failed —
+                                     a concurrent push may be about to reference them.
 ```
+
+## Client-managed garbage collection
+
+Only the client can compute true reachability — it holds the keys — so garbage
+collection is the client's job. The server keeps every stored object until its
+owner explicitly deletes it through `POST /v1/chunks/delete` (the official
+client's `aqt prune`, which decodes every resource and snapshot, diffs the
+reachable closure against the `GET /v1/chunks` inventory, and deletes the rest).
+The server's own maintenance only tidies what a prune leaves behind: it sweeps
+emptied packs and compacts sparse ones, never choosing victims itself.
+
+`chunkRefs` therefore no longer carries reachability. It survives for one job: the
+scope of object ids a non-owner reader of a public or granted resource may fetch.
+Private writes may omit it — which also lifts the header-size ceiling on private
+folder size — while a refs-less write against a shared resource that has refs is
+`400 shared_needs_refs`, and the operations that mint a reader (`SetVisibility`,
+`POST /v1/resources/:id/grants`) accept `chunkRefs` to refresh the scope.
+
+A current client assumes a current server: it never sends refs on a private write,
+and a pre-client-GC server — whose sweep would read that as unreferenced data —
+must not be pointed at by one. There is no negotiation; server and clients upgrade
+together (pre-1.0 there is exactly one deployment). Deleting a resource only
+unroots it (bytes return at the next prune); `DELETE /v1/account` still erases
+everything immediately.
 
 `GET /livez` is the liveness probe and `GET /readyz` admits traffic only while
 storage is available and the server is not shutting down; `/healthz` remains a
@@ -247,17 +285,20 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 `quota_exceeded`, `device_limit`, `bad_pack`, `gone`, `snapshot_anchored`,
 `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
 `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
-`account_exists`, `account_disabled`, `drops_roots`, `missing_chunks`
-(a push outlived the unreferenced-pack grace period and GC swept chunks it had
-uploaded; re-running sync re-uploads them), `invite_required`
+`account_exists`, `account_disabled`, `missing_chunks`
+(the manifest's refs name objects the owner no longer stores — a prune reaped an
+upload that outlived the grace period; re-running sync re-uploads them),
+`invite_required`
 (signup on an invite-mode server without a valid token), `invalid_challenge`
 (request a fresh attach challenge and retry), `invalid_credentials` (the single
 401 a failed attach collapses to; retrying the same inputs cannot succeed),
 `proof_mismatch` (the passphrase-derived proof on a passphrase change, root-key
 rotation, or account deletion did not match), `git_remote_policy` (the
 operation would share, publish, or reclassify a sealed Git remote resource), and
-`resource_too_large` (the upload's `chunkRefs` set overran the 32 MiB header) — so
-a client that acts on one of them matches the code rather than the prose.
+`resource_too_large` (the upload's `chunkRefs` set overran the 32 MiB header), and
+`shared_needs_refs` (a refs-less write targeted a public or granted resource, whose
+`chunkRefs` scope non-owner reads) — so a client that acts on one of them matches
+the code rather than the prose.
 
 Every other error carries the bucket code for its status: `invalid_request`
 (400), `unauthorized` (401), `forbidden` (403), `not_acceptable` (406),

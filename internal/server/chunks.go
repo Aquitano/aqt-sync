@@ -54,6 +54,43 @@ func (s *Server) checkChunks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ChunkCheckResponse{Missing: missing})
 }
 
+// listChunks pages the calling account's complete object inventory for a client
+// prune.
+func (s *Server) listChunks(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	ids, next, err := s.store.ListOwnerChunks(owner, c.Query("cursor"))
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "chunk list failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ChunkListResponse{IDs: ids, NextCursor: next})
+}
+
+// deleteChunks drops objects a client prune found unreachable from every root it
+// holds. The store enforces the pack age guard; ids it skips as too young are
+// reported, not failed, so the pruner retries them later.
+func (s *Server) deleteChunks(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.ChunkDeleteRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.IDs) > maxPublicObjectIDs {
+		abortCode(c, http.StatusBadRequest, "too many object ids in one request", api.ErrCodeTooManyIDs)
+		return
+	}
+	deleted, skipped, freed, err := s.store.DeleteOwnerChunks(owner, req.IDs, gcMinAge)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "chunk delete failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ChunkDeleteResponse{Deleted: deleted, SkippedRecent: skipped, FreedBytes: freed})
+}
+
 // putPack stores one raw pack (application/octet-stream). The id in the path is the
 // pack's content address; the store verifies it and every object slice, so a
 // corrupt or mislabeled pack is rejected wholesale.

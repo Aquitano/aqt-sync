@@ -666,7 +666,7 @@ func TestPutResourceRevokesGranteeAtomically(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "rotate@example.com")
 	id := s.putPublic(t, owner, "v1", 0, 0)
-	if err := s.PutGrant(owner, id, "grantee-handle", []byte("wrapped-to-grantee")); err != nil {
+	if err := s.PutGrant(owner, id, "grantee-handle", []byte("wrapped-to-grantee"), nil); err != nil {
 		t.Fatalf("put grant: %v", err)
 	}
 

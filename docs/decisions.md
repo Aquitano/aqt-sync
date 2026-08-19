@@ -43,9 +43,9 @@ release each landed in.
   trade-off working as intended. See
   [subpath addressing](protocol/folder-sync.md#subpath-addressing).
 
-- **Repack.** Mark-and-sweep at pack granularity left dead objects inside still-live
-  packs. `RepackOwner` now copies live objects into a fresh pack under a bounded byte
-  budget and swaps atomically. See
+- **Repack.** Chunk-granular pruning leaves dead bytes inside still-populated
+  packs. `RepackOwner` copies the surviving objects into a fresh pack under a
+  bounded byte budget and swaps atomically. See
   [garbage collection](protocol/folder-sync.md#garbage-collection).
 
 - **Push throughput / upload overlap.** The push no longer stalls the chunker on each
@@ -61,7 +61,7 @@ release each landed in.
   [chunking and dedup](protocol/folder-sync.md#chunking-and-dedup).
 
 - **Public whole-folder sharing.** Sharing a chunked folder needed no new object
-  space: `chunkRefs` already root every node and chunk, so the membership-checked
+  space: `chunkRefs` already list every node and chunk, so the membership-checked
   public object endpoint serves the whole DAG once the resource is public. See
   [public folder links](protocol/folder-sync.md#public-folder-links).
 

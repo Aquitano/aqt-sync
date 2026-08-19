@@ -230,13 +230,13 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	if n, _ := res.RowsAffected(); n == 0 {
 		return "", 0, ErrVersionConflict
 	}
-	// Defense-in-depth against a client re-PUTting an object-backed resource without
-	// its roots (e.g. a buggy key rotation): clearing every ChunkRef while the prior
-	// version had some would orphan the still-referenced objects for the next GC. No
-	// legitimate replace does this — a folder/streamed update always carries at least
-	// its manifest/root objects — so reject it rather than commit the unrooting. The
-	// per-resource lock above makes this count-then-replace atomic.
 	if len(req.ChunkRefs) == 0 {
+		// A refs-less update of a resource that has refs is the private fast path:
+		// the rows are left untouched, since they only matter as a non-owner read
+		// scope. A shared resource is the one place stale rows would bite — its
+		// readers could fetch nothing pushed since — so there the write is refused.
+		// An inline resource (no rows) passes either way; the server cannot tell it
+		// from a folder, and does not need to.
 		var existing int
 		if err := tx.QueryRow(
 			`SELECT count(*) FROM resource_chunks WHERE resource_id = ?`, req.ID,
@@ -244,12 +244,18 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 			return "", 0, err
 		}
 		if existing > 0 {
-			return "", 0, ErrDropsRoots
+			var shared bool
+			if err := tx.QueryRow(
+				`SELECT ? OR EXISTS(SELECT 1 FROM grants WHERE resource_id = ? AND owner_handle = ?)`,
+				req.Visibility == api.Public, req.ID, owner,
+			).Scan(&shared); err != nil {
+				return "", 0, err
+			}
+			if shared {
+				return "", 0, ErrSharedNeedsRefs
+			}
 		}
-	}
-	// Replace the GC roots to match the new manifest; chunks only this version
-	// referenced become unreferenced and eligible for a later sweep.
-	if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
+	} else if err := replaceResourceChunks(tx, req.ID, owner, req.ChunkRefs); err != nil {
 		return "", 0, err
 	}
 	// A revocation is a key rotation and a grant delete, and this is what makes them one
@@ -599,7 +605,12 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	if req.ExpectedVersion > 0 && req.ExpectedVersion != current {
 		return 0, ErrVersionConflict
 	}
-	res, err := s.db.Exec(
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`UPDATE resources SET visibility = ?, version = version + 1, updated_at = unixepoch(),
 		   expires_at = ?, max_reads = ?, on_expiry = ?, reads = 0, exhausted_at = NULL
 		 WHERE id = ? AND owner_handle = ? AND reclaimed = 0`,
@@ -610,6 +621,16 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return 0, ErrNotFound
+	}
+	// The stored refs can be stale on a client-GC account (private pushes omit
+	// them), so the flip that mints readers may carry the current set.
+	if len(req.ChunkRefs) > 0 {
+		if err := replaceResourceChunks(tx, id, owner, req.ChunkRefs); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return current + 1, nil
 }
@@ -761,18 +782,9 @@ func (s *Store) DeleteResourceVersion(owner, id string, expectedVersion int) err
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	// Drop the GC roots; the chunks themselves are reclaimed by a later sweep
-	// (they may still be referenced by another of the owner's resources or pinned
-	// by a snapshot). The dropped ids are read before the delete so the pack
-	// counters can be recomputed for exactly the packs this unrooting touches.
-	dropped, err := resourceChunkIDs(tx, id)
-	if err != nil {
-		return err
-	}
+	// Drop the read-scope rows; the chunks themselves stay until a client prune
+	// determines they are unreachable from every remaining root.
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
-		return err
-	}
-	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {

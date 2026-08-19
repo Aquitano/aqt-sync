@@ -15,13 +15,13 @@ import (
 )
 
 // A snapshot freezes a resource version against the in-place overwrite the next
-// sync performs: updateResource replaces the blob and the resource's GC roots and
-// removeStaleBlobs drops the superseded blob file, so without a snapshot the prior
-// state is gone. CreateSnapshot copies the root blob to a snapshot-owned file and
-// the chunk roots into snapshot_chunks, which the GC root queries union in (see
-// GCPacks/repackCandidates/commitRepack), so the objects a snapshot needs stay
-// live. Snapshots are owner-scoped and never public; all decryption is the
-// client's, so the server copies only ciphertext and never sees a key.
+// sync performs: updateResource replaces the blob and removeStaleBlobs drops the
+// superseded blob file, so without a snapshot the prior state is gone.
+// CreateSnapshot copies the root blob to a snapshot-owned file; the chunk objects
+// it references stay stored because nothing deletes objects except an explicit
+// client prune, whose reachability walk treats every snapshot as a root.
+// Snapshots are owner-scoped and never public; all decryption is the client's, so
+// the server copies only ciphertext and never sees a key.
 
 // decodeMetaKey parses a stored resource/snapshot's JSON-encoded sealed metadata
 // and optional wrapped key into the api shapes. The wrapped key stays nil when the
@@ -54,10 +54,10 @@ func decodeLabel(labelJSON sql.NullString) (*crypto.SealedBlob, error) {
 }
 
 // CreateSnapshot pins the owner's current version of a resource, returning the new
-// snapshot's metadata. It is keyless: it copies the already-sealed blob and the
-// existing chunk roots, decrypting nothing. label, when non-nil, is the client-
-// sealed user label stored opaquely alongside. anchor pins the snapshot against
-// retention (see `aqt checkpoint`).
+// snapshot's metadata. It is keyless: it copies the already-sealed blob,
+// decrypting nothing. label, when non-nil, is the client-sealed user label stored
+// opaquely alongside. anchor pins the snapshot against retention (see
+// `aqt checkpoint`).
 func (s *Store) CreateSnapshot(owner, resourceID string, label *crypto.SealedBlob, anchor bool) (api.SnapshotInfo, error) {
 	return s.createSnapshot(owner, resourceID, label, false, anchor, "")
 }
@@ -187,18 +187,6 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 		`INSERT INTO snapshots(snapshot_id, owner_handle, resource_id, visibility, encrypted_meta, encrypted_label, wrapped_key, blob_nonce, blob_size, version_captured, created_at, scheduled, min_client, anchored)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		snapID, owner, resourceID, visibility, metaJSON, labelJSON, wrappedJSON, nonce, blobSize, version, createdAt, sched, minClient, anchor,
-	); err != nil {
-		return api.SnapshotInfo{}, err
-	}
-	// Pin every object the live resource references now. The FK to objects holds
-	// because the resource still roots them, and copying inside the tx makes the pin
-	// atomic against a concurrent GC (the single writer connection serializes the two
-	// transactions). No pack recount is needed: every pinned object is already live
-	// via resource_chunks, so the pin flips no object's rooted state.
-	if _, err := tx.Exec(
-		`INSERT INTO snapshot_chunks(snapshot_id, owner_handle, chunk_id)
-		 SELECT ?, owner_handle, chunk_id FROM resource_chunks WHERE resource_id = ?`,
-		snapID, resourceID,
 	); err != nil {
 		return api.SnapshotInfo{}, err
 	}
@@ -347,15 +335,6 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if anchored {
 		return ErrSnapshotAnchored
 	}
-	// Unpinning can flip objects dead (if no resource or other snapshot still roots
-	// them), so the affected packs' counters are recomputed in the same transaction.
-	dropped, err := snapshotChunkIDs(tx, snapshotID)
-	if err != nil {
-		return err
-	}
-	if _, err := tx.Exec(`DELETE FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID); err != nil {
-		return err
-	}
 	res, err := tx.Exec(`DELETE FROM snapshots WHERE snapshot_id = ? AND owner_handle = ? AND anchored = 0`, snapshotID, owner)
 	if err != nil {
 		return err
@@ -363,32 +342,11 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if n, _ := res.RowsAffected(); n != 1 {
 		return ErrSnapshotAnchored
 	}
-	if err := recountPacksForChunks(tx, owner, dropped); err != nil {
-		return err
-	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
 	s.removeStaleBlobs(snapshotID, nil)
 	return nil
-}
-
-// snapshotChunkIDs returns the chunk ids a snapshot currently pins.
-func snapshotChunkIDs(tx *sql.Tx, snapshotID string) ([]string, error) {
-	rows, err := tx.Query(`SELECT chunk_id FROM snapshot_chunks WHERE snapshot_id = ?`, snapshotID)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
 }
 
 // SetSnapshotAnchor sets a snapshot's anchor flag and returns the updated metadata so

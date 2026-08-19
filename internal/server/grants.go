@@ -115,7 +115,9 @@ func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error
 // bump here is what makes ExpectedVersion a CAS over grant mutations. The cost
 // is that a content writer's If-Match can 409 on a concurrent grant change; its
 // refetch-and-retry resolves that like any other conflict.
-func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expectedVersions ...int) error {
+// refs, when non-empty, refreshes the resource's read scope in the same
+// transaction — the client-GC path, where the stored refs may be stale.
+func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, refs []string, expectedVersions ...int) error {
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -174,6 +176,11 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, expe
 	}
 	if _, err := tx.Exec(`UPDATE resources SET version = version + 1, updated_at = unixepoch() WHERE id = ? AND version = ?`, resourceID, version); err != nil {
 		return err
+	}
+	if len(refs) > 0 {
+		if err := replaceResourceChunks(tx, resourceID, owner, refs); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -626,7 +633,7 @@ func (s *Server) createGrant(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "cannot grant a resource to its own account")
 		return
 	}
-	err := s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ExpectedVersion)
+	err := s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ChunkRefs, req.ExpectedVersion)
 	if errors.Is(err, ErrVersionConflict) {
 		abortCode(c, http.StatusConflict, "resource or grants changed since you last fetched it", api.ErrCodeVersionConflict)
 		return
