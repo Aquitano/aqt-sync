@@ -112,9 +112,11 @@ GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrap
                                      410 Gone (code "gone") if the public link has expired, exhausted its
                                      read limit, or been reclaimed. Owner reads are never counted or expired
                                      (until reclaimed).
-POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxReads? }
+POST   /v1/resources/:id/visibility  Body: { visibility, expireSeconds?, maxReads?, chunkRefs? }
                                      Used by `share`/`unshare`; rotation just replaces the blob. Echoes the
-                                     accepted policy; a private flip clears it.
+                                     accepted policy; a private flip clears it. A public flip sends the
+                                     resource's current chunkRefs: refs-less private pushes leave the stored
+                                     read scope stale, and this is the operation that mints readers.
 DELETE /v1/resources/:id
 GET    /v1/resources                 List owner's resources (ids + encrypted meta + visibility + minClient +
                                      grantCount, so `share ls` skips grant fetches for ungranted resources).
@@ -164,9 +166,10 @@ GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, e
                                      correctly self-signed decoy — no existence oracle.
 PUT    /v1/account/enc-key           Backfill the caller's X25519 enc key; the Ed25519 self-signature is
                                      verified against the account identity key before storing.
-POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey }. Upsert (rotation
-                                     re-wraps by re-posting). No grantee-existence check (decoy handles
-                                     must be accepted indistinguishably).
+POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs? }. Upsert
+                                     (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
+                                     like the visibility flip above, for the same reason. No grantee-
+                                     existence check (decoy handles must be accepted indistinguishably).
 GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, createdAt }], nextCursor? }.
                                      Paginated (see below).
 DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key

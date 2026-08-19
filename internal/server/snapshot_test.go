@@ -38,8 +38,9 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	s := newStore(t)
 	owner := s.mustAccount(t, "snap@example.com")
 
-	// packA holds the snapshotted object plus a large dead sibling, so the pack is
-	// >50% dead and RepackOwner rewrites it. packC is the object the resource moves to.
+	// packA holds the snapshotted object plus a large sibling; pruning the sibling
+	// below makes the pack >50% dead so RepackOwner rewrites it. packC is the
+	// object the resource moves to.
 	packA, dataA, idsA := packOf("snapshot target", strings.Repeat("x", 8192))
 	packC, dataC, idsC := packOf("post-supersede object")
 	if _, err := s.PutPack(owner, packA, dataA, 0); err != nil {
@@ -56,14 +57,23 @@ func TestSnapshotPinsChunksThroughGCAndRepack(t *testing.T) {
 	}
 
 	// The resource now references a different object; idsA[0] is rooted only by the
-	// snapshot.
+	// snapshot. A prune reclaims the large sibling — the snapshot is a client-side
+	// root, so a correct pruner names everything in packA except idsA[0] — leaving
+	// the pack mostly dead.
 	s.supersede(t, owner, rid, []string{idsC[0]})
+	if deleted, _, _, err := s.DeleteOwnerChunks(owner, []string{idsA[1]}, forceGC); err != nil || deleted != 1 {
+		t.Fatalf("prune of dead sibling deleted %d err=%v, want 1", deleted, err)
+	}
 
 	if _, _, err := s.GCPacks(owner, forceGC); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := s.RepackOwner(owner, forceGC); err != nil {
+	repacked, _, err := s.RepackOwner(owner, forceGC)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if repacked != 1 {
+		t.Fatalf("repacked %d packs, want 1 (the mostly-dead packA)", repacked)
 	}
 
 	// The snapshot-pinned object survived sweep and repack (it may have moved packs)
