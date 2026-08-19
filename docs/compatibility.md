@@ -85,13 +85,13 @@ no discovery endpoint; the echo is the supported probe.
 
 - Every client request carries `X-Aqt-Capability: <n>` (`api.CapabilityHeader`),
   set to `api.ClientCapability`.
-- A write (`PUT /v1/resources`) may declare `minClient`: the lowest capability that
-  can read the formats it seals. The sealing sites set it — folder writes, one-shot
-  `push` and key rotation declare `2`; Git-remote roots declare `4`. Nothing declares
-  `1`: a create seals unbound only because the id does not exist until the server
-  answers, and it re-seals root and metadata id-bound as the resource's second write
-  before anything can read it. The server stores it per resource. A snapshot copies
-  the value from its source resource at capture time.
+- A write (`POST`/`PUT /v1/resources`) declares `minClient`: the lowest capability
+  that can read the formats it seals. The sealing sites set it — folder writes,
+  one-shot `push` and key rotation declare `2`; Git-remote roots declare `4`. Nothing
+  declares `1`: a create seals unbound only because the id does not exist until the
+  server answers, and it re-seals root and metadata id-bound as the resource's second
+  write before anything can read it. The server stores it per resource. A snapshot
+  copies the value from its source resource at capture time.
 - On a **read** (`GET /v1/resources/:id`, `GET /v1/snapshots/:id`) or an
   **overwriting write** of an existing resource, the server compares the requester's
   capability to the resource's stored `min_client`. If the requester is below it, the
@@ -99,11 +99,12 @@ no discovery endpoint; the echo is the supported probe.
   `{ "error": "...", "code": "upgrade_required", "minClient": <n> }` and no payload.
   The client maps this to `client.ErrUpgradeRequired` (exit code `6`). See
   [Recovering from a 426](#recovering-from-a-426) for what it prints.
-- Write-side validation: a declared `minClient` above the writer's own capability is
-  `400` (a client cannot write content it could never read back); an omitted
-  declaration stores `1`, so a caller that declares nothing never over-restricts a
-  resource. An update *may* lower `min_client`: the declaration describes the format
-  the write actually seals, and the server does not second-guess it.
+- Write-side validation: a declared `minClient` is `400` above the writer's own
+  capability (a client cannot write content it could never read back) and `400` below
+  the baseline `1`, including the omitted `0` — the server never invents one. An
+  update *may* lower `min_client` to any value at or above the baseline: the
+  declaration describes the format the write actually seals, and the server does not
+  second-guess it.
 - `GET /v1/resources` never `426`s: refusing an account's whole listing over one
   too-new row would hide everything else in it. Each row carries its `minClient`, and
   `aqt ls` renders a row above this build's capability as
@@ -160,7 +161,7 @@ Server-enforced link lifecycle (`--expire`/`--max-reads`/`--burn`) is a separate
 compatibility axis from the sealed-format capability above. It changes no encrypted
 format, so `api.ClientCapability` is **not** bumped and no `min_client` is set for it.
 
-Instead it uses an **enforcement echo**: a `PUT /v1/resources` (or visibility change)
+Instead it uses an **enforcement echo**: a resource write (or visibility change)
 that carries a policy gets the accepted `expiresAt`/`maxReads` echoed back in the
 response. A server that predates the feature ignores the unknown request fields and
 echoes nothing. A new client therefore **fails closed** — it deletes the just-created
@@ -229,9 +230,9 @@ format-agnostic; it only compares integers.
 The versioned media types, the resource envelope framing, object frames, and the
 idempotency and optimistic-concurrency rules are specified in
 [`protocol/api.md`](protocol/api.md#request-contract). None of them changes an
-encrypted format, so none is gated by `api.ClientCapability`; the unversioned
-`application/json` and `application/octet-stream` forms remain aliases for pre-v1
-clients.
+encrypted format, so none is gated by `api.ClientCapability`. The unversioned
+`application/json` and `application/octet-stream` forms remain `Accept` aliases; a
+resource write must declare the versioned envelope type or it is `415`.
 
 ## Rate limiting (429)
 

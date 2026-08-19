@@ -55,36 +55,11 @@ var ErrBlockLimit = errors.New("block list is full")
 
 // --- store ---
 
-// SetEncKey stores (or replaces) the account's published X25519 key and its
-// identity self-signature. The handler verifies the signature first.
-func (s *Store) SetEncKey(owner string, encPub, sig []byte) error {
-	res, err := s.db.Exec(
-		`UPDATE accounts SET enc_public_key = ?, enc_key_sig = ? WHERE owner_handle = ?`,
-		encPub, sig, owner,
-	)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	return nil
-}
-
-// AccountPublicKey returns the account's Ed25519 identity public key.
-func (s *Store) AccountPublicKey(owner string) ([]byte, error) {
-	var pub []byte
-	err := s.rdb.QueryRow(`SELECT public_key FROM accounts WHERE owner_handle = ?`, owner).Scan(&pub)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, ErrNotFound
-	}
-	return pub, err
-}
-
 // AccountKeysByEmail returns the grant-target lookup fields for an email:
-// ErrNotFound both for an unknown email and for an account that has not
-// published an enc key yet, so the handler's decoy covers the two cases
-// identically (distinguishing them would be the oracle).
+// ErrNotFound both for an unknown email and for a keyless account, so the
+// handler's decoy covers the two cases identically (distinguishing them would be
+// the oracle). Signup registers the enc key, so a keyless row is a defensive case
+// rather than one this deployment produces.
 func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error) {
 	var (
 		out    api.AccountKeysResponse
@@ -584,36 +559,6 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 		EncPublicKey: encPub,
 		EncKeySig:    crypto.SignEncKey(identity, encPub),
 	}, nil
-}
-
-// publishEncKey backfills the caller's X25519 key (PUT /v1/account/enc-key). The
-// self-signature is verified against the account's registered Ed25519 key, so a
-// stolen token alone cannot repoint future grants at an attacker key without also
-// holding the master key that signs the binding.
-func (s *Server) publishEncKey(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.PublishEncKeyRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if len(req.EncPublicKey) != crypto.EncPublicKeySize {
-		abort(c, http.StatusBadRequest, "enc public key must be 32 bytes")
-		return
-	}
-	identityPub, err := s.store.AccountPublicKey(owner)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "lookup failed")
-		return
-	}
-	if !crypto.VerifyEncKey(identityPub, req.EncPublicKey, req.EncKeySig) {
-		abort(c, http.StatusBadRequest, "enc key signature does not verify against the account identity key")
-		return
-	}
-	if err := s.store.SetEncKey(owner, req.EncPublicKey, req.EncKeySig); err != nil {
-		abort(c, http.StatusInternalServerError, "store failed")
-		return
-	}
-	c.Status(http.StatusNoContent)
 }
 
 // createGrant stores a client-sealed grant on a resource the caller owns

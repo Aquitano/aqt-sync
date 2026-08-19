@@ -145,9 +145,9 @@ func (s *Server) MetricsHandler() http.Handler {
 // gauges are exact at scrape time with no refresh loop to go stale. One series per
 // account per gauge; the label is the opaque owner handle. The queries run on the
 // read pool and touch counters, COUNT(*)s, and a SUM of the recorded blob sizes,
-// which stays cheap at the account counts a self-hosted server sees. Rows written
-// before migration 16 carry no recorded size and are stat'ed instead, so a server
-// that has not rewritten them yet pays one stat per such row per scrape.
+// which stays cheap at the account counts a self-hosted server sees. No scrape
+// touches the filesystem: every row records its blob size (startup backfills the
+// ones written before migration 16).
 type accountCollector struct {
 	store *Store
 }

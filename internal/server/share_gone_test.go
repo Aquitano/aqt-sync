@@ -25,7 +25,7 @@ func TestShareViewGoneOnceReadsExhausted(t *testing.T) {
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 
 	var resp api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
+	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
 		Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
 		MaxReads: 1,
 	}, &resp); code != http.StatusCreated {

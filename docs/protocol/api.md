@@ -21,9 +21,9 @@ requester whose capability is below the resource's stored `min_client` gets
 `426 Upgrade Required` with a structured body
 (`{ error, code: "upgrade_required", minClient }`) *before* any payload — an
 actionable "upgrade aqt" instead of a downstream decryption failure. A request with
-no (or an unparseable) capability header fails closed to `1` (baseline). A declared
-`minClient` above the writer's own capability is rejected `400`; an omitted
-declaration stores the baseline.
+no (or an unparseable) capability header fails closed to `1` (baseline). Every write
+declares a `minClient`: above the writer's own capability it is rejected `400`, and
+below the baseline (including an omitted `0`) it is rejected `400` too.
 
 `GET /v1/resources` is the deliberate exception: the listing never `426`s, because
 refusing the whole list over one too-new row would hide every resource the client
@@ -37,11 +37,12 @@ names the release the row needs rather than rendering it as unreadable.
 - Object frames: `application/vnd.aqt.object-frames; version=1`
 
 `Accept` selection honors media parameters and quality values; if none of the
-offered representations is supported the server returns `406`. Resource writes accept
-the versioned JSON or envelope media type and return `415` for unsupported or
-malformed `Content-Type` values. The unversioned `application/json` and
-`application/octet-stream` forms stay accepted as aliases, so a hand-rolled request
-(`curl`) does not have to name a versioned media type.
+offered representations is supported the server returns `406`; the unversioned
+`application/json` and `application/octet-stream` forms are accepted there as
+aliases, so a hand-rolled request (`curl`) does not have to name a versioned media
+type. Requests are stricter than responses: a resource write must declare
+`application/vnd.aqt.resource+octet-stream; version=1`, and anything else — an
+unlabelled body, a JSON body, the unversioned octet-stream form — is `415`.
 Public DTO fields are lower camel case and do not depend on Go field names.
 
 The resource envelope is a four-byte unsigned big-endian JSON-header length, a
@@ -74,7 +75,9 @@ returns `201` with no body, like the first post.
 
 ```text
 POST   /v1/account                  Create account. Body: { email, kdf, publicKey, wrappedRoot,
-                                     authVerifier, deviceName, inviteToken? }
+                                     authVerifier, deviceName, encPublicKey, encKeySig, inviteToken? }
+                                     encPublicKey/encKeySig are required and must self-verify (400
+                                     otherwise): an account without them is not a grant target.
                                      → { ownerHandle, deviceId, token }  (stores kdf + Ed25519 public key)
 GET    /v1/account/salt?email=…      → { kdf, wrappedRoot }  (needed to re-derive on a new machine;
                                      an unknown email gets an indistinguishable decoy — see the
@@ -98,12 +101,11 @@ DELETE /v1/account                   Erase the account and everything under it. 
                                          grants, bytes?, fileErrors? }  (a receipt; every token dies)
 
 POST   /v1/resources                 Create (server-assigned id). Same body/echo as PUT below.
-PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). An id-less body
-                                     is also accepted here and dispatched as a create.
-                                     Body: { blob, encryptedMeta, visibility,
-                                             wrappedKey?, expireSeconds?, maxReads? }  // blob = { nonce, ciphertext };
-                                                                                       // wrappedKey only for private;
-                                                                                       // policy only for public
+PUT    /v1/resources                 Replace in place (id set, owner-checked, version++). An id-less PUT
+                                     is 400: create is POST, where an Idempotency-Key can replay it.
+                                     Body: the resource envelope (see Media types above), whose header
+                                     carries id?, visibility, encryptedMeta, blobNonce, minClient, and
+                                     wrappedKey? (private only) / expireSeconds?, maxReads? (public only)
                                      → { id, version, expiresAt?, maxReads?, onExpiry? }  // echoes the accepted policy
 GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth. A private id needs the owner
@@ -163,10 +165,10 @@ POST   /v1/resources/:id/auto-snapshot   Body: { enabled }. Per-resource opt-out
 # a grant like ownership on the READ path only (returns the grant wrap + owner
 # handle instead of the owner's wrapped key); every mutation stays owner-scoped:
 GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, encPublicKey, encKeySig }.
-                                     Unknown emails (or accounts predating enc keys) get a deterministic,
-                                     correctly self-signed decoy — no existence oracle.
-PUT    /v1/account/enc-key           Backfill the caller's X25519 enc key; the Ed25519 self-signature is
-                                     verified against the account identity key before storing.
+                                     Unknown emails (or an account with no published enc key) get a
+                                     deterministic, correctly self-signed decoy — no existence oracle.
+                                     Signup registers the enc key, and root-key rotation replaces it; there
+                                     is no separate publish endpoint.
 POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs? }. Upsert
                                      (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
                                      like the visibility flip above, for the same reason. No grantee-
@@ -360,9 +362,10 @@ that only parses JSON.
 
 ## Public-link lifecycle
 
-`PUT /v1/resources` and the visibility endpoint accept an optional `expireSeconds`
-(a TTL — the server stores `expires_at = now + expireSeconds`, so client clock skew
-never matters) and `maxReads` on a public resource. The server enforces both: a
+A resource write (`POST`/`PUT /v1/resources`) and the visibility endpoint accept an
+optional `expireSeconds` (a TTL — the server stores `expires_at = now +
+expireSeconds`, so client clock skew never matters) and `maxReads` on a public
+resource. The server enforces both: a
 non-owner read past the expiry or the read limit gets `410 Gone` with
 `{ error, code: "gone" }`; only successful non-owner serves count toward `maxReads`,
 and concurrent reads cannot over-serve (the count is committed under a per-resource

@@ -430,8 +430,12 @@ What you get:
 - Standard Go runtime and process metrics.
 
 Per-account gauges are computed from SQLite at scrape time, so they are exact
-with no refresh lag. Users can see their own numbers without operator access
-via `aqt usage` (`GET /v1/account/usage`).
+with no refresh lag, and no scrape touches the filesystem: every resource and
+snapshot row records its own blob size. Rows written before that column existed are
+sized once, at startup, by a one-shot backfill that stats each of them; on a data dir
+carried forward from an older release the first start after this upgrade takes that
+one pass, and every start after it has nothing to visit. Users can see their own
+numbers without operator access via `aqt usage` (`GET /v1/account/usage`).
 
 ## Health checks and upgrades
 

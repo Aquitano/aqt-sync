@@ -104,7 +104,7 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if _, err := tx.Exec(
 		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, blob_size, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at, compact_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), expiresAt, maxReads, onExpiry, now, now, compactAt,
+		id, owner, string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, req.MinClient, expiresAt, maxReads, onExpiry, now, now, compactAt,
 	); err != nil {
 		return "", 0, err
 	}
@@ -210,7 +210,7 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 
 	set := setContent
 	args := []any{
-		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, normalizeMinClient(req.MinClient), compactAt,
+		string(req.Visibility), metaJSON, wrappedJSON, req.Blob.Nonce, int64(len(req.Blob.Ciphertext)), version, req.MinClient, compactAt,
 	}
 	if replacePolicy {
 		set += `,
@@ -716,14 +716,12 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 			vis         string
 			metaJSON    string
 			wrappedJSON sql.NullString
-			grantCount  int
 		)
 		if err := rows.Scan(&item.ID, &vis, &metaJSON, &wrappedJSON, &item.Version, &item.AutoSnapshot, &item.CompactAt,
 			&item.MinClient, &item.ExpiresAt, &item.MaxReads, &item.Reads, &item.CreatedAt, &item.UpdatedAt, &item.Reclaimed,
-			&grantCount); err != nil {
+			&item.GrantCount); err != nil {
 			return nil, "", err
 		}
-		item.GrantCount = &grantCount
 		item.Visibility = api.Visibility(vis)
 		if err := json.Unmarshal([]byte(metaJSON), &item.EncryptedMeta); err != nil {
 			return nil, "", err

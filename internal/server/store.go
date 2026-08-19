@@ -93,16 +93,6 @@ func (e *UpgradeRequiredError) Error() string {
 	return fmt.Sprintf("resource requires client capability %d", e.MinClient)
 }
 
-// normalizeMinClient floors a declared min_client at the baseline: a legacy writer
-// declares 0, and a resource is never over-restricted below the format every release
-// reads.
-func normalizeMinClient(declared int) int {
-	if declared < api.CapabilityBaseline {
-		return api.CapabilityBaseline
-	}
-	return declared
-}
-
 func validateGitRemotePolicy(req api.PutResourceRequest, storedCompactAt int) (int, error) {
 	if req.CompactAt < 0 {
 		return 0, ErrGitRemotePolicy
@@ -233,6 +223,13 @@ func OpenStore(dataDir string) (*Store, error) {
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
+	}
+	// One-shot: migration 16 left pre-existing rows without a recorded blob size, and
+	// usage now reads the column unconditionally. A dir that has already been through
+	// it has no rows to visit.
+	if err := s.backfillBlobSizes(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("backfill blob sizes: %w", err)
 	}
 	// The read pool. query_only makes a stray write on it fail loudly instead of
 	// racing the writer to SQLITE_BUSY; a fresh read transaction per query sees the
@@ -447,8 +444,8 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	`ALTER TABLE snapshots ADD COLUMN anchored INTEGER NOT NULL DEFAULT 0;`,
 	// 12: account-to-account grants. enc_public_key is the account's published X25519
 	// key (derived client-side from the master key), enc_key_sig its Ed25519
-	// self-signature; both NULL until a new-enough client uploads them (signup or the
-	// lazy PUT /v1/account/enc-key backfill). A grant row wraps one resource's content
+	// self-signature; signup registers both, and only a row predating this migration
+	// can be NULL. A grant row wraps one resource's content
 	// key to one grantee (HPKE, client-sealed); the server stores it opaquely. No FK on
 	// grantee_handle: a grant to a decoy handle (unknown-email lookup) must be accepted
 	// indistinguishably from a real one, or grant creation becomes an existence oracle.
@@ -489,9 +486,8 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// os.Stat per live resource and per snapshot, on the hot path of every resource
 	// create, snapshot create, and pack PUT (all under the per-account lock) and for
 	// every account on every Prometheus scrape. A column makes it one SUM. Existing
-	// rows are left at -1, meaning "not recorded"; those still fall back to a stat,
-	// so the backfill happens as rows are rewritten rather than in one pass over
-	// every blob at upgrade time.
+	// rows land at -1, meaning "not recorded"; OpenStore's backfillBlobSizes stats
+	// those once at startup, so the column is authoritative from then on.
 	`ALTER TABLE resources ADD COLUMN blob_size INTEGER NOT NULL DEFAULT -1;
 	 ALTER TABLE snapshots ADD COLUMN blob_size INTEGER NOT NULL DEFAULT -1;`,
 	// 17: a non-zero compact_at identifies a private git-remote resource and stores

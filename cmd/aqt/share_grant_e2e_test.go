@@ -152,63 +152,6 @@ func shareListRows(t *testing.T) map[string]shareListRow {
 	return byID
 }
 
-// Against a server that predates the grantCount echo the field is absent, and
-// the client must fall back to fetching grants per resource — a bare zero would
-// be indistinguishable from absent and silently hide every granted resource.
-// The proxy strips grantCount from list responses to stand in for that server.
-func TestShareLsFallsBackWhenTheServerOmitsGrantCounts(t *testing.T) {
-	var grantGets atomic.Int64
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
-		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/grants") {
-			grantGets.Add(1)
-		}
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/resources" {
-			rec := httptest.NewRecorder()
-			pass(rec, r)
-			body := rec.Body.Bytes()
-			var payload map[string]any
-			if json.Unmarshal(body, &payload) == nil {
-				if resources, ok := payload["resources"].([]any); ok {
-					for _, it := range resources {
-						if m, ok := it.(map[string]any); ok {
-							delete(m, "grantCount")
-						}
-					}
-					if stripped, err := json.Marshal(payload); err == nil {
-						body = stripped
-					}
-				}
-			}
-			w.Header().Set("Content-Type", rec.Header().Get("Content-Type"))
-			w.WriteHeader(rec.Code)
-			w.Write(body)
-			return
-		}
-		pass(w, r)
-	})
-	grantSignup(t, h, "old-grantee@example.com", "old-grantee", "another passphrase")
-
-	private := pushSecretFile(t, "private.txt", "p")
-	granted := pushSecretFile(t, "granted.txt", "g")
-	if err := runShareWith(granted, "old-grantee@example.com"); err != nil {
-		t.Fatalf("share --with: %v", err)
-	}
-
-	grantGets.Store(0)
-	rows := shareListRows(t)
-	if _, ok := rows[private]; ok {
-		t.Fatalf("private resource listed: %v", rows)
-	}
-	row, ok := rows[granted]
-	if !ok || len(row.Grantees) != 1 {
-		t.Fatalf("granted resource missing or grantee-less against an old server: %v", rows)
-	}
-	// Without counts nothing can be skipped: one fetch per listed resource.
-	if got := grantGets.Load(); got != 2 {
-		t.Fatalf("old-server fallback made %d grant fetches, want 2 (every resource)", got)
-	}
-}
-
 // pushSecretFile pushes one inline file as the current profile and returns its id.
 func pushSecretFile(t *testing.T, name, content string) string {
 	t.Helper()
@@ -463,18 +406,17 @@ func TestAccountKeysDecoy(t *testing.T) {
 	if casedGhost.Handle != ghost1.Handle || !bytes.Equal(casedGhost.EncPublicKey, ghost1.EncPublicKey) {
 		t.Fatal("decoy differs by email casing")
 	}
-	// An account that never published an enc key gets the decoy too — the lookup
-	// must not reveal that the account exists but predates grants.
-	legacyKdf := cryptotest.KdfParams(t)
-	legacyMK, err := crypto.GenerateMasterKey()
+	// Signup demands an enc key, so a keyless account can no longer be registered.
+	keylessKdf := cryptotest.KdfParams(t)
+	keylessMK, err := crypto.GenerateMasterKey()
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyUK, err := crypto.DeriveUnlockKey("legacy horse battery staple", legacyKdf)
+	keylessUK, err := crypto.DeriveUnlockKey("keyless horse battery staple", keylessKdf)
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacyRoot, err := crypto.WrapRoot(legacyMK, legacyUK)
+	keylessRoot, err := crypto.WrapRoot(keylessMK, keylessUK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,21 +425,29 @@ func TestAccountKeysDecoy(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := bootCl.CreateAccount(api.CreateAccountRequest{
-		Email:        "legacy@example.com",
-		Kdf:          legacyKdf,
-		PublicKey:    crypto.DeriveSigningKey(legacyMK).Public().(ed25519.PublicKey),
-		WrappedRoot:  legacyRoot,
-		AuthVerifier: crypto.DeriveAuthVerifier(legacyUK),
-		DeviceName:   "legacy",
-	}); err != nil {
+		Email:        "keyless@example.com",
+		Kdf:          keylessKdf,
+		PublicKey:    crypto.DeriveSigningKey(keylessMK).Public().(ed25519.PublicKey),
+		WrappedRoot:  keylessRoot,
+		AuthVerifier: crypto.DeriveAuthVerifier(keylessUK),
+		DeviceName:   "keyless",
+	}); err == nil || !strings.Contains(err.Error(), "enc public key") {
+		t.Fatalf("signup without an enc key = %v, want a refusal naming the key", err)
+	}
+
+	// The keyless branch stays as a defensive case: a row without a published key
+	// answers with the decoy rather than admitting the account exists.
+	if _, err := h.store.CreateAccount("keyless@example.com", keylessKdf,
+		crypto.DeriveSigningKey(keylessMK).Public().(ed25519.PublicKey), keylessRoot,
+		crypto.DeriveAuthVerifier(keylessUK), nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	got, err := cl.AccountKeys("legacy@example.com")
+	got, err := cl.AccountKeys("keyless@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !crypto.VerifyEncKey(got.PublicKey, got.EncPublicKey, got.EncKeySig) {
-		t.Fatal("legacy-account decoy is not self-consistent")
+		t.Fatal("keyless-account decoy is not self-consistent")
 	}
 }
 

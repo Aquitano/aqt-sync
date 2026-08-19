@@ -39,12 +39,13 @@ func TestRawResourceRoundTrip(t *testing.T) {
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
+		MinClient:     api.CapabilityBaseline,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec := h.raw(http.MethodPut, "/v1/resources", token,
-		map[string]string{"Content-Type": "application/octet-stream"}, body)
+	rec := h.raw(http.MethodPost, "/v1/resources", token,
+		map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}, body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("raw put: %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -91,10 +92,11 @@ func TestRawResourceRoundTrip(t *testing.T) {
 	}
 }
 
-// TestRawResourceLegacyInterop confirms the two wire shapes are interchangeable: a
-// blob uploaded raw is readable by a legacy JSON client, and vice versa, so an
-// upgrade needs no coordinated flag day.
-func TestRawResourceLegacyInterop(t *testing.T) {
+// TestResourceReadsBackInEitherRepresentation covers the one half of the old
+// interop that survives: uploads are envelope-only, but a stored resource still
+// reads back either as the envelope or as JSON, which is what the browser share
+// page fetches.
+func TestResourceReadsBackInEitherRepresentation(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("interop@example.com", "another passphrase here now")
@@ -103,12 +105,11 @@ func TestRawResourceLegacyInterop(t *testing.T) {
 	blob, _ := crypto.Seal([]byte("public snippet"), ck, crypto.AADBlob)
 	metaBlob, _ := crypto.Seal([]byte(`{"name":"n.txt","size":14}`), ck, crypto.AADMeta)
 
-	// Raw upload, legacy JSON read.
 	body, _ := api.EncodeResourceUpload(api.PutResourceRequest{
-		Visibility: api.Public, Blob: blob, EncryptedMeta: metaBlob,
+		Visibility: api.Public, Blob: blob, EncryptedMeta: metaBlob, MinClient: api.CapabilityBaseline,
 	})
-	rec := h.raw(http.MethodPut, "/v1/resources", token,
-		map[string]string{"Content-Type": "application/octet-stream"}, body)
+	rec := h.raw(http.MethodPost, "/v1/resources", token,
+		map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}, body)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("raw put: %d (%s)", rec.Code, rec.Body.String())
 	}
@@ -117,21 +118,14 @@ func TestRawResourceLegacyInterop(t *testing.T) {
 
 	var jsonGot api.GetResourceResponse
 	if code := h.do(http.MethodGet, "/v1/resources/"+put.ID, token, nil, &jsonGot); code != http.StatusOK {
-		t.Fatalf("legacy json get: %d", code)
+		t.Fatalf("json get: %d", code)
 	}
 	if !bytes.Equal(jsonGot.Blob.Ciphertext, blob.Ciphertext) {
-		t.Fatal("legacy JSON read of a raw upload lost the blob")
+		t.Fatal("JSON read of an envelope upload lost the blob")
 	}
 
-	// Legacy JSON upload, raw read.
-	var put2 api.PutResourceResponse
-	if code := h.do(http.MethodPut, "/v1/resources", token, api.PutResourceRequest{
-		Visibility: api.Public, Blob: blob, EncryptedMeta: metaBlob,
-	}, &put2); code != http.StatusCreated {
-		t.Fatalf("legacy json put: %d", code)
-	}
-	rec = h.raw(http.MethodGet, "/v1/resources/"+put2.ID, token,
-		map[string]string{"Accept": "application/octet-stream"}, nil)
+	rec = h.raw(http.MethodGet, "/v1/resources/"+put.ID, token,
+		map[string]string{"Accept": api.ResourceEnvelopeMediaType}, nil)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("raw get: %d", rec.Code)
 	}
@@ -140,13 +134,12 @@ func TestRawResourceLegacyInterop(t *testing.T) {
 		t.Fatalf("decode raw download: %v", err)
 	}
 	if !bytes.Equal(rawGot.Blob.Ciphertext, blob.Ciphertext) {
-		t.Fatal("raw read of a legacy JSON upload lost the blob")
+		t.Fatal("envelope read lost the blob")
 	}
 }
 
-// TestRawResourceBodyCapEnforced confirms the raw path honors the same
-// maxResourceBody cap as the JSON path: an over-cap body is refused before it is
-// buffered, not read whole into memory.
+// TestRawResourceBodyCapEnforced confirms the upload path honors maxResourceBody:
+// an over-cap body is refused before it is buffered, not read whole into memory.
 func TestRawResourceBodyCapEnforced(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -157,8 +150,8 @@ func TestRawResourceBodyCapEnforced(t *testing.T) {
 	binary.BigEndian.PutUint32(over, uint32(len(header)))
 	copy(over[4:], header)
 
-	rec := h.raw(http.MethodPut, "/v1/resources", token,
-		map[string]string{"Content-Type": "application/octet-stream"}, over)
+	rec := h.raw(http.MethodPost, "/v1/resources", token,
+		map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}, over)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over-cap raw put: got %d, want 413", rec.Code)
 	}
@@ -257,18 +250,26 @@ func TestVersionedMediaNegotiationConformance(t *testing.T) {
 	if _, ok := negotiateResourceResponse("application/vnd.aqt.resource+json; version=2"); ok {
 		t.Fatal("unsupported response version was accepted")
 	}
-	if _, ok := resourceRequestFormat("application/vnd.aqt.resource+json; version=2"); ok {
-		t.Fatal("unsupported request version was accepted")
-	}
 	if acceptsObjectFrames("application/vnd.aqt.object-frames; version=1; q=0") {
 		t.Fatal("q=0 object frames were accepted")
 	}
 
 	h := newHarness(t)
 	token, _ := h.signup("media.com", "passphrase for media tests")
-	rec := h.raw(http.MethodPost, "/v1/resources", token, map[string]string{"Content-Type": "text/plain"}, []byte("nope"))
-	if rec.Code != http.StatusUnsupportedMediaType {
-		t.Fatalf("unsupported content type = %d", rec.Code)
+	// Uploads take the versioned envelope and nothing else: no sniffing an unlabelled
+	// body as JSON, no unversioned octet-stream alias, no JSON request body at all.
+	for _, contentType := range []string{
+		"text/plain",
+		"",
+		"application/json",
+		"application/octet-stream",
+		"application/vnd.aqt.resource+json; version=1",
+		"application/vnd.aqt.resource+octet-stream; version=2",
+	} {
+		rec := h.raw(http.MethodPost, "/v1/resources", token, map[string]string{"Content-Type": contentType}, []byte("nope"))
+		if rec.Code != http.StatusUnsupportedMediaType {
+			t.Fatalf("Content-Type %q on an upload = %d, want 415", contentType, rec.Code)
+		}
 	}
 	ck, _ := crypto.GenerateContentKey()
 	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
@@ -277,8 +278,42 @@ func TestVersionedMediaNegotiationConformance(t *testing.T) {
 	if code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{Visibility: api.Public, Blob: blob, EncryptedMeta: meta}, &put); code != http.StatusCreated {
 		t.Fatalf("create = %d", code)
 	}
-	rec = h.raw(http.MethodGet, "/v1/resources/"+put.ID, token, map[string]string{"Accept": "image/png"}, nil)
+	rec := h.raw(http.MethodGet, "/v1/resources/"+put.ID, token, map[string]string{"Accept": "image/png"}, nil)
 	if rec.Code != http.StatusNotAcceptable {
 		t.Fatalf("unacceptable response = %d", rec.Code)
+	}
+}
+
+// TestResourceWriteRefusals pins the two write-shape rules the client already
+// obeys, in place of the leniency they replaced: a create is a POST (a PUT names
+// the resource it replaces), and a declared min_client below the baseline is a
+// client bug rather than something the server floors.
+func TestResourceWriteRefusals(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, _ := h.signup("strict@example.com", "passphrase for the write refusals")
+	envelope := map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}
+
+	ck, _ := crypto.GenerateContentKey()
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
+	upload := func(minClient int) []byte {
+		blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
+		body, err := api.EncodeResourceUpload(api.PutResourceRequest{
+			Visibility: api.Public, Blob: blob, EncryptedMeta: meta, MinClient: minClient,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return body
+	}
+
+	if rec := h.raw(http.MethodPut, "/v1/resources", token, envelope, upload(api.CapabilityBaseline)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("PUT without an id = %d, want 400", rec.Code)
+	}
+	if rec := h.raw(http.MethodPost, "/v1/resources", token, envelope, upload(api.CapabilityBaseline)); rec.Code != http.StatusCreated {
+		t.Fatalf("POST create = %d, want 201", rec.Code)
+	}
+	if rec := h.raw(http.MethodPost, "/v1/resources", token, envelope, upload(0)); rec.Code != http.StatusBadRequest {
+		t.Fatalf("undeclared min_client = %d, want 400", rec.Code)
 	}
 }

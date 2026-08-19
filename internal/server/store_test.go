@@ -95,11 +95,11 @@ func (s *Store) rootResource(t *testing.T, owner string, refs []string) string {
 	return id
 }
 
-// TestResourceMinClientDefaultsToBaseline covers migration 9's DEFAULT and the
-// store's normalization: an undeclared write stores the baseline capability (so a
-// pre-migration row and a legacy writer are never over-restricted), while a declared
-// value is stored verbatim.
-func TestResourceMinClientDefaultsToBaseline(t *testing.T) {
+// TestResourceMinClientStoredVerbatim covers migration 9's column: a declared
+// capability is stored exactly as declared, never adjusted. A write that declares
+// less than the baseline is refused at the handler instead — see
+// TestResourceWriteRefusals.
+func TestResourceMinClientStoredVerbatim(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "mincli@example.com")
@@ -118,12 +118,12 @@ func TestResourceMinClientDefaultsToBaseline(t *testing.T) {
 		return n
 	}
 
-	undeclared, _, err := s.PutResource(owner, api.CapabilityIDBinding, req(0))
+	baseline, _, err := s.PutResource(owner, api.CapabilityIDBinding, req(api.CapabilityBaseline))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := stored(undeclared); got != api.CapabilityBaseline {
-		t.Fatalf("undeclared min_client = %d, want %d", got, api.CapabilityBaseline)
+	if got := stored(baseline); got != api.CapabilityBaseline {
+		t.Fatalf("baseline min_client = %d, want %d", got, api.CapabilityBaseline)
 	}
 
 	declared, _, err := s.PutResource(owner, api.CapabilityIDBinding, req(api.CapabilityIDBinding))
@@ -1790,31 +1790,71 @@ func TestMutationsRejectStaleResourceVersions(t *testing.T) {
 	}
 }
 
-// A resource row whose blob file is gone (operator deletion, crash-window
-// orphan) must not fail usage accounting: AccountUsage feeds metrics, pack and
-// resource puts, and auto-snapshots, so a hard error would wedge the whole
-// account on one missing file.
-func TestAccountUsageToleratesMissingBlob(t *testing.T) {
+// Usage reads blob_size unconditionally, so the startup backfill is what makes
+// rows written before migration 16 countable. A row whose file is gone (operator
+// deletion, crash-window orphan) records 0 rather than failing the boot: a hard
+// error there would wedge every account, since AccountUsage feeds metrics, pack
+// and resource puts, and auto-snapshots.
+func TestBlobSizeBackfillRunsAtStartup(t *testing.T) {
 	t.Parallel()
-	s := newStore(t)
-	owner := s.mustAccount(t, "orphan@example.com")
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	owner := s.mustAccount(t, "backfill@example.com")
 	ck, _ := crypto.GenerateContentKey()
-	blob, _ := crypto.Seal([]byte("body"), ck, crypto.AADBlob)
 	meta, _ := crypto.Seal([]byte(`{"name":"f","size":4}`), ck, crypto.AADMeta)
 	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
-	id, _, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped})
-	if err != nil {
+	put := func(body string) (string, crypto.SealedBlob) {
+		blob, _ := crypto.Seal([]byte(body), ck, crypto.AADBlob)
+		id, _, err := s.PutResource(owner, api.ClientCapability, api.PutResourceRequest{
+			Visibility: api.Private, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+			MinClient: api.CapabilityBaseline,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id, blob
+	}
+	kept, keptBlob := put("body")
+	orphan, orphanBlob := put("orphaned body")
+
+	// Age both rows back to the pre-migration-16 state, and strip one of its file.
+	if _, err := s.db.Exec(`UPDATE resources SET blob_size = -1`); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(s.blobPath(id, blob.Nonce)); err != nil {
+	if err := os.Remove(s.blobPath(orphan, orphanBlob.Nonce)); err != nil {
 		t.Fatal(err)
 	}
-	u, err := s.AccountUsage(owner)
-	if err != nil {
-		t.Fatalf("usage with missing blob: %v", err)
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
 	}
-	if u.Resources != 1 {
-		t.Fatalf("resources = %d, want 1", u.Resources)
+
+	s, err = OpenStore(dir)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	t.Cleanup(func() { s.Close() })
+	size := func(id string) int64 {
+		var n int64
+		if err := s.db.QueryRow(`SELECT blob_size FROM resources WHERE id = ?`, id).Scan(&n); err != nil {
+			t.Fatalf("read blob_size: %v", err)
+		}
+		return n
+	}
+	if got, want := size(kept), int64(len(keptBlob.Ciphertext)); got != want {
+		t.Fatalf("backfilled blob_size = %d, want %d", got, want)
+	}
+	if got := size(orphan); got != 0 {
+		t.Fatalf("orphaned row blob_size = %d, want 0", got)
+	}
+	blobBytes, err := s.ownerBlobBytes(owner)
+	if err != nil {
+		t.Fatalf("usage after backfill: %v", err)
+	}
+	if want := int64(len(keptBlob.Ciphertext)); blobBytes != want {
+		t.Fatalf("blob bytes after backfill = %d, want %d", blobBytes, want)
 	}
 }
 
