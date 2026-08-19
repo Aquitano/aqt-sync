@@ -37,11 +37,10 @@ type folderState struct {
 	// Profile, Account, and Fingerprint bind the folder to the account that owns its
 	// remote resource: Profile is the local profile name commands default to, and
 	// Account is the server-side owner handle — the account's stable identity, which
-	// a root-key rotation preserves. Fingerprint pins the account's signing key and
-	// is the legacy form of the same check; because rotation mints a new signing key,
-	// it is only authoritative when no Account is recorded. Empty on state written by
-	// an older build; backfilled by bindTrackedRoot once the recorded identity checks
-	// out.
+	// a root-key rotation preserves and which every identity check keys on.
+	// Fingerprint records the account's current signing key; bindTrackedRoot refreshes
+	// it after a rotation. Profile and Account are written by init/clone/adopt and
+	// required by loadState.
 	Profile     string `json:"profile,omitempty"`
 	Account     string `json:"account,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
@@ -50,8 +49,9 @@ type folderState struct {
 	// the freshness pin. A server reporting a lower version has been rolled back
 	// (restored from backup, or replaying an old state); syncing against it would
 	// read the regression as remote changes and revert local files, so it is
-	// refused unless --accept-rollback. 0 (state written by an older build)
-	// disables the guard until the next successful sync records a version.
+	// refused unless --accept-rollback. Recorded by every init/clone/adopt and by
+	// every sync, and required by loadState: an absent pin would silently disable
+	// the guard.
 	RemoteVersion int `json:"remoteVersion,omitempty"`
 }
 
@@ -458,15 +458,14 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	// last integrated (recorded by every init/clone/sync), so the resource header alone
 	// answers "is the server ahead?" — no folder key, no tree walk.
 	switch {
-	case st.RemoteVersion > 0 && res.Version < st.RemoteVersion:
+	case res.Version < st.RemoteVersion:
 		return &incomingReport{State: "rollback", ServerVersion: res.Version, SeenVersion: st.RemoteVersion}
-	case st.RemoteVersion > 0 && res.Version == st.RemoteVersion:
+	case res.Version == st.RemoteVersion:
 		return &incomingReport{State: "up-to-date"}
 	}
 
-	// The server is ahead (or RemoteVersion predates version tracking). Try for a
-	// entry-level breakdown; it needs the folder key, available without a prompt only
-	// when a session is already unlocked.
+	// The server is ahead. Try for a entry-level breakdown; it needs the folder key,
+	// available without a prompt only when a session is already unlocked.
 	{
 		if mk, ok := identity.LoadSession(prof.Name); ok {
 			defer mk.Wipe()
@@ -485,9 +484,6 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	}
 
 	// Fallback: the server advanced but we cannot (or need not) enumerate the files.
-	if st.RemoteVersion == 0 {
-		return &incomingReport{State: "ahead"}
-	}
 	return &incomingReport{State: "ahead", AheadBy: res.Version - st.RemoteVersion}
 }
 
@@ -2763,20 +2759,33 @@ func saveState(root string, st folderState) error {
 	return fsatomic.WriteFile(controlPath(root, stateFile), b, 0o600)
 }
 
+// loadState reads the folder pointer and refuses state that is missing the identity
+// binding or the freshness pin. Every init/clone/adopt writes both, so an absence
+// means state from a build that predates them: the folder cannot be tied to an
+// account, and the rollback guard has nothing to compare against. Local state is
+// regenerable, so re-tracking the folder is the fix.
 func loadState(root string) (folderState, error) {
 	var st folderState
-	b, err := os.ReadFile(controlPath(root, stateFile))
+	path := controlPath(root, stateFile)
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return st, err
 	}
-	return st, json.Unmarshal(b, &st)
+	if err := json.Unmarshal(b, &st); err != nil {
+		return st, err
+	}
+	if st.Profile == "" || st.Account == "" {
+		return st, fmt.Errorf("%s records no owning profile and account, so this folder cannot be bound to an identity; re-run `aqt init` or `aqt clone` to track it again", path)
+	}
+	if st.RemoteVersion == 0 {
+		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; run `aqt sync` first (state written by an older build must be re-tracked with `aqt init` or `aqt clone`)", path)
+	}
+	return st, nil
 }
 
-// sealedBase is the at-rest envelope for the local base manifest. Its "sealed" key
-// is disjoint from a plaintext Manifest's ("version"/"entries"), so a legacy
-// unsealed base.json is detected and read transparently, then upgraded on the next
-// save. base.json holds chunk decryption keys and inline file plaintext, so it is
-// sealed under the profile's session sealing key rather than left in the clear.
+// sealedBase is the at-rest envelope for the local base manifest. base.json holds
+// chunk decryption keys and inline file plaintext, so it is sealed under the
+// profile's session sealing key rather than left in the clear.
 type sealedBase struct {
 	Sealed *crypto.SealedBlob `json:"sealed"`
 }
@@ -2797,20 +2806,23 @@ func saveBase(root string, m syncengine.Manifest) error {
 	return fsatomic.WriteFile(controlPath(root, baseFile), b, 0o600)
 }
 
-// decodeBase unmarshals base.json bytes into m, transparently opening a sealed
-// envelope (current format) or reading a legacy plaintext manifest (pre-seal,
-// upgraded on the next save). The two forms have disjoint top-level keys, so the
-// sealed probe is unambiguous.
+// decodeBase opens a sealed base.json into m. Anything that is not the sealed
+// envelope is refused rather than read as a bare manifest: base.json carries chunk
+// keys and inline plaintext, and an unreadable base is not fatal — the sync degrades
+// to --reconcile, which rebuilds it.
 func decodeBase(b []byte, m *syncengine.Manifest) error {
 	var env sealedBase
-	if err := json.Unmarshal(b, &env); err == nil && env.Sealed != nil {
-		plain, err := identity.OpenBase(flagProfile, *env.Sealed)
-		if err != nil {
-			return err
-		}
-		b = plain
+	if err := json.Unmarshal(b, &env); err != nil {
+		return err
 	}
-	return json.Unmarshal(b, m)
+	if env.Sealed == nil {
+		return errors.New("base.json is not a sealed envelope; re-run `aqt sync --reconcile` to rebuild it")
+	}
+	plain, err := identity.OpenBase(flagProfile, *env.Sealed)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(plain, m)
 }
 
 // loadBaseForSync returns the last-synced manifest and whether a usable base

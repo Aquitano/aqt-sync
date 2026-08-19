@@ -99,7 +99,7 @@ func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 	// remote edits/deletes and clobber local files. A baseless reconcile turns them
 	// into conflicts to review instead.
 	trustBase := s.baseExists
-	if s.st.RemoteVersion > 0 && res.Version < s.st.RemoteVersion {
+	if res.Version < s.st.RemoteVersion {
 		if !opts.acceptRollback {
 			return remoteSync{}, rollbackErr(res.Version, s.st.RemoteVersion)
 		}

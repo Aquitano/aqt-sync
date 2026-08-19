@@ -341,8 +341,9 @@ recovery guidance rather than reconciled as an empty chunked manifest.
 ## Tracked state
 
 `.aqt/state.json` records, next to the resource id and server URL, the owning profile
-name, the account's owner handle, and its signing-key fingerprint — the fingerprint
-only as a legacy fallback for state written before the handle was recorded. Tracked
+name, the account's owner handle, and its signing-key fingerprint. State missing the
+profile, the owner handle, or the version pin is refused rather than adopted: local
+state is regenerable, so re-running `aqt init`/`aqt clone` is the fix. Tracked
 commands default to that recorded identity (no `--profile` needed even from a shell
 whose default profile differs), and an explicit `--profile` or `--server` that
 contradicts it is rejected with guidance rather than talking to the wrong account or
@@ -356,12 +357,10 @@ The binding is on the account's owner handle, not its signing key, so
 not strand tracked folders. Deleting the account leaves the folder's plaintext files
 alone, but its `state.json` then names an account that no longer exists.
 
-*Binding migration.* State written by an older build carries no binding fields. The
-first tracked command adopts the active profile only when that profile's server
-matches the folder's recorded server, and writes the binding back. A legacy folder
-whose recorded server matches no configured profile fails with instructions to pass
-the owning `--profile` (or re-clone); it is never silently rebound to whatever
-account happens to be active.
+*Missing binding.* State written by a build that predates the binding fields is
+refused with instructions to re-run `aqt init`/`aqt clone`; it is never adopted by
+whatever account happens to be active. What the folder tracks is regenerable, and a
+silent adoption is the one outcome that cannot be undone after the fact.
 
 **Atomic materialization.** Operations that create trees commit all-or-nothing.
 `clone`, directory pulls, snapshot export, and side-by-side restore download into a
