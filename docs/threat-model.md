@@ -327,6 +327,12 @@ you from":
   contact who can read their fingerprint out over a separate channel: the pin lands
   only if the server presents that key, which is a check no decoy passes. Without a
   fingerprint to check against, the pin is still trust-on-first-use.
+- **Plaintext base residue.** Refusing an unsealed `.aqt/base.json` stops this build
+  from reading one, but it does not erase what an older build already wrote: the file
+  sits there until a reconcile replaces it through an atomic rename, and the freed
+  disk blocks holding the old plaintext are not scrubbed. `aqt sync --reconcile`
+  overwrites the file; scrubbing the blocks is the disk's job. Forensic-only, and
+  local to that disk.
 
 Nothing here changes an interface, which is why they are recorded as limits rather
 than blocking work.

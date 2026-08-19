@@ -144,4 +144,15 @@ func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "records no synced server version") {
 		t.Fatalf("sync of unpinned state = %v, want a refusal", err)
 	}
+
+	// A negative pin is equally unusable: every server version would read as an
+	// advance, so the guard could never trip.
+	st.RemoteVersion = -1
+	if err := saveState(origin, st); err != nil {
+		t.Fatal(err)
+	}
+	err = runSync(origin, syncOptions{})
+	if err == nil || !strings.Contains(err.Error(), "records no synced server version") {
+		t.Fatalf("sync of a negative pin = %v, want a refusal", err)
+	}
 }

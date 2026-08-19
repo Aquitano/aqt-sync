@@ -2777,8 +2777,8 @@ func loadState(root string) (folderState, error) {
 	if st.Profile == "" || st.Account == "" {
 		return st, fmt.Errorf("%s records no owning profile and account, so this folder cannot be bound to an identity; re-run `aqt init` or `aqt clone` to track it again", path)
 	}
-	if st.RemoteVersion == 0 {
-		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; run `aqt sync` first (state written by an older build must be re-tracked with `aqt init` or `aqt clone`)", path)
+	if st.RemoteVersion <= 0 {
+		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; re-run `aqt init` or `aqt clone` to track it again", path)
 	}
 	return st, nil
 }

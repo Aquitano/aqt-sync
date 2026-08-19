@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
 // TestMain forces the keychain off for the e2e suite so it exercises the
@@ -66,5 +68,30 @@ func TestAccountLifecycleCommandsAreExplicit(t *testing.T) {
 	}
 	if err := validateSessionTTL(time.Second); err != nil {
 		t.Fatalf("1s TTL must be valid: %v", err)
+	}
+}
+
+// The TTL a profile recorded at signup/login is authoritative, including an explicit
+// zero ("cache until lock or logout"). Zero is dropped from the JSON by omitempty, so
+// the round-trip is what pins that an absent field reads back as that same zero.
+func TestSessionTTLRoundTripsExplicitZero(t *testing.T) {
+	isolateConfigEnv(t, t.TempDir())
+
+	if got := sessionTTL(nil); got != defaultSessionTTL {
+		t.Fatalf("sessionTTL(nil) = %v, want the flag default %v", got, defaultSessionTTL)
+	}
+	for _, secs := range []int64{0, 900} {
+		if err := identity.Save(&identity.Profile{
+			Name: identity.DefaultProfile, Server: "https://one.example", SessionTTLSeconds: secs,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		prof, err := identity.Load(identity.DefaultProfile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, want := sessionTTL(prof), time.Duration(secs)*time.Second; got != want {
+			t.Errorf("sessionTTL after a round-trip of %ds = %v, want %v", secs, got, want)
+		}
 	}
 }
