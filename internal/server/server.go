@@ -1710,9 +1710,10 @@ func requestCapability(c *gin.Context) int {
 }
 
 // abortUpgradeRequired answers 426 with the structured upgrade error. The message is
-// self-contained because a header-less old client prints it verbatim (server: %s), so
-// it must explain the mismatch on its own. need is the capability the resource
-// requires; have is what the requester declared.
+// self-contained because the client quotes the server prose verbatim ("server said:
+// %s") and hand-rolled requests see only the body, so it must explain the mismatch on
+// its own. need is the capability the resource requires; have is what the requester
+// declared.
 func abortUpgradeRequired(c *gin.Context, need, have int) {
 	c.AbortWithStatusJSON(http.StatusUpgradeRequired, api.ErrorResponse{
 		Error:     fmt.Sprintf("resource requires client capability %d or newer (this client supports %d): upgrade aqt", need, have),
