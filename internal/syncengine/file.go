@@ -98,7 +98,8 @@ func distinctIDs(chunks []crypto.Chunk) []string {
 }
 
 // SealFileRoot seals a streamed file's root as the resource blob, bound to the
-// resource id when known (empty on create, before the server assigns one).
+// resource id. It is empty for the first half of a create, which re-seals bound as
+// soon as the server assigns the id.
 func SealFileRoot(r FileRoot, ck crypto.ContentKey, resourceID string) (crypto.SealedBlob, error) {
 	b, err := json.Marshal(r)
 	if err != nil {

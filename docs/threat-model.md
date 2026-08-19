@@ -220,18 +220,17 @@ Chunk objects, directory nodes, and pack segments stay id-free. They are
 content-addressed, client-verified against their address, and reachable only through
 an id-bound root; binding them would kill cross-resource dedup.
 
-Four bounded caveats:
+A create still seals before the server assigns the id, but that unbound form never
+becomes readable state: every create re-seals its root and metadata bound to the
+assigned id as its second write, and a create that cannot complete that write deletes
+itself. Reads open bound-only — there is no v1 fallback for a server to downgrade to.
 
-1. A create seals before the server assigns the id, so a resource is unbound until
-   its first re-seal. Folder syncs upgrade the root — and, once, the metadata — on
-   the next update; a one-shot `push` stays unbound.
-2. The v1 fallback that keeps old blobs readable means a server can serve a stale
-   unbound blob. It still cannot forge or cross-open one. Full strictness would need
-   client-generated ids and a fallback cut-off.
-3. A snapshot browsed without naming a resource has no client-side expectation to pin
+Two bounded caveats:
+
+1. A snapshot browsed without naming a resource has no client-side expectation to pin
    its claimed resource id to. An in-place restore checks the tracked folder's id;
    `--out` restores trust the claim.
-4. Once a folder has synced with an id-binding client, its root no longer opens on
+2. Once a resource has been sealed by an id-binding client, it no longer opens on
    clients from before that change — upgrade every device together.
 
 Capability negotiation gates every declared format boundary: a client below a

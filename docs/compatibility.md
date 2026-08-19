@@ -19,7 +19,7 @@ API layer, *before* any payload is served.
 
 | Capability | Release | Formats it can read |
 | ---------- | ------- | ------------------- |
-| `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata |
+| `1` (baseline)   | v0.1.0 | unbound (v1 AAD) roots and metadata — no site writes this any more |
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
@@ -81,10 +81,12 @@ no discovery endpoint; the echo is the supported probe.
 - Every client request carries `X-Aqt-Capability: <n>` (`api.CapabilityHeader`),
   set to `api.ClientCapability`.
 - A write (`PUT /v1/resources`) may declare `minClient`: the lowest capability that
-  can read the formats it seals. The sealing sites set it — id-bound folder updates
-  and key rotation declare `2`; Git-remote roots declare `4`; unbound creates and
-  one-shot `push` declare `1` (baseline). The server stores it per resource. A
-  snapshot copies the value from its source resource at capture time.
+  can read the formats it seals. The sealing sites set it — folder writes, one-shot
+  `push` and key rotation declare `2`; Git-remote roots declare `4`. Nothing declares
+  `1`: a create seals unbound only because the id does not exist until the server
+  answers, and it re-seals root and metadata id-bound as the resource's second write
+  before anything can read it. The server stores it per resource. A snapshot copies
+  the value from its source resource at capture time.
 - On a **read** (`GET /v1/resources/:id`, `GET /v1/snapshots/:id`) or an
   **overwriting write** of an existing resource, the server compares the requester's
   capability to the resource's stored `min_client`. If the requester is below it, the

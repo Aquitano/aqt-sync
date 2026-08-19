@@ -394,13 +394,13 @@ func TestTreeRootBoundToResourceID(t *testing.T) {
 	if _, err := OpenTreeRoot(blob, ck, "res2"); err == nil {
 		t.Fatal("a TreeRoot bound to one resource id must not open under another")
 	}
-	// Pre-binding roots (and init-time seals, before the server assigns the id)
-	// carry the unbound tag and must still open when fetched by id.
-	legacy, err := SealTreeRoot(root, ck, "")
+	// The create-time seal (before the server assigns the id) carries the unbound tag
+	// and must not open under an id: the create re-seals it bound instead.
+	unbound, err := SealTreeRoot(root, ck, "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := OpenTreeRoot(legacy, ck, "res1"); err != nil {
-		t.Fatalf("an unbound TreeRoot must open via the v1 fallback: %v", err)
+	if _, err := OpenTreeRoot(unbound, ck, "res1"); err == nil {
+		t.Fatal("an unbound TreeRoot must not open under a resource id")
 	}
 }

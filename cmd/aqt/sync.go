@@ -234,7 +234,7 @@ func runInit(dir string, gitChoice *bool) error {
 	defer ck.Wipe()
 	manifest := syncengine.Manifest{Version: syncengine.TreeManifestVersion}
 	conv := crypto.DeriveConvergenceKey(mk)
-	resp, err := putFolder(cl, conv, "", manifest, ck, mk, abs)
+	resp, err := createFolder(cl, conv, manifest, ck, mk, abs)
 	conv.Wipe()
 	if err != nil {
 		cleanupLocal()
@@ -2513,12 +2513,15 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 	}
 }
 
-func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
+// createFolder registers a new folder resource. The create seals unbound — the id
+// does not exist yet — and bindCreated immediately re-seals root and metadata under
+// the id the server assigned, which is the form every read expects.
+func createFolder(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest, ck crypto.ContentKey, mk crypto.MasterKey, dir string) (api.PutResourceResponse, error) {
 	root, _, err := uploadTreeObjects(cl, conv, m)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	blob, err := syncengine.SealTreeRoot(root, ck, id)
+	blob, err := syncengine.SealTreeRoot(root, ck, "")
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -2526,7 +2529,7 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	metaBlob, err := crypto.SealBound(metaJSON, ck, crypto.AADMeta, id)
+	metaBlob, err := crypto.SealBound(metaJSON, ck, crypto.AADMeta, "")
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -2534,13 +2537,17 @@ func putFolder(cl *client.Client, conv crypto.ConvergenceKey, id string, m synce
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	return cl.PutResource(api.PutResourceRequest{
-		ID: id, Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
+	req := api.PutResourceRequest{
+		Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped,
-		// Both seals above bind iff id is non-empty, so the declaration follows the
-		// same rule. In practice this is a create (callers pass id ""): the seals stay
-		// unbound and the first putFolderUpdate re-seals them id-bound.
-		MinClient: minClientForID(id),
+		MinClient:  api.CapabilityIDBinding, // the bind below seals root and meta id-bound (v2)
+	}
+	resp, err := cl.PutResource(req)
+	if err != nil {
+		return api.PutResourceResponse{}, err
+	}
+	return bindCreated(cl, req, resp, ck, metaJSON, func(id string) (crypto.SealedBlob, error) {
+		return syncengine.SealTreeRoot(root, ck, id)
 	})
 }
 
@@ -2574,8 +2581,8 @@ func rearmUploadedChunks(check func([]string) ([]string, error), ids []string, s
 // putFolderUpdate replaces an existing folder's manifest, conditional on the
 // resource still being at expectedVersion (else the server returns a conflict).
 // The encrypted metadata (the folder name sealed at init) is carried forward
-// unchanged, so a sync never clobbers it; metadata that predates id binding is
-// re-sealed bound to the id once (init seals before the server assigns the id).
+// unchanged, so a sync never clobbers it; it is checked against the id first, since
+// a write must not carry forward metadata this client cannot read.
 //
 // vis is the resource's current visibility, carried forward for the same reason: a
 // sync pushes content, it does not re-share or un-share. Hardcoding private here made
@@ -2595,7 +2602,7 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, v
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
-	metaBlob, err := resealMetaBound(meta, ck, id)
+	metaBlob, err := verifiedMetaBound(meta, ck, id)
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
@@ -2617,31 +2624,6 @@ func putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, v
 		req.ChunkRefs = refs
 	}
 	return cl.PutResource(req)
-}
-
-// minClientForID reports the capability a folder write requires: a create (empty id)
-// seals its root and metadata unbound and so stays baseline-readable, while an
-// id-bound write needs the id-binding capability.
-func minClientForID(id string) int {
-	if id == "" {
-		return api.CapabilityBaseline
-	}
-	return api.CapabilityIDBinding
-}
-
-// resealMetaBound upgrades carried-forward resource metadata that predates id
-// binding: a blob already bound to the id passes through byte-identical, and only
-// a legacy (unbound) blob is re-sealed. The raw plaintext is re-sealed (not
-// re-marshaled), so fields a newer client wrote survive the round trip.
-func resealMetaBound(meta crypto.SealedBlob, ck crypto.ContentKey, id string) (crypto.SealedBlob, error) {
-	if _, err := crypto.Open(meta, ck, crypto.BoundAAD(crypto.AADMeta, id)); err == nil {
-		return meta, nil
-	}
-	plain, err := crypto.Open(meta, ck, crypto.AADMeta)
-	if err != nil {
-		return crypto.SealedBlob{}, fmt.Errorf("decrypt metadata: %w", err)
-	}
-	return crypto.SealBound(plain, ck, crypto.AADMeta, id)
 }
 
 func manifestFrom(byPath map[string]syncengine.Entry, version int) syncengine.Manifest {
