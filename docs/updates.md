@@ -359,10 +359,12 @@ plaintext, in agent memory, or in an ordinary shared password vault.
 ### Provisioning a key
 
 1. `go run ./cmd/updatectl keygen --comment "release signing key 3" --added-in vX.Y.Z`
-   on a trusted machine, with `--added-in` naming the first release that will carry
-   the key and the comment naming it in `trustroots.go` (the shipped root is
-   "release signing key 2", added in v0.4.1). It prints the key id, the public key,
-   the private key, and the `trustroots.go` entry to paste.
+   on a trusted machine. Replace `vX.Y.Z` with the actual version of the first release
+   that will carry the key before running it — the value is copied verbatim into the
+   `trustroots.go` entry, so a literal placeholder ships as one. The comment names the
+   key in `trustroots.go` (the shipped root is "release signing key 2", added in
+   v0.4.1). It prints the key id, the public key, the private key, and the
+   `trustroots.go` entry to paste.
 2. Store the private key as the `AQT_UPDATE_SIGNING_KEYS` secret in the
    `release-signing` environment. Never put it in a repository secret or a plaintext
    file.
