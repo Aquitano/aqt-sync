@@ -9,3 +9,7 @@
 
 # Local scratch for manually exercising the CLI.
 /test/
+
+# Local agent working files; never repo content.
+/agents.md
+/.claude/
