@@ -269,7 +269,7 @@ func closureRefs(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey
 		if err != nil {
 			return nil, err
 		}
-		sealed, refs, err := syncengine.SealTree(manifest, conv, nil)
+		sealed, refs, err := syncengine.SealTree(manifest, conv, nil, openSealMemo())
 		if err != nil {
 			return nil, err
 		}

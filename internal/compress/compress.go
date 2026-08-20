@@ -9,9 +9,13 @@
 package compress
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"runtime"
+	"runtime/debug"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -57,6 +61,39 @@ func decoderOpts() []zstd.DOption {
 		zstd.WithDecoderMaxMemory(maxDecoded),
 	}
 }
+
+// optionsEpoch versions this package's encoder options as an input to CodecID.
+// Bump it whenever encoderOpts changes, for the same reason a zstd upgrade
+// matters: different options mean different bytes for the same input.
+const optionsEpoch = "o1"
+
+// CodecID names the exact compressor this build seals with: the zstd module
+// version plus the encoder-options epoch. Convergent object ids depend on the
+// compressor's exact output, so caches of sealed output namespace entries by
+// CodecID — an upgrade that changes compressed bytes then retires them (a
+// re-seal, mirroring the dedup degradation described above) instead of
+// prolonging the old codec's no-longer-canonical bytes.
+var CodecID = sync.OnceValue(func() string {
+	version := "unversioned"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path != "github.com/klauspost/compress" {
+				continue
+			}
+			version = dep.Version
+			if dep.Replace != nil {
+				// A replacement's identity is its path plus version; the version
+				// alone can be empty (a directory replacement) or collide across
+				// forks. Hash the pair, since a path is not filesystem-safe. Edits
+				// inside an unversioned directory replacement stay invisible —
+				// build info carries nothing to tell them apart.
+				sum := sha256.Sum256([]byte(dep.Replace.Path + "@" + dep.Replace.Version))
+				version = "replaced-" + hex.EncodeToString(sum[:8])
+			}
+		}
+	}
+	return "zstd-" + version + "-" + optionsEpoch
+})
 
 // Encode compresses raw when that saves space, returning the payload to seal
 // and its algorithm marker: (zstd output, Zstd) when strictly smaller, else

@@ -342,11 +342,11 @@ func TestDiffTreeRootsMatchesManifestDiff(t *testing.T) {
 
 	conv := testConv(t)
 	oldSink, curSink := mapSink{}, mapSink{}
-	oldRoot, _, err := SealTree(oldScan, conv, oldSink)
+	oldRoot, _, err := SealTree(oldScan, conv, oldSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	curRoot, _, err := SealTree(curScan, conv, curSink)
+	curRoot, _, err := SealTree(curScan, conv, curSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

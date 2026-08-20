@@ -11,11 +11,11 @@ func diffManifests(t *testing.T, left, right Manifest) (Delta, *diffFetcher, Tre
 	t.Helper()
 	conv := testConv(t)
 	leftSink, rightSink := mapSink{}, mapSink{}
-	leftRoot, _, err := SealTree(left, conv, leftSink)
+	leftRoot, _, err := SealTree(left, conv, leftSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightRoot, _, err := SealTree(right, conv, rightSink)
+	rightRoot, _, err := SealTree(right, conv, rightSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
