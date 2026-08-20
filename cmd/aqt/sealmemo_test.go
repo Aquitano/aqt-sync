@@ -71,6 +71,48 @@ func TestSealMemoBadEntriesMiss(t *testing.T) {
 	}
 }
 
+// An entry that reads fine but fails SealNodeMemo's verification — here another
+// node's valid seal sitting in this digest's slot — must be replaced by the cold
+// seal's put, not skipped: left in place it would pin the node to a cold seal on
+// every future push.
+func TestSealMemoHealsMismatchedEntry(t *testing.T) {
+	t.Parallel()
+	memo := tempSealMemo(t)
+	var conv crypto.ConvergenceKey
+	conv[0] = 9
+	plainA := bytes.Repeat([]byte("node A plaintext "), 100)
+	plainB := bytes.Repeat([]byte("node B plaintext "), 100)
+
+	// Warm the memo for A, then splice B's (perfectly valid) seal into A's slot.
+	if _, _, err := crypto.SealNodeMemo(plainA, conv, memo); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := filepath.Glob(filepath.Join(memo.dir, "*", "*"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("expected exactly one index entry, got %v (err %v)", entries, err)
+	}
+	ctB, chB, err := crypto.SealNode(plainB, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	memo.cache.put(chB.ID, ctB)
+	if err := os.WriteFile(entries[0], []byte(chB.ID+"\n"+chB.Alg+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	coldCT, coldCh, err := crypto.SealNode(plainA, conv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ct, ch, err := crypto.SealNodeMemo(plainA, conv, memo)
+	if err != nil || !bytes.Equal(ct, coldCT) || ch.ID != coldCh.ID {
+		t.Fatalf("mismatched entry did not degrade to a cold seal (err %v)", err)
+	}
+	if b, err := os.ReadFile(entries[0]); err != nil || string(b) != coldCh.ID+"\n"+coldCh.Alg+"\n" {
+		t.Fatalf("mismatched entry was not healed: %q (err %v)", b, err)
+	}
+}
+
 func TestSealMemoEvictedCiphertextMisses(t *testing.T) {
 	t.Parallel()
 	memo := tempSealMemo(t)

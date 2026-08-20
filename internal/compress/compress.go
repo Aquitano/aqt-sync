@@ -9,6 +9,8 @@
 package compress
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"runtime"
@@ -80,7 +82,13 @@ var CodecID = sync.OnceValue(func() string {
 			}
 			version = dep.Version
 			if dep.Replace != nil {
-				version = dep.Replace.Version
+				// A replacement's identity is its path plus version; the version
+				// alone can be empty (a directory replacement) or collide across
+				// forks. Hash the pair, since a path is not filesystem-safe. Edits
+				// inside an unversioned directory replacement stay invisible —
+				// build info carries nothing to tell them apart.
+				sum := sha256.Sum256([]byte(dep.Replace.Path + "@" + dep.Replace.Version))
+				version = "replaced-" + hex.EncodeToString(sum[:8])
 			}
 		}
 	}

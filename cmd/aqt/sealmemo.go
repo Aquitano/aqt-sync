@@ -74,14 +74,13 @@ func (m *sealMemo) PutNodeSeal(digest, id, alg string, ciphertext []byte) {
 	}
 	m.cache.put(id, ciphertext)
 	p := m.path(digest)
-	if _, err := os.Lstat(p); err == nil {
-		return
-	}
 	if os.MkdirAll(filepath.Dir(p), 0o700) != nil {
 		return
 	}
-	// Temp+rename, like the id-keyed store: a torn entry would just miss, but a
-	// concurrent reader should never have to pay that re-seal.
+	// Always write, even over an existing entry: a put after a rejected hit is
+	// how a stale record heals, and skipping it would pin that node to a cold
+	// seal forever. Temp+rename, like the id-keyed store: a torn entry would
+	// just miss, but a concurrent reader should never have to pay that re-seal.
 	f, err := os.CreateTemp(filepath.Dir(p), ".aqt-tmp-*")
 	if err != nil {
 		return
