@@ -158,6 +158,7 @@ func buildDirTree(m Manifest) *dirBuild {
 type sealer struct {
 	conv crypto.ConvergenceKey
 	sink ChunkSink
+	memo crypto.NodeSealMemo
 	refs map[string]struct{}
 }
 
@@ -228,7 +229,7 @@ func (s *sealer) sealNode(d *dirBuild, path string) (crypto.Chunk, error) {
 		return crypto.Chunk{}, fmt.Errorf("directory %q has too much metadata to sync (%d bytes, limit %d): it has too many direct children; split it into subdirectories",
 			path, len(b), MaxNodeBytes)
 	}
-	ct, ch, err := crypto.SealNode(b, s.conv)
+	ct, ch, err := crypto.SealNodeMemo(b, s.conv, s.memo)
 	if err != nil {
 		return crypto.Chunk{}, err
 	}
@@ -243,11 +244,16 @@ func (s *sealer) sealNode(d *dirBuild, path string) (crypto.Chunk, error) {
 // convergent pipeline into sink (so the objects the server lacks can be packed and
 // uploaded), and returns the tree root plus the full set of GC roots: every node
 // object id unioned with every file-chunk id reachable from the root.
-func SealTree(m Manifest, conv crypto.ConvergenceKey, sink ChunkSink) (TreeRoot, []string, error) {
+// A non-nil memo lets nodes unchanged since a prior seal reuse their remembered
+// ciphertext instead of re-encrypting (crypto.SealNodeMemo verifies every hit,
+// so the memo never changes the result). Only how a node's bytes are obtained
+// differs: every node still reaches sink and the ref set in full, and the root
+// is identical to a cold seal's.
+func SealTree(m Manifest, conv crypto.ConvergenceKey, sink ChunkSink, memo crypto.NodeSealMemo) (TreeRoot, []string, error) {
 	if sink == nil {
 		sink = nopSink{}
 	}
-	s := &sealer{conv: conv, sink: sink, refs: map[string]struct{}{}}
+	s := &sealer{conv: conv, sink: sink, memo: memo, refs: map[string]struct{}{}}
 	root, err := s.sealNode(buildDirTree(m), "")
 	if err != nil {
 		return TreeRoot{}, nil, err
@@ -270,9 +276,9 @@ func (s ctSink) Add(ch crypto.Chunk, ct []byte) error {
 // remote node the base tree already contains without a server round-trip: because nodes
 // are content-addressed, a node id shared with base is byte-identical, so an unchanged
 // subtree is reconstructed entirely from memory. Memory is O(number of directory nodes).
-func SealTreeCiphertexts(m Manifest, conv crypto.ConvergenceKey) (map[string][]byte, error) {
+func SealTreeCiphertexts(m Manifest, conv crypto.ConvergenceKey, memo crypto.NodeSealMemo) (map[string][]byte, error) {
 	sink := ctSink{}
-	if _, _, err := SealTree(m, conv, sink); err != nil {
+	if _, _, err := SealTree(m, conv, sink, memo); err != nil {
 		return nil, err
 	}
 	return sink, nil

@@ -12,6 +12,8 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"runtime/debug"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -57,6 +59,33 @@ func decoderOpts() []zstd.DOption {
 		zstd.WithDecoderMaxMemory(maxDecoded),
 	}
 }
+
+// optionsEpoch versions this package's encoder options as an input to CodecID.
+// Bump it whenever encoderOpts changes, for the same reason a zstd upgrade
+// matters: different options mean different bytes for the same input.
+const optionsEpoch = "o1"
+
+// CodecID names the exact compressor this build seals with: the zstd module
+// version plus the encoder-options epoch. Convergent object ids depend on the
+// compressor's exact output, so caches of sealed output namespace entries by
+// CodecID — an upgrade that changes compressed bytes then retires them (a
+// re-seal, mirroring the dedup degradation described above) instead of
+// prolonging the old codec's no-longer-canonical bytes.
+var CodecID = sync.OnceValue(func() string {
+	version := "unversioned"
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, dep := range info.Deps {
+			if dep.Path != "github.com/klauspost/compress" {
+				continue
+			}
+			version = dep.Version
+			if dep.Replace != nil {
+				version = dep.Replace.Version
+			}
+		}
+	}
+	return "zstd-" + version + "-" + optionsEpoch
+})
 
 // Encode compresses raw when that saves space, returning the payload to seal
 // and its algorithm marker: (zstd output, Zstd) when strictly smaller, else

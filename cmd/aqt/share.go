@@ -898,7 +898,7 @@ func rotateTree(cl *client.Client, id string, res api.GetResourceResponse, oldCK
 		if err != nil {
 			return resealed{}, err
 		}
-		sealedTree, refs, err := syncengine.SealTree(manifest, crypto.DeriveConvergenceKey(mk), nil)
+		sealedTree, refs, err := syncengine.SealTree(manifest, crypto.DeriveConvergenceKey(mk), nil, openSealMemo())
 		if err != nil {
 			return resealed{}, err
 		}

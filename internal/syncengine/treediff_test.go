@@ -61,11 +61,11 @@ func TestDiffTreeRootsReportsChanges(t *testing.T) {
 	}}
 
 	leftSink, rightSink := mapSink{}, mapSink{}
-	leftRoot, _, err := SealTree(left, conv, leftSink)
+	leftRoot, _, err := SealTree(left, conv, leftSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightRoot, _, err := SealTree(right, conv, rightSink)
+	rightRoot, _, err := SealTree(right, conv, rightSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,7 +111,7 @@ func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
 	conv := testConv(t)
 	m := Manifest{Version: TreeManifestVersion, Entries: []Entry{file("a/b.txt", "x")}}
 	sink := mapSink{}
-	root, _, err := SealTree(m, conv, sink)
+	root, _, err := SealTree(m, conv, sink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,11 +139,11 @@ func TestDiffTreeRootsTypeChange(t *testing.T) {
 		file("x/deep/nested.txt", "deeper"),
 	}}
 	leftSink, rightSink := mapSink{}, mapSink{}
-	leftRoot, _, err := SealTree(left, conv, leftSink)
+	leftRoot, _, err := SealTree(left, conv, leftSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rightRoot, _, err := SealTree(right, conv, rightSink)
+	rightRoot, _, err := SealTree(right, conv, rightSink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

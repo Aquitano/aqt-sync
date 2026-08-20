@@ -16,7 +16,7 @@ func TestResolveTreePathFetchesOnlyTheSpine(t *testing.T) {
 		file("other/unrelated.txt", "u"),
 	}}
 	sink := mapSink{}
-	root, _, err := SealTree(m, conv, sink)
+	root, _, err := SealTree(m, conv, sink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestResolveTreePathRootAndMisses(t *testing.T) {
 	conv := testConv(t)
 	m := Manifest{Version: TreeManifestVersion, Entries: []Entry{file("dir/f.txt", "x")}}
 	sink := mapSink{}
-	root, _, err := SealTree(m, conv, sink)
+	root, _, err := SealTree(m, conv, sink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

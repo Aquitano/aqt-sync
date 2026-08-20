@@ -200,7 +200,7 @@ func TestTreeIndirectChunkListRoundTrip(t *testing.T) {
 			{Path: "small.txt", Mode: 0o644, Size: 1, Hash: "hs", Inline: []byte("x")},
 		},
 	}
-	root, refs, err := SealTree(in, conv, sink)
+	root, refs, err := SealTree(in, conv, sink, nil)
 	if err != nil {
 		t.Fatalf("SealTree: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestNodeSizeCeiling(t *testing.T) {
 			Inline: bytes.Repeat([]byte{byte(i)}, 1<<20),
 		})
 	}
-	_, _, err := SealTree(Manifest{Version: TreeManifestVersion, Entries: entries}, conv, mapSink{})
+	_, _, err := SealTree(Manifest{Version: TreeManifestVersion, Entries: entries}, conv, mapSink{}, nil)
 	if err == nil {
 		t.Fatal("a node past MaxNodeBytes must be rejected client-side")
 	}

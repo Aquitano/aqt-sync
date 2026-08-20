@@ -230,6 +230,19 @@ trustworthy as a server fetch. Only ciphertext is stored — the same bytes the 
 keeps — and the cache is LRU-pruned to a 256 MiB budget. A repeated `find` or diff
 over a large account therefore fetches only nodes it has never seen.
 
+The cache has a second key dimension serving the write path: a **seal memo** mapping
+a keyed digest of a directory node's plaintext (HMAC under a convergence-key-derived
+secret, so it reveals nothing and never collides across accounts) to the id and
+compression alg the node last sealed to, the ciphertext living in the id-keyed store
+above. Every push and prune re-seals the whole DAG; with the memo, an unchanged
+node's ciphertext is reused instead of re-compressed and re-encrypted, which is most
+of that cost on a barely-changed tree. Entries are advisory and hold no keys: a hit
+is verified by re-deriving the node key and reopening the ciphertext against the
+plaintext, so a corrupt, evicted, or foreign entry degrades to a cold seal — the
+sealed output, root, and ref set are byte-identical with or without the memo.
+Entries are namespaced by the exact compressor build, since convergent ids depend on
+its output.
+
 ## Streamed single files
 
 A regular file at or above ~8 MiB uses the same pipeline instead of sealing whole in

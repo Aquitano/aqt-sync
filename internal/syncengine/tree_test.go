@@ -67,7 +67,7 @@ func TestSealOpenTreeRoundTrip(t *testing.T) {
 	}
 
 	sink := mapSink{}
-	root, refs, err := SealTree(in, conv, sink)
+	root, refs, err := SealTree(in, conv, sink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -130,7 +130,7 @@ func TestSubtreeDedup(t *testing.T) {
 // content addressing) equals the id any directory with these exact contents seals to.
 func subtreeRootID(t *testing.T, conv crypto.ConvergenceKey, entries []Entry) string {
 	t.Helper()
-	root, _, err := SealTree(Manifest{Version: TreeManifestVersion, Entries: entries}, conv, nil)
+	root, _, err := SealTree(Manifest{Version: TreeManifestVersion, Entries: entries}, conv, nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,11 +151,11 @@ func TestEditLocality(t *testing.T) {
 		{Path: "docs/readme.md", Hash: "r", Inline: []byte("r")},
 	}}
 
-	baseCT, err := SealTreeCiphertexts(base, conv)
+	baseCT, err := SealTreeCiphertexts(base, conv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	editCT, err := SealTreeCiphertexts(edited, conv)
+	editCT, err := SealTreeCiphertexts(edited, conv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 	}}
 
 	server := mapSink{}
-	root, _, err := SealTree(remote, conv, server)
+	root, _, err := SealTree(remote, conv, server, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	baseCT, err := SealTreeCiphertexts(base, conv)
+	baseCT, err := SealTreeCiphertexts(base, conv, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestOpenTreeReusingBaseNodes(t *testing.T) {
 	}
 
 	// A remote identical to base fetches nothing at all: every node id is already in memory.
-	sameRoot, _, err := SealTree(base, conv, mapSink{})
+	sameRoot, _, err := SealTree(base, conv, mapSink{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestOpenTreeBatchedOneFetchPerLevel(t *testing.T) {
 	}}
 
 	sink := mapSink{}
-	root, _, err := SealTree(in, conv, sink)
+	root, _, err := SealTree(in, conv, sink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +321,7 @@ func TestOpenTreeBatchedIndirectChunkListAndInlineAlg(t *testing.T) {
 	}}
 
 	sink := mapSink{}
-	root, _, err := SealTree(in, conv, sink)
+	root, _, err := SealTree(in, conv, sink, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

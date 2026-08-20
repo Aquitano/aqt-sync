@@ -528,7 +528,7 @@ func readRemoteManifest(cl *client.Client, res api.GetResourceResponse, ck crypt
 	}
 	conv := crypto.DeriveConvergenceKey(mk)
 	defer conv.Wipe()
-	baseCT, err := syncengine.SealTreeCiphertexts(base, conv)
+	baseCT, err := syncengine.SealTreeCiphertexts(base, conv, openSealMemo())
 	if err != nil {
 		return syncengine.Manifest{}, err
 	}
@@ -802,7 +802,7 @@ func runSync(dir string, opts syncOptions) error {
 	// retry closure) stops a conflict retry from re-sealing the whole DAG each pass.
 	var baseCT map[string][]byte
 	if baseExists {
-		baseCT, err = syncengine.SealTreeCiphertexts(base, conv)
+		baseCT, err = syncengine.SealTreeCiphertexts(base, conv, openSealMemo())
 		if err != nil {
 			return err
 		}
@@ -2418,7 +2418,7 @@ func distinctChunkIDs(entries []syncengine.Entry) []string {
 // the resource PUT roots them, hence the flush.
 func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.TreeRoot, []string, error) {
 	up := newPackUploader(cl, nil)
-	root, refs, err := syncengine.SealTree(m, conv, up)
+	root, refs, err := syncengine.SealTree(m, conv, up, openSealMemo())
 	if err != nil {
 		up.Wait() // drain in-flight uploads before returning the seal error
 		return syncengine.TreeRoot{}, nil, err
