@@ -91,9 +91,10 @@ release each landed in.
   [client data at rest](threat-model.md#client-data-at-rest).
 
 - **Local base manifest at rest.** `.aqt/base.json` carries per-chunk keys and inline
-  plaintext, so it is sealed under the same per-profile key with its own AAD; old
-  plaintext bases are read transparently and upgraded on the next sync. See
-  [client data at rest](threat-model.md#client-data-at-rest).
+  plaintext, so it is sealed under the same per-profile key with its own AAD, packaged
+  in a binary envelope (compressed before sealing); the older sealed JSON envelope is
+  read transparently and upgraded on the next sync, while an unsealed manifest is
+  refused. See [client data at rest](threat-model.md#client-data-at-rest).
 
 ## Server exposure
 

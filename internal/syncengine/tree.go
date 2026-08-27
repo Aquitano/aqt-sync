@@ -275,7 +275,9 @@ func (s ctSink) Add(ch crypto.Chunk, ct []byte) error {
 // every node's ciphertext keyed by its content address. A reconcile uses it to serve any
 // remote node the base tree already contains without a server round-trip: because nodes
 // are content-addressed, a node id shared with base is byte-identical, so an unchanged
-// subtree is reconstructed entirely from memory. Memory is O(number of directory nodes).
+// subtree is reconstructed entirely from memory. Memory is O(directory nodes +
+// inline file bytes): inline content rides inside each node's plaintext, so the
+// retained ciphertexts scale with it, not just with the node count.
 func SealTreeCiphertexts(m Manifest, conv crypto.ConvergenceKey, memo crypto.NodeSealMemo) (map[string][]byte, error) {
 	sink := ctSink{}
 	if _, _, err := SealTree(m, conv, sink, memo); err != nil {
