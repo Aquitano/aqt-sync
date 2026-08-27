@@ -146,6 +146,9 @@ func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 // touchPacksFor resets created_at to now on every pack holding one of the given
 // objects, re-arming the GC age guard so a sync about to reference them has time to
 // commit. Touching the pack (not the object) is what the pack-granularity GC reads.
+// The one unbatched IN clause in this file is deliberate: the handler caps the id
+// set at maxPublicObjectIDs (10,000), ~10,003 bound variables against SQLite's
+// 32,766 limit, so it cannot overrun the way an unbounded set would.
 func (s *Store) touchPacksFor(owner string, objIDs []string) error {
 	if len(objIDs) == 0 {
 		return nil
@@ -332,9 +335,14 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	if err != nil {
 		return 0, err
 	}
+	if err := addOwnerObjectCount(tx, owner, int64(stored)); err != nil {
+		return 0, err
+	}
 	if maxObjects > 0 {
+		// The counter already includes this transaction's inserts, so the cap check
+		// reads it instead of counting the owner's largest table per pack PUT.
 		var count int64
-		if err := tx.QueryRow(`SELECT count(*) FROM objects WHERE owner_handle = ?`, owner).Scan(&count); err != nil {
+		if err := tx.QueryRow(`SELECT object_count FROM accounts WHERE owner_handle = ?`, owner).Scan(&count); err != nil {
 			return 0, err
 		}
 		if count > int64(maxObjects) {
@@ -953,6 +961,7 @@ func (s *Store) DeleteOwnerChunks(owner string, ids []string, minAge time.Durati
 	if len(drop) == 0 {
 		return 0, skippedRecent, 0, nil
 	}
+	var objectsDropped int64
 	for _, table := range []string{"resource_chunks", "objects"} {
 		for start := 0; start < len(drop); start += batch {
 			end := min(start+batch, len(drop))
@@ -962,13 +971,21 @@ func (s *Store) DeleteOwnerChunks(owner string, ids []string, minAge time.Durati
 			for _, id := range group {
 				args = append(args, id)
 			}
-			if _, err := tx.Exec(
+			res, err := tx.Exec(
 				`DELETE FROM `+table+` WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(group))+`)`,
 				args...,
-			); err != nil {
+			)
+			if err != nil {
 				return 0, 0, 0, err
 			}
+			if table == "objects" {
+				n, _ := res.RowsAffected()
+				objectsDropped += n
+			}
 		}
+	}
+	if err := addOwnerObjectCount(tx, owner, -objectsDropped); err != nil {
+		return 0, 0, 0, err
 	}
 	if err := recountPacks(tx, owner, packs); err != nil {
 		return 0, 0, 0, err
@@ -1066,8 +1083,14 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 		// Objects FK-reference the pack, so they go first. A dead pack's objects are
 		// by definition unreferenced by resource_chunks, so removing them cannot
 		// violate that backstop.
-		if _, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
+		res, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, d.id)
+		if err != nil {
 			return 0, 0, err
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			if err := addOwnerObjectCount(tx, owner, -n); err != nil {
+				return 0, 0, err
+			}
 		}
 		if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, d.id); err != nil {
 			return 0, 0, err
@@ -1400,8 +1423,14 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	}
 	// The old pack now holds only dead objects (the live ones moved); remove them and
 	// the pack row.
-	if _, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
+	res, err := tx.Exec(`DELETE FROM objects WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID)
+	if err != nil {
 		return false, 0, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		if err := addOwnerObjectCount(tx, owner, -n); err != nil {
+			return false, 0, err
+		}
 	}
 	if _, err := tx.Exec(`DELETE FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, cand.packID); err != nil {
 		return false, 0, err

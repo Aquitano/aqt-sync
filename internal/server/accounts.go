@@ -467,6 +467,21 @@ func addOwnerPackBytes(tx *sql.Tx, owner string, delta int64) error {
 	return err
 }
 
+// addOwnerObjectCount adjusts the owner's object-row counter by delta (may be
+// negative) inside the caller's transaction, mirroring addOwnerPackBytes: the
+// counter moves atomically with the object rows it accounts for, and floors at
+// zero as a backstop against drift.
+func addOwnerObjectCount(tx *sql.Tx, owner string, delta int64) error {
+	if delta == 0 {
+		return nil
+	}
+	_, err := tx.Exec(
+		`UPDATE accounts SET object_count = MAX(0, object_count + ?) WHERE owner_handle = ?`,
+		delta, owner,
+	)
+	return err
+}
+
 // AccountUsage summarizes what one account has stored. StorageBytes is the
 // pack-byte quota counter; the rest are row counts. Resources counts live rows
 // only — a reclaimed tombstone holds no content and exists just to keep its link
@@ -482,36 +497,42 @@ type AccountUsage struct {
 	Devices      int64
 }
 
-const accountUsageColumns = `
+// accountUsageQuery returns raw per-table components; AccountUsage assembles
+// StorageBytes in Go so no table is aggregated twice just for the arithmetic,
+// and the object term reads accounts.object_count — maintained incrementally by
+// every object-row write — instead of counting the owner's largest table on the
+// hottest write path.
+const accountUsageQuery = `SELECT
 	a.owner_handle,
-	a.pack_bytes
-	  + COALESCE((SELECT SUM(length(r.encrypted_meta) + COALESCE(length(r.wrapped_key), 0) + length(r.blob_nonce) + 256) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0), 0)
-	  + COALESCE((SELECT SUM(length(sn.encrypted_meta) + COALESCE(length(sn.encrypted_label), 0) + COALESCE(length(sn.wrapped_key), 0) + length(sn.blob_nonce) + 256) FROM snapshots sn WHERE sn.owner_handle = a.owner_handle), 0)
-	  + COALESCE((SELECT SUM(length(g.wrapped_key) + 128) FROM grants g WHERE g.owner_handle = a.owner_handle), 0)
-	  + 96 * (SELECT COUNT(*) FROM objects o WHERE o.owner_handle = a.owner_handle)
-	  + 64 * (SELECT COUNT(*) FROM devices d WHERE d.owner_handle = a.owner_handle),
-	(SELECT COUNT(*) FROM packs p WHERE p.owner_handle = a.owner_handle),
-	(SELECT COUNT(*) FROM objects o WHERE o.owner_handle = a.owner_handle),
+	a.pack_bytes,
+	a.object_count,
+	COALESCE((SELECT SUM(length(r.encrypted_meta) + COALESCE(length(r.wrapped_key), 0) + length(r.blob_nonce) + 256) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0), 0),
 	(SELECT COUNT(*) FROM resources r WHERE r.owner_handle = a.owner_handle AND r.reclaimed = 0),
+	COALESCE((SELECT SUM(length(sn.encrypted_meta) + COALESCE(length(sn.encrypted_label), 0) + COALESCE(length(sn.wrapped_key), 0) + length(sn.blob_nonce) + 256) FROM snapshots sn WHERE sn.owner_handle = a.owner_handle), 0),
 	(SELECT COUNT(*) FROM snapshots sn WHERE sn.owner_handle = a.owner_handle),
-	(SELECT COUNT(*) FROM devices d WHERE d.owner_handle = a.owner_handle)`
-
-func scanAccountUsage(row interface{ Scan(...any) error }) (AccountUsage, error) {
-	var u AccountUsage
-	err := row.Scan(&u.Owner, &u.StorageBytes, &u.Packs, &u.Objects, &u.Resources, &u.Snapshots, &u.Devices)
-	return u, err
-}
+	COALESCE((SELECT SUM(length(g.wrapped_key) + 128) FROM grants g WHERE g.owner_handle = a.owner_handle), 0),
+	(SELECT COUNT(*) FROM packs p WHERE p.owner_handle = a.owner_handle),
+	(SELECT COUNT(*) FROM devices d WHERE d.owner_handle = a.owner_handle)
+FROM accounts a WHERE a.owner_handle = ?`
 
 // AccountUsage returns the storage summary for one account.
 func (s *Store) AccountUsage(owner string) (AccountUsage, error) {
-	u, err := scanAccountUsage(s.rdb.QueryRow(
-		`SELECT `+accountUsageColumns+` FROM accounts a WHERE a.owner_handle = ?`, owner))
+	var (
+		u                                        AccountUsage
+		resourceBytes, snapshotBytes, grantBytes int64
+	)
+	err := s.usageStmt.QueryRow(owner).Scan(
+		&u.Owner, &u.StorageBytes, &u.Objects,
+		&resourceBytes, &u.Resources, &snapshotBytes, &u.Snapshots, &grantBytes,
+		&u.Packs, &u.Devices,
+	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return AccountUsage{}, ErrNotFound
 	}
 	if err != nil {
 		return AccountUsage{}, err
 	}
+	u.StorageBytes += resourceBytes + snapshotBytes + grantBytes + 96*u.Objects + 64*u.Devices
 	blobBytes, err := s.ownerBlobBytes(owner)
 	if err != nil {
 		return AccountUsage{}, err
@@ -578,15 +599,15 @@ func (s *Store) ResourceCreateKeyRecorded(owner string, req api.PutResourceReque
 // Every row records its own size — written on insert since migration 16, and
 // backfilled at startup for rows older than it — so this is one aggregate query
 // on a path (metrics, pack/resource puts, auto-snapshots) that runs constantly.
+const ownerBlobBytesQuery = `SELECT COALESCE(SUM(blob_size), 0) FROM (
+	SELECT blob_size FROM resources WHERE owner_handle = ? AND reclaimed = 0
+	UNION ALL
+	SELECT blob_size FROM snapshots WHERE owner_handle = ?
+)`
+
 func (s *Store) ownerBlobBytes(owner string) (int64, error) {
 	var total int64
-	err := s.rdb.QueryRow(
-		`SELECT COALESCE(SUM(blob_size), 0) FROM (
-		   SELECT blob_size FROM resources WHERE owner_handle = ? AND reclaimed = 0
-		   UNION ALL
-		   SELECT blob_size FROM snapshots WHERE owner_handle = ?
-		 )`, owner, owner,
-	).Scan(&total)
+	err := s.blobBytesStmt.QueryRow(owner, owner).Scan(&total)
 	return total, err
 }
 
