@@ -2330,6 +2330,12 @@ func (c *packCache) evict() {
 // into a file, so the file cannot be materialized until the directory is emptied).
 // On a case-folding filesystem (fold) the nesting compares case-insensitively,
 // because that is how the filesystem will resolve the paths.
+// A remote directory rename arrives as N deletes plus N downloads with no nesting
+// between them, so this must not compare every pair: each delete answers both
+// nesting questions against the download keys directly — a sorted slice for "is
+// any download under this delete?" (keys sharing a prefix sort contiguously, so
+// the first key at or after the prefix decides) and a set for "is any ancestor of
+// this delete a download?" (a path has only O(depth) ancestors).
 func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry, fold bool) (early, late []string) {
 	key := func(p string) string {
 		if fold {
@@ -2337,13 +2343,22 @@ func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry, 
 		}
 		return p
 	}
+	sorted := make([]string, len(downloads))
+	downloadKeys := make(map[string]struct{}, len(downloads))
+	for i, e := range downloads {
+		k := key(e.Path)
+		sorted[i] = k
+		downloadKeys[k] = struct{}{}
+	}
+	sort.Strings(sorted)
 	for _, d := range deletes {
-		deletePrefix := key(d) + "/"
-		races := false
-		for _, e := range downloads {
-			if strings.HasPrefix(key(e.Path), deletePrefix) || strings.HasPrefix(key(d), key(e.Path)+"/") {
-				races = true
-				break
+		kd := key(d)
+		deletePrefix := kd + "/"
+		i := sort.SearchStrings(sorted, deletePrefix)
+		races := i < len(sorted) && strings.HasPrefix(sorted[i], deletePrefix)
+		for j := 0; !races && j < len(kd); j++ {
+			if kd[j] == '/' {
+				_, races = downloadKeys[kd[:j]]
 			}
 		}
 		if races {
