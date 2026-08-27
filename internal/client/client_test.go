@@ -364,3 +364,21 @@ func TestUnsafeMutationSurfacesUnknownOutcome(t *testing.T) {
 		t.Fatalf("error = %v, want UnknownOutcomeError", err)
 	}
 }
+
+// An empty id must fail before any request is made: it would hit /v1/resources/
+// (a different route) and make the response-id pin vacuous, which is the read-side
+// path back to the unbound v1 AAD that issue #239 closed.
+func TestGetResourceRejectsEmptyID(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request for %s", r.URL.Path)
+	}))
+	defer srv.Close()
+
+	cl, err := New(srv.URL, "token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cl.GetResource(""); err == nil {
+		t.Fatal("GetResource(\"\") must error without contacting the server")
+	}
+}

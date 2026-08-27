@@ -261,8 +261,15 @@ func TestOpenBoundRefusesUnbound(t *testing.T) {
 	if _, err := Open(createTime, ck, AADMeta); err != nil {
 		t.Fatalf("empty-id seal must open under the v1 tag: %v", err)
 	}
-	if _, err := OpenBound(createTime, ck, AADMeta, ""); err != nil {
-		t.Fatalf("empty-id seal must open with an empty id: %v", err)
+
+	// Opening has no empty-id case: it would open under the unbound v1 tag, which is
+	// exactly the fallback the binding exists to prevent. An empty id (a truncated
+	// ref, a malformed URL) must error rather than weaken the check.
+	if _, err := OpenBound(createTime, ck, AADMeta, ""); err == nil {
+		t.Fatal("OpenBound must refuse an empty resource id")
+	}
+	if _, err := OpenBound(legacy, ck, AADMeta, ""); err == nil {
+		t.Fatal("an unbound v1 blob must not open via an empty resource id")
 	}
 }
 

@@ -368,10 +368,13 @@ func SealBound(plaintext []byte, ck ContentKey, role []byte, resourceID string) 
 
 // OpenBound reverses SealBound: a blob fetched under an id opens only under that
 // id's v2 tag. There is no unbound fallback, so a server cannot strip the binding
-// by serving the v1 form of a record it moved between ids.
+// by serving the v1 form of a record it moved between ids. An empty id is refused:
+// sealing needs the empty case (a create seals before the server assigns the id),
+// but every read happens against a resource whose id is already known, and the
+// empty case would reintroduce the unbound v1 tag on the read side.
 func OpenBound(blob SealedBlob, ck ContentKey, role []byte, resourceID string) ([]byte, error) {
 	if resourceID == "" {
-		return Open(blob, ck, role)
+		return nil, errors.New("open bound: empty resource id")
 	}
 	return Open(blob, ck, BoundAAD(role, resourceID))
 }
