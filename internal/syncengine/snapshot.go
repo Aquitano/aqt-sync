@@ -36,7 +36,11 @@ func EntryFromBytes(path string, data []byte, mode uint32, conv crypto.Convergen
 	if sink == nil {
 		return Entry{}, errors.New("syncengine: chunk sink is required for chunked content")
 	}
-	chunks, _, err := sealStream(bytes.NewReader(data), conv, chunker, sink)
+	seal := sealStream
+	if e.Size < serialSealCutoff {
+		seal = sealSerial
+	}
+	chunks, _, err := seal(bytes.NewReader(data), conv, chunker, sink)
 	if err != nil {
 		return Entry{}, err
 	}
@@ -536,17 +540,22 @@ func touchedReuse(prev, cur Entry) Entry {
 }
 
 // sealFile streams a file through the chunker once, sealing each chunk into sink
-// (fanned across cores by sealStream, in file order) and computing the content
-// hash from the same pass.
+// (fanned across cores by sealStream for content large enough to amortize the
+// pool, inline otherwise — same chunks, same order either way) and computing the
+// content hash from the same pass.
 func sealFile(n fileNode, entry Entry, conv crypto.ConvergenceKey, chunker *Chunker, sink ChunkSink) (Entry, error) {
 	f, err := os.Open(n.path)
 	if err != nil {
 		return Entry{}, err
 	}
 	defer f.Close()
+	seal := sealStream
+	if n.info.Size() < serialSealCutoff {
+		seal = sealSerial
+	}
 	h := sha256.New()
 	tee := io.TeeReader(f, h)
-	chunks, _, err := sealStream(tee, conv, chunker, sink)
+	chunks, _, err := seal(tee, conv, chunker, sink)
 	if err != nil {
 		return Entry{}, err
 	}

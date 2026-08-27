@@ -52,6 +52,12 @@ func encoderOpts(concurrency int) []zstd.EOption {
 		zstd.WithEncoderLevel(zstd.SpeedDefault),
 		zstd.WithEncoderConcurrency(concurrency),
 		zstd.WithEncoderCRC(false),
+		// Without this each encoder state allocates 2x the 8 MiB window of history
+		// headroom — 16 MiB x GOMAXPROCS once warmed, held for the process lifetime —
+		// which one-shot EncodeAll calls on bounded payloads cannot use. Output is
+		// byte-identical either way (the option changes buffer sizing, not matching;
+		// pinned by TestLowerEncoderMemOutputUnchanged), so no optionsEpoch bump.
+		zstd.WithLowerEncoderMem(true),
 	}
 }
 
