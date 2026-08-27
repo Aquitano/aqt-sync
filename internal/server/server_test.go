@@ -1124,3 +1124,15 @@ func TestBackgroundWorkersDrainAfterStop(t *testing.T) {
 		t.Fatalf("workers did not drain: %v", err)
 	}
 }
+
+// The router must not 301 between /x/ and /x: with the redirect on, a GET for
+// /v1/resources/ (an empty resource id) silently becomes the authed list endpoint
+// and returns a 200 whose body is not a resource envelope. A 404 is the honest
+// answer for a route that does not exist.
+func TestNoTrailingSlashRedirect(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	if rec := h.get("/v1/resources/"); rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /v1/resources/ = %d, want 404", rec.Code)
+	}
+}

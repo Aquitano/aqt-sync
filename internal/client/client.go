@@ -350,6 +350,12 @@ func (c *Client) PutResource(req api.PutResourceRequest) (api.PutResourceRespons
 // GetResource fetches a resource; the response is the raw envelope, decoded
 // straight off the body.
 func (c *Client) GetResource(id string) (api.GetResourceResponse, error) {
+	// An empty id would request /v1/resources/ — a different route — and would make
+	// the res.ID pin below vacuous. Refs that parse to no id (aqt://, a share URL
+	// truncated at /x/) all funnel through here, so this is where they fail.
+	if id == "" {
+		return api.GetResourceResponse{}, errors.New("empty resource id")
+	}
 	path := "/v1/resources/" + url.PathEscape(id)
 	req, err := http.NewRequestWithContext(c.ctx, http.MethodGet, c.baseURL+path, nil)
 	if err != nil {

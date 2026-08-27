@@ -219,6 +219,11 @@ const (
 // Router builds the Gin engine with all routes mounted.
 func (s *Server) Router() *gin.Engine {
 	r := gin.New()
+	// An API has no reason to 301 between /x and /x/. With the redirect on, a request
+	// for /v1/resources/ (an empty resource id) lands on the authed list endpoint and
+	// returns a 200 whose body the caller then misparses; a plain 404 is the honest
+	// answer and maps to the client's not-found message.
+	r.RedirectTrailingSlash = false
 	// Trust only the configured reverse proxies for X-Forwarded-*. Without a call to
 	// SetTrustedProxies gin trusts every proxy, so an attacker could spoof
 	// X-Forwarded-Proto/For; the aqt-server binary always sets a list (loopback when
