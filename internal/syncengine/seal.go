@@ -28,6 +28,14 @@ type sealJob struct {
 // that error takes precedence, so this sentinel never escapes sealStream.
 var errSealStopped = errors.New("syncengine: seal aborted")
 
+// serialSealCutoff routes content below this size through sealSerial: sealStream
+// stands up GOMAXPROCS workers, a collector, and four channels per call, and below
+// ~64 KiB that setup costs more than the parallelism returns (measured 2.4x slower
+// at 4 KiB on 8 cores, crossover near 64 KiB). A byte constant on purpose — the
+// callers that gate on it know the content size, and chunker.Min is not a size
+// floor (it is 64 KiB under the large profile and 256 KiB under huge).
+const serialSealCutoff = 64 << 10
+
 // sealStream splits r and seals every chunk under conv, fanning crypto.SealChunk
 // (XChaCha20-Poly1305 plus two SHA-256s — the CPU ceiling of a push on a fast
 // network) across GOMAXPROCS workers. Order is preserved: the returned chunk
