@@ -173,8 +173,14 @@ type Store struct {
 	// concurrently with the single writer connection, so GETs, auth lookups, and GC
 	// planning no longer queue behind writes. Reads that are part of a mutation flow
 	// (inside a write transaction or under a resource lock) stay on db.
-	rdb  *sql.DB
-	auth *authCache
+	rdb *sql.DB
+	// usageStmt and blobBytesStmt are the two statements behind AccountUsage,
+	// prepared once: the usage query is the most expensive statement in the server
+	// to parse (~1 KB of subqueries) and it runs on every quota-checked write, so
+	// re-parsing it per call cost more than executing it on an empty account.
+	usageStmt     *sql.Stmt
+	blobBytesStmt *sql.Stmt
+	auth          *authCache
 	// suspended memoizes per-account suspension. It is separate from auth because
 	// an operator writes it from another process, so it needs a much shorter expiry
 	// than a token resolution this process controls. See suspensionTTL.
@@ -243,6 +249,14 @@ func OpenStore(dataDir string) (*Store, error) {
 	}
 	rdb.SetMaxOpenConns(max(4, runtime.NumCPU()))
 	s.rdb = rdb
+	if s.usageStmt, err = rdb.Prepare(accountUsageQuery); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("prepare usage query: %w", err)
+	}
+	if s.blobBytesStmt, err = rdb.Prepare(ownerBlobBytesQuery); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("prepare blob-bytes query: %w", err)
+	}
 	return s, nil
 }
 
@@ -252,6 +266,12 @@ func (s *Store) Ping() error {
 }
 
 func (s *Store) Close() error {
+	if s.usageStmt != nil {
+		s.usageStmt.Close()
+	}
+	if s.blobBytesStmt != nil {
+		s.blobBytesStmt.Close()
+	}
 	rerr := s.rdb.Close()
 	if err := s.db.Close(); err != nil {
 		return err
@@ -540,6 +560,16 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
 	   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
 	                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id), 0);`,
+	// 25: per-owner object-row counter. The usage scan behind quota and row-cap
+	// enforcement ran COUNT(*) over the owner's objects — its largest table — on
+	// every quota-checked write, so pushing an account of total size S cost O(S^2).
+	// Maintained incrementally, mirroring pack_bytes, in the same transactions that
+	// insert or delete object rows (pack put, client chunk GC, pack GC, repack; an
+	// account purge deletes the accounts row itself); backfilled so an existing
+	// data dir starts accurate.
+	`ALTER TABLE accounts ADD COLUMN object_count INTEGER NOT NULL DEFAULT 0;
+	 UPDATE accounts SET object_count =
+	     (SELECT COUNT(*) FROM objects WHERE objects.owner_handle = accounts.owner_handle);`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the
