@@ -129,6 +129,13 @@ func trackedGitBusy(root string) (busy bool, repoDir string) {
 	if err != nil {
 		return false, ""
 	}
+	// gitTracked consults only these root-level rules, and the built-in .git/ rule
+	// excludes every .git path — so unless some rule negates, no repository can be
+	// tracked and the whole-tree walk below cannot find anything. This runs on
+	// every guarded sync, so skipping the walk matters on a large tree.
+	if !ig.HasNegation() {
+		return false, ""
+	}
 	walkErr := walkGitRepos(root, ig, func(gitPath string) bool {
 		if !gitTracked(ig, root, gitPath) {
 			return false

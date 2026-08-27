@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 )
 
 // Ignore matches paths against .aqtignore files, a pragmatic subset of gitignore:
@@ -28,10 +29,56 @@ type ignoreScope struct {
 	rules []ignoreRule
 }
 
+// ruleKind selects how a rule matches. Almost every real rule is a literal or a
+// single edge glob, and the regexp form of those is slow in exactly the common
+// case — the bare-name pattern (^|/)name$ opens with an alternation that defeats
+// the literal-prefix optimizer, so the backtracker retries at every byte of a
+// path that does not match. Those shapes are classified at compile time into
+// direct string comparisons; the compiled regexp remains only for genuine globs
+// (?, **, a * away from the edge, or more than one *).
+type ruleKind uint8
+
+const (
+	ruleRegexp          ruleKind = iota
+	ruleBareLiteral              // name: matches a whole path segment at any depth
+	ruleBareSuffix               // *X: the last segment ends with X
+	ruleBarePrefix               // X*: the last segment starts with X
+	ruleAnchoredLiteral          // a/b: matches exactly that path — equality, not prefix
+)
+
 type ignoreRule struct {
-	re      *regexp.Regexp
+	kind    ruleKind
+	lit     string         // the literal for the non-regexp kinds
+	re      *regexp.Regexp // only for ruleRegexp
 	negate  bool
 	dirOnly bool
+}
+
+// matches mirrors what the rule's regexp form would answer. The literal kinds
+// compare bytes, matching regexp semantics for a metacharacter-free pattern; the
+// anchored kind is equality on purpose — /dist compiles to ^dist$ and never
+// matches dist/x.js (a walk excludes children via SkipDir instead), and callers
+// that match individual paths (fswatch, gitguard) rely on that.
+func (r *ignoreRule) matches(sub string) bool {
+	switch r.kind {
+	case ruleBareLiteral:
+		return strings.HasSuffix(sub, r.lit) && (len(sub) == len(r.lit) || sub[len(sub)-len(r.lit)-1] == '/')
+	case ruleBareSuffix:
+		return strings.HasSuffix(lastSegment(sub), r.lit)
+	case ruleBarePrefix:
+		return strings.HasPrefix(lastSegment(sub), r.lit)
+	case ruleAnchoredLiteral:
+		return sub == r.lit
+	default:
+		return r.re.MatchString(sub)
+	}
+}
+
+func lastSegment(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
 }
 
 // newIgnore seeds a matcher that always excludes the control directory, .git, and
@@ -77,16 +124,32 @@ func (ig *Ignore) Match(relPath string, isDir bool) bool {
 		if !ok {
 			continue // this scope does not cover relPath
 		}
-		for _, r := range sc.rules {
+		for i := range sc.rules {
+			r := &sc.rules[i]
 			if r.dirOnly && !isDir {
 				continue
 			}
-			if r.re.MatchString(sub) {
+			if r.matches(sub) {
 				ignored = !r.negate
 			}
 		}
 	}
 	return ignored
+}
+
+// HasNegation reports whether any loaded rule is a `!` re-include. Callers use it
+// to skip work only a negation can make reachable: the built-in .git/ rule
+// excludes every .git path, so without a negation anywhere no .git can be
+// tracked and a walk looking for one provably finds nothing.
+func (ig *Ignore) HasNegation() bool {
+	for _, sc := range ig.scopes {
+		for i := range sc.rules {
+			if sc.rules[i].negate {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // relativeTo returns relPath expressed relative to scopeDir, and whether relPath
@@ -131,6 +194,27 @@ func compileRule(line string) (ignoreRule, bool) {
 	}
 	anchored := strings.HasPrefix(line, "/") || strings.Contains(line, "/")
 	line = strings.TrimPrefix(line, "/")
+
+	// Classify on * and ? only: translateGlob escapes every other metacharacter, so
+	// a pattern like x[a-z] or a+b is a literal string here exactly as it is under
+	// the regexp. The UTF-8 guard preserves the compile path's behavior of silently
+	// dropping a rule regexp.Compile would reject.
+	if utf8.ValidString(line) && !strings.Contains(line, "?") {
+		switch stars := strings.Count(line, "*"); {
+		case stars == 0 && anchored:
+			r.kind, r.lit = ruleAnchoredLiteral, line
+			return r, true
+		case stars == 0:
+			r.kind, r.lit = ruleBareLiteral, line
+			return r, true
+		case stars == 1 && !anchored && strings.HasPrefix(line, "*"):
+			r.kind, r.lit = ruleBareSuffix, line[1:]
+			return r, true
+		case stars == 1 && !anchored && strings.HasSuffix(line, "*"):
+			r.kind, r.lit = ruleBarePrefix, line[:len(line)-1]
+			return r, true
+		}
+	}
 
 	expr := translateGlob(line)
 	if anchored {
