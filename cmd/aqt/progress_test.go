@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -26,22 +27,57 @@ func TestEntriesBytes(t *testing.T) {
 	}
 }
 
-func TestUploadBytes(t *testing.T) {
-	const big = 4 << 10 // above the 2 KiB inline cutoff, so it is chunked, not inlined
-	base := syncengine.Manifest{Entries: []syncengine.Entry{
-		{Path: "same", Size: big, Hash: "h1"},
-		{Path: "changed", Size: big, Hash: "old"},
-	}}
-	local := syncengine.Manifest{Entries: []syncengine.Entry{
-		{Path: "same", Size: big, Hash: "h1"},     // unchanged: not counted
-		{Path: "changed", Size: big, Hash: "new"}, // hash differs: counted
-		{Path: "added", Size: big, Hash: "h3"},    // absent from base: counted
-		{Path: "tiny", Size: 100, Hash: "h4"},     // new but inline-sized: never packed, so not counted
-		{Path: "link", Size: big, Link: "target"}, // symlink: never packed, so not counted
-	}}
-	sel := syncengine.DefaultChunkSelector()
-	if got := uploadBytes(local, base, sel); got != 2*big {
-		t.Errorf("uploadBytes = %d, want %d (changed + added; tiny and link excluded)", got, 2*big)
+// An unsized bar has no total to divide by, so it reports what moved and how fast
+// instead of a percentage.
+func TestUnsizedBarLine(t *testing.T) {
+	const moved = 100 << 20
+	p := &progressBar{label: "uploading", unsized: true, start: time.Now().Add(-2 * time.Second)}
+	p.done.Store(moved)
+	line := p.line()
+	for _, want := range []string{"uploading", "100.0 MB", "/s)"} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line %q missing %q", line, want)
+		}
+	}
+	if strings.Contains(line, "%") {
+		t.Errorf("line %q shows a percentage, but the total is unknown", line)
+	}
+	// Rate is wall-clock derived, so assert the magnitude rather than an exact string.
+	if got := p.rate(moved); got < 40<<20 || got > 60<<20 {
+		t.Errorf("rate = %d B/s, want ~50 MiB/s for %d bytes over ~2s", got, moved)
+	}
+}
+
+// A bar that has moved nothing has no elapsed time to divide by on its first redraw.
+func TestUnsizedBarRateZeroBeforeClockAdvances(t *testing.T) {
+	p := &progressBar{label: "uploading", unsized: true, start: time.Now().Add(time.Hour)}
+	if got := p.rate(1000); got != 0 {
+		t.Errorf("rate = %d, want 0 before any time has elapsed", got)
+	}
+}
+
+// The bar draws nothing until the first byte lands, so a push with nothing to upload
+// leaves no line behind — the state the deleted sizing pre-pass used to detect by
+// walking the whole tree.
+func TestUnsizedBarSilentUntilFirstByte(t *testing.T) {
+	p := &progressBar{label: "uploading", unsized: true, start: time.Now(), stop: make(chan struct{})}
+	if !p.silent() {
+		t.Fatal("an unsized bar must stay silent before any byte moves")
+	}
+	p.add(100)
+	if p.silent() {
+		t.Fatal("the bar must draw once bytes have moved")
+	}
+}
+
+// finish(true) snaps a sized bar to its total; an unsized bar has none, so snapping
+// would zero the count it just reported.
+func TestUnsizedBarFinishKeepsCount(t *testing.T) {
+	p := &progressBar{label: "uploading", unsized: true, start: time.Now(), stop: make(chan struct{})}
+	p.done.Store(500)
+	p.finish(true)
+	if got := p.done.Load(); got != 500 {
+		t.Errorf("finish(true) done = %d, want 500 (an unsized bar has no total to snap to)", got)
 	}
 }
 
