@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -45,8 +46,8 @@ func TestSaveBaseSealsSecretsAtRest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Contains(b, []byte(`"sealed"`)) {
-		t.Errorf("base.json is not a sealed envelope: %s", b)
+	if !bytes.HasPrefix(b, baseMagic) {
+		t.Errorf("base.json is not the sealed binary envelope: %s", b)
 	}
 	// Paths, chunk keys, hashes, and the entries array must not survive in the clear.
 	for _, leak := range []string{"secret.env", "big.bin", "chunk-decryption-key", "entries", "hash-secret-env"} {
@@ -120,5 +121,38 @@ func TestLoadBaseForSyncTreatsCorruptAsAbsent(t *testing.T) {
 	}
 	if len(m.Entries) != 0 {
 		t.Error("corrupt base should yield an empty manifest")
+	}
+}
+
+// A base written by a build predating the binary envelope (a base64 JSON
+// {"sealed": ...} wrapper) must keep loading, or every upgraded folder would be
+// forced through --reconcile.
+func TestLoadBaseReadsLegacyJSONEnvelope(t *testing.T) {
+	root := t.TempDir()
+	mkControlDir(t, root)
+	want := sampleBase()
+
+	plain, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sealed, err := identity.SealBase("", plain)
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := json.Marshal(sealedBase{Sealed: &sealed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(controlPath(root, baseFile), env, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, exists, err := loadBaseForSync(root)
+	if err != nil || !exists {
+		t.Fatalf("legacy envelope: exists=%v err=%v", exists, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("legacy round-trip mismatch:\n got %+v\nwant %+v", got, want)
 	}
 }

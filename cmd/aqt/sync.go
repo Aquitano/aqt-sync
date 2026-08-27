@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"encoding/json"
@@ -22,6 +23,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/cliutil"
+	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
@@ -2713,34 +2715,60 @@ func loadState(root string) (folderState, error) {
 	return st, nil
 }
 
-// sealedBase is the at-rest envelope for the local base manifest. base.json holds
-// chunk decryption keys and inline file plaintext, so it is sealed under the
-// profile's session sealing key rather than left in the clear.
+// sealedBase is the legacy JSON at-rest envelope for the local base manifest.
+// saveBase writes the binary form below since #236; decodeBase still opens this
+// one so a folder synced by an older build keeps its base across the upgrade.
 type sealedBase struct {
 	Sealed *crypto.SealedBlob `json:"sealed"`
 }
+
+// baseMagic opens the binary base.json envelope: this magic, one compression-alg
+// byte, the sealing nonce, then the raw ciphertext. The JSON envelope it replaces
+// base64-encoded the whole sealed manifest (4/3 the size, decoded through an
+// extra full-size copy), on top of the manifest JSON base64-encoding every inline
+// file's bytes — so a tree of small incompressible files produced a base nearly
+// twice its own size. The manifest is now also compressed before sealing, which
+// wins back most of that inner base64 expansion. base.json holds chunk decryption
+// keys and inline file plaintext, so it stays sealed under the profile's sealing
+// key exactly as before; only the packaging around the ciphertext changed.
+var baseMagic = []byte("aqt-base-v2\n")
+
+const (
+	baseAlgNone byte = 0
+	baseAlgZstd byte = 1
+)
 
 func saveBase(root string, m syncengine.Manifest) error {
 	plain, err := json.Marshal(m)
 	if err != nil {
 		return err
 	}
-	sealed, err := identity.SealBase(flagProfile, plain)
+	payload, alg := compress.Encode(plain)
+	sealed, err := identity.SealBase(flagProfile, payload)
 	if err != nil {
 		return err
 	}
-	b, err := json.Marshal(sealedBase{Sealed: &sealed})
-	if err != nil {
-		return err
+	buf := make([]byte, 0, len(baseMagic)+1+len(sealed.Nonce)+len(sealed.Ciphertext))
+	buf = append(buf, baseMagic...)
+	if alg == compress.Zstd {
+		buf = append(buf, baseAlgZstd)
+	} else {
+		buf = append(buf, baseAlgNone)
 	}
-	return fsatomic.WriteFile(controlPath(root, baseFile), b, 0o600)
+	buf = append(buf, sealed.Nonce...)
+	buf = append(buf, sealed.Ciphertext...)
+	return fsatomic.WriteFile(controlPath(root, baseFile), buf, 0o600)
 }
 
-// decodeBase opens a sealed base.json into m. Anything that is not the sealed
-// envelope is refused rather than read as a bare manifest: base.json carries chunk
-// keys and inline plaintext, and an unreadable base is not fatal — the sync degrades
-// to --reconcile, which rebuilds it.
+// decodeBase opens a sealed base.json into m — the binary envelope, or the legacy
+// JSON one for a base written before the format change. Anything else is refused
+// rather than read as a bare manifest: base.json carries chunk keys and inline
+// plaintext, and an unreadable base is not fatal — the sync degrades to
+// --reconcile, which rebuilds it.
 func decodeBase(b []byte, m *syncengine.Manifest) error {
+	if rest, ok := bytes.CutPrefix(b, baseMagic); ok {
+		return decodeBinaryBase(rest, m)
+	}
 	var env sealedBase
 	if err := json.Unmarshal(b, &env); err != nil {
 		return err
@@ -2749,6 +2777,32 @@ func decodeBase(b []byte, m *syncengine.Manifest) error {
 		return errors.New("base.json is not a sealed envelope; re-run `aqt sync --reconcile` to rebuild it")
 	}
 	plain, err := identity.OpenBase(flagProfile, *env.Sealed)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(plain, m)
+}
+
+// decodeBinaryBase reads the body after baseMagic. The nonce length is fixed by
+// the sealing AEAD, so the layout needs no length fields.
+func decodeBinaryBase(b []byte, m *syncengine.Manifest) error {
+	if len(b) < 1+crypto.NonceSize {
+		return errors.New("base.json envelope is truncated")
+	}
+	var alg string
+	switch b[0] {
+	case baseAlgNone:
+	case baseAlgZstd:
+		alg = compress.Zstd
+	default:
+		return fmt.Errorf("base.json envelope declares unknown compression %d", b[0])
+	}
+	blob := crypto.SealedBlob{Nonce: b[1 : 1+crypto.NonceSize], Ciphertext: b[1+crypto.NonceSize:]}
+	payload, err := identity.OpenBase(flagProfile, blob)
+	if err != nil {
+		return err
+	}
+	plain, err := compress.Decode(payload, alg, -1)
 	if err != nil {
 		return err
 	}
