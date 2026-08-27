@@ -766,23 +766,11 @@ func runSync(dir string, opts syncOptions) error {
 		}
 		warnSkipped(local.Skipped)
 	} else {
-		// With --progress on a terminal, size the upload up front so the bar shows a real
-		// percentage. Chunked content streams during Take (below) before any plan exists,
-		// so there is no cheaper moment to learn the total. A sizing scan tolerates a stale
-		// estimate (the bar snaps to 100% on completion), so it runs the cheap stat
-		// fast-path with rehash off — avoiding a second full-tree hash under --rehash — and
-		// a scan error just leaves the bar off (total 0).
-		var uploadTotal int64
-		if progressActive() {
-			scanBase := &base
-			if !baseExists {
-				scanBase = nil
-			}
-			if pre, perr := syncengine.ScanReusing(root, scanBase, false); perr == nil {
-				uploadTotal = uploadBytes(pre, base, selector)
-			}
-		}
-		prog := newProgressBar("uploading", uploadTotal)
+		// The bar reports bytes moved rather than a percentage. A push learns its byte
+		// count only by walking the tree, and Take's walk below is the upload itself, so
+		// sizing it up front cost a second full-tree walk — and a second hash of every
+		// file on a first sync, where there is no base to stat against.
+		prog := newUnsizedBar("uploading")
 		up := newPackUploader(cl, prog)
 		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
@@ -3286,26 +3274,6 @@ func entriesBytes(entries []syncengine.Entry) int64 {
 	var n int64
 	for _, e := range entries {
 		n += e.Size
-	}
-	return n
-}
-
-// uploadBytes estimates the plaintext bytes a push will credit to the progress bar:
-// every new or content-changed local entry that is actually chunked into packs. Only
-// chunked files reach the pack uploader that credits the bar, so symlinks and inline-
-// sized files (kept in the manifest, never sent as packs) are excluded to keep the
-// total close to what add() will report. Cross-file and base chunk dedup can still make
-// the credited bytes smaller, so the bar is snapped to this total on completion.
-func uploadBytes(local, base syncengine.Manifest, selector syncengine.ChunkSelector) int64 {
-	baseByPath := base.ByPath()
-	var n int64
-	for _, e := range local.Entries {
-		if e.IsSymlink() || e.Size <= int64(selector.ChunkerFor(e.Size).Min) {
-			continue
-		}
-		if be, ok := baseByPath[e.Path]; !ok || be.Hash != e.Hash {
-			n += e.Size
-		}
 	}
 	return n
 }

@@ -28,7 +28,9 @@ accepting it and behaving identically:
 - `--progress`: `pull`, `sync`, `clone`, `watch`, `agent start`, and `restore`, and
   only on a terminal. Those are the commands that transfer enough at once to draw a
   bar — `pull` for a subtree (`aqt://<id>/<dir>`), `restore` for the re-sync
-  `--in-place` ends with.
+  `--in-place` ends with. A download knows its size from the manifest and shows a
+  percentage; an upload shows bytes moved and the rate, because a push discovers what
+  it will send only by walking the tree, and that walk is the upload.
 
 Every prompt has a flag that answers it ahead of time, so a scripted run neither
 blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive
