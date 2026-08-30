@@ -2698,7 +2698,8 @@ func saveState(root string, st folderState) error {
 // binding or the freshness pin. Every init/clone/adopt writes both, so an absence
 // means state from a build that predates them: the folder cannot be tied to an
 // account, and the rollback guard has nothing to compare against. Local state is
-// regenerable, so re-tracking the folder is the fix.
+// regenerable, so re-tracking the folder is the fix — via `aqt untrack`, since
+// `aqt init` refuses a directory that still has a control dir.
 func loadState(root string) (folderState, error) {
 	var st folderState
 	path := controlPath(root, stateFile)
@@ -2710,10 +2711,10 @@ func loadState(root string) (folderState, error) {
 		return st, err
 	}
 	if st.Profile == "" || st.Account == "" {
-		return st, fmt.Errorf("%s records no owning profile and account, so this folder cannot be bound to an identity; re-run `aqt init` or `aqt clone` to track it again", path)
+		return st, fmt.Errorf("%s records no owning profile and account, so this folder cannot be bound to an identity; run `aqt untrack` here, then `aqt init` or `aqt clone`, to track it again (your files are left alone)", path)
 	}
 	if st.RemoteVersion <= 0 {
-		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; re-run `aqt init` or `aqt clone` to track it again", path)
+		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; run `aqt untrack` here, then `aqt init` or `aqt clone`, to track it again (your files are left alone)", path)
 	}
 	return st, nil
 }
