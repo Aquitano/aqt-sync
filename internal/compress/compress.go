@@ -24,9 +24,22 @@ import (
 const Zstd = "zstd"
 
 // maxDecoded caps decoder output when the caller cannot pin the exact raw
-// length. Sealed payloads are AEAD-authenticated before they reach the
-// decoder, so this is a sanity bound, not a security boundary.
+// length. Sealed payloads are AEAD-authenticated before they reach the decoder,
+// so this is not a parsing boundary — but the seal only proves a key holder wrote
+// the payload, and a share link hands that key to whoever follows it, so this is
+// what stops a hostile inline entry from expanding into the reader's memory.
+// Inline content is capped at the chunker's Min (kilobytes), so nothing
+// legitimate comes near it.
 const maxDecoded = 1 << 30
+
+// maxSelfDecoded bounds a payload this machine sealed for itself, where no hostile
+// input reaches the decoder and the only size that matters is what Encode can
+// produce. Encode has no cap, so a bound the decoder enforces but the encoder does
+// not is a payload this package writes and then refuses to read back; the base
+// manifest, whose plaintext scales with the tracked tree, is the one payload that
+// gets there — and an unopenable base degrades every later sync to --reconcile
+// rather than failing once.
+const maxSelfDecoded = 16 << 30
 
 // Shared coders for the one-shot EncodeAll/DecodeAll calls, which are safe for
 // concurrent use; each call runs on a single goroutine, so the concurrency
@@ -34,13 +47,20 @@ const maxDecoded = 1 << 30
 var (
 	encoder *zstd.Encoder
 	decoder *zstd.Decoder
+	// selfDecoder differs from decoder only in the bound it carries. A decoder
+	// allocates its window on first use, so the second one costs nothing in a
+	// process that never opens a base.
+	selfDecoder *zstd.Decoder
 )
 
 func init() {
 	var err error
 	encoder, err = zstd.NewWriter(nil, encoderOpts(runtime.GOMAXPROCS(0))...)
 	if err == nil {
-		decoder, err = zstd.NewReader(nil, decoderOpts()...)
+		decoder, err = zstd.NewReader(nil, decoderOpts(maxDecoded)...)
+	}
+	if err == nil {
+		selfDecoder, err = zstd.NewReader(nil, decoderOpts(maxSelfDecoded)...)
 	}
 	if err != nil {
 		panic("compress init: " + err.Error()) // static options; unreachable
@@ -61,10 +81,10 @@ func encoderOpts(concurrency int) []zstd.EOption {
 	}
 }
 
-func decoderOpts() []zstd.DOption {
+func decoderOpts(maxOutput uint64) []zstd.DOption {
 	return []zstd.DOption{
 		zstd.WithDecoderConcurrency(1),
-		zstd.WithDecoderMaxMemory(maxDecoded),
+		zstd.WithDecoderMaxMemory(maxOutput),
 	}
 }
 
@@ -118,8 +138,19 @@ func Encode(raw []byte) ([]byte, string) {
 
 // Decode reverses Encode for a payload sealed under alg. rawLen >= 0 pins the exact
 // expected output length, which is the caller's tamper check; rawLen < 0 leaves only
-// the global cap.
+// maxDecoded.
 func Decode(payload []byte, alg string, rawLen int) ([]byte, error) {
+	return decodeWith(decoder, payload, alg, rawLen)
+}
+
+// DecodeSelfSealed reverses Encode for a payload this machine sealed for itself,
+// bounding output at maxSelfDecoded instead. Anything that arrived over the wire
+// belongs in Decode, however it was authenticated.
+func DecodeSelfSealed(payload []byte, alg string) ([]byte, error) {
+	return decodeWith(selfDecoder, payload, alg, -1)
+}
+
+func decodeWith(d *zstd.Decoder, payload []byte, alg string, rawLen int) ([]byte, error) {
 	switch alg {
 	case "":
 		if rawLen >= 0 && len(payload) != rawLen {
@@ -131,7 +162,7 @@ func Decode(payload []byte, alg string, rawLen int) ([]byte, error) {
 		if capacity < 0 {
 			capacity = len(payload)
 		}
-		raw, err := decoder.DecodeAll(payload, make([]byte, 0, capacity))
+		raw, err := d.DecodeAll(payload, make([]byte, 0, capacity))
 		if err != nil {
 			return nil, fmt.Errorf("zstd decode: %w", err)
 		}

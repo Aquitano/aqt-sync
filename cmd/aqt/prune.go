@@ -109,18 +109,9 @@ func runPrune(dryRun, asJSON bool) error {
 		roots++
 	}
 
-	var stored []string
-	cursor := ""
-	for {
-		page, err := cl.ListChunks(cursor)
-		if err != nil {
-			return err
-		}
-		stored = append(stored, page.IDs...)
-		if page.NextCursor == "" {
-			break
-		}
-		cursor = page.NextCursor
+	stored, err := cl.ListAllChunks()
+	if err != nil {
+		return err
 	}
 	var unreachable []string
 	for _, id := range stored {

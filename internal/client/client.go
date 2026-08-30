@@ -639,22 +639,23 @@ func (c *Client) GC() (api.GCResponse, error) {
 	return r, err
 }
 
-// ListChunks fetches one page of the account's complete object inventory (client-GC
-// accounts only). Pass the previous response's NextCursor to continue; "" starts
-// from the beginning, and an empty NextCursor in the response ends the listing.
-func (c *Client) ListChunks(cursor string) (api.ChunkListResponse, error) {
-	path := "/v1/chunks"
-	if cursor != "" {
-		path += "?cursor=" + url.QueryEscape(cursor)
-	}
-	var r api.ChunkListResponse
-	err := c.do(http.MethodGet, path, nil, &r)
-	return r, err
+// ListAllChunks walks the account's complete object inventory, which a prune diffs
+// its computed closure against. It goes through the same cursor loop as every other
+// listing, so a server that never advances its cursor ends the walk instead of
+// spinning the client through an unbounded inventory.
+func (c *Client) ListAllChunks() ([]string, error) {
+	return listAll("/v1/chunks", func(path string) ([]string, string, error) {
+		var r api.ChunkListResponse
+		if err := c.do(http.MethodGet, path, nil, &r); err != nil {
+			return nil, "", err
+		}
+		return r.IDs, r.NextCursor, nil
+	})
 }
 
-// DeleteChunks asks the server to drop the named objects (client-GC accounts only).
-// The server skips unknown ids and ids inside the GC grace window; the response
-// reports what was dropped, what was skipped as too young, and the pack bytes freed.
+// DeleteChunks asks the server to drop the named objects. The server skips unknown
+// ids and ids inside the GC grace window; the response reports what was dropped,
+// what was skipped as too young, and the pack bytes freed.
 func (c *Client) DeleteChunks(ids []string) (api.ChunkDeleteResponse, error) {
 	var r api.ChunkDeleteResponse
 	err := c.do(http.MethodPost, "/v1/chunks/delete", api.ChunkDeleteRequest{IDs: ids}, &r)

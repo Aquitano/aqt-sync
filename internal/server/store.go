@@ -560,7 +560,7 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	                WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id),
 	   live_bytes = COALESCE((SELECT sum(o.length) FROM objects o
 	                 WHERE o.owner_handle = packs.owner_handle AND o.pack_id = packs.pack_id), 0);`,
-	// 25: per-owner object-row counter. The usage scan behind quota and row-cap
+	// 22: per-owner object-row counter. The usage scan behind quota and row-cap
 	// enforcement ran COUNT(*) over the owner's objects — its largest table — on
 	// every quota-checked write, so pushing an account of total size S cost O(S^2).
 	// Maintained incrementally, mirroring pack_bytes, in the same transactions that

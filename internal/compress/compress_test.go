@@ -5,6 +5,7 @@ package compress
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	mrand "math/rand"
 	"runtime"
 	"testing"
@@ -116,5 +117,38 @@ func TestLowerEncoderMemOutputUnchanged(t *testing.T) {
 				t.Fatalf("%s/%d: lowMem output differs (%d vs %d bytes)", name, n, len(got), len(want))
 			}
 		}
+	}
+}
+
+// Decode and DecodeSelfSealed differ only in the bound they hand decodeWith, so a
+// bound that does not reach the decoder would silently give wire input the base
+// manifest's headroom.
+func TestDecodeBoundIsWiredThrough(t *testing.T) {
+	raw := bytes.Repeat([]byte("bounded output\n"), 500)
+	payload, alg := Encode(raw)
+	if alg != Zstd {
+		t.Fatalf("alg = %q, want %q", alg, Zstd)
+	}
+
+	tight, err := zstd.NewReader(nil, decoderOpts(uint64(len(raw)-1))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tight.Close()
+	if _, err := decodeWith(tight, payload, alg, -1); !errors.Is(err, zstd.ErrDecoderSizeExceeded) {
+		t.Fatalf("one byte under the raw length: err = %v, want %v", err, zstd.ErrDecoderSizeExceeded)
+	}
+
+	loose, err := zstd.NewReader(nil, decoderOpts(uint64(len(raw)))...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer loose.Close()
+	got, err := decodeWith(loose, payload, alg, -1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, raw) {
+		t.Fatal("round trip mismatch at the exact bound")
 	}
 }

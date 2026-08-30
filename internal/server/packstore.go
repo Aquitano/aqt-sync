@@ -801,19 +801,21 @@ func (s *Store) reclaimLink(tx *sql.Tx, owner, id string) error {
 	return nil
 }
 
-// GC reclaims the owner's dead pack space under one owner-scoped lock: it sweeps
-// fully-dead packs (GCPacks), then compacts the dead objects trapped in still-live
-// ones (RepackOwner). The lock serializes the whole sequence so two concurrent passes
-// — two folders syncing at once, two devices, or a manual sync racing the watch
-// daemon, each of which triggers a GC — cannot both pick the same repack candidate and
-// have the loser's stale-plan branch delete the winner's now-live compacted pack. The
-// single DB connection serializes the transactions, but not the pack-file writes and
-// removes around them, so this lock is what makes the swap safe.
+// GC runs the owner's scheduled maintenance under one owner-scoped lock: it fires
+// due link lifecycle policies (SweepExpired), sweeps fully-dead packs (GCPacks),
+// then compacts the dead objects trapped in still-live ones (RepackOwner). The lock
+// serializes the whole sequence so two concurrent passes — two folders syncing at
+// once, two devices, or a manual sync racing the watch daemon, each of which triggers
+// a GC — cannot both pick the same repack candidate and have the loser's stale-plan
+// branch delete the winner's now-live compacted pack. The single DB connection
+// serializes the transactions, but not the pack-file writes and removes around them,
+// so this lock is what makes the swap safe.
 func (s *Store) GC(owner string, minAge time.Duration) (api.GCResponse, error) {
 	defer s.gcLocks.lock(owner)()
-	// Reclaim expired/exhausted links first, so the objects they unroot become dead and
-	// are eligible for the pack sweep in this same pass (still subject to the pack age
-	// guard, which is the point of the grace window on exhaustion).
+	// Fire due link policies first. This unroots a reclaimed link's chunks and deletes
+	// its blob, but not its object rows — those wait for a prune, since the server
+	// cannot tell which of them another resource still shares — so what this frees for
+	// the pack sweep below is only what an earlier prune had already emptied.
 	if _, err := s.SweepExpired(owner, time.Now().Unix()); err != nil {
 		return api.GCResponse{}, err
 	}
@@ -1026,11 +1028,12 @@ func (s *Store) RunGCAll(minAge time.Duration) (api.GCResponse, error) {
 	return total, firstErr
 }
 
-// GCPacks deletes the owner's packs none of whose objects any live resource
-// references and that were uploaded longer ago than minAge. The age guard keeps an
-// in-flight push's freshly uploaded packs from being reaped before its manifest
-// commits. v1 only deletes fully-dead packs; dead objects inside a still-live pack
-// are tolerated until a future repack. Returns the pack count and bytes reclaimed.
+// GCPacks deletes the owner's packs whose every object row is already gone — an
+// `aqt prune` deleted them; the server never decides that on its own — and that
+// were uploaded longer ago than minAge. The age guard keeps an in-flight push's
+// freshly uploaded packs from being reaped before its manifest commits. Only
+// fully-dead packs go here; dead objects inside a still-live pack are left to
+// RepackOwner. Returns the pack count and bytes reclaimed.
 //
 // The dead-pack selection and the row deletes run in one transaction. On the single
 // writer connection a transaction monopolizes the connection for its duration, so a
