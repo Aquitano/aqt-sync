@@ -2806,7 +2806,7 @@ func decodeBinaryBase(b []byte, m *syncengine.Manifest) error {
 	if err != nil {
 		return err
 	}
-	plain, err := compress.Decode(payload, alg, -1)
+	plain, err := compress.DecodeSelfSealed(payload, alg)
 	if err != nil {
 		return err
 	}
