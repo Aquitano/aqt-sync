@@ -1026,11 +1026,12 @@ func (s *Store) RunGCAll(minAge time.Duration) (api.GCResponse, error) {
 	return total, firstErr
 }
 
-// GCPacks deletes the owner's packs none of whose objects any live resource
-// references and that were uploaded longer ago than minAge. The age guard keeps an
-// in-flight push's freshly uploaded packs from being reaped before its manifest
-// commits. v1 only deletes fully-dead packs; dead objects inside a still-live pack
-// are tolerated until a future repack. Returns the pack count and bytes reclaimed.
+// GCPacks deletes the owner's packs whose every object row is already gone — an
+// `aqt prune` deleted them; the server never decides that on its own — and that
+// were uploaded longer ago than minAge. The age guard keeps an in-flight push's
+// freshly uploaded packs from being reaped before its manifest commits. Only
+// fully-dead packs go here; dead objects inside a still-live pack are left to
+// RepackOwner. Returns the pack count and bytes reclaimed.
 //
 // The dead-pack selection and the row deletes run in one transaction. On the single
 // writer connection a transaction monopolizes the connection for its duration, so a

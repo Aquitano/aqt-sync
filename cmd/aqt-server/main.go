@@ -89,9 +89,11 @@ func run() (code int) {
 		api.StartAutoSnapshot(interval, keep, workerStop)
 	}
 
-	// Scheduled GC. Clients trigger a sweep after a sync, but an account whose
-	// devices stop syncing would otherwise never reclaim space; the server-side
-	// timer covers that. AQT_GC_INTERVAL=0 disables it. Default 6h.
+	// Scheduled pack maintenance. Clients trigger a sweep after a sync, and this
+	// timer covers an account whose devices have stopped. It only tidies what an
+	// `aqt prune` already unrooted — sweeping emptied packs, compacting sparse
+	// ones — since the server cannot see which objects a resource references.
+	// AQT_GC_INTERVAL=0 disables it. Default 6h.
 	gcInterval, err := envDurationValue("AQT_GC_INTERVAL", "6h", true)
 	if err != nil {
 		log.Printf("%v", err)
