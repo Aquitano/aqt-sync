@@ -89,11 +89,13 @@ func run() (code int) {
 		api.StartAutoSnapshot(interval, keep, workerStop)
 	}
 
-	// Scheduled pack maintenance. Clients trigger a sweep after a sync, and this
-	// timer covers an account whose devices have stopped. It only tidies what an
-	// `aqt prune` already unrooted — sweeping emptied packs, compacting sparse
-	// ones — since the server cannot see which objects a resource references.
-	// AQT_GC_INTERVAL=0 disables it. Default 6h.
+	// Scheduled maintenance: link expiry (retire or reclaim, per the resource's
+	// on_expiry) and pack tidying. Clients trigger the same pass after a sync, and
+	// this timer covers an account whose devices have stopped. Expiry is the server's
+	// own decision; pack tidying is not — it sweeps emptied packs and compacts sparse
+	// ones, but only ever after an `aqt prune` deleted the object rows, since the
+	// server cannot see which objects a resource references. AQT_GC_INTERVAL=0
+	// disables both. Default 6h.
 	gcInterval, err := envDurationValue("AQT_GC_INTERVAL", "6h", true)
 	if err != nil {
 		log.Printf("%v", err)

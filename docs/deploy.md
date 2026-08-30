@@ -76,7 +76,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_TRUSTED_PROXIES` | loopback | Comma-separated proxy CIDRs/hosts whose `X-Forwarded-*` is trusted. `none` trusts none. |
 | `AQT_SNAPSHOT_INTERVAL` | `24h` | Scheduled snapshot cadence. `0` disables. |
 | `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. Anchored snapshots (`aqt checkpoint`) are exempt and never pruned. |
-| `AQT_GC_INTERVAL` | `6h` | Cadence of the scheduled pack-maintenance pass. It tidies after client prunes; it never decides on its own that an object is garbage. See [Reclaiming storage](#reclaiming-storage). `0` disables. |
+| `AQT_GC_INTERVAL` | `6h` | Cadence of the scheduled maintenance pass: it fires due link lifecycle policies, and tidies packs after client prunes. It never decides on its own that an object is garbage. See [Reclaiming storage](#reclaiming-storage). `0` disables the pass, link expiry included. |
 | `AQT_SHUTDOWN_GRACE` | `20s` | Shared deadline for HTTP, metrics, snapshot, and GC draining. Must be positive. |
 | `AQT_METRICS_ADDR` | unset | Prometheus `/metrics` listen address (e.g. `127.0.0.1:9091`). Unset disables. See [Monitoring](#monitoring). |
 | `AQT_SOURCE_URL` | upstream repo | Source link the share page offers. Must be absolute `http(s)`. See [Source offer](#source-offer). |
@@ -345,14 +345,17 @@ ciphertext and cannot see which chunks a resource references, so reachability is
 computed by the account holder, who has the keys: `aqt prune` walks every resource
 and snapshot, diffs the closure against the server's inventory, and deletes the
 difference. `AQT_GC_INTERVAL` only tidies afterwards — it sweeps packs a prune
-emptied and compacts the ones it left sparse.
+emptied and compacts the ones it left sparse. (It also fires due link lifecycle
+policies, which is a server-side decision, but an expiring link unroots chunks
+rather than deleting them.)
 
 Two consequences for an operator:
 
 - **Deleting a resource unroots it; it does not free storage.** `aqt rm`, an
   expired link, and snapshot retention all take effect immediately as far as access
   is concerned, but the bytes and the quota they occupy return at the account's next
-  prune.
+  prune. (A reclaimed link's sealed blob is dropped immediately; its chunks, which
+  another resource may still share, are not.)
 - **You cannot reclaim on a user's behalf.** There is no operator-side sweep to run,
   because the reachability walk needs keys the server does not have. An account
   sitting at its quota with nothing to show for it needs `aqt prune` run by that
