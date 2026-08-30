@@ -2,6 +2,264 @@
 
 All notable changes to this project are documented in this file.
 
+## [v0.9.0] - 2026-08-30
+
+### Breaking Changes
+
+- **Every sealed record is now bound to its resource id, and the unbound (v1 AAD)
+  read fallback is gone.** Every sealed read used to go through `OpenBound`, which
+  retried the unbound v1 AAD when the id-bound open failed. That retry existed for
+  create-time seals — the resource id does not exist until the server answers — but
+  it also let a hostile server strip the binding by serving the unbound form of a
+  record it had moved between ids. Creates now seal in two steps: create, then
+  immediately re-seal root and metadata bound to the assigned id, deleting the
+  unreadable first version if the bind cannot land. Nothing declares capability 1 any
+  more, and the browser share page dropped its own v1 retry. A resource sealed before
+  this stops opening and has to be re-pushed; see Upgrading.
+
+- **Garbage collection moved to the client, and it is the only mode.** The server
+  tracked chunk reachability through the flat ref list every push carried, which made
+  push cost O(total folder size) on the wire, capped private folders at ~500k chunks,
+  and put GC on the one party that cannot see the object graph. A current server
+  never decides an object is garbage: it keeps every stored object until its owner
+  deletes it, and reclamation happens through the new `aqt prune`, which computes
+  reachability where the keys are. Deleting a resource unroots it — the bytes and the
+  quota they occupy come back at the next prune, not immediately. Private writes send
+  no refs at all; refs survive only as the read-authorization scope of public and
+  granted resources, so a refs-less write against a shared resource is refused with
+  `shared_needs_refs`. There is no negotiation between the two halves: server and
+  clients upgrade together.
+
+- **The server no longer accepts request shapes the current client never sends.**
+  A resource upload must carry the `version=1` envelope media type (`415` otherwise),
+  create is POST-only (an id-less `PUT` is `400`), a `minClient` below the baseline
+  `1` is `400` rather than silently floored, and signup requires the account's
+  published encryption key. That makes the login-time key backfill and
+  `PUT /v1/account/enc-key` unreachable, so both are gone. Response negotiation is
+  untouched — the browser share page still fetches the JSON representation.
+
+- **`/healthz` is gone; `/livez` is the liveness endpoint.** It was an alias kept for
+  a deployment shape that no longer exists. Anything probing `/healthz` — a load
+  balancer, a container healthcheck, an uptime monitor — has to be repointed.
+
+- **`.aqt` folder state must carry its owning profile, account handle, and
+  remote-version pin.** Four fail-open paths kept for state written by older builds
+  are gone: state without those fields is refused with a re-track message instead of
+  being silently adopted by whichever account happens to be active, the rollback
+  guard can no longer be switched off by an absent version pin, `sameAccount` binds on
+  the owner handle alone, and `decodeBase` requires the sealed envelope — a bare
+  manifest is no longer read as a base, since it carries chunk keys and inline
+  plaintext. `Profile.SessionTTLSet` is dropped; the recorded seconds stand on their
+  own, where zero means cache until lock or logout.
+
+- **The last pack-and-seal remnants are deleted.** The format went in v0.8.0, but its
+  refusal branches, the `pack` config field, `Metadata.Packed`, the
+  `aqt-pack-v1`/`aqt-packroot-v1` AAD tags, the `.aqt/pull-in-progress` marker and its
+  readers in `status`, `diff` and the TUI, and the `interruptedPull` key in
+  `sync --json` all survived as dead weight. A stale `"pack": true` in `.aqtconfig` is
+  now an ordinary unknown-field error rather than a format refusal. The retired AAD
+  tags are enforced as tombstones: the disjointness test fails if either string is
+  ever handed to a live role.
+
+- **Capability 3's enforcement is removed.** It gated exactly one route
+  (`rotate-root`) and was declared by nothing, since every requester is capability 4.
+  The number stays as a record of when root rotation landed. `api.ClientCapability`
+  is unchanged at `4`.
+
+### Upgrading
+
+- **Upgrade the server and every client together.** This is not a rolling upgrade.
+  A current client against a pre-client-GC server sends no refs on a private write,
+  and that server's reachability sweep would reclaim the data it just stored.
+
+- **Take a backup, then start the new server.** Migrations 21 and 22 apply
+  automatically on first start and are forward-only; an older binary refuses a
+  migrated data directory. Migration 21 drops the snapshot pin table and the per-pack
+  rooted-object counter that client-side reachability made unreadable; migration 22
+  adds `accounts.object_count` and backfills it with one count per account. The first
+  start also runs a one-shot `blob_size` backfill that stats each resource and
+  snapshot row written before that column existed — one pass, on that start only.
+
+- **Re-push everything sealed before the id binding.** A v1-sealed blob does not open
+  on this release. Clone or export the affected resources with a v0.8.x client first
+  if you no longer have the local originals.
+
+- **Re-track folders whose `.aqt` state predates the owner, account, and version-pin
+  fields.** The refusal names the path: `aqt untrack` in the folder, then `aqt init`
+  or `aqt clone`. Untrack tolerates exactly the state the refusal rejects — its
+  confirmation still names the resource id — and it never touches the working tree.
+
+- **`base.json` upgrades itself.** The local base is now a compressed binary
+  envelope; a base written by an older build loads transparently and is rewritten in
+  the new format on the next save. The asymmetry is one-directional: a folder handed
+  back to a pre-v0.9.0 client after a new-format save needs one
+  `aqt sync --reconcile`.
+
+- **Run `aqt prune` once after upgrading.** Anything deleted on the old server that
+  its sweep had not yet reclaimed is now reclaimed by the client. Expect the first
+  run on an established account to free a lot and to take a while: it decodes every
+  resource and snapshot before it deletes anything.
+
+- **Repoint health checks and any non-aqt API client.** `/healthz` becomes `/livez`;
+  a tool that uploads resources must send the `version=1` envelope media type and use
+  `POST` to create.
+
+### Added
+
+- `aqt prune` reclaims stored bytes. It decodes every resource and snapshot of the
+  account, computes the full set of reachable chunks, diffs that against the server's
+  inventory, and deletes the difference in batches. It fails closed twice over: if any
+  root cannot be decoded nothing is deleted, and the server refuses to drop a chunk
+  whose pack was uploaded or touched within the last hour, since a concurrent push
+  from another device may be about to reference it. Those are reported as skipped, to
+  be picked up by a later run. Before deleting, it re-lists the account's roots and
+  aborts if any appeared or changed version while the walk was running, so a push that
+  landed mid-walk cannot lose the chunks it just rooted. `--dry-run` reports the diff
+  without deleting; `--json` prints the same summary machine-readably. The server side
+  is `GET /v1/chunks` (paged inventory) and `POST /v1/chunks/delete`.
+
+- **Ctrl-C stops what it looks like it stops.** No client method observed the
+  command's context: every request was built on `context.Background()`, so an
+  interrupt could not stop an in-flight transfer — it ran until the stall guard or a
+  timeout gave up, and the resulting error mapped to exit `5`, telling cron to retry a
+  command the user had deliberately killed. Every CLI client now parents on a signal
+  context, including rate-limit cooldown parks and retry waits, with the per-request
+  stall guard nesting underneath; a second Ctrl-C restores default signal handling.
+  The three failure modes are typed apart: cancellation is the new exit code `130`
+  ("interrupted"), a stall is the new `client.ErrStalled` sentinel (exit `5`, where it
+  used to be a generic `1`), and transport failures are unchanged. An interrupt
+  between packs can no longer let the uploader drop its batch and report success, and
+  the passphrase prompt aborts on the first Ctrl-C with the terminal restored.
+
+- **The updater remembers the newest release it has ever authenticated.** It refused
+  a release older than the running build, but nothing remembered the high-water mark,
+  so a replayed signed manifest newer than the running build yet older than the newest
+  release ever seen was offered as an update — which is exactly how a replay pins a
+  client at an intermediate version. `update.json` now records that ceiling per
+  requested channel and checks pass it as a floor; a manifest below it fails after
+  signature, channel, schema, URL, and version validation. Corrupt or unreadable state
+  fails open to no ceiling and is never overwritten with defaults. Recovery from a
+  genuine upstream retraction is `aqt update --accept-rollback`, which skips the floor
+  for that check and lowers the record only once the older release is actually
+  accepted — a `--check`, a declined prompt, or a failed install leaves the ceiling
+  standing.
+
+### Changed
+
+- **The support policy says what actually holds.** The compatibility doc promised a
+  readable window of two minor releases and backward-compatible servers over the same
+  span. That describes a fleet this project does not have. It now states the real
+  rule: one deployment, server and clients upgrade together, and capability numbers
+  stage the next format break rather than carry old peers. The rungs below
+  `ClientCapability` record which release introduced a format; they are not a support
+  window.
+
+- **The upload progress bar reports bytes moved and a rate instead of a percentage.**
+  Sizing it up front cost a second full walk of the tree — and a second hash of every
+  file on a first sync, where there is no base to stat against. A push learns its byte
+  count only by walking, and that walk is the upload. The bar stays silent until the
+  first byte lands, so a sync with nothing to send draws nothing at all. Downloads are
+  untouched and keep their percentage: the total comes from the manifest and costs
+  nothing.
+
+- **`aqt update --check` documents what it actually guarantees.** It has recorded the
+  freshness ceiling since the replay fix, so "makes no changes" overstated it. The
+  flag help and docs now promise only that it never installs.
+
+- Documentation refresh: the update doc's JSON samples and hand-verification example
+  showed releases that no longer exist, and the signing-key runbook hardcoded an
+  already-provisioned key's identity, so following it verbatim would have minted a
+  duplicate key.
+
+### Fixed
+
+- **An empty resource id no longer reaches the unbound seal path.** `parseRef`
+  returns `""` for `aqt://`, for an empty ref, and for a share URL truncated at
+  `/x/`, and the `GetResource` id pin is vacuously satisfied when both sides are
+  empty, so a hostile server echoing `"id": ""` passed it — the last read-side path
+  back to the v1 AAD. `OpenBound` now errors on an empty id, `Client.GetResource`
+  refuses one before any request is made, and the router no longer redirects
+  `GET /v1/resources/` onto the authenticated list endpoint, where the client handed
+  a JSON listing to the envelope decoder and reported a nonsense 2 GB header. That
+  route now honestly `404`s.
+
+- A resource create whose idempotency key conflicts now answers `409` rather than
+  `507` when the account is over quota, and the existence probe behind that check is
+  bounded to rows with real TTL left, so a row the sweep deletes between the probe
+  and the writer transaction can never let a create land unmetered.
+
+### Performance
+
+A stress-test wave and a profiling pass, measured end to end rather than in
+microbenchmarks alone.
+
+- **Directory renames stop being quadratic.** Renaming a directory on one device made
+  the other device's next sync O(N x M): the rename arrives as N deletes plus N
+  downloads, no old path nests with any new one, so the delete/download partition's
+  inner loop never hit its early exit and rebuilt an allocated key on every
+  comparison. Measured as 9.8 s of silent wedge at 20,000 moved files on a
+  case-sensitive filesystem and 54.1 s on a case-folding one. Each delete now answers
+  both nesting questions against keys computed once — a sorted slice for "is any
+  download under this delete?", a set for "is any ancestor of this delete a
+  download?" — for O((N+M) log M) total, pinned against the old pairwise scan by a
+  differential test.
+
+- **Unchanged directory-node seals are reused across pushes.** A full-tree seal of a
+  13.6k-file tree cost ~310 ms, which was 24% of a no-change sync and 37% of a prune
+  closure. An advisory memo keyed on a plaintext digest returns the ciphertext for a
+  node that has not changed, verified by re-deriving the node key and reopening, so a
+  bad entry degrades to a cold seal and output stays byte-identical either way. Warm
+  seals are 2.7x faster on a mixed layout.
+
+- **Ignore rules are classified when they are compiled.** Bare literals, prefix and
+  suffix wildcards, and anchored literals are matched directly; a regexp is built only
+  for a rule that genuinely needs one.
+
+- **The chunker stops compacting its buffer per chunk.** It moved the entire unconsumed
+  tail to the front after every emitted chunk. Reads now land in the window's spare
+  capacity behind an offset and the tail slides only when that capacity runs out — one
+  sub-max copy per max bytes consumed, with the separate read-staging buffer gone.
+  Random-data throughput rises 14-50% depending on profile; cuts stay byte-identical.
+
+- **Small payloads stop paying fixed costs they cannot amortize.** Content under
+  64 KiB routes to the serial seal path rather than the parallel one, and the zstd
+  encoder no longer reserves 16 MiB of window history per state for one-shot calls
+  that cannot use it. Compressed output is byte-identical, pinned by a test, so
+  convergent ids are unaffected.
+
+- **The server counts object rows incrementally.** On a server with a quota or a row
+  cap configured, usage accounting re-aggregated every owner-scoped table on every
+  pack PUT and resource write — 22.4% of server CPU under 20 concurrent clients, the
+  largest single function in the profile, and it ran under the per-owner lock.
+  `accounts.object_count` is now maintained in the same transactions that insert or
+  delete object rows, and the usage query returns raw components that Go assembles.
+  A drift test pins the counter against a fresh count after every mutation path. A
+  default self-hosted server with no quota and no caps never ran any of this and is
+  unaffected.
+
+- **A resource create is hashed for idempotency only when a key makes the digest
+  usable.** Every create marshaled the complete request — blob ciphertext included —
+  and SHA-256'd it, even with no `Idempotency-Key` present. A keyless 4 MiB create
+  goes from 14.8 ms to 6.1 ms per operation, with allocations down from ~7.5 MB to
+  ~6 KB.
+
+- **`aqt share ls` stops fetching grants for resources that have none.** The resource
+  list echoes a per-row grant count, so the common case — a private, never-shared
+  resource — costs no round-trip.
+
+- **`base.json` is a compressed binary envelope.** It went through two layers of
+  base64: inline file bytes inside the manifest JSON, and the envelope encoding the
+  whole sealed manifest again. For a tree of small incompressible files that produced
+  a base roughly 1.9x the size of the content it described — 113.2 MB of base for
+  60 MB of inline bytes — parsed through three simultaneous full-size copies on load
+  and four on save. The outer base64 is gone and the manifest is compressed before
+  sealing. Sealing semantics are unchanged: same key, same AAD, and an unsealed
+  manifest is still refused rather than trusted.
+
+- **The upload progress bar no longer costs a second tree walk.** See Changed. The
+  deleted pre-pass measured 122 ms on a no-op sync and 623 ms on a first sync over a
+  30k-file tree, worse cold and worse still at 200k files.
+
 ## [v0.8.0] - 2026-08-16
 
 ### Breaking Changes
