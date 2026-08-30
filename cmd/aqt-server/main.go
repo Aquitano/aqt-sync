@@ -20,12 +20,42 @@ import (
 	"github.com/aquitano/aqt-sync/internal/server"
 )
 
+// version is reported by `aqt-server version` and logged at startup, overridable at
+// build time via -ldflags "-X main.version=...". The release workflow passes that
+// flag to every shipped binary, but the linker drops it for a package that declares
+// no such variable, so until this existed a running server could not say which
+// release it was. The default names no release on purpose: claiming a version this
+// build is not is worse than admitting it has none.
+var version = "dev"
+
+// buildKind records where this binary came from; the release workflow stamps
+// "release" on a tagged build. An untagged build takes its version from
+// `git describe`, which reads like a release at a glance, so anything that is not
+// one says so rather than being left to look official. Overridable at build time via
+// -ldflags "-X main.buildKind=release", so the value stays a plain string literal.
+var buildKind = "dev"
+
+// versionString is this build's release, with a non-release build marked as such.
+func versionString() string {
+	if buildKind == "release" {
+		return version
+	}
+	return version + " (" + buildKind + " build)"
+}
+
 func main() {
 	// `aqt-server admin ...` is operator tooling against the data dir, not a server
-	// run. Everything else, including no arguments at all, starts the server exactly
-	// as before, so existing systemd units and container commands are unaffected.
-	if len(os.Args) > 1 && os.Args[1] == "admin" {
-		os.Exit(runAdmin(os.Args[1:]))
+	// run, and `version` answers which release a binary is without starting it.
+	// Everything else, including no arguments at all, starts the server exactly as
+	// before, so existing systemd units and container commands are unaffected.
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "admin":
+			os.Exit(runAdmin(os.Args[1:]))
+		case "version", "--version", "-v":
+			fmt.Println("aqt-server " + versionString())
+			os.Exit(0)
+		}
 	}
 	os.Exit(run())
 }
@@ -37,6 +67,10 @@ func main() {
 // stop and never restart it. Returning rather than calling log.Fatal also lets the
 // deferred store.Close run, so the SQLite WAL is checkpointed on the way out.
 func run() (code int) {
+	// First line of the log, so a start that dies before the listener is still
+	// attributable to a build — which release is running is the first question a
+	// lockstep upgrade asks.
+	log.Printf("aqt-server %s", versionString())
 	dataDir := envOr("AQT_DATA_DIR", "./aqt-data")
 	addr := envOr("AQT_ADDR", "127.0.0.1:8080")
 

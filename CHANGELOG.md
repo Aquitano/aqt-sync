@@ -131,6 +131,17 @@ All notable changes to this project are documented in this file.
   between packs can no longer let the uploader drop its batch and report success, and
   the passphrase prompt aborts on the first Ctrl-C with the terminal restored.
 
+- **`aqt-server` reports its version.** The release workflow stamps every shipped
+  binary with `-X main.version`, but the linker silently ignores that for a package
+  declaring no such variable, and `cmd/aqt-server` had none — so through v0.8.0 an
+  operator could not ask a running server which release it was. `aqt-server
+  --version` (also `version`, `-v`) now answers without starting the server, and the
+  version is the first line of the log on every start. A build that is not a tagged
+  release is marked `(dev build)`, since an untagged version comes from
+  `git describe` and reads like a release at a glance. The release workflow now runs
+  both binaries after building them and fails if the stamp did not land, so the same
+  silent drop cannot recur.
+
 - **The updater remembers the newest release it has ever authenticated.** It refused
   a release older than the running build, but nothing remembered the high-water mark,
   so a replayed signed manifest newer than the running build yet older than the newest

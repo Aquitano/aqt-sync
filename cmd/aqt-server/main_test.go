@@ -41,3 +41,24 @@ func TestRunExitsNonZeroOnBadConfig(t *testing.T) {
 		t.Fatal("run returned 0 with an unparseable AQT_SNAPSHOT_KEEP")
 	}
 }
+
+// The release workflow stamps every shipped binary with -X main.version, but the
+// linker silently ignores that for a package declaring no such variable, which is how
+// aqt-server shipped without one. The variables have to stay in package main for the
+// flag to land; this pins the reporting around them, including that a build which is
+// not a tagged release cannot present itself as one.
+func TestVersionStringMarksNonReleaseBuilds(t *testing.T) {
+	origVersion, origKind := version, buildKind
+	t.Cleanup(func() { version, buildKind = origVersion, origKind })
+
+	version, buildKind = "v0.9.0", "release"
+	if got := versionString(); got != "v0.9.0" {
+		t.Fatalf("release build: versionString() = %q, want %q", got, "v0.9.0")
+	}
+
+	// What `git describe` produces off a tag, which reads like a release at a glance.
+	version, buildKind = "v0.9.0-3-gabc1234", "dev"
+	if got := versionString(); got != "v0.9.0-3-gabc1234 (dev build)" {
+		t.Fatalf("source build: versionString() = %q, want %q", got, "v0.9.0-3-gabc1234 (dev build)")
+	}
+}
