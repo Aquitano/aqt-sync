@@ -25,8 +25,12 @@ const Zstd = "zstd"
 
 // maxDecoded caps decoder output when the caller cannot pin the exact raw
 // length. Sealed payloads are AEAD-authenticated before they reach the
-// decoder, so this is a sanity bound, not a security boundary.
-const maxDecoded = 1 << 30
+// decoder, so this is a sanity bound, not a security boundary, and it has to
+// sit above anything Encode can produce: Encode has no cap, so a bound the
+// decoder enforces but the encoder does not is a payload this package writes
+// and then refuses to read back. The largest such payload is a folder's base
+// manifest, which scales with the tracked tree.
+const maxDecoded = 16 << 30
 
 // Shared coders for the one-shot EncodeAll/DecodeAll calls, which are safe for
 // concurrent use; each call runs on a single goroutine, so the concurrency
