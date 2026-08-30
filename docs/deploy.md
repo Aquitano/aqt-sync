@@ -40,6 +40,9 @@ go build -o aqt-server ./cmd/aqt-server
 AQT_DATA_DIR=./aqt-data ./aqt-server        # plain HTTP on :8080
 ```
 
+A binary built this way reports its version as `dev`; only the release workflow
+stamps a real one.
+
 The data directory holds a SQLite database plus `packs/` and `blobs/` subdirectories.
 Point `AQT_DATA_DIR` at persistent storage; everything else the server needs is in
 environment variables.
@@ -468,6 +471,11 @@ numbers without operator access via `aqt usage` (`GET /v1/account/usage`).
 - **Liveness.** `GET /livez` returns `200` without touching storage.
 - **Readiness.** `GET /readyz` checks storage and returns `503` during shutdown or
   when storage is unavailable. Use it for traffic admission.
+- **Which release is running.** `aqt-server --version` (also `version`, `-v`) reports
+  it without starting the server, and it is the first line of the log on every start.
+  A build that is not a tagged release is marked `(dev build)`, since its version
+  comes from `git describe` and reads like a release at a glance. This matters most
+  during a lockstep upgrade, where server and clients have to move together.
 - **Upgrades.** Fetch the new binary (install script or a build from the checkout),
   replace it, and restart the service. `aqt update` is the client's self-update path
   and does not touch a server install. The graceful shutdown marks readiness false,

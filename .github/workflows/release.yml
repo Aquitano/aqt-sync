@@ -111,6 +111,17 @@ jobs:
               fi
             done
           done
+          # The linker silently ignores -X for a package that declares no such
+          # variable, which is how aqt-server shipped unstamped through v0.8.0. The
+          # runner is linux/amd64, so assert the stamp landed on the binaries it can
+          # actually execute rather than finding out from a released one.
+          for cmd in aqt aqt-server; do
+            got="$("./stage/linux_amd64/$cmd" --version)"
+            case "$got" in
+              *"$VERSION"*) echo "stamp ok: $got" ;;
+              *) echo "$cmd --version reports '$got', which does not contain '$VERSION'" >&2; exit 1 ;;
+            esac
+          done
           ls -l dist
 
       # The manifest describes the archives that were just built: it reads their
