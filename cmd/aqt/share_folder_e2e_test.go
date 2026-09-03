@@ -388,7 +388,7 @@ func TestShareExpireDisarmsPolicyWhenTheServerDropsOnExpiry(t *testing.T) {
 				}
 			}
 			w.WriteHeader(rec.Code)
-			w.Write(out)
+			_, _ = w.Write(out)
 			return
 		}
 		pass(w, r)

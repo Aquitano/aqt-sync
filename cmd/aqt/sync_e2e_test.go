@@ -326,7 +326,7 @@ func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
 	if got := readTree(t, replica, copies[0]); got != "ORIGIN\ntwo\nthree\nFOUR\n" {
 		t.Fatalf("overlap copy lost remote bytes: %q", got)
 	}
-	if bytes.Contains([]byte(readTree(t, replica, "notes.md")), []byte("<<<<<<<")) {
+	if strings.Contains(readTree(t, replica, "notes.md"), "<<<<<<<") {
 		t.Fatal("merge fallback wrote conflict markers")
 	}
 	h.sync(replica) // publish the local-only conflict copy
@@ -368,8 +368,7 @@ func TestSyncConflictMergeBudgetFallsBackToCopy(t *testing.T) {
 	// merges and b.md is pushed to the copy path.
 	maxMergedBytesHeld = len(body("ONE", "FOUR"))
 
-	var stderr string
-	stderr = captureStderr(t, func() {
+	stderr := captureStderr(t, func() {
 		h.syncOpts(replica, syncOptions{conflicts: "merge"})
 	})
 	if got, want := readTree(t, replica, "a.md"), body("ONE", "FOUR"); got != want {
@@ -791,7 +790,7 @@ func newE2E(t *testing.T) *e2eHarness {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	ts := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	t.Cleanup(ts.Close)
 
@@ -814,7 +813,7 @@ func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 
 	backend := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	t.Cleanup(backend.Close)
@@ -1066,7 +1065,7 @@ func assertTreeEqual(t *testing.T, a, b string) {
 // for content-defined chunking to find boundaries (multiple chunks).
 func bigContent() string {
 	var b strings.Builder
-	for i := 0; i < 4000; i++ {
+	for i := range 4000 {
 		fmt.Fprintf(&b, "line %05d: the quick brown fox jumps over the lazy dog\n", i)
 	}
 	return b.String()

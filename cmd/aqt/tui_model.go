@@ -1546,7 +1546,7 @@ func (m *tuiModel) panelRanges() [tuiPanelCount][2]int {
 	h := m.panelHeights()
 	var r [tuiPanelCount][2]int
 	y := 0
-	for i := 0; i < int(tuiPanelCount); i++ {
+	for i := range int(tuiPanelCount) {
 		r[i] = [2]int{y, y + h[i]}
 		y += h[i]
 	}
@@ -1557,7 +1557,7 @@ func (m *tuiModel) leftColumn() string {
 	lw := m.leftWidth()
 	h := m.panelHeights()
 	boxes := make([]string, tuiPanelCount)
-	for i := 0; i < int(tuiPanelCount); i++ {
+	for i := range int(tuiPanelCount) {
 		boxes[i] = m.panelBox(tuiPanelID(i), lw, h[i])
 	}
 	return lipgloss.JoinVertical(lipgloss.Left, boxes...)

@@ -441,7 +441,7 @@ func TestGitBusyBestEffortOnUnreadableDir(t *testing.T) {
 	if err := os.Chmod(blocked, 0o000); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(blocked, 0o755) })
+	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
 	mkGitDir(t, filepath.Join(root, "zzz-repo"), "index.lock")
 
 	busy, _, err := gitBusy(root)

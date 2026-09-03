@@ -30,7 +30,7 @@ func TestGrantExactness(t *testing.T) {
 		}
 		nRes := rapid.IntRange(1, 3).Draw(rt, "resources")
 		var grants []grant
-		for r := 0; r < nRes; r++ {
+		for range nRes {
 			resID := rapid.StringMatching(`res[0-9a-f]{8}`).Draw(rt, "resID")
 			owner := rapid.IntRange(0, nAcc-1).Draw(rt, "owner")
 			var ck ContentKey

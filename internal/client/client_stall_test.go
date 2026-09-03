@@ -51,7 +51,7 @@ func TestStallGuard(t *testing.T) {
 		done := make(chan struct{})
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			w.Write([]byte("part"))
+			_, _ = w.Write([]byte("part"))
 			w.(http.Flusher).Flush()
 			<-done
 		}))
@@ -71,8 +71,8 @@ func TestStallGuard(t *testing.T) {
 	t.Run("slow but moving transfer outlives the window", func(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			for i := 0; i < 8; i++ {
-				w.Write([]byte("ab"))
+			for range 8 {
+				_, _ = w.Write([]byte("ab"))
 				w.(http.Flusher).Flush()
 				time.Sleep(80 * time.Millisecond)
 			}

@@ -54,7 +54,7 @@ func TestPushMaxReadsInline(t *testing.T) {
 		public: true, noClip: true, policy: linkPolicy{maxReads: 2},
 	})
 
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if got := pullFresh(t, ref, ""); len(got) != len(data) {
 			t.Fatalf("pull %d got %d bytes, want %d", i, len(got), len(data))
 		}

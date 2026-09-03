@@ -20,20 +20,20 @@ import (
 // all three UserConfigDir inputs set: Windows reads AppData, Linux reads
 // XDG_CONFIG_HOME, and macOS derives its path from HOME.
 func TestMain(m *testing.M) {
-	os.Setenv("AQT_NO_KEYCHAIN", "1")
+	_ = os.Setenv("AQT_NO_KEYCHAIN", "1")
 	testRoot, err := os.MkdirTemp("", "aqt-test-*")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "create isolated test root: %v\n", err)
 		os.Exit(1)
 	}
-	os.Setenv("AppData", testRoot)
-	os.Setenv("XDG_CONFIG_HOME", filepath.Join(testRoot, ".config"))
-	os.Setenv("HOME", testRoot)
-	os.Setenv("AQT_NODE_CACHE_DIR", filepath.Join(testRoot, "nodecache"))
+	_ = os.Setenv("AppData", testRoot)
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(testRoot, ".config"))
+	_ = os.Setenv("HOME", testRoot)
+	_ = os.Setenv("AQT_NODE_CACHE_DIR", filepath.Join(testRoot, "nodecache"))
 	code := m.Run()
-	os.RemoveAll(testRoot)
+	_ = os.RemoveAll(testRoot)
 	if sharedAqtDir != "" {
-		os.RemoveAll(sharedAqtDir)
+		_ = os.RemoveAll(sharedAqtDir)
 	}
 	os.Exit(code)
 }

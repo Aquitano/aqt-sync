@@ -135,7 +135,7 @@ func TestMaterializeStaged(t *testing.T) {
 		if err := os.Chmod(parent, 0o500); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { os.Chmod(parent, 0o755) })
+		t.Cleanup(func() { _ = os.Chmod(parent, 0o755) })
 		err := materializeStaged(filepath.Join(parent, "out"), func(string) error { return nil })
 		if err == nil {
 			t.Fatal("expected a permission error")

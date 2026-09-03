@@ -246,17 +246,12 @@ func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry, cache *p
 // grant): entries are materialized in chunk-bounded batches so the object index
 // stays O(batch) rather than O(tree) — the same bound the authed pack path applies —
 // while one shared LRU carries fetched objects across batches.
-func runPublicDownloads(fetch sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
+func runPublicDownloads(fetch sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) error {
 	cache := packio.NewCache(packio.DefaultCacheBytes)
-	mtimes := make(map[string]int64, len(entries))
 	for _, batch := range batchByChunks(entries, locateBatchChunks) {
-		batchMTimes, err := runDownloadsFrom(newPublicEntrySource(fetch, batch, cache), root, batch, prog)
-		if err != nil {
-			return nil, err
-		}
-		for path, mtime := range batchMTimes {
-			mtimes[path] = mtime
+		if _, err := runDownloadsFrom(newPublicEntrySource(fetch, batch, cache), root, batch, prog); err != nil {
+			return err
 		}
 	}
-	return mtimes, nil
+	return nil
 }

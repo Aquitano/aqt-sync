@@ -364,7 +364,7 @@ func TestTUIOverlayGeometry(t *testing.T) {
 	bg := lipgloss.NewStyle().Background(lipgloss.Color("236"))
 	const w, h = 40, 12
 	var lines []string
-	for i := 0; i < h; i++ {
+	for range h {
 		lines = append(lines, bg.Render(strings.Repeat("x", w)))
 	}
 	base := strings.Join(lines, "\n")
@@ -627,7 +627,7 @@ func TestTUITitleScrollIndicator(t *testing.T) {
 	m := testModel(t)
 	// Overflow the resources panel so its box cannot show every row at once.
 	var many []lsRow
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		many = append(many, lsRow{ID: fmt.Sprintf("r%d", i), Name: fmt.Sprintf("file%02d", i), Kind: "file", Visibility: "private", Version: 1})
 	}
 	m.resources = many
@@ -658,7 +658,7 @@ func TestTUITitleScrollIndicator(t *testing.T) {
 func TestTUIPageKeysMoveByHalfPage(t *testing.T) {
 	m := testModel(t)
 	var many []lsRow
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		many = append(many, lsRow{ID: fmt.Sprintf("r%d", i), Name: fmt.Sprintf("file%02d", i), Kind: "file", Visibility: "private", Version: 1})
 	}
 	m.resources = many
@@ -814,7 +814,7 @@ func TestTUIBreadcrumbTitle(t *testing.T) {
 
 func TestTUILogFollowPauseResume(t *testing.T) {
 	m := testModel(t)
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		m.appendLog(fmt.Sprintf("line %d", i))
 	}
 	m.mainTab = tuiTabLog

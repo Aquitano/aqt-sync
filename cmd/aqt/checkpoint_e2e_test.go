@@ -205,7 +205,7 @@ func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 func TestSetSnapshotAnchorFailsClosed(t *testing.T) {
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Echo a snapshot with no anchored field, so it reads back as unanchored.
-		json.NewEncoder(w).Encode(map[string]any{"id": "s1"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": "s1"})
 	}))
 	t.Cleanup(stub.Close)
 	cl, err := client.New(stub.URL, "token")
@@ -234,7 +234,7 @@ func anchorStrippingProxy(t *testing.T, backend string) *httptest.Server {
 			return
 		}
 		body, err := io.ReadAll(req.Body)
-		req.Body.Close()
+		_ = req.Body.Close()
 		if err != nil {
 			return
 		}

@@ -16,7 +16,7 @@ func fsyncDir(dir string) error {
 		return err
 	}
 	if err := d.Sync(); err != nil {
-		d.Close()
+		_ = d.Close()
 		return err
 	}
 	return d.Close()

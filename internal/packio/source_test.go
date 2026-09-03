@@ -52,7 +52,7 @@ func (f *fakePackServer) client(t *testing.T) *client.Client {
 			http.Error(w, "no pack", http.StatusNotFound)
 			return
 		}
-		w.Write(body) // whole body; the client slices the requested window out of a 200
+		_, _ = w.Write(body) // whole body; the client slices the requested window out of a 200
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
@@ -90,7 +90,7 @@ func TestSourceConcurrentGet(t *testing.T) {
 	var wg sync.WaitGroup
 	ids := []string{"a", "b", "c", "d"}
 	errs := make(chan error, 200)
-	for i := 0; i < 200; i++ {
+	for i := range 200 {
 		id := ids[i%len(ids)]
 		wg.Add(1)
 		go func() {
@@ -128,7 +128,7 @@ func TestForgetLocationsKeepsFetchedSpans(t *testing.T) {
 		getHits: map[string]*int32{"p1": new(int32)},
 	}
 	src := NewEmptySource(f.client(t))
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		if err := src.Locate([]string{"a"}); err != nil {
 			t.Fatal(err)
 		}

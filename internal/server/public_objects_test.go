@@ -53,7 +53,7 @@ func postPublicObjects(t *testing.T, router http.Handler, resourceID string, ids
 func decodeFrames(t *testing.T, body []byte, want int) [][]byte {
 	t.Helper()
 	out := make([][]byte, 0, want)
-	for i := 0; i < want; i++ {
+	for i := range want {
 		if len(body) < 4 {
 			t.Fatalf("frame %d: body ended before length prefix", i)
 		}

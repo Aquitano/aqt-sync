@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -233,7 +234,7 @@ func TestNodeSizeCeiling(t *testing.T) {
 	t.Parallel()
 	conv := testConv(t)
 	var entries []Entry
-	for i := 0; i < 25; i++ { // 25 x ~1 MiB inline overflows MaxNodeBytes (24 MiB)
+	for i := range 25 { // 25 x ~1 MiB inline overflows MaxNodeBytes (24 MiB)
 		entries = append(entries, Entry{
 			Path:   fmt.Sprintf("f%02d", i),
 			Mode:   0o644,
@@ -246,7 +247,7 @@ func TestNodeSizeCeiling(t *testing.T) {
 	if err == nil {
 		t.Fatal("a node past MaxNodeBytes must be rejected client-side")
 	}
-	if !bytes.Contains([]byte(err.Error()), []byte("too much metadata")) {
+	if !strings.Contains(err.Error(), "too much metadata") {
 		t.Fatalf("error should explain the node is too large, got: %v", err)
 	}
 }

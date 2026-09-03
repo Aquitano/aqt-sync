@@ -57,8 +57,8 @@ func CaseInsensitiveDir(dir string) bool {
 		return false
 	}
 	name := f.Name()
-	f.Close()
-	defer os.Remove(name)
+	_ = f.Close()
+	defer func() { _ = os.Remove(name) }()
 	_, err = os.Lstat(filepath.Join(dir, strings.ToLower(filepath.Base(name))))
 	return err == nil
 }
@@ -74,10 +74,10 @@ func SymlinkSupport(dir string) bool {
 	}
 	name := filepath.Join(dir, ".aqt-linkprobe")
 	// A leftover from a crashed probe would read as EEXIST, not inability.
-	os.Remove(name)
+	_ = os.Remove(name)
 	if err := os.Symlink("aqt-probe-target", name); err != nil {
 		return false
 	}
-	os.Remove(name)
+	_ = os.Remove(name)
 	return true
 }

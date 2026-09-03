@@ -364,7 +364,7 @@ func TestApplyFailsCleanlyWithoutWritePermission(t *testing.T) {
 	if err := os.Chmod(in.Dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(in.Dir, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(in.Dir, 0o700) })
 
 	if _, err := applyFixture(t, in, "new binary", nil); err == nil {
 		t.Fatal("Apply succeeded in a read-only directory")

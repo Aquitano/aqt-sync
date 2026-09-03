@@ -43,7 +43,7 @@ func WatchTree(root string) (*TreeWatcher, error) {
 		events:  make(chan struct{}, 1),
 	}
 	if err := w.addTree(root, true); err != nil {
-		fw.Close()
+		_ = fw.Close()
 		return nil, err
 	}
 	go w.pump()

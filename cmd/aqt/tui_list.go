@@ -261,7 +261,7 @@ func tuiBox(title, body string, width, height int, focused bool) string {
 	b.WriteString(border.Render("╭─") + titleStyle.Render(t) + border.Render(strings.Repeat("─", fill)+"╮"))
 
 	lines := strings.Split(body, "\n")
-	for i := 0; i < height-2; i++ {
+	for i := range height - 2 {
 		line := ""
 		if i < len(lines) {
 			line = lines[i]

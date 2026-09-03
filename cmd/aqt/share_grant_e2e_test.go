@@ -664,7 +664,7 @@ func replaceRecorded(w http.ResponseWriter, rec *httptest.ResponseRecorder, body
 		}
 	}
 	w.WriteHeader(rec.Code)
-	w.Write(out)
+	_, _ = w.Write(out)
 }
 
 func copyRecorded(w http.ResponseWriter, rec *httptest.ResponseRecorder) {
@@ -672,5 +672,5 @@ func copyRecorded(w http.ResponseWriter, rec *httptest.ResponseRecorder) {
 		w.Header().Set(k, rec.Header().Get(k))
 	}
 	w.WriteHeader(rec.Code)
-	w.Write(rec.Body.Bytes())
+	_, _ = w.Write(rec.Body.Bytes())
 }

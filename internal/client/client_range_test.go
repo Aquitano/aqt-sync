@@ -40,7 +40,7 @@ func TestGetPackRangeNormalizesWholeBodyResponse(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Ignore the Range header entirely and return 200 with the whole pack.
 			w.WriteHeader(http.StatusOK)
-			w.Write(full)
+			_, _ = w.Write(full)
 		}))
 		defer srv.Close()
 		cl, err := New(srv.URL, "tok")

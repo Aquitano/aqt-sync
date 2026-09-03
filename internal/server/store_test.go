@@ -28,13 +28,13 @@ import (
 // not have to wait out gcMinAge to collect a just-uploaded pack.
 const forceGC = -time.Hour
 
-func newStore(t testing.TB) *Store {
-	t.Helper()
-	s, err := OpenStore(t.TempDir())
+func newStore(tb testing.TB) *Store {
+	tb.Helper()
+	s, err := OpenStore(tb.TempDir())
 	if err != nil {
-		t.Fatalf("open store: %v", err)
+		tb.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	tb.Cleanup(func() { _ = s.Close() })
 	return s
 }
 
@@ -67,12 +67,12 @@ func packOf(payloads ...string) (packID string, pack []byte, ids []string) {
 	return objID(pack), pack, ids
 }
 
-func (s *Store) mustAccount(t testing.TB, email string) string {
-	t.Helper()
-	kdf := cryptotest.KdfParams(t)
+func (s *Store) mustAccount(tb testing.TB, email string) string {
+	tb.Helper()
+	kdf := cryptotest.KdfParams(tb)
 	acc, err := s.CreateAccount(email, kdf, make([]byte, 32), crypto.SealedBlob{Nonce: make([]byte, 1), Ciphertext: make([]byte, 1)}, make([]byte, 32), nil, nil)
 	if err != nil {
-		t.Fatalf("create account: %v", err)
+		tb.Fatalf("create account: %v", err)
 	}
 	return acc.OwnerHandle
 }
@@ -528,7 +528,7 @@ func TestConcurrentPackWritesDoNotError(t *testing.T) {
 	const writers = 32
 	errs := make(chan error, writers)
 	var wg sync.WaitGroup
-	for i := 0; i < writers; i++ {
+	for i := range writers {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -558,7 +558,7 @@ func TestConcurrentUploadAndGCKeepsFreshPacks(t *testing.T) {
 	var wg sync.WaitGroup
 	errs := make(chan error, uploaders*2)
 	packIDs := make([]string, uploaders)
-	for i := 0; i < uploaders; i++ {
+	for i := range uploaders {
 		packID, data, _ := packOf(fmt.Sprintf("racing object %d", i))
 		packIDs[i] = packID
 		wg.Add(2)
@@ -696,13 +696,13 @@ func TestMigrateIsIdempotentAndIndexesDeviceToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
+	_ = s.Close()
 
 	s2, err := OpenStore(dir) // second migrate over the same dir must not error
 	if err != nil {
 		t.Fatalf("re-open after migrate: %v", err)
 	}
-	defer s2.Close()
+	defer func() { _ = s2.Close() }()
 
 	var uv int
 	if err := s2.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
@@ -733,8 +733,8 @@ func seedSchemaAt(t *testing.T, dir string, k int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
-	for i := 0; i < k; i++ {
+	defer func() { _ = db.Close() }()
+	for i := range k {
 		if _, err := db.Exec(migrations[i]); err != nil {
 			t.Fatalf("seed migration %d: %v", i+1, err)
 		}
@@ -751,7 +751,7 @@ func seedSchemaAt(t *testing.T, dir string, k int) {
 // empty table.
 func TestMigrateForwardFromEveryVersion(t *testing.T) {
 	t.Parallel()
-	for k := 0; k < len(migrations); k++ {
+	for k := range migrations {
 		t.Run(fmt.Sprintf("from_v%d", k), func(t *testing.T) {
 			t.Parallel()
 			dir := t.TempDir()
@@ -760,7 +760,7 @@ func TestMigrateForwardFromEveryVersion(t *testing.T) {
 			if err != nil {
 				t.Fatalf("migrate forward from user_version %d: %v", k, err)
 			}
-			defer s.Close()
+			defer func() { _ = s.Close() }()
 			var uv int
 			if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&uv); err != nil {
 				t.Fatal(err)
@@ -782,7 +782,7 @@ func TestFailedMigrationStepRollsBackWhole(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// Shaped like a real step: an ALTER TABLE ADD COLUMN that succeeds, then a
 	// statement that does not — the power-loss-in-the-middle case, only deterministic.
@@ -857,7 +857,7 @@ func TestMigrateRefusesNewerDataDir(t *testing.T) {
 	if _, err := s.db.Exec(fmt.Sprintf(`PRAGMA user_version = %d`, len(migrations)+3)); err != nil {
 		t.Fatal(err)
 	}
-	s.Close()
+	_ = s.Close()
 
 	_, err = OpenStore(dir)
 	if err == nil {
@@ -918,7 +918,7 @@ func TestLegacyChunkStoreFailsLoud(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	raw.Close()
+	_ = raw.Close()
 
 	if _, err := OpenStore(dir); err == nil || !strings.Contains(err.Error(), "older build") {
 		t.Fatalf("OpenStore on a pre-pack data dir = %v, want a clear stale-schema error", err)
@@ -939,7 +939,7 @@ func TestStaleResourceChunksSchemaFailsLoud(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	raw.Close()
+	_ = raw.Close()
 
 	if _, err := OpenStore(dir); err == nil || !strings.Contains(err.Error(), "older build") {
 		t.Fatalf("OpenStore on a legacy schema = %v, want a clear stale-schema error", err)
@@ -1345,16 +1345,16 @@ func (s *Store) assertPackCounters(t *testing.T, owner string) {
 			c  counters
 		)
 		if err := rows.Scan(&id, &c.objCount, &c.liveBytes); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			t.Fatal(err)
 		}
 		got[id] = c
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		t.Fatal(err)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	for id, c := range got {
 		var want counters
@@ -1465,7 +1465,7 @@ func TestReadsProceedDuringOpenWriteTx(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Take the write lock so the writer connection is genuinely busy.
 	if _, err := tx.Exec(`INSERT INTO server_meta(key, value) VALUES('test-write-lock', x'00')`); err != nil {
 		t.Fatal(err)
@@ -1835,7 +1835,7 @@ func TestBlobSizeBackfillRunsAtStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	t.Cleanup(func() { s.Close() })
+	t.Cleanup(func() { _ = s.Close() })
 	size := func(id string) int64 {
 		var n int64
 		if err := s.db.QueryRow(`SELECT blob_size FROM resources WHERE id = ?`, id).Scan(&n); err != nil {
@@ -1921,7 +1921,7 @@ func TestGCSweepsStaleIdempotencyKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var k string
 		if err := rows.Scan(&k); err != nil {

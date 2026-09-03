@@ -84,7 +84,7 @@ func TestLowerEncoderMemOutputUnchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reference.Close()
+	defer func() { _ = reference.Close() }()
 
 	rng := mrand.New(mrand.NewSource(1))
 	shapes := map[string]func(n int) []byte{

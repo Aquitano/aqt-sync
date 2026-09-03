@@ -28,7 +28,7 @@ func TestListResourcesPaginationWalksAllPages(t *testing.T) {
 	}
 
 	const total = 25
-	for i := 0; i < total; i++ {
+	for range total {
 		s.rootResource(t, owner, nil)
 	}
 
@@ -112,7 +112,7 @@ func TestListResourceGrantsPaginationWalksAllPages(t *testing.T) {
 	owner := s.mustAccount(t, "grantpage@example.com")
 	id := s.rootResource(t, owner, nil)
 	const total = 5
-	for i := 0; i < total; i++ {
+	for i := range total {
 		if err := s.PutGrant(owner, id, fmt.Sprintf("grantee-%d", i), []byte("wrap"), nil); err != nil {
 			t.Fatalf("put grant %d: %v", i, err)
 		}
@@ -152,7 +152,7 @@ func TestListResourcesExactBoundary(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	owner := s.mustAccount(t, "boundary@example.com")
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		s.rootResource(t, owner, nil)
 	}
 	items, next, err := s.ListResources(owner, pageParams{limit: 10})
@@ -193,7 +193,7 @@ func TestListResourcesHTTPPaging(t *testing.T) {
 	if err != nil {
 		t.Fatalf("owner by token: %v", err)
 	}
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		h.store.rootResource(t, owner, nil)
 	}
 
@@ -270,7 +270,7 @@ func TestRateLimitSetsRetryAfter(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	var rec *httptest.ResponseRecorder
-	for i := 0; i < unauthBurst+5; i++ {
+	for range unauthBurst + 5 {
 		rec = h.get("/v1/account/salt?email=rl@example.com")
 		if rec.Code == http.StatusTooManyRequests {
 			break

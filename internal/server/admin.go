@@ -64,7 +64,7 @@ func (s *Store) ListAdminAccounts() ([]AdminAccount, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []AdminAccount
 	for rows.Next() {
@@ -123,7 +123,7 @@ func (s *Store) adminAccountByPrefix(prefix string) (AdminAccount, error) {
 	if err != nil {
 		return AdminAccount{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var matches []AdminAccount
 	for rows.Next() {
@@ -280,7 +280,7 @@ func (s *Store) deleteAccount(owner string, authVerifier []byte) (DeletedAccount
 	if err != nil {
 		return acct, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	var verifierHash []byte
 	var disabledAt int64
@@ -397,7 +397,7 @@ func accountBlobIDs(q queryer, owner string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var ids []string
 	for rows.Next() {

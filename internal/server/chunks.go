@@ -166,7 +166,7 @@ func (s *Server) handleGetPack(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "open pack failed")
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	info, err := f.Stat()
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "stat pack failed")
@@ -248,7 +248,7 @@ func (s *Server) writeObjectFrames(c *gin.Context, owner string, locs []api.Obje
 	open := map[string]*os.File{}
 	defer func() {
 		for _, f := range open {
-			f.Close()
+			_ = f.Close()
 		}
 	}()
 
@@ -289,9 +289,8 @@ func acceptsObjectFrames(header string) bool {
 		if err != nil {
 			continue
 		}
-		q := 1.0
 		if raw := params["q"]; raw != "" {
-			q, err = strconv.ParseFloat(raw, 64)
+			q, err := strconv.ParseFloat(raw, 64)
 			if err != nil || q <= 0 || q > 1 {
 				continue
 			}

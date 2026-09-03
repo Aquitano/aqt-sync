@@ -30,7 +30,7 @@ func deadPID(t *testing.T) int {
 // (issue #183).
 func TestStaleLockReclaimAdmitsOneHolder(t *testing.T) {
 	stalePID := deadPID(t)
-	for iter := 0; iter < 200; iter++ {
+	for iter := range 200 {
 		path := filepath.Join(t.TempDir(), "lock")
 		if err := os.WriteFile(path, []byte(fmt.Sprintf("%d\n", stalePID)), 0o600); err != nil {
 			t.Fatal(err)
@@ -38,7 +38,7 @@ func TestStaleLockReclaimAdmitsOneHolder(t *testing.T) {
 		var wins int32
 		var releases sync.Map
 		var wg sync.WaitGroup
-		for g := 0; g < 8; g++ {
+		for g := range 8 {
 			wg.Add(1)
 			go func(g int) {
 				defer wg.Done()

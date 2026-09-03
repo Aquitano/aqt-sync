@@ -2,6 +2,28 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Fixed
+
+- **`aqt update` now fails if closing the extracted binary fails.** The extractor
+  synced the new binary but discarded the error from closing it, so a write that only
+  failed at close (a full or remote filesystem flushing on the last descriptor) could
+  produce a short executable that was then chmodded, verified, and renamed over the
+  working one.
+- **TUI shortcuts and the space menu are one table.** Every entry in a panel's actions
+  menu now answers to the key it shows: incoming shares (`h`), contacts (`o`), account
+  usage (`U`) and clone-and-adopt (`C`) previously had menu entries without a working
+  shortcut.
+
+### Changed
+
+- **Opening a resource you own reports the same three refusals everywhere.** A missing
+  owner key, a resource that is not a folder, and a pre-tree folder used to be worded
+  differently by each command.
+- **`aqt-server` validates its environment before it opens the data directory**, so a
+  bad `AQT_*` value is reported without creating the store first.
+
 ## [v0.9.0] - 2026-08-30
 
 ### Breaking Changes

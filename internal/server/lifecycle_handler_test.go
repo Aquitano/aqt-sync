@@ -169,7 +169,7 @@ func TestPublicPreflightDoesNotConsumeBurnRead(t *testing.T) {
 	h := newHarness(t)
 	token, mk := h.signup("preflight.com", "a passphrase here")
 	put := h.putPublicViaAPI(token, mk, 0, 1)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		rec := h.get("/v1/public/resources/" + put.ID + "/preflight")
 		if rec.Code != http.StatusOK {
 			t.Fatalf("preflight %d = %d: %s", i, rec.Code, rec.Body.String())

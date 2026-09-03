@@ -201,7 +201,7 @@ func sortResourceRows(rows []lsRow, by string, reverse bool) {
 		descending = !descending
 	}
 	sort.SliceStable(rows, func(i, j int) bool {
-		comparison := 0
+		var comparison int
 		switch by {
 		case "size":
 			comparison = cmp.Compare(rows[i].Size, rows[j].Size)

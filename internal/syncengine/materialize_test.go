@@ -61,8 +61,8 @@ func TestMaterializeDirsAppliesModesLast(t *testing.T) {
 	// RemoveAll cannot unlink out of a directory it cannot write, so restore the modes
 	// before the temp dir is torn down.
 	t.Cleanup(func() {
-		os.Chmod(filepath.Join(root, "locked", "inner"), 0o700)
-		os.Chmod(filepath.Join(root, "locked"), 0o700)
+		_ = os.Chmod(filepath.Join(root, "locked", "inner"), 0o700)
+		_ = os.Chmod(filepath.Join(root, "locked"), 0o700)
 	})
 
 	if err := MaterializeDirs(root, dirs); err != nil {

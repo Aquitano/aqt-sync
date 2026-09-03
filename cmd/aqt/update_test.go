@@ -73,9 +73,9 @@ func serveUpdateManifest(t *testing.T, released string) {
 		// superset of stable, so this mirrors the common state where no
 		// prerelease is outstanding and a --prerelease check lands on stable.
 		case "/stable.json", "/beta.json":
-			w.Write(manifest)
+			_, _ = w.Write(manifest)
 		case "/stable.json.sig", "/beta.json.sig":
-			w.Write(sigBytes)
+			_, _ = w.Write(sigBytes)
 		default:
 			http.NotFound(w, r)
 		}

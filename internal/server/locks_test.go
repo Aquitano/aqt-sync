@@ -59,7 +59,7 @@ func TestKeyedMutexPrunesReleasedKeys(t *testing.T) {
 	k := newKeyedMutex()
 	// Lock-and-release many distinct keys (the bogus-id DoS shape). A non-pruning
 	// map would retain one mutex per id; a self-pruning one drops back to empty.
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		k.lock(string(rune(i)))()
 	}
 	if n := k.size(); n != 0 {

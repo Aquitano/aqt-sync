@@ -21,17 +21,18 @@ func WriteStream(path string, perm os.FileMode, fn func(*os.File) error) error {
 		return err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp) // no-op once renamed; cleans up every failure path
+	// The remove is a no-op once renamed; it cleans up every failure path.
+	defer func() { _ = os.Remove(tmp) }()
 	if err := f.Chmod(perm); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := fn(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Sync(); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {

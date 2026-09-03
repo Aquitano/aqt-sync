@@ -63,10 +63,10 @@ func wideManifest(dirs, filesPer int) Manifest {
 	rng := benchRand()
 	var m Manifest
 	m.Version = TreeManifestVersion
-	for d := 0; d < dirs; d++ {
+	for d := range dirs {
 		dir := fmt.Sprintf("dir%04d", d)
 		m.Dirs = append(m.Dirs, DirEntry{Path: dir, Mode: 0o755})
-		for f := 0; f < filesPer; f++ {
+		for f := range filesPer {
 			m.Entries = append(m.Entries, benchEntry(rng, fmt.Sprintf("%s/file%04d.bin", dir, f), 24<<10))
 		}
 	}
@@ -80,7 +80,7 @@ func deepManifest(depth int) Manifest {
 	var m Manifest
 	m.Version = TreeManifestVersion
 	path := ""
-	for d := 0; d < depth; d++ {
+	for d := range depth {
 		path = joinChild(path, fmt.Sprintf("d%03d", d))
 		m.Dirs = append(m.Dirs, DirEntry{Path: path, Mode: 0o755})
 		m.Entries = append(m.Entries, benchEntry(rng, path+"/leaf.txt", 512))
@@ -99,7 +99,7 @@ func mixedManifest(fanout, depth int) Manifest {
 	var fill func(prefix string, level int)
 	fill = func(prefix string, level int) {
 		nfiles := 6 + rng.Intn(9)
-		for f := 0; f < nfiles; f++ {
+		for f := range nfiles {
 			size := 200 + rng.Intn(1800) // <= 2 KiB: inline
 			switch rng.Intn(20) {
 			case 0: // ~5%: a couple hundred KiB
@@ -112,7 +112,7 @@ func mixedManifest(fanout, depth int) Manifest {
 		if level >= depth {
 			return
 		}
-		for d := 0; d < fanout; d++ {
+		for d := range fanout {
 			sub := joinChild(prefix, fmt.Sprintf("pkg%02d", d))
 			m.Dirs = append(m.Dirs, DirEntry{Path: sub, Mode: 0o755})
 			fill(sub, level+1)
@@ -121,7 +121,7 @@ func mixedManifest(fanout, depth int) Manifest {
 	fill("", 1)
 	// A few files whose chunk lists exceed chunkListInlineMax, so the sealed
 	// chunk-list segments are part of the measurement.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		m.Entries = append(m.Entries, benchEntry(rng, fmt.Sprintf("big%d.iso", i), (chunkListInlineMax+72)*defaultNormal))
 	}
 	return m

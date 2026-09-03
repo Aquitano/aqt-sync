@@ -435,7 +435,6 @@ func TestGitRemoteConcurrentPushRace(t *testing.T) {
 	start := make(chan struct{})
 	results := make(chan gitCommandResult, 2)
 	for _, dir := range []string{first, second} {
-		dir := dir
 		go func() {
 			<-start
 			results <- runGitCommand(dir, "push", "origin", "main")
@@ -615,7 +614,7 @@ func sharedAqtBinary() (string, error) {
 		cmd := exec.Command("go", "build", "-o", exe, ".")
 		cmd.Dir = "."
 		if data, err := cmd.CombinedOutput(); err != nil {
-			sharedAqtErr = fmt.Errorf("build aqt: %v\n%s", err, data)
+			sharedAqtErr = fmt.Errorf("build aqt: %w\n%s", err, data)
 			return
 		}
 		sharedAqtExe = exe

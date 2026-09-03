@@ -109,6 +109,7 @@ func TestUpgradeGuidanceIsControlCharacterFree(t *testing.T) {
 // reach the user unchanged.
 func TestExplainErrorPassesOtherErrorsThrough(t *testing.T) {
 	orig := errors.New("something else went wrong")
+	//nolint:errorlint // identity is the assertion: explainError must hand an unknown error back unchanged, not wrapped.
 	if got := explainError(orig); got != orig {
 		t.Errorf("explainError rewrote an unrelated error: %v", got)
 	}

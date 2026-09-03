@@ -95,7 +95,7 @@ func TestBindSurvivesLostResponse(t *testing.T) {
 				t.Errorf("hijack: %v", err)
 				return
 			}
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 		pass(w, r)

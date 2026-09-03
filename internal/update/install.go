@@ -101,15 +101,15 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	if err != nil {
 		return res, err
 	}
-	defer os.Remove(archive)
+	defer func() { _ = os.Remove(archive) }()
 
 	staged, err := os.CreateTemp(in.Dir, TempPrefix+"*.new")
 	if err != nil {
 		return res, err
 	}
 	stagedPath := staged.Name()
-	staged.Close() // ExtractExecutable owns the contents; this only reserved the name
-	defer os.Remove(stagedPath)
+	_ = staged.Close() // ExtractExecutable owns the contents; this only reserved the name
+	defer func() { _ = os.Remove(stagedPath) }()
 
 	if err := ExtractExecutable(archive, platform, stagedPath); err != nil {
 		return res, err
@@ -121,22 +121,22 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	// Prove the candidate runs before the installed binary is disturbed at all. A
 	// broken download that got this far stops here, with nothing to undo.
 	if err := verifyExec(ctx, opts, stagedPath); err != nil {
-		return res, fmt.Errorf("%w before installing: %v", ErrVerifyFailed, err)
+		return res, fmt.Errorf("%w before installing: %w", ErrVerifyFailed, err)
 	}
 
 	rollback := filepath.Join(in.Dir, TempPrefix+"previous.old")
-	os.Remove(rollback)
+	_ = os.Remove(rollback)
 	if err := os.Rename(in.Path, rollback); err != nil {
 		return res, fmt.Errorf("moving the current binary aside: %w", err)
 	}
 	if err := os.Rename(stagedPath, in.Path); err != nil {
 		restore(rollback, in.Path)
-		return res, fmt.Errorf("%w: installing the new binary: %v", ErrRolledBack, err)
+		return res, fmt.Errorf("%w: installing the new binary: %w", ErrRolledBack, err)
 	}
 	if err := verifyExec(ctx, opts, in.Path); err != nil {
-		os.Remove(in.Path)
+		_ = os.Remove(in.Path)
 		restore(rollback, in.Path)
-		return res, fmt.Errorf("%w: %v (%w)", ErrVerifyFailed, err, ErrRolledBack)
+		return res, fmt.Errorf("%w: %w (%w)", ErrVerifyFailed, err, ErrRolledBack)
 	}
 
 	// The rollback copy is this process's own running image on Windows, which the

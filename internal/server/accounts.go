@@ -159,7 +159,7 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var (
 		curEpoch    int
 		curVerifier []byte
@@ -221,7 +221,7 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 	if err != nil {
 		return "", 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	fail := func(e error) (string, int, error) { return "", 0, e }
 	var epoch int
 	var verifier []byte
@@ -378,7 +378,7 @@ func (s *Store) CreateChallenge(email string) (id string, nonce []byte, err erro
 	// Opportunistic sweep: challenges are deleted on consume, but an unconsumed one
 	// would otherwise linger forever. Reaping expired rows on each issue keeps the
 	// table bounded without a background job.
-	s.db.Exec(`DELETE FROM challenges WHERE expires_at < ?`, now.Unix())
+	_, _ = s.db.Exec(`DELETE FROM challenges WHERE expires_at < ?`, now.Unix())
 	expiresAt := now.Add(challengeTTL).Unix()
 	_, err = s.db.Exec(
 		`INSERT INTO challenges(id, email, nonce, expires_at) VALUES(?,?,?,?)`,
@@ -406,7 +406,7 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.db.Exec(`DELETE FROM challenges WHERE id = ?`, id) // single-use, regardless of validity
+	_, _ = s.db.Exec(`DELETE FROM challenges WHERE id = ?`, id) // single-use, regardless of validity
 	if time.Now().Unix() > expiresAt {
 		return nil, ErrNotFound
 	}
@@ -426,7 +426,7 @@ func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (d
 	if err != nil {
 		return "", "", err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if maxDevices > 0 {
 		var count int
 		if err := tx.QueryRow(`SELECT count(*) FROM devices WHERE owner_handle = ?`, ownerHandle).Scan(&count); err != nil {
@@ -641,7 +641,7 @@ func (s *Store) backfillBlobSizes() error {
 			var id string
 			var nonce []byte
 			if err := rows.Scan(&id, &nonce); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return err
 			}
 			var size int64
@@ -650,12 +650,12 @@ func (s *Store) backfillBlobSizes() error {
 				size = info.Size()
 			case errors.Is(err, os.ErrNotExist):
 			default:
-				rows.Close()
+				_ = rows.Close()
 				return err
 			}
 			pending = append(pending, sized{id: id, size: size})
 		}
-		rows.Close()
+		_ = rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
@@ -681,7 +681,7 @@ func (s *Store) AccountUsageAll() ([]AccountUsage, error) {
 	for rows.Next() {
 		var owner string
 		if err := rows.Scan(&owner); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return nil, err
 		}
 		owners = append(owners, owner)
@@ -784,7 +784,7 @@ func (s *Store) ListDevices(owner string, page pageParams) ([]api.Device, string
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	devices := []api.Device{}
 	for rows.Next() {
@@ -826,7 +826,7 @@ func (s *Store) Owners() ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var owners []string
 	for rows.Next() {
 		var o string

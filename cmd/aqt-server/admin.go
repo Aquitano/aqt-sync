@@ -288,7 +288,7 @@ func withStore(cmd *cobra.Command, fn func(*server.Store) error) error {
 	if err != nil {
 		return fmt.Errorf("open data dir %s: %w", dir, err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return fn(store)
 }
 

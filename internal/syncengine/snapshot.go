@@ -12,7 +12,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"unicode/utf8"
@@ -201,7 +200,7 @@ func streamHash(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err
@@ -352,21 +351,6 @@ func unsupportedBaseLinks(m *Manifest, base *Manifest, dir string) []Entry {
 		return nil
 	}
 	return missing
-}
-
-// namePaths renders skipped paths for a message, naming the first few and counting
-// the rest so one unreadable directory of ten thousand files stays one line.
-func namePaths(skipped []SkippedPath) string {
-	const show = 3
-	names := make([]string, 0, show)
-	for _, s := range skipped[:min(show, len(skipped))] {
-		names = append(names, strconv.Quote(s.Path))
-	}
-	out := strings.Join(names, ", ")
-	if rest := len(skipped) - len(names); rest > 0 {
-		out += fmt.Sprintf(" and %d more", rest)
-	}
-	return out
 }
 
 // ListPaths returns the relative slash path of every tracked file and symlink under
@@ -548,7 +532,7 @@ func sealFile(n fileNode, entry Entry, conv crypto.ConvergenceKey, chunker *Chun
 	if err != nil {
 		return Entry{}, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	seal := sealStream
 	if n.info.Size() < serialSealCutoff {
 		seal = sealSerial

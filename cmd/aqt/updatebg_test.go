@@ -150,7 +150,7 @@ func captureStderr(t *testing.T, fn func()) string {
 		done <- b.String()
 	}()
 	fn()
-	w.Close()
+	_ = w.Close()
 	os.Stderr = orig
 	return <-done
 }

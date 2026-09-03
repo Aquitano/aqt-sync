@@ -147,7 +147,7 @@ func Check(ctx context.Context, opts Options) (Result, error) {
 
 	available, err := ParseVersion(m.Version)
 	if err != nil {
-		return res, fmt.Errorf("%w: %v", ErrMalformedManifest, err)
+		return res, fmt.Errorf("%w: %w", ErrMalformedManifest, err)
 	}
 	res.AvailableVersion = m.Version
 	res.ReleaseURL = m.ReleaseURL

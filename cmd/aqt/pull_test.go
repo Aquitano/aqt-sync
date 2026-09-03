@@ -90,7 +90,7 @@ func TestWriteStreamAtomicLeavesOriginalOnFailure(t *testing.T) {
 
 	streamErr := errors.New("simulated mid-write network failure")
 	err := fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
-		if _, err := f.Write([]byte("partial")); err != nil {
+		if _, err := f.WriteString("partial"); err != nil {
 			return err
 		}
 		return streamErr

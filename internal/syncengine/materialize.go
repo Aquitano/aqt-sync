@@ -173,18 +173,18 @@ func materializeAt(full string, mode os.FileMode, prepare func() error, write fu
 		return 0, err
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	bw := bufio.NewWriter(tmp)
 	if err := write(bw); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return 0, err
 	}
 	if err := bw.Flush(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return 0, err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return 0, err
 	}
 	if err := tmp.Close(); err != nil {

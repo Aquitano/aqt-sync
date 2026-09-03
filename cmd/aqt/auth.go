@@ -179,7 +179,7 @@ func runLogin(email string, ttl time.Duration) error {
 	// path and is handled below.
 	name := firstNonEmpty(flagProfile, identity.DefaultProfile)
 	if prof, loadErr := identity.Load(name); loadErr == nil && prof.Token != "" &&
-		!(sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email)) {
+		!(sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email)) { //nolint:staticcheck // QF1001: "not the same account on the same server" is the condition being tested; splitting it into two negations reads worse.
 		return fmt.Errorf("profile %q is already logged in as %s on %s; run `aqt logout` first (which revokes that device), or use a different --profile",
 			name, prof.Email, prof.Server)
 	}

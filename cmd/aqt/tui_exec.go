@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -145,7 +146,8 @@ func tuiExecCmd(exe string, sub []string, stdin string) tea.Cmd {
 			wg.Wait()
 			err := cmd.Wait()
 			exit := 0
-			if ee, ok := err.(*exec.ExitError); ok {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) {
 				exit = ee.ExitCode()
 			} else if err != nil {
 				exit = 1

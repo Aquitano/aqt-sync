@@ -179,7 +179,7 @@ func ParseManifest(b []byte) (Manifest, error) {
 	dec.DisallowUnknownFields()
 	var m Manifest
 	if err := dec.Decode(&m); err != nil {
-		return Manifest{}, fmt.Errorf("%w: %v", ErrMalformedManifest, err)
+		return Manifest{}, fmt.Errorf("%w: %w", ErrMalformedManifest, err)
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return Manifest{}, fmt.Errorf("%w: trailing data after the manifest", ErrMalformedManifest)
@@ -208,7 +208,7 @@ func (m Manifest) Validate() error {
 	}
 	v, err := ParseVersion(m.Version)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrMalformedManifest, err)
+		return fmt.Errorf("%w: %w", ErrMalformedManifest, err)
 	}
 	if m.Channel == ChannelStable && v.IsPrerelease() {
 		return fmt.Errorf("%w: stable channel carries prerelease %s", ErrMalformedManifest, m.Version)
@@ -217,10 +217,10 @@ func (m Manifest) Validate() error {
 		return fmt.Errorf("%w: publishedAt must be UTC", ErrMalformedManifest)
 	}
 	if _, err := time.Parse(time.RFC3339, m.PublishedAt); err != nil {
-		return fmt.Errorf("%w: publishedAt: %v", ErrMalformedManifest, err)
+		return fmt.Errorf("%w: publishedAt: %w", ErrMalformedManifest, err)
 	}
 	if _, err := parseHTTPSURL(m.ReleaseURL); err != nil {
-		return fmt.Errorf("%w: releaseUrl: %v", ErrMalformedManifest, err)
+		return fmt.Errorf("%w: releaseUrl: %w", ErrMalformedManifest, err)
 	}
 	if len(m.Artifacts) == 0 || len(m.Artifacts) > maxArtifacts {
 		return fmt.Errorf("%w: %d artifacts", ErrMalformedManifest, len(m.Artifacts))
@@ -246,7 +246,7 @@ func (m Manifest) Validate() error {
 		}
 		u, err := parseHTTPSURL(a.URL)
 		if err != nil {
-			return fmt.Errorf("%w: %s url: %v", ErrMalformedManifest, p, err)
+			return fmt.Errorf("%w: %s url: %w", ErrMalformedManifest, p, err)
 		}
 		if path.Base(u.Path) != a.Name {
 			return fmt.Errorf("%w: %s url does not end in %q", ErrMalformedManifest, p, a.Name)
@@ -301,7 +301,7 @@ func isSHA256Hex(s string) bool {
 	if len(s) != 64 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			return false
@@ -314,7 +314,7 @@ func isLowerAlnum(s string) bool {
 	if s == "" || len(s) > 32 {
 		return false
 	}
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		c := s[i]
 		if (c < '0' || c > '9') && (c < 'a' || c > 'z') {
 			return false

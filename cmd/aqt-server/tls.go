@@ -174,7 +174,7 @@ func serveListenerLifecycle(ctx context.Context, srv *http.Server, ln net.Listen
 		}
 		go func() { errCh <- srv.Shutdown(shutCtx) }()
 		var first error
-		for i := 0; i < n; i++ {
+		for range n {
 			select {
 			case err := <-errCh:
 				if first == nil && err != nil {

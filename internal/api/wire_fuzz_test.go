@@ -14,6 +14,7 @@ import (
 // framing and mutates outward, rather than spending its budget rediscovering the
 // 4-byte length prefix.
 func seedEnvelopes(f *testing.F) {
+	f.Helper()
 	up, err := EncodeResourceUpload(PutResourceRequest{
 		ID:            "abc",
 		Visibility:    Private,

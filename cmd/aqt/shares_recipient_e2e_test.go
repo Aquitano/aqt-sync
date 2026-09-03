@@ -410,7 +410,7 @@ func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := confirmPinnedKeys(cl, prof, pin); err != nil {
+	if err := confirmPinnedKeys(cl, pin); err != nil {
 		t.Fatalf("confirming an unchanged pin: %v", err)
 	}
 
@@ -450,7 +450,7 @@ func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 		}
 	})
 
-	err = confirmPinnedKeys(cl, prof, pin)
+	err = confirmPinnedKeys(cl, pin)
 	if err == nil {
 		t.Fatal("confirmPinnedKeys accepted keys that no longer match the pin")
 	}

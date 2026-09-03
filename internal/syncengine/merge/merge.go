@@ -177,6 +177,7 @@ func strictlyBefore(a, b Hunk) bool {
 	}
 	// Adjacent replacements and an insertion at a replacement boundary are clean.
 	// Two insertions at the same point compete for ordering and therefore overlap.
+	//nolint:staticcheck // QF1001: "not both insertions" is the rule; the expanded form reads as two unrelated tests.
 	return !(a.Start == a.End && b.Start == b.End)
 }
 

@@ -16,7 +16,7 @@ func TestRunExitsNonZeroWhenItCannotListen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer busy.Close()
+	defer func() { _ = busy.Close() }()
 
 	t.Setenv("AQT_DATA_DIR", t.TempDir())
 	t.Setenv("AQT_ADDR", busy.Addr().String())

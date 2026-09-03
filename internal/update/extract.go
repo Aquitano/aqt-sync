@@ -60,7 +60,7 @@ func ExtractExecutable(archivePath string, p Platform, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	want := ExecutableName(p)
 	if archiveExt(p) == ".zip" {
@@ -78,7 +78,7 @@ func extractTarGz(r io.Reader, want, dst string) error {
 	if err != nil {
 		return fmt.Errorf("reading the release archive: %w", err)
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
 	tr := tar.NewReader(gz)
 	found := false
@@ -136,7 +136,7 @@ func extractZip(r io.ReaderAt, size int64, want, dst string) error {
 			return err
 		}
 		err = writeBounded(dst, rc)
-		rc.Close()
+		_ = rc.Close()
 		if err != nil {
 			return err
 		}
@@ -164,12 +164,19 @@ func checkEntryName(name, want string) error {
 // writeBounded copies at most maxExecutableBytes to dst, created private because
 // a partially written executable must never be runnable by anyone. The caller
 // sets the final mode once the contents are known good.
-func writeBounded(dst string, r io.Reader) error {
+func writeBounded(dst string, r io.Reader) (err error) {
 	f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	// Close is reached on the early returns too, where nothing was synced, and on
+	// a network or FUSE filesystem it is where deferred writeback errors surface.
+	// The caller is about to run what it wrote, so neither may be dropped.
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, closeErr)
+		}
+	}()
 
 	n, err := io.Copy(f, io.LimitReader(r, maxExecutableBytes+1))
 	if err != nil {

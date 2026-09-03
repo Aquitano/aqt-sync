@@ -97,7 +97,7 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	if err != nil {
 		return "", 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Authoritative duplicate check: the pre-tx lookup on the read pool may see a
 	// stale WAL snapshot; only this re-check on the single writer connection is
 	// race-free. Do not remove it as redundant.
@@ -198,7 +198,7 @@ func (s *Store) updateResource(owner string, capability int, req api.PutResource
 	if err != nil {
 		return "", 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// An update may lower min_client: a capable client legitimately rewrites a
 	// resource in an older (baseline) format, and that state is then readable by
 	// older clients again.
@@ -466,7 +466,7 @@ func (s *Store) countPublicRead(id string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var (
 		reads     int64
 		maxReads  sql.NullInt64
@@ -615,7 +615,7 @@ func (s *Store) SetVisibility(owner, id string, req api.SetVisibilityRequest) (i
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	res, err := tx.Exec(
 		`UPDATE resources SET visibility = ?, version = version + 1, updated_at = unixepoch(),
 		   expires_at = ?, max_reads = ?, on_expiry = ?, reads = 0, exhausted_at = NULL
@@ -713,7 +713,7 @@ func (s *Store) ListResources(owner string, page pageParams) ([]api.ResourceList
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var items []api.ResourceListItem
 	for rows.Next() {
@@ -765,7 +765,7 @@ func (s *Store) DeleteResourceVersion(owner, id string, expectedVersion int) err
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if expectedVersion > 0 {
 		var current int
 		err := tx.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&current)

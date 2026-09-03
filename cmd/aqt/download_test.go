@@ -56,7 +56,7 @@ func (f *fakePackServer) handler() http.Handler {
 			http.Error(w, "no pack", http.StatusNotFound)
 			return
 		}
-		w.Write(body) // whole body; getRange slices the requested window out of a 200
+		_, _ = w.Write(body) // whole body; getRange slices the requested window out of a 200
 	})
 	return mux
 }
@@ -97,7 +97,7 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 func TestBatchByChunks(t *testing.T) {
 	entry := func(path string, chunks int) syncengine.Entry {
 		e := syncengine.Entry{Path: path}
-		for i := 0; i < chunks; i++ {
+		for range chunks {
 			e.Chunks = append(e.Chunks, crypto.Chunk{ID: path})
 		}
 		return e
