@@ -263,8 +263,8 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(tmp)
-	if _, err := materializeWithMaster(cl, mk, snapshotAsResource(snap), tmp); err != nil {
+	defer func() { _ = os.RemoveAll(tmp) }()
+	if err := materializeWithMaster(cl, mk, snapshotAsResource(snap), tmp); err != nil {
 		return fmt.Errorf("reconstruct snapshot %s: %w", snapshotID, err)
 	}
 	snapshotManifest, err := syncengine.Scan(tmp)

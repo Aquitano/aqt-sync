@@ -114,7 +114,9 @@ func TestResourceReadsBackInEitherRepresentation(t *testing.T) {
 		t.Fatalf("raw put: %d (%s)", rec.Code, rec.Body.String())
 	}
 	var put api.PutResourceResponse
-	json.Unmarshal(rec.Body.Bytes(), &put)
+	if err := json.Unmarshal(rec.Body.Bytes(), &put); err != nil {
+		t.Fatalf("decode raw put response: %v", err)
+	}
 
 	var jsonGot api.GetResourceResponse
 	if code := h.do(http.MethodGet, "/v1/resources/"+put.ID, token, nil, &jsonGot); code != http.StatusOK {

@@ -42,7 +42,7 @@ func bindCreated(cl *client.Client, create api.PutResourceRequest, resp api.PutR
 		cleanupErr = cl.DeleteResourceVersion(stored.ID, stored.Version)
 	}
 	if cleanupErr != nil {
-		return resp, fmt.Errorf("bind resource %s to its id: %w (the unreadable resource could not be removed: %v; `aqt rm %s` deletes it)", resp.ID, err, cleanupErr, resp.ID)
+		return resp, fmt.Errorf("bind resource %s to its id: %w (the unreadable resource could not be removed: %w; `aqt rm %s` deletes it)", resp.ID, err, cleanupErr, resp.ID)
 	}
 	return resp, fmt.Errorf("bind resource %s to its id: %w", resp.ID, err)
 }

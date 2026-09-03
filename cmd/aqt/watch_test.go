@@ -76,21 +76,21 @@ func TestWatcherIdleStreakBacksOffAndResets(t *testing.T) {
 	w := newFakeWatcher(f)
 	var st watchState
 
-	w.step(&st) // prime
+	_ = w.step(&st) // prime
 	if st.idle != 0 {
 		t.Fatalf("prime idle=%d, want 0", st.idle)
 	}
-	w.step(&st) // quiet -> initial sync (activity)
+	_ = w.step(&st) // quiet -> initial sync (activity)
 	if f.syncs != 1 || st.idle != 0 {
 		t.Fatalf("after sync syncs=%d idle=%d, want 1/0", f.syncs, st.idle)
 	}
-	w.step(&st) // quiet, nothing pending -> idle grows
-	w.step(&st)
+	_ = w.step(&st) // quiet, nothing pending -> idle grows
+	_ = w.step(&st)
 	if st.idle != 2 {
 		t.Fatalf("idle=%d after two quiet ticks, want 2", st.idle)
 	}
 	f.sig = "b"
-	w.step(&st) // a change resets the streak
+	_ = w.step(&st) // a change resets the streak
 	if st.idle != 0 {
 		t.Fatalf("a change must reset the idle streak, got %d", st.idle)
 	}
@@ -101,15 +101,15 @@ func TestWatcherSyncsOnceWhenQuiet(t *testing.T) {
 	w := newFakeWatcher(f)
 	var st watchState
 
-	w.step(&st) // prime
+	_ = w.step(&st) // prime
 	if f.syncs != 0 {
 		t.Fatalf("priming must not sync; syncs=%d", f.syncs)
 	}
-	w.step(&st) // quiet tick -> the initial convergence sync
+	_ = w.step(&st) // quiet tick -> the initial convergence sync
 	if f.syncs != 1 {
 		t.Fatalf("a quiet tick must sync once; syncs=%d", f.syncs)
 	}
-	w.step(&st) // still quiet -> nothing
+	_ = w.step(&st) // still quiet -> nothing
 	if f.syncs != 1 {
 		t.Fatalf("an unchanged tree must not re-sync; syncs=%d", f.syncs)
 	}
@@ -122,18 +122,18 @@ func TestWatcherDebouncesChange(t *testing.T) {
 	w := newFakeWatcher(f)
 	var st watchState
 
-	w.step(&st) // prime
-	w.step(&st) // initial sync
+	_ = w.step(&st) // prime
+	_ = w.step(&st) // initial sync
 	if f.syncs != 1 {
 		t.Fatalf("setup: syncs=%d", f.syncs)
 	}
 
 	f.sig = "b"
-	w.step(&st) // change observed
+	_ = w.step(&st) // change observed
 	if f.syncs != 1 {
 		t.Fatalf("a change must not sync on the tick it appears; syncs=%d", f.syncs)
 	}
-	w.step(&st) // tree quiet -> sync
+	_ = w.step(&st) // tree quiet -> sync
 	if f.syncs != 2 {
 		t.Fatalf("a settled change must sync; syncs=%d", f.syncs)
 	}
@@ -146,15 +146,15 @@ func TestWatcherDefersWhileGitBusy(t *testing.T) {
 	w := newFakeWatcher(f)
 	var st watchState
 
-	w.step(&st) // prime
-	w.step(&st) // would sync, but git is busy
-	w.step(&st) // still busy
+	_ = w.step(&st) // prime
+	_ = w.step(&st) // would sync, but git is busy
+	_ = w.step(&st) // still busy
 	if f.syncs != 0 {
 		t.Fatalf("must not sync while git is busy; syncs=%d", f.syncs)
 	}
 
 	f.busy = false
-	w.step(&st) // git idle -> the held-back sync runs
+	_ = w.step(&st) // git idle -> the held-back sync runs
 	if f.syncs != 1 {
 		t.Fatalf("must sync once git is idle; syncs=%d", f.syncs)
 	}
@@ -192,8 +192,8 @@ func TestWatchGuardGatesRealSync(t *testing.T) {
 	}
 
 	var st watchState
-	w.step(&st) // prime
-	w.step(&st) // would sync, but git is locked
+	_ = w.step(&st) // prime
+	_ = w.step(&st) // would sync, but git is locked
 	if f.syncs != 0 {
 		t.Fatalf("a locked sub-repo must hold back the sync; syncs=%d", f.syncs)
 	}
@@ -204,7 +204,7 @@ func TestWatchGuardGatesRealSync(t *testing.T) {
 	if err := os.Remove(filepath.Join(root, ".git", "index.lock")); err != nil {
 		t.Fatal(err)
 	}
-	w.step(&st) // git idle -> the held-back push runs
+	_ = w.step(&st) // git idle -> the held-back push runs
 	if f.syncs != 1 {
 		t.Fatalf("the push must run once git is idle; syncs=%d", f.syncs)
 	}
@@ -229,15 +229,15 @@ func TestWatcherKeepsEditMadeDuringSync(t *testing.T) {
 	}
 	var st watchState
 
-	w.step(&st) // prime
-	w.step(&st) // sync #1; tree changes to "b" mid-sync
+	_ = w.step(&st) // prime
+	_ = w.step(&st) // sync #1; tree changes to "b" mid-sync
 	if f.syncs != 1 {
 		t.Fatalf("syncs=%d", f.syncs)
 	}
 	if !st.pending {
 		t.Fatal("an edit made during the sync was dropped (pending cleared)")
 	}
-	w.step(&st) // tree quiet at "b" -> the edit is synced
+	_ = w.step(&st) // tree quiet at "b" -> the edit is synced
 	if f.syncs != 2 {
 		t.Fatalf("concurrent edit was not synced; syncs=%d", f.syncs)
 	}

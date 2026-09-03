@@ -122,7 +122,10 @@ func TestStatusIncomingE2E(t *testing.T) {
 	}
 }
 
-func mustStatus(t *testing.T, dir string) { mustStatusOpts(t, dir, statusOptions{}) }
+func mustStatus(t *testing.T, dir string) {
+	t.Helper()
+	mustStatusOpts(t, dir, statusOptions{})
+}
 
 func mustStatusOpts(t *testing.T, dir string, opts statusOptions) {
 	t.Helper()

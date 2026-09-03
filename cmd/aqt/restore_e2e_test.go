@@ -89,7 +89,7 @@ func TestFullBackupRestoreDrill(t *testing.T) {
 		t.Fatalf("open restored store: %v", err)
 	}
 	srvB := newHTTPServer(t, storeB)
-	t.Cleanup(func() { srvB.Close(); storeB.Close() })
+	t.Cleanup(func() { srvB.Close(); _ = storeB.Close() })
 
 	// --- Clean machine: empty config, recover from email + passphrase alone. ---
 	setConfigHome(t, t.TempDir())

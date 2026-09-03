@@ -389,7 +389,7 @@ func TestGetResourceMaxReadsNoOverServe(t *testing.T) {
 	const readers = 40
 	var wg sync.WaitGroup
 	results := make(chan error, readers)
-	for i := 0; i < readers; i++ {
+	for range readers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -438,7 +438,7 @@ func TestSetVisibilityPolicyLifecycle(t *testing.T) {
 	if _, err := s.SetVisibility(owner, id, api.SetVisibilityRequest{Visibility: api.Public, MaxReads: 2}); err != nil {
 		t.Fatalf("set visibility public with policy: %v", err)
 	}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if _, err := s.GetResource(id, ""); err != nil {
 			t.Fatalf("read after reset %d: %v", i, err)
 		}

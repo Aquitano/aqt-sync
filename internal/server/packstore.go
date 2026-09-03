@@ -110,10 +110,9 @@ func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
 // Bumping the pack's created_at keeps it past the age guard until the PUT roots it.
 func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 	present := make(map[string]bool, len(ids))
-	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
 	if err := queryIDsBatched(s.rdb,
 		`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
-		[]any{owner}, ids, batch,
+		[]any{owner}, ids,
 		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
@@ -176,7 +175,8 @@ func placeholders(n int) string {
 // splices the group's placeholder list plus closing paren onto query, so callers pass
 // the SELECT up to and including "IN (". Each batch's rows are closed before the next
 // runs, and the first scan error aborts.
-func queryIDsBatched(q queryer, query string, lead []any, ids []string, batch int, scan func(*sql.Rows) error) error {
+func queryIDsBatched(q queryer, query string, lead []any, ids []string, scan func(*sql.Rows) error) error {
+	const batch = 400
 	for start := 0; start < len(ids); start += batch {
 		end := min(start+batch, len(ids))
 		group := ids[start:end]
@@ -191,15 +191,15 @@ func queryIDsBatched(q queryer, query string, lead []any, ids []string, batch in
 		}
 		for rows.Next() {
 			if err := scan(rows); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				return err
 			}
 		}
 		if err := rows.Err(); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
-		rows.Close()
+		_ = rows.Close()
 	}
 	return nil
 }
@@ -284,7 +284,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Packs intentionally predate account foreign keys. Recheck the owner inside
 	// this write transaction so an upload authenticated just before an operator
 	// deletes the account cannot recreate pack/object rows after the deletion.
@@ -421,7 +421,7 @@ func parsePackIndex(data []byte) (index []api.PackIndexEntry, objectsEnd int, er
 		return nil, 0, fmt.Errorf("%w: index length %d exceeds the pack", ErrBadPack, indexLen)
 	}
 	if err := json.Unmarshal(data[objectsEnd:len(data)-4], &index); err != nil {
-		return nil, 0, fmt.Errorf("%w: index json: %v", ErrBadPack, err)
+		return nil, 0, fmt.Errorf("%w: index json: %w", ErrBadPack, err)
 	}
 	return index, objectsEnd, nil
 }
@@ -439,10 +439,9 @@ func (s *Store) LocateObjects(owner string, ids []string) ([]api.ObjectLocation,
 	out := make([]api.ObjectLocation, 0, len(ids))
 	seenPack := map[string]bool{}
 	var packs []string
-	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
 	if err := queryIDsBatched(s.rdb,
 		`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
-		[]any{owner}, ids, batch,
+		[]any{owner}, ids,
 		func(rows *sql.Rows) error {
 			var (
 				id, packID  string
@@ -533,14 +532,12 @@ func (s *Store) orderedObjectSlices(owner, resourceID string, ids []string) ([]a
 		}
 	}
 
-	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
-
 	// Membership: every requested id must be a chunk root of this resource. A miss on
 	// any id fails the whole request without revealing which one.
 	member := map[string]bool{}
 	if err := queryIDsBatched(s.rdb,
 		`SELECT chunk_id FROM resource_chunks WHERE resource_id = ? AND chunk_id IN (`,
-		[]any{resourceID}, distinct, batch,
+		[]any{resourceID}, distinct,
 		func(rows *sql.Rows) error {
 			var id string
 			if err := rows.Scan(&id); err != nil {
@@ -565,7 +562,7 @@ func (s *Store) orderedObjectSlices(owner, resourceID string, ids []string) ([]a
 	var packs []string
 	if err := queryIDsBatched(s.rdb,
 		`SELECT chunk_id, pack_id, "offset", length FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
-		[]any{owner}, distinct, batch,
+		[]any{owner}, distinct,
 		func(rows *sql.Rows) error {
 			var (
 				id, packID  string
@@ -684,16 +681,16 @@ func (s *Store) SweepExpired(owner string, now int64) (int, error) {
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, err
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return 0, err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	var swept int
 	for _, id := range ids {
@@ -732,7 +729,7 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// A concurrent SetVisibility or version-pinned re-PUT can resurrect the link between
 	// the unlocked scan and this lock — resetting expires_at/reads/exhausted_at while
 	// leaving reclaimed = 0 — so re-testing reclaimed alone would still tombstone a
@@ -774,7 +771,7 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 		}
 		return tx.Commit()
 	case api.ExpiryReclaim:
-		return s.reclaimLink(tx, owner, id)
+		return s.reclaimLink(tx, id)
 	default:
 		return fmt.Errorf("resource %s: unknown on_expiry action %q", id, action)
 	}
@@ -782,7 +779,7 @@ func (s *Store) endOfLife(owner, id string, now, graceCutoff int64) error {
 
 // reclaimLink is endOfLife's reclaim arm: it runs inside that function's transaction and
 // under its resource lock, and commits.
-func (s *Store) reclaimLink(tx *sql.Tx, owner, id string) error {
+func (s *Store) reclaimLink(tx *sql.Tx, id string) error {
 	// The blob dies here; the chunk objects (still possibly shared with other
 	// resources) wait for a client prune.
 	if _, err := tx.Exec(`DELETE FROM resource_chunks WHERE resource_id = ?`, id); err != nil {
@@ -882,7 +879,7 @@ func (s *Store) ListOwnerChunks(owner, cursor string) ([]string, string, error) 
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var ids []string
 	for rows.Next() {
 		var id string
@@ -924,18 +921,18 @@ func (s *Store) DeleteOwnerChunks(owner string, ids []string, minAge time.Durati
 	if err != nil {
 		return 0, 0, 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var (
 		drop     []string
 		packSeen = map[string]bool{}
 		packs    []string
 	)
-	const batch = 400 // keep the IN clause well under SQLite's bound-variable limit
+	const batch = 400 // the delete loop below reuses it; queryIDsBatched batches on its own
 	err = queryIDsBatched(tx,
 		`SELECT o.chunk_id, o.pack_id, p.created_at FROM objects o
 		 JOIN packs p ON p.owner_handle = o.owner_handle AND p.pack_id = o.pack_id
 		 WHERE o.owner_handle = ? AND o.chunk_id IN (`,
-		[]any{owner}, ids, batch,
+		[]any{owner}, ids,
 		func(rows *sql.Rows) error {
 			var (
 				id, packID string
@@ -1048,7 +1045,7 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 	if err != nil {
 		return 0, 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// A pack is dead once every one of its object rows has been deleted (a client
 	// prune, or the resource churn that preceded it). obj_count is maintained inside
 	// every transaction that moves object rows (see recountPacks), so selection
@@ -1069,16 +1066,16 @@ func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) 
 	for rows.Next() {
 		var d deadPack
 		if err := rows.Scan(&d.id, &d.length); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, 0, err
 		}
 		dead = append(dead, d)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return 0, 0, err
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	var freed int64
 	for _, d := range dead {
@@ -1248,7 +1245,7 @@ func (s *Store) repackCandidates(owner string, cutoff int64) ([]repackCand, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []repackCand
 	for rows.Next() {
 		var c repackCand
@@ -1279,7 +1276,7 @@ func (s *Store) packLiveObjects(owner, packID string) ([]liveObj, int64, error) 
 	if err != nil {
 		return nil, 0, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var (
 		live  []liveObj
 		total int64
@@ -1331,7 +1328,7 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	if err != nil {
 		return false, 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Take SQLite's cross-process writer lock before validating the plan. Without
 	// this no-op write, an admin process can delete and commit after these reads,
 	// leaving this deferred transaction to fail with SQLITE_BUSY after its new pack
@@ -1370,16 +1367,16 @@ func (s *Store) commitRepack(owner string, cutoff int64, cand repackCand, newID 
 	for lrows.Next() {
 		var id string
 		if err := lrows.Scan(&id); err != nil {
-			lrows.Close()
+			_ = lrows.Close()
 			return false, 0, err
 		}
 		liveNow[id] = true
 	}
 	if err := lrows.Err(); err != nil {
-		lrows.Close()
+		_ = lrows.Close()
 		return false, 0, err
 	}
-	lrows.Close()
+	_ = lrows.Close()
 
 	// The new pack was built from the planned object set; if a concurrent delete
 	// changed it, the new pack no longer matches the objects to move, so abandon.

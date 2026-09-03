@@ -199,10 +199,7 @@ func TestPresentObjectsAndRemoteReaches(t *testing.T) {
 
 	refs := map[string]string{"refs/heads/main": second}
 	frontier := []string{second}
-	reached, err := remoteReaches([]string{first, second, unrelated}, refs, frontier)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reached := remoteReaches([]string{first, second, unrelated}, refs, frontier)
 	if !reached[first] {
 		t.Error("an ancestor of a remote ref should be reachable from it")
 	}
@@ -216,10 +213,7 @@ func TestPresentObjectsAndRemoteReaches(t *testing.T) {
 	// A ref the remote advertises but this clone never fetched still settles by
 	// identity, with nothing to walk — the pairwise check compared ids first too.
 	remoteOnly := map[string]string{"refs/heads/theirs": absent}
-	reached, err = remoteReaches([]string{absent}, remoteOnly, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	reached = remoteReaches([]string{absent}, remoteOnly, nil)
 	if !reached[absent] {
 		t.Error("an exact remote ref match must hold without a local object")
 	}

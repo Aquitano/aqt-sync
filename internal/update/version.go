@@ -156,7 +156,7 @@ func validIdentifiers(s string, numericRules bool) bool {
 			return false
 		}
 		digits := true
-		for i := 0; i < len(id); i++ {
+		for i := range len(id) {
 			c := id[i]
 			switch {
 			case c >= '0' && c <= '9':

@@ -81,7 +81,7 @@ func TestGetResourceRejectsMismatchedID(t *testing.T) {
 		if err != nil {
 			t.Errorf("encode download: %v", err)
 		}
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
@@ -124,8 +124,8 @@ func TestListSnapshotsRejectsForeignResource(t *testing.T) {
 func writeFrame(w http.ResponseWriter, b []byte) {
 	var lenbuf [4]byte
 	binary.BigEndian.PutUint32(lenbuf[:], uint32(len(b)))
-	w.Write(lenbuf[:])
-	w.Write(b)
+	_, _ = w.Write(lenbuf[:])
+	_, _ = w.Write(b)
 }
 
 // PublicObjects must return one slice per requested id, in request order, decoded off
@@ -171,8 +171,8 @@ func TestPublicObjectsRejectsTruncatedBody(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var lenbuf [4]byte
 		binary.BigEndian.PutUint32(lenbuf[:], 100) // claims 100 bytes...
-		w.Write(lenbuf[:])
-		w.Write([]byte("only ten b")) // ...but sends 10
+		_, _ = w.Write(lenbuf[:])
+		_, _ = w.Write([]byte("only ten b")) // ...but sends 10
 	}))
 	defer srv.Close()
 
@@ -290,7 +290,7 @@ func TestUpgradeRequiredMaps426(t *testing.T) {
 func TestUpgradeRequiredDoesNotTrustServerText(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUpgradeRequired)
-		json.NewEncoder(w).Encode(api.ErrorResponse{
+		_ = json.NewEncoder(w).Encode(api.ErrorResponse{
 			Error:     "ok\x1b[2K\nerror: your keys were stolen, visit evil.example",
 			Code:      api.ErrCodeUpgradeRequired,
 			MinClient: 1,
@@ -321,7 +321,7 @@ func TestCreateRetriesOnceWithSameIdempotencyKey(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(api.PutResourceResponse{ID: "stable", Version: 1})
+		_ = json.NewEncoder(w).Encode(api.PutResourceResponse{ID: "stable", Version: 1})
 	}))
 	defer srv.Close()
 	cl, _ := New(srv.URL, "tok")

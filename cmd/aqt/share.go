@@ -151,7 +151,7 @@ func runShareList(ref string) error {
 		name := "(unreadable)"
 		kind := ""
 		if m, ok := openMetadata(it, mk); ok {
-			name, kind = m.Name, string(m.Kind)
+			name, kind = m.Name, m.Kind
 		}
 		row := shareListRow{ID: it.ID, Name: name, Kind: kind, Public: it.Visibility == api.Public}
 		if row.Public {
@@ -277,7 +277,7 @@ func shareScopeRefs(cl *client.Client, res api.GetResourceResponse, keys *resour
 	defer conv.Wipe()
 	refs, err := closureRefs(cl, res.Blob, keys.ck, id, keys.meta, conv)
 	if err != nil {
-		return nil, fmt.Errorf("recomputing the folder's object set failed (%v); run `aqt sync` in the folder, then retry", err)
+		return nil, fmt.Errorf("recomputing the folder's object set failed (%w); run `aqt sync` in the folder, then retry", err)
 	}
 	return refs, nil
 }
@@ -549,7 +549,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 				_, undo = cl.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Private})
 			}
 			if undo != nil {
-				return fmt.Errorf("%w; additionally, clearing the policy this attempt stored failed (%v) — the link may still expire destructively, so run `aqt unshare %s` to rotate the key and drop the policy", err, undo, id)
+				return fmt.Errorf("%w; additionally, clearing the policy this attempt stored failed (%w) — the link may still expire destructively, so run `aqt unshare %s` to rotate the key and drop the policy", err, undo, id)
 			}
 			return err
 		}
@@ -781,7 +781,7 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 		// share does. Wrapping to the stored pin blindly means a grantee who rotated
 		// their own root key gets their working wrap silently overwritten with a dead
 		// one by an unrelated revocation — permanently, since nothing re-checks later.
-		if err := confirmPinnedKeys(cl, prof, pin); err != nil {
+		if err := confirmPinnedKeys(cl, pin); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant for %s: %v\n", pin.Email, err)
 			continue
 		}

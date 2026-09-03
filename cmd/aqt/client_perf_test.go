@@ -17,16 +17,16 @@ func TestWatcherFailingSyncBacksOff(t *testing.T) {
 	w.sync = func() error { f.syncs++; return errors.New("conflicts changed on both sides") }
 	var st watchState
 
-	w.step(&st) // prime
-	w.step(&st) // quiet -> first (failing) sync attempt
+	_ = w.step(&st) // prime
+	_ = w.step(&st) // quiet -> first (failing) sync attempt
 	if f.syncs != 1 {
 		t.Fatalf("syncs=%d, want 1", f.syncs)
 	}
 	if st.idle != 1 {
 		t.Fatalf("idle=%d after a failed attempt, want 1 (backoff engaged)", st.idle)
 	}
-	w.step(&st)
-	w.step(&st)
+	_ = w.step(&st)
+	_ = w.step(&st)
 	if st.idle != 3 {
 		t.Fatalf("idle=%d after repeated failures, want a growing streak", st.idle)
 	}
@@ -36,12 +36,12 @@ func TestWatcherFailingSyncBacksOff(t *testing.T) {
 
 	// Resolving the conflict shows up as a tree change: streak resets, sync retries.
 	f.sig = "b"
-	w.step(&st)
+	_ = w.step(&st)
 	if st.idle != 0 {
 		t.Fatalf("idle=%d after a change, want 0", st.idle)
 	}
 	w.sync = func() error { f.syncs++; return nil }
-	w.step(&st)
+	_ = w.step(&st)
 	if st.idle != 0 || f.syncs < 3 {
 		t.Fatalf("recovered sync: idle=%d syncs=%d", st.idle, f.syncs)
 	}

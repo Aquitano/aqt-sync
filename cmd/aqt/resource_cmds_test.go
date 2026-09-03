@@ -161,7 +161,7 @@ func captureStdout(t *testing.T, fn func()) string {
 		done <- b.String()
 	}()
 	fn()
-	w.Close()
+	_ = w.Close()
 	os.Stdout = orig
 	return <-done
 }

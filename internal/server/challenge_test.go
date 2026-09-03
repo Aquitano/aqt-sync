@@ -13,7 +13,7 @@ func TestCreateChallengeSweepsExpired(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	// An unconsumed, already-expired challenge sitting in the table.
 	if _, err := s.db.Exec(

@@ -512,7 +512,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging)
+	defer func() { _ = os.RemoveAll(staging) }()
 	meta, err := reconstructSnapshot(cl, prof, snap, staging, false)
 	if err != nil {
 		return err
@@ -583,7 +583,7 @@ func swapTree(root, staging string) error {
 		if !ok {
 			return fmt.Errorf("%w (rolled back partially; original contents preserved in %s)", cause, backup)
 		}
-		os.RemoveAll(backup)
+		_ = os.RemoveAll(backup)
 		return cause
 	}
 
@@ -794,16 +794,16 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 	if err != nil {
 		return zero, err
 	}
-	defer os.RemoveAll(leftDir)
+	defer func() { _ = os.RemoveAll(leftDir) }()
 	rightDir, err := os.MkdirTemp("", "aqt-diff-new-*")
 	if err != nil {
 		return zero, err
 	}
-	defer os.RemoveAll(rightDir)
-	if _, err := materializeWithMaster(cl, mk, left, leftDir); err != nil {
+	defer func() { _ = os.RemoveAll(rightDir) }()
+	if err := materializeWithMaster(cl, mk, left, leftDir); err != nil {
 		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
 	}
-	if _, err := materializeWithMaster(cl, mk, right, rightDir); err != nil {
+	if err := materializeWithMaster(cl, mk, right, rightDir); err != nil {
 		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
 	}
 	return diffTrees(leftDir, rightDir)
@@ -1287,16 +1287,17 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 // materializeWithMaster unwraps res's content key under the master key, then writes
 // its plaintext tree under destDir. Used by diff, which materializes both sides under
 // one unlocked master key.
-func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetResourceResponse, destDir string) (api.Metadata, error) {
+func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetResourceResponse, destDir string) error {
 	if res.WrappedKey == nil {
-		return api.Metadata{}, errors.New("resource has no owner key (public); cannot decrypt")
+		return errors.New("resource has no owner key (public); cannot decrypt")
 	}
 	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
 	if err != nil {
-		return api.Metadata{}, fmt.Errorf("unwrap key: %w", err)
+		return fmt.Errorf("unwrap key: %w", err)
 	}
 	defer ck.Wipe()
-	return materializeResource(cl, res, ck, destDir, false) // diff always lands in a fresh temp dir
+	_, err = materializeResource(cl, res, ck, destDir, false) // diff always lands in a fresh temp dir
+	return err
 }
 
 // resolveResourceID maps a tracked-folder path (or an explicit --id) to a resource

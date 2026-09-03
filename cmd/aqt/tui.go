@@ -87,7 +87,7 @@ func runTUI(dir string, explicitDir bool) error {
 	var fsEvents <-chan struct{}
 	if ctx.root != "" {
 		if w, werr := syncengine.WatchTree(ctx.root); werr == nil {
-			defer w.Close()
+			defer func() { _ = w.Close() }()
 			fsEvents = w.Events()
 		}
 	}

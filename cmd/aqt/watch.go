@@ -47,7 +47,7 @@ func backoffInterval(base, max time.Duration, idleStreak int) time.Duration {
 		return base
 	}
 	d := base
-	for i := 0; i < idleStreak; i++ {
+	for range idleStreak {
 		d *= 2
 		if d >= max {
 			return max
@@ -235,7 +235,7 @@ func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 	if tw, err := syncengine.WatchTree(root); err != nil {
 		logger.Printf("file events unavailable (%v); polling every %s (backing off to %s while idle)", err, interval, maxWatchInterval)
 	} else {
-		defer tw.Close()
+		defer func() { _ = tw.Close() }()
 		events = tw.Events()
 		max = watchRescanInterval
 		logger.Printf("file events active (debounce %s, safety rescan every %s)", interval, watchRescanInterval)
@@ -480,7 +480,7 @@ func startWatchDaemon(root string, interval time.Duration) error {
 	if err != nil {
 		return err
 	}
-	defer logFile.Close()
+	defer func() { _ = logFile.Close() }()
 
 	args := []string{"watch", root, "--interval", interval.String()}
 	if flagServer != "" {
@@ -589,7 +589,7 @@ func runAgentStop(dir string) error {
 	path := controlPath(root, agentPIDFile)
 	pid, ok := readLockPID(path)
 	if !ok || !processAlive(pid) {
-		os.Remove(path) // clear a stale pid file if one was left behind
+		_ = os.Remove(path) // clear a stale pid file if one was left behind
 		fmt.Println("no watch agent running")
 		return nil
 	}
@@ -619,7 +619,7 @@ func runAgentLogs(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	_, err = io.Copy(os.Stdout, f)
 	return err
 }

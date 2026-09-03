@@ -56,7 +56,7 @@ func (m *sealMemo) GetNodeSeal(digest string) (id, alg string, ciphertext []byte
 	}
 	id, alg, found := strings.Cut(strings.TrimSuffix(string(b), "\n"), "\n")
 	if !found || !validCacheID(id) {
-		os.Remove(p) // mangled entry: drop it so the next seal rewrites it
+		_ = os.Remove(p) // mangled entry: drop it so the next seal rewrites it
 		return "", "", nil, false
 	}
 	ct, hit := m.cache.get(id)
@@ -89,6 +89,6 @@ func (m *sealMemo) PutNodeSeal(digest, id, alg string, ciphertext []byte) {
 	_, werr := f.WriteString(id + "\n" + alg + "\n")
 	cerr := f.Close()
 	if werr != nil || cerr != nil || os.Rename(tmp, p) != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 	}
 }

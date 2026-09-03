@@ -25,7 +25,7 @@ func TestListAllFollowsEveryPage(t *testing.T) {
 		cursor := r.URL.Query().Get("cursor")
 		seen = append(seen, cursor)
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(pages[cursor])
+		_ = json.NewEncoder(w).Encode(pages[cursor])
 	}))
 	defer srv.Close()
 
@@ -46,7 +46,7 @@ func TestListAllFollowsEveryPage(t *testing.T) {
 func TestListAllRefusesAStuckCursor(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(api.ListDevicesResponse{
+		_ = json.NewEncoder(w).Encode(api.ListDevicesResponse{
 			Devices: []api.Device{{ID: "d"}}, NextCursor: "same",
 		})
 	}))
@@ -69,7 +69,7 @@ func TestListAllAbortsOnAFailedPage(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(api.ListDevicesResponse{
+		_ = json.NewEncoder(w).Encode(api.ListDevicesResponse{
 			Devices: []api.Device{{ID: "d1"}}, NextCursor: "c1",
 		})
 	}))

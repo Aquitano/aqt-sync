@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 
 	"github.com/charmbracelet/lipgloss"
@@ -147,7 +148,7 @@ func changePath(c syncengine.Change) string {
 
 // orderedChanges sorts a change set for display: by kind, then by path.
 func orderedChanges(changes []syncengine.Change) []syncengine.Change {
-	out := append(changes[:0:0], changes...)
+	out := slices.Clone(changes)
 	sort.SliceStable(out, func(i, j int) bool {
 		if ri, rj := kindRank(out[i].Kind), kindRank(out[j].Kind); ri != rj {
 			return ri < rj

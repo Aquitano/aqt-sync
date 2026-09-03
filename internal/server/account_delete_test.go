@@ -147,7 +147,7 @@ func TestAccountDeleteReportsUnremovableFiles(t *testing.T) {
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatalf("chmod blob dir: %v", err)
 	}
-	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	var receipt api.DeleteAccountResponse
 	if code := h.do(http.MethodDelete, "/v1/account", token,

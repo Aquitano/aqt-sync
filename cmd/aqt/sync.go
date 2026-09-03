@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -180,13 +181,13 @@ func runInit(dir string, gitChoice *bool) error {
 	}
 	wroteIgnore, err := writeStarterIgnore(abs, syncGit)
 	if err != nil {
-		os.RemoveAll(filepath.Join(abs, syncengine.ControlDir))
+		_ = os.RemoveAll(filepath.Join(abs, syncengine.ControlDir))
 		return err
 	}
 	cleanupLocal := func() {
-		os.RemoveAll(filepath.Join(abs, syncengine.ControlDir))
+		_ = os.RemoveAll(filepath.Join(abs, syncengine.ControlDir))
 		if wroteIgnore {
-			os.Remove(filepath.Join(abs, ".aqtignore"))
+			_ = os.Remove(filepath.Join(abs, ".aqtignore"))
 		}
 	}
 
@@ -213,7 +214,7 @@ func runInit(dir string, gitChoice *bool) error {
 		// user cannot see locally.
 		cleanupLocal()
 		if delErr := cl.DeleteResourceVersion(resp.ID, resp.Version); delErr != nil {
-			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %v; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
+			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %w; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
 		}
 		return err
 	}
@@ -723,7 +724,7 @@ func runSync(dir string, opts syncOptions) error {
 		up := newUploader(cl, prog)
 		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
-			up.Wait() // drain in-flight uploads before returning the snapshot error
+			_ = up.Wait() // drain in-flight uploads before returning the snapshot error
 			prog.finish(false)
 			return err
 		}
@@ -830,7 +831,7 @@ func runSync(dir string, opts syncOptions) error {
 // version conflict (another sync committed first), up to maxSyncAttempts before giving
 // up. The conflict retry is how a concurrent write is re-planned rather than lost.
 func reconcileWithRetry(reconcile func() error) error {
-	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
+	for attempt := range maxSyncAttempts {
 		err := reconcile()
 		if errors.Is(err, client.ErrConflict) {
 			if attempt == 0 {
@@ -934,12 +935,12 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 		re := remoteByPath[path]
 		localData, err := os.ReadFile(filepath.Join(c.root, filepath.FromSlash(path)))
 		if err != nil {
-			uploader.Wait()
+			_ = uploader.Wait()
 			return nil, nil, err
 		}
 		remoteData, err := syncengine.FileBytes(re, source.Get)
 		if err != nil {
-			uploader.Wait()
+			_ = uploader.Wait()
 			if errors.Is(err, client.ErrNotFound) {
 				return nil, nil, client.ErrConflict
 			}
@@ -951,7 +952,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			continue
 		}
 		if err != nil {
-			uploader.Wait()
+			_ = uploader.Wait()
 			return nil, nil, err
 		}
 		data, _, ok := mergeConflictBytes(baseData, localData, remoteData)
@@ -966,7 +967,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 		}
 		entry, err := syncengine.EntryFromBytes(path, data, le.Mode, c.conv, c.selector, uploader)
 		if err != nil {
-			uploader.Wait()
+			_ = uploader.Wait()
 			return nil, nil, err
 		}
 		held += len(data)
@@ -1642,7 +1643,7 @@ func cloneReadOnly(fetch sliceFetch, res api.GetResourceResponse, ck crypto.Cont
 		prog := newProgressBar("downloading", entriesBytes(manifest.Entries))
 		// No base is recorded for a read-only share, so its mtimes have nothing to stamp.
 		// Batched: the object index stays O(batch), not O(tree).
-		_, dlErr := runPublicDownloads(fetch, staging, manifest.Entries, prog)
+		dlErr := runPublicDownloads(fetch, staging, manifest.Entries, prog)
 		prog.finish(dlErr == nil)
 		if dlErr != nil {
 			return dlErr
@@ -1871,7 +1872,6 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 	mtimes := make(map[string]int64, len(entries))
 	var skippedLinks []string
 	for _, e := range entries {
-		e := e
 		g.Go(func() error {
 			if e.IsSymlink() {
 				if skipLinks {
@@ -2040,7 +2040,7 @@ func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengi
 	up := newUploader(cl, nil)
 	root, refs, err := syncengine.SealTree(m, conv, up, openSealMemo())
 	if err != nil {
-		up.Wait() // drain in-flight uploads before returning the seal error
+		_ = up.Wait() // drain in-flight uploads before returning the seal error
 		return syncengine.TreeRoot{}, nil, err
 	}
 	if err := up.Flush(); err != nil {
@@ -2432,7 +2432,7 @@ func materializeStaged(dest string, fn func(staging string) error) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging)
+	defer func() { _ = os.RemoveAll(staging) }()
 	if err := fn(staging); err != nil {
 		return err
 	}
@@ -2653,7 +2653,7 @@ func coalescePlanRenames(actions []syncengine.Action, dirActions []syncengine.Di
 			keepDirs = append(keepDirs, a)
 		}
 	}
-	renames := append(localRen, remoteRen...)
+	renames := slices.Concat(localRen, remoteRen)
 	sort.Slice(renames, func(i, j int) bool { return renames[i].From < renames[j].From })
 	return keepActions, keepDirs, renames
 }

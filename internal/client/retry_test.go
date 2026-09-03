@@ -145,7 +145,7 @@ func TestCooldownWaitAddsPositiveJitter(t *testing.T) {
 	cd.enter(2 * time.Second)
 
 	done := make(chan struct{})
-	go func() { defer close(done); cd.wait(context.Background(), nil) }()
+	go func() { defer close(done); _ = cd.wait(context.Background(), nil) }()
 	waitFor(t, func() bool { return len(clk.recorded()) == 1 })
 
 	got := clk.recorded()[0]
@@ -318,7 +318,7 @@ func TestSendRidesOutRateLimitsThenGivesUp(t *testing.T) {
 		hits.Add(1)
 		w.Header().Set("Retry-After", "1")
 		w.WriteHeader(http.StatusTooManyRequests)
-		json.NewEncoder(w).Encode(api.ErrorResponse{
+		_ = json.NewEncoder(w).Encode(api.ErrorResponse{
 			Error: "rate limit exceeded; slow down", Code: api.ErrCodeRateLimited, RetryAfterSeconds: 1,
 		})
 	}))
@@ -358,7 +358,7 @@ func TestSendRecoversWhenTheLimitClears(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"resources":[]}`))
+		_, _ = w.Write([]byte(`{"resources":[]}`))
 	}))
 	defer srv.Close()
 
@@ -385,7 +385,7 @@ func TestRateLimitCooldownIsSharedAcrossConcurrentRequests(t *testing.T) {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"resources":[]}`))
+		_, _ = w.Write([]byte(`{"resources":[]}`))
 	}))
 	defer srv.Close()
 

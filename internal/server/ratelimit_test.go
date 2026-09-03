@@ -14,7 +14,7 @@ func TestRateLimiterBurstThenRefill(t *testing.T) {
 	l := newIPRateLimiter(1, 3) // burst 3, 1 token/sec
 	l.now = func() time.Time { return now }
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if !l.allow("ip") {
 			t.Fatalf("burst token %d should be allowed", i)
 		}
@@ -42,7 +42,7 @@ func TestRateLimiterPrunesIdleBuckets(t *testing.T) {
 	l := newIPRateLimiter(1, 1)
 	l.now = func() time.Time { return now }
 
-	for i := 0; i < maxBuckets+10; i++ {
+	for i := range maxBuckets + 10 {
 		l.allow(fmt.Sprintf("ip-%d", i))
 	}
 	now = now.Add(time.Hour) // every bucket fully refills

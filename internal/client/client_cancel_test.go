@@ -50,7 +50,7 @@ func TestCancelDuringUploadAborts(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Read a little so the client is genuinely mid-upload, then stop draining.
 		buf := make([]byte, 1024)
-		r.Body.Read(buf)
+		_, _ = r.Body.Read(buf)
 		close(uploading)
 		<-done
 	}))
@@ -82,7 +82,7 @@ func TestCancelDuringResponseReadAborts(t *testing.T) {
 	done := make(chan struct{})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("partial"))
+		_, _ = w.Write([]byte("partial"))
 		w.(http.Flusher).Flush()
 		close(reading)
 		<-done
@@ -106,7 +106,7 @@ func TestCancelDuringResponseReadAborts(t *testing.T) {
 func TestCancelDuringCooldownAborts(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer srv.Close()
 

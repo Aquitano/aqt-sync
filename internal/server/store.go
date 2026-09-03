@@ -227,14 +227,14 @@ func OpenStore(dataDir string) (*Store, error) {
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db, auth: newAuthCache(), suspended: newSuspensionCache(), blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 	// One-shot: migration 16 left pre-existing rows without a recorded blob size, and
 	// usage now reads the column unconditionally. A dir that has already been through
 	// it has no rows to visit.
 	if err := s.backfillBlobSizes(); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("backfill blob sizes: %w", err)
 	}
 	// The read pool. query_only makes a stray write on it fail loudly instead of
@@ -244,17 +244,17 @@ func OpenStore(dataDir string) (*Store, error) {
 	rdsn := dbPath + "?_pragma=busy_timeout(5000)&_pragma=query_only(1)"
 	rdb, err := sql.Open("sqlite", rdsn)
 	if err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, fmt.Errorf("open read pool: %w", err)
 	}
 	rdb.SetMaxOpenConns(max(4, runtime.NumCPU()))
 	s.rdb = rdb
 	if s.usageStmt, err = rdb.Prepare(accountUsageQuery); err != nil {
-		s.Close()
+		_ = s.Close()
 		return nil, fmt.Errorf("prepare usage query: %w", err)
 	}
 	if s.blobBytesStmt, err = rdb.Prepare(ownerBlobBytesQuery); err != nil {
-		s.Close()
+		_ = s.Close()
 		return nil, fmt.Errorf("prepare blob-bytes query: %w", err)
 	}
 	return s, nil
@@ -267,10 +267,10 @@ func (s *Store) Ping() error {
 
 func (s *Store) Close() error {
 	if s.usageStmt != nil {
-		s.usageStmt.Close()
+		_ = s.usageStmt.Close()
 	}
 	if s.blobBytesStmt != nil {
-		s.blobBytesStmt.Close()
+		_ = s.blobBytesStmt.Close()
 	}
 	rerr := s.rdb.Close()
 	if err := s.db.Close(); err != nil {
@@ -622,7 +622,7 @@ func (s *Store) applyMigration(version int, stmts string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.Exec(stmts); err != nil {
 		return fmt.Errorf("apply migration %d: %w", version, err)
 	}
@@ -659,7 +659,7 @@ func (s *Store) checkSchema() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var (
 			cid, notnull, pk int

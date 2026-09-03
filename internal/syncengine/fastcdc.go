@@ -36,6 +36,7 @@ const (
 // NewChunker builds a chunker with explicit sizes. It panics on a nonsensical
 // ordering, since those are programmer errors, not runtime conditions.
 func NewChunker(min, normal, max int) *Chunker {
+	//nolint:staticcheck // QF1001: the negated ordering chain states the invariant; its De Morgan expansion does not.
 	if !(0 < min && min <= normal && normal <= max) {
 		panic("syncengine: chunker sizes must satisfy 0 < min <= normal <= max")
 	}
@@ -148,7 +149,7 @@ func (c *Chunker) nextCut(data []byte) int {
 		n = c.Max
 	}
 	var fp uint64
-	for i := 0; i < n; i++ {
+	for i := range n {
 		fp = (fp << 1) + gear[data[i]]
 		length := i + 1
 		if length < c.Min {

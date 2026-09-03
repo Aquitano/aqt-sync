@@ -111,7 +111,7 @@ func Verify(manifest, signature []byte, roots []TrustRoot) (string, error) {
 	dec.DisallowUnknownFields()
 	var s Signature
 	if err := dec.Decode(&s); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrMalformedSignature, err)
+		return "", fmt.Errorf("%w: %w", ErrMalformedSignature, err)
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return "", fmt.Errorf("%w: trailing data after the signature", ErrMalformedSignature)

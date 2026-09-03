@@ -148,7 +148,7 @@ func collectShares() (*client.Client, []shareRow, error) {
 		row.Name = "(undecryptable metadata)"
 		if err == nil {
 			row.Name = foreignText(meta.Name)
-			row.Kind = foreignText(string(meta.Kind))
+			row.Kind = foreignText(meta.Kind)
 		}
 		rows = append(rows, row)
 	}

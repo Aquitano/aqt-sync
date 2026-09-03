@@ -50,7 +50,7 @@ func (h *e2eHarness) restoreServer(dataDir string) {
 	if err != nil {
 		h.t.Fatalf("open restored store: %v", err)
 	}
-	h.t.Cleanup(func() { store.Close() })
+	h.t.Cleanup(func() { _ = store.Close() })
 	ts := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	h.t.Cleanup(ts.Close)
 	prof, err := identity.Load(identity.DefaultProfile)
@@ -69,13 +69,13 @@ func copyRegularFile(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	defer in.Close()
+	defer func() { _ = in.Close() }()
 	out, err := os.Create(dst)
 	if err != nil {
 		return err
 	}
 	if _, err := io.Copy(out, in); err != nil {
-		out.Close()
+		_ = out.Close()
 		return err
 	}
 	return out.Close()

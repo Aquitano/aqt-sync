@@ -173,7 +173,7 @@ func TestStoreCeilingWriteSkipsAnUnreadableFile(t *testing.T) {
 	if err := os.Chmod(path, 0); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(path, 0o600) })
+	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 
 	if err := s.RaiseCeiling(ChannelStable, "v9.9.9"); err == nil {
 		t.Fatal("RaiseCeiling wrote through a load failure")

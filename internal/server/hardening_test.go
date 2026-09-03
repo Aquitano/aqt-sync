@@ -27,7 +27,7 @@ func newHarnessCfg(t *testing.T, cfg Config) *harness {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	srv := NewWithConfig(store, cfg)
 	return &harness{t: t, router: srv.Router(), store: store, srv: srv}
 }
@@ -165,7 +165,7 @@ func TestAuthedRateLimitReturns429(t *testing.T) {
 	// The burst allows a few requests, then the bucket is empty and refills far too
 	// slowly to matter within the test.
 	allowed, limited := 0, false
-	for i := 0; i < 12; i++ {
+	for range 12 {
 		switch code := h.do(http.MethodGet, "/v1/resources", token, nil, nil); code {
 		case http.StatusOK:
 			allowed++

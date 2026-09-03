@@ -19,7 +19,7 @@ func TestAnchorRacingDeleteNeverLosesAnchoredSnapshot(t *testing.T) {
 	owner := s.mustAccount(t, "anchor-race@example.com")
 	rid := s.rootResource(t, owner, nil)
 
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		snap, err := s.CreateSnapshotIdempotent(owner, api.CreateSnapshotRequest{ResourceID: rid, Automatic: true})
 		if err != nil {
 			t.Fatal(err)
@@ -69,7 +69,7 @@ func TestAnchorRacingAutoPrune(t *testing.T) {
 	owner := s.mustAccount(t, "anchor-prune@example.com")
 	rid := s.rootResource(t, owner, nil)
 
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		older, err := s.CreateSnapshotIdempotent(owner, api.CreateSnapshotRequest{ResourceID: rid, Automatic: true})
 		if err != nil {
 			t.Fatal(err)

@@ -186,8 +186,7 @@ func runPush(path string, opts pushOptions) error {
 		// (and, for public pushes, deletable — its key lived only in the link).
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
-	printResult(resp.ID, ref, name, int64(len(data)), req.Visibility, opts)
-	return nil
+	return printResult(resp.ID, ref, name, int64(len(data)), req.Visibility, opts)
 }
 
 // runPushStream uploads a large private file as convergent chunk objects under a
@@ -216,7 +215,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -227,7 +226,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	chunker := syncengine.DefaultChunkSelector().ChunkerFor(info.Size())
 	chunks, size, err := syncengine.ChunkFile(f, conv, chunker, up)
 	if err != nil {
-		up.Wait() // drain in-flight uploads before returning the chunking error
+		_ = up.Wait() // drain in-flight uploads before returning the chunking error
 		return err
 	}
 	// A large file's chunk list would itself overflow the resource blob, so above a
@@ -235,7 +234,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	// refs carries both the content chunks and those segments as GC roots.
 	root, refs, err := syncengine.BuildFileRoot(chunks, size, conv, up)
 	if err != nil {
-		up.Wait()
+		_ = up.Wait()
 		return err
 	}
 	if err := up.Flush(); err != nil {
@@ -304,8 +303,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
-	printResult(resp.ID, ref, name, size, visibility, opts)
-	return nil
+	return printResult(resp.ID, ref, name, size, visibility, opts)
 }
 
 // confirmPolicy fails closed when a requested lifecycle policy was not enforced by the
@@ -371,14 +369,13 @@ func buildPushJSON(id, link, name string, size int64, vis api.Visibility) pushJS
 	return out
 }
 
-func printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) {
+func printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) error {
 	if flagJSON {
-		printJSON(buildPushJSON(id, ref, name, size, vis))
-		return
+		return printJSON(buildPushJSON(id, ref, name, size, vis))
 	}
 	if flagQuiet {
 		fmt.Println(ref)
-		return
+		return nil
 	}
 	copied := !opts.noClip && copyToClipboard(ref)
 	fmt.Println(ref)
@@ -390,4 +387,5 @@ func printResult(id, ref, name string, size int64, vis api.Visibility, opts push
 		visLabel += " · password-gated"
 	}
 	fmt.Fprintf(os.Stderr, "%s · %d B · %s\n", name, size, visLabel)
+	return nil
 }

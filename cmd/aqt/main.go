@@ -74,7 +74,11 @@ var (
 // keeps them uncancellable.
 var rootCtx context.Context = context.Background()
 
-func main() {
+func main() { os.Exit(run()) }
+
+// run holds main's body so the signal-handler restore in its defer actually runs;
+// os.Exit skips deferred calls.
+func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	rootCtx = ctx
@@ -90,12 +94,13 @@ func main() {
 	cmd, err := root.ExecuteC()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", explainError(err))
-		os.Exit(exitCode(err))
+		return exitCode(err)
 	}
 	// Only after the command succeeded and printed what it was asked for: the
 	// update policy is off by default, and even when on it never affects this
 	// command's output or status.
 	maybeBackgroundUpdate(cmd)
+	return 0
 }
 
 // explainError renders an error for the terminal, expanding the conditions whose

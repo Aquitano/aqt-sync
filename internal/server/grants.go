@@ -95,7 +95,7 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, refs
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var resOwner string
 	var version, compactAt int
 	if err := tx.QueryRow(`SELECT owner_handle, version, compact_at FROM resources WHERE id = ?`, resourceID).Scan(&resOwner, &version, &compactAt); err != nil {
@@ -191,7 +191,7 @@ func (s *Store) ListResourceGrants(owner, resourceID string, page pageParams) ([
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []api.GrantEntry
 	for rows.Next() {
 		var g api.GrantEntry
@@ -221,7 +221,7 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions 
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var version int
 	err = tx.QueryRow(`SELECT version FROM resources WHERE id = ? AND owner_handle = ?`, resourceID, owner).Scan(&version)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -279,7 +279,7 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []api.ShareItem
 	for rows.Next() {
 		var (
@@ -328,7 +328,7 @@ func (s *Store) DeleteShare(grantee, resourceID string, block bool) (string, int
 	if err != nil {
 		return "", 0, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	var owner string
 	err = tx.QueryRow(
 		`SELECT owner_handle FROM grants WHERE resource_id = ? AND grantee_handle = ?`, resourceID, grantee,
@@ -409,7 +409,7 @@ func (s *Store) ListShareBlocks(grantee string, page pageParams) ([]api.ShareBlo
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []api.ShareBlock
 	for rows.Next() {
 		var b api.ShareBlock

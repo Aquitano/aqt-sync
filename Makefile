@@ -1,4 +1,4 @@
-.PHONY: build build-server test test-short test-race vet fmt fuzz restore-drill docker clean
+.PHONY: build build-server test test-short test-race vet lint fmt fuzz restore-drill docker clean
 
 # Build the CLI and server into ./bin. aqt is a multi-call binary: Git reaches its
 # remote helper through a link named git-remote-aqt, which is what `aqt git setup`
@@ -22,6 +22,9 @@ test-race:
 
 vet:
 	go vet ./...
+
+lint:
+	golangci-lint run ./...
 
 # Run every fuzz target for a short burst. Native fuzzing runs one target per
 # invocation, so each decoder is listed explicitly.

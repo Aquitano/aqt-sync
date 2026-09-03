@@ -49,7 +49,7 @@ func fetchAccountKeys(cl *client.Client, email string) (api.AccountKeysResponse,
 // errors on any disagreement with the pin before returning, so routing through it
 // would make the check below dead code and report a grantee's own root-key rotation —
 // a routine event on this path — in the words of a server substituting keys.
-func confirmPinnedKeys(cl *client.Client, prof *identity.Profile, pin identity.Contact) error {
+func confirmPinnedKeys(cl *client.Client, pin identity.Contact) error {
 	keys, err := fetchAccountKeys(cl, pin.Email)
 	if err != nil {
 		return err

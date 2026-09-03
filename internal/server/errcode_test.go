@@ -70,7 +70,7 @@ func TestErrorResponsesCarryCodes(t *testing.T) {
 			run: func() (int, api.ErrorResponse) {
 				rec := h.raw(http.MethodPost, "/v1/account", "", nil, []byte(`{"email":`))
 				var e api.ErrorResponse
-				json.Unmarshal(rec.Body.Bytes(), &e)
+				_ = json.Unmarshal(rec.Body.Bytes(), &e)
 				return rec.Code, e
 			},
 			wantStatus: http.StatusBadRequest,

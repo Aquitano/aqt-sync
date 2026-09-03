@@ -58,8 +58,8 @@ func DownloadArtifact(ctx context.Context, src ArtifactSource, version string, a
 	tmp := f.Name()
 	defer func() {
 		if err != nil {
-			f.Close()
-			os.Remove(tmp)
+			_ = f.Close()
+			_ = os.Remove(tmp)
 		}
 	}()
 
@@ -125,7 +125,7 @@ func streamURL(ctx context.Context, client *http.Client, rawURL string, w io.Wri
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("GET %s: %s", rawURL, resp.Status)
 	}
@@ -152,6 +152,6 @@ func CleanStale(dir, keep string) {
 		if path == keep {
 			continue
 		}
-		os.Remove(path) // best effort: a locked or vanished file is not worth reporting
+		_ = os.Remove(path) // best effort: a locked or vanished file is not worth reporting
 	}
 }

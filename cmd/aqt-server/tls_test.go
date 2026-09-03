@@ -131,7 +131,7 @@ func TestServeTLSRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HTTPS GET: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
@@ -160,7 +160,7 @@ func TestServeListenerReportsServeError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ln.Close() // Serve on a closed listener returns immediately
+	_ = ln.Close() // Serve on a closed listener returns immediately
 
 	srv := &http.Server{Handler: http.NewServeMux()}
 	errCh := make(chan error, 1)
@@ -213,7 +213,7 @@ func TestServeListenerMarksUnreadyBeforeClosingListener(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server did not start: %v", err)
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	cancel()
 	select {
 	case err := <-done:

@@ -233,7 +233,7 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 		return err
 	}
 	defer remote.close()
-	localFormat, err := commandOutput("git", "rev-parse", "--show-object-format")
+	localFormat, err := gitCommandOutput("rev-parse", "--show-object-format")
 	if err != nil {
 		return fmt.Errorf("detect local git object format: %w", err)
 	}
@@ -304,7 +304,7 @@ func parsePushRefspec(refspec string) (helperPush, error) {
 }
 
 func (h *remoteHelper) push(pushes []helperPush) error {
-	objectFormat, err := commandOutput("git", "rev-parse", "--show-object-format")
+	objectFormat, err := gitCommandOutput("rev-parse", "--show-object-format")
 	if err != nil {
 		return err
 	}
@@ -312,19 +312,19 @@ func (h *remoteHelper) push(pushes []helperPush) error {
 		if pushes[i].delete {
 			continue
 		}
-		oid, err := commandOutput("git", "rev-parse", "--verify", pushes[i].src+"^{object}")
+		oid, err := gitCommandOutput("rev-parse", "--verify", pushes[i].src+"^{object}")
 		if err != nil {
 			return fmt.Errorf("resolve push source %s: %w", pushes[i].src, err)
 		}
 		pushes[i].localOID = oid
-		objectType, err := commandOutput("git", "cat-file", "-t", oid)
+		objectType, err := gitCommandOutput("cat-file", "-t", oid)
 		if err != nil {
 			return fmt.Errorf("inspect push source %s: %w", pushes[i].src, err)
 		}
 		pushes[i].annotatedTag = objectType == "tag"
 	}
 
-	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
+	for range maxSyncAttempts {
 		remote, err := h.openRemote()
 		if err != nil {
 			return err
@@ -406,7 +406,7 @@ func (h *remoteHelper) compact(explicit bool) (compacted bool, before, generatio
 		snapshot string
 		ok       bool
 	}
-	for attempt := 0; attempt < maxSyncAttempts; attempt++ {
+	for range maxSyncAttempts {
 		remote, err := h.openRemote()
 		if err != nil {
 			return false, 0, 0, err
@@ -548,7 +548,7 @@ func (s localRefSet) bundleRefs(remote map[string]string) []string {
 }
 
 func localGitRefs(remoteName string, remoteTargets ...string) (localRefSet, error) {
-	output, err := commandOutput("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags", "refs/remotes")
+	output, err := gitCommandOutput("for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/tags", "refs/remotes")
 	if err != nil {
 		return localRefSet{}, err
 	}
@@ -580,7 +580,7 @@ func gitRemoteMatches(name, hintedName string, targets []string) bool {
 	if name == hintedName {
 		return true
 	}
-	rawURL, err := commandOutput("git", "remote", "get-url", name)
+	rawURL, err := gitCommandOutput("remote", "get-url", name)
 	if err != nil {
 		return false
 	}
@@ -723,10 +723,7 @@ func buildAndUploadPushBundle(cl *client.Client, key crypto.ContentKey, root git
 		tips = append(tips, push.localOID)
 		seenTip[push.localOID] = true
 	}
-	contained, err := remoteReaches(tips, root.Refs, bases)
-	if err != nil {
-		return nil, err
-	}
+	contained := remoteReaches(tips, root.Refs, bases)
 
 	var positives []string
 	seenPositive := make(map[string]bool)
@@ -799,7 +796,7 @@ func distinctRefOIDs(refs map[string]string) []string {
 // --is-ancestor` per tip and remote ref) made a push cost O(pushed x remote)
 // subprocesses: pushing 80 unrelated branches to a remote holding 60 took 10s, against
 // 121ms for 20 to an empty one.
-func remoteReaches(tips []string, refs map[string]string, frontier []string) (map[string]bool, error) {
+func remoteReaches(tips []string, refs map[string]string, frontier []string) map[string]bool {
 	reached := make(map[string]bool, len(tips))
 	for _, tip := range tips {
 		// An exact ref match settles it without a walk, and settles it even when the
@@ -811,13 +808,9 @@ func remoteReaches(tips []string, refs map[string]string, frontier []string) (ma
 		if len(frontier) == 0 {
 			continue
 		}
-		ok, err := reachableFrom(tip, frontier)
-		if err != nil {
-			return nil, err
-		}
-		reached[tip] = ok
+		reached[tip] = reachableFrom(tip, frontier)
 	}
-	return reached, nil
+	return reached
 }
 
 // reachableFrom reports whether oid is reachable from any of frontier. `rev-list oid
@@ -825,15 +818,15 @@ func remoteReaches(tips []string, refs map[string]string, frontier []string) (ma
 // frontier, so no output means the remote already has it; --max-count=1 stops at the
 // first counterexample. A tip git cannot walk (a non-commit-ish ref) counts as not
 // reached, exactly as a failing merge-base did.
-func reachableFrom(oid string, frontier []string) (bool, error) {
+func reachableFrom(oid string, frontier []string) bool {
 	args := append([]string{"rev-list", "--max-count=1", oid, "--not"}, frontier...)
 	cmd := exec.Command("git", args...)
 	cmd.Stderr = io.Discard
 	out, err := cmd.Output()
 	if err != nil {
-		return false, nil
+		return false
 	}
-	return len(strings.TrimSpace(string(out))) == 0, nil
+	return len(strings.TrimSpace(string(out))) == 0
 }
 
 // presentObjects returns the subset of oids this repository holds, in one
@@ -1038,7 +1031,7 @@ func newBundlePath(prefix string) (path string, cleanup func(), err error) {
 	if err != nil {
 		return "", nil, err
 	}
-	return filepath.Join(dir, "git.bundle"), func() { os.RemoveAll(dir) }, nil
+	return filepath.Join(dir, "git.bundle"), func() { _ = os.RemoveAll(dir) }, nil
 }
 
 func applyBundle(bundle gitremote.BundleRef, key crypto.ContentKey, get func(string) ([]byte, error)) error {
@@ -1052,7 +1045,7 @@ func applyBundle(bundle gitremote.BundleRef, key crypto.ContentKey, get func(str
 		return err
 	}
 	if err := gitremote.OpenBundle(bundle, key, get, f); err != nil {
-		f.Close()
+		_ = f.Close()
 		return err
 	}
 	if err := f.Close(); err != nil {
@@ -1065,13 +1058,13 @@ func applyBundle(bundle gitremote.BundleRef, key crypto.ContentKey, get func(str
 	return nil
 }
 
-func commandOutput(name string, args ...string) (string, error) {
-	cmd := exec.Command(name, args...)
+func gitCommandOutput(args ...string) (string, error) {
+	cmd := exec.Command("git", args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	output, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("%s: %w: %s", name, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("git: %w: %s", err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(output)), nil
 }

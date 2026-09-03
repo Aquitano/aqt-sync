@@ -601,7 +601,7 @@ func (c *Client) PublicObjects(resourceID string, ids []string) ([][]byte, error
 // for the declared length is a protocol error — a truncated or hostile response.
 func parsePublicFrames(data []byte, want int) ([][]byte, error) {
 	out := make([][]byte, 0, want)
-	for i := 0; i < want; i++ {
+	for i := range want {
 		if len(data) < 4 {
 			return nil, fmt.Errorf("aqt: public objects response truncated before frame %d of %d", i, want)
 		}
@@ -866,7 +866,7 @@ func (c *Client) send(req *http.Request, path string) (status int, data []byte, 
 		// Bounded against the client's own hostile-server posture: a server that
 		// streams forever must not buffer unbounded memory here.
 		data, readErr := io.ReadAll(io.LimitReader(&progressBody{rc: resp.Body, touch: guard.touch}, maxResponseBytes+1))
-		resp.Body.Close()
+		_ = resp.Body.Close()
 		if readErr == nil && len(data) > maxResponseBytes {
 			return 0, nil, fmt.Errorf("request %s %s: response exceeds %d bytes; refusing to buffer it", req.Method, path, maxResponseBytes)
 		}
@@ -983,7 +983,7 @@ func (c *Client) doRawIdempotent(method, path string, body []byte, out any) erro
 		return err
 	}
 	var last error
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		req, err := http.NewRequestWithContext(c.ctx, method, c.baseURL+path, bytes.NewReader(body))
 		if err != nil {
 			return err
@@ -1018,7 +1018,7 @@ func (c *Client) doIdempotent(method, path string, body, out any) error {
 		return err
 	}
 	var last error
-	for attempt := 0; attempt < 2; attempt++ {
+	for range 2 {
 		req, err := http.NewRequestWithContext(c.ctx, method, c.baseURL+path, bytes.NewReader(payload))
 		if err != nil {
 			return err
@@ -1080,7 +1080,7 @@ func statusError(status int, path string, body []byte) error {
 		return nil
 	}
 	var e api.ErrorResponse
-	json.Unmarshal(body, &e) // best effort; a bodyless or non-JSON error falls through to status
+	_ = json.Unmarshal(body, &e) // best effort; a bodyless or non-JSON error falls through to status
 
 	switch e.Code {
 	case api.ErrCodeSnapshotAnchored:

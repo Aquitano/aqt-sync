@@ -293,7 +293,7 @@ func hashFile(path string) (int64, string, error) {
 	if err != nil {
 		return 0, "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	n, err := io.Copy(h, f)
 	if err != nil {

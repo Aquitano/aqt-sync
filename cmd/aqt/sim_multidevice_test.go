@@ -77,6 +77,7 @@ const (
 
 // simSeeds returns the fixed seed set, or the single AQT_SIM_SEED override.
 func simSeeds(t *testing.T) []int64 {
+	t.Helper()
 	if v := os.Getenv("AQT_SIM_SEED"); v != "" {
 		n, err := strconv.ParseInt(v, 10, 64)
 		if err != nil {
@@ -148,7 +149,7 @@ func buildDeck(w map[opKind]int) []opKind {
 	sort.Slice(kinds, func(i, j int) bool { return kinds[i] < kinds[j] })
 	var deck []opKind
 	for _, k := range kinds {
-		for i := 0; i < w[k]; i++ {
+		for range w[k] {
 			deck = append(deck, k)
 		}
 	}
@@ -213,10 +214,11 @@ type sim struct {
 }
 
 func runSim(t *testing.T, seed int64, mode hostMode) {
+	t.Helper()
 	s := &sim{t: t, seed: seed, mode: mode, rng: rand.New(rand.NewSource(seed)), server: contentMap{}}
 	s.setup()
 
-	for step := 0; step < simSteps; step++ {
+	for step := range simSteps {
 		d := s.devs[s.rng.Intn(simDevices)]
 		op := simOps[s.rng.Intn(len(simOps))]
 		s.use(d)
@@ -286,15 +288,15 @@ func (s *sim) startServer() {
 	t.Setenv("AQT_CONFLICT_HOST", "") // restored by t.Setenv; use() sets it per device
 	origHome, origXDG := os.Getenv("HOME"), os.Getenv("XDG_CONFIG_HOME")
 	t.Cleanup(func() {
-		os.Setenv("HOME", origHome)
-		os.Setenv("XDG_CONFIG_HOME", origXDG)
+		_ = os.Setenv("HOME", origHome)
+		_ = os.Setenv("XDG_CONFIG_HOME", origXDG)
 	})
 
 	store, err := server.OpenStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 
 	s.fault = &faultInjector{h: server.NewWithConfig(store, server.Config{}).Router()}
 	ts := httptest.NewServer(s.fault)
@@ -305,12 +307,12 @@ func (s *sim) startServer() {
 // use points the identity config env at device d, so the next run* call authenticates
 // and unlocks as that device. Operations are sequential, so a plain env swap is enough.
 func (s *sim) use(d *simDevice) {
-	os.Setenv("HOME", d.home)                                      // darwin config dir
-	os.Setenv("XDG_CONFIG_HOME", filepath.Join(d.home, ".config")) // linux config dir
+	_ = os.Setenv("HOME", d.home)                                      // darwin config dir
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(d.home, ".config")) // linux config dir
 	// Conflict-copy host per the run's mode: distinct-host disambiguates copy names by
 	// device (the common case); shared-host makes every device stamp one name, so copy
 	// names collide and must be resolved by the suffix bump instead of the hostname.
-	os.Setenv("AQT_CONFLICT_HOST", s.mode.host(d.id))
+	_ = os.Setenv("AQT_CONFLICT_HOST", s.mode.host(d.id))
 }
 
 func (s *sim) freshContent() string {
@@ -542,7 +544,7 @@ func (s *sim) checkModelMatchesDisk(step int, d *simDevice) {
 // copy made in the last active round needs a further round to propagate.
 func (s *sim) quiesce() {
 	s.fault.disarm()
-	for round := 0; round < simQuiesce; round++ {
+	for round := range simQuiesce {
 		for _, d := range s.devs {
 			s.use(d)
 			if err := runSync(d.dir, s.syncOpts()); err != nil {

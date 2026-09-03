@@ -261,11 +261,11 @@ func LoadSession(name string) (crypto.MasterKey, bool) {
 	}
 	var s session
 	if err := json.Unmarshal(b, &s); err != nil {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return mk, false
 	}
 	if s.ExpiresAt != 0 && time.Now().Unix() > s.ExpiresAt {
-		os.Remove(path)
+		_ = os.Remove(path)
 		return mk, false
 	}
 	// Try the keychain sealing key, then the machine-bound fallback. A failure on
@@ -277,7 +277,7 @@ func LoadSession(name string) (crypto.MasterKey, bool) {
 			return mk, true
 		}
 	}
-	os.Remove(path)
+	_ = os.Remove(path)
 	return mk, false
 }
 

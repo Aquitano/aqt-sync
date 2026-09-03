@@ -115,7 +115,7 @@ func TestScanKeepsUnreadableDirSubtree(t *testing.T) {
 	if err := os.Chmod(locked, 0); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { os.Chmod(locked, 0o755) }) // or TempDir cleanup cannot remove it
+	t.Cleanup(func() { _ = os.Chmod(locked, 0o755) }) // or TempDir cleanup cannot remove it
 
 	got, err := ScanReusing(dir, &base, false)
 	if err != nil {

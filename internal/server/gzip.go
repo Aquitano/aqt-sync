@@ -108,11 +108,11 @@ func (w *gzipResponseWriter) startGzip() error {
 // a sub-threshold body is written raw.
 func (w *gzipResponseWriter) finish() {
 	if w.gz != nil {
-		w.gz.Close()
+		_ = w.gz.Close()
 		return
 	}
 	if len(w.buf) > 0 {
-		w.ResponseWriter.Write(w.buf)
+		_, _ = w.ResponseWriter.Write(w.buf)
 		w.buf = nil
 	}
 }

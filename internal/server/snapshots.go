@@ -158,7 +158,7 @@ func (s *Store) createSnapshot(owner, resourceID string, label *crypto.SealedBlo
 	if err != nil {
 		return api.SnapshotInfo{}, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Authoritative duplicate check; see the matching re-check in createResource.
 	if found, err := lookupIdempotency(tx, owner, "snapshot.create", idempotencyKey, digest, &prior); err != nil {
 		return api.SnapshotInfo{}, err
@@ -235,7 +235,7 @@ func (s *Store) ListSnapshots(owner, resourceID string, page pageParams) ([]api.
 	if err != nil {
 		return nil, "", err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var out []api.SnapshotInfo
 	for rows.Next() {
@@ -315,7 +315,7 @@ func (s *Store) DeleteSnapshot(owner, snapshotID string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Refuse in the store, not just the client: the anchor is the durable guarantee a
 	// checkpoint is not pruned, so it must hold against any caller, including a stale
 	// client that never learned the snapshot was anchored. Read inside the delete
@@ -440,16 +440,16 @@ func (s *Store) RunAutoSnapshotsWithLimits(maxSnapshots int, quotaBytes int64) (
 	for rows.Next() {
 		var r ref
 		if err := rows.Scan(&r.owner, &r.id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, err
 		}
 		due = append(due, r)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return 0, err
 	}
-	rows.Close() // release the read connection before the CreateSnapshot writes below
+	_ = rows.Close() // release the read connection before the CreateSnapshot writes below
 
 	// Snapshot each due resource independently: a per-resource failure (e.g. the rare
 	// row/blob race a concurrent update can cause, which GetResource also tolerates)
@@ -563,16 +563,16 @@ func (s *Store) PruneAutoSnapshots(keepLast int) (int, error) {
 	for rows.Next() {
 		var r ref
 		if err := rows.Scan(&r.id, &r.owner); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return 0, err
 		}
 		due = append(due, r)
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return 0, err
 	}
-	rows.Close() // the single writer connection can't take DeleteSnapshot's writes with this cursor open
+	_ = rows.Close() // the single writer connection can't take DeleteSnapshot's writes with this cursor open
 
 	pruned := 0
 	var firstErr error

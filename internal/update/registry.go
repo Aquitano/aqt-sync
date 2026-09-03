@@ -191,15 +191,15 @@ func (s Store) withAgentLock(fn func() error) error {
 	for {
 		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err == nil {
-			f.Close()
-			defer os.Remove(path)
+			_ = f.Close()
+			defer func() { _ = os.Remove(path) }()
 			return fn()
 		}
 		if !os.IsExist(err) {
 			return err
 		}
 		if fi, statErr := os.Stat(path); statErr == nil && time.Since(fi.ModTime()) > lockStale {
-			os.Remove(path)
+			_ = os.Remove(path)
 			continue
 		}
 		if time.Now().After(deadline) {

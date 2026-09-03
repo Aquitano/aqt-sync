@@ -15,7 +15,7 @@ func newTreeWatcher(t *testing.T, root string) *TreeWatcher {
 	if err != nil {
 		t.Fatalf("WatchTree: %v", err)
 	}
-	t.Cleanup(func() { w.Close() })
+	t.Cleanup(func() { _ = w.Close() })
 	return w
 }
 

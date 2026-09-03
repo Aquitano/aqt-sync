@@ -80,7 +80,7 @@ func (c *nodeCache) get(id string) ([]byte, bool) {
 	}
 	sum := sha256.Sum256(b)
 	if hex.EncodeToString(sum[:]) != id {
-		os.Remove(p) // corrupt entry: drop it so the next fetch heals it
+		_ = os.Remove(p) // corrupt entry: drop it so the next fetch heals it
 		return nil, false
 	}
 	now := time.Now()
@@ -111,7 +111,7 @@ func (c *nodeCache) put(id string, ct []byte) {
 	_, werr := f.Write(ct)
 	cerr := f.Close()
 	if werr != nil || cerr != nil || os.Rename(tmp, p) != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 	}
 }
 

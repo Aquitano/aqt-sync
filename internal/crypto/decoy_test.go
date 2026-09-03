@@ -18,7 +18,7 @@ func TestDecoyKdfCostsDeterministicAndInDistribution(t *testing.T) {
 
 	full := presetTargets[DefaultPreset].memory
 	memCounts := map[uint32]int{}
-	for i := 0; i < 256; i++ {
+	for i := range 256 {
 		tc, mem, threads := DecoyKdfCosts([]byte{byte(i), byte(i * 7)})
 		if threads != defaultThreads {
 			t.Fatalf("seed %d: threads %d, want %d", i, threads, defaultThreads)

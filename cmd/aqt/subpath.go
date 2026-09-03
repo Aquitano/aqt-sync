@@ -103,7 +103,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		if toStdout {
 			return fmt.Errorf("%s is a directory: `aqt ls aqt://%s/%s` lists it, `aqt pull` materializes it", subpath, id, subpath)
 		}
-		return pullSubtree(cl, id, root.Version, child, fetch, subpath, out, slices)
+		return pullSubtree(cl, root.Version, child, fetch, subpath, out, slices)
 	case syncengine.ChildSymlink:
 		if toStdout {
 			return fmt.Errorf("%s is a symlink to %s; use `aqt pull` to recreate the link", subpath, child.Link)
@@ -183,7 +183,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 // pullSubtree materializes one directory subtree into a fresh destination: the
 // subtree's own node is a complete content-addressed root, so the rest of the
 // folder is never fetched.
-func pullSubtree(cl *client.Client, id string, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, slices sliceFetch) error {
+func pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, slices sliceFetch) error {
 	sub := syncengine.TreeRoot{Version: version, Root: *child.Node}
 	m, err := syncengine.OpenTreeBatched(sub, fetch)
 	if err != nil {
@@ -212,7 +212,7 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 		var dlErr error
 		if slices != nil {
 			// Batched: the object index stays O(batch), not O(subtree).
-			_, dlErr = runPublicDownloads(slices, staging, m.Entries, prog)
+			dlErr = runPublicDownloads(slices, staging, m.Entries, prog)
 		} else {
 			_, dlErr = runDownloadsFrom(get, staging, m.Entries, prog)
 		}

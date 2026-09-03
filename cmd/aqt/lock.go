@@ -76,12 +76,12 @@ func acquirePIDFile(path string, busyMsg func(pid int) error) (release func(), e
 	}
 	held, err := tryLockFile(f)
 	if err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if !held {
 		pid, _ := readLockPID(path)
-		f.Close()
+		_ = f.Close()
 		return nil, busyMsg(pid)
 	}
 	if err := f.Truncate(0); err == nil {
@@ -90,7 +90,7 @@ func acquirePIDFile(path string, busyMsg func(pid int) error) (release func(), e
 	// Close drops the lock. The file itself stays: removing it would reopen the
 	// unlink race (a waiter holding the old inode and a fresh creator would each
 	// hold "the" lock at once).
-	return func() { f.Close() }, nil
+	return func() { _ = f.Close() }, nil
 }
 
 func readLockPID(path string) (int, bool) {

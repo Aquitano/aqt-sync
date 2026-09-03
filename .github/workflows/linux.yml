@@ -33,6 +33,10 @@ jobs:
           fi
       - name: Vet
         run: go vet ./...
+      - name: Lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
       - name: Build
         run: go build ./cmd/...
       # -race roughly triples the suite, so go test's 10m per-package default is

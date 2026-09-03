@@ -151,7 +151,7 @@ func (c Config) Chunker() (*Chunker, error) {
 		return nil, err
 	}
 	if err := sizes.validate(); err != nil {
-		return nil, fmt.Errorf("%s in %s", err, configFile)
+		return nil, fmt.Errorf("%w in %s", err, configFile)
 	}
 	return NewChunker(sizes.Min, sizes.Normal, sizes.Max), nil
 }
@@ -270,6 +270,7 @@ func (c Config) Validate() error {
 }
 
 func (s ChunkSizes) validate() error {
+	//nolint:staticcheck // QF1001: the negated ordering chain states the invariant; its De Morgan expansion does not.
 	if !(0 < s.Min && s.Min <= s.Normal && s.Normal <= s.Max) {
 		return fmt.Errorf("invalid chunk sizes: need 0 < min (%d) <= normal (%d) <= max (%d)", s.Min, s.Normal, s.Max)
 	}

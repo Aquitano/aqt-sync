@@ -19,9 +19,9 @@ func TestHTTPSourceFetchesBothHalves(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/stable.json":
-			w.Write(manifest)
+			_, _ = w.Write(manifest)
 		case "/stable.json.sig":
-			w.Write(signature)
+			_, _ = w.Write(signature)
 		default:
 			http.NotFound(w, r)
 		}
@@ -42,7 +42,7 @@ func TestHTTPSourceFailsClosedOnBadResponses(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasPrefix(r.URL.Path, "/oversized"):
-			w.Write([]byte(oversized))
+			_, _ = w.Write([]byte(oversized))
 		case strings.HasPrefix(r.URL.Path, "/broken"):
 			http.Error(w, "boom", http.StatusInternalServerError)
 		default:
@@ -66,7 +66,7 @@ func TestHTTPSourceFailsClosedOnBadResponses(t *testing.T) {
 // misconfiguration or a downgrade attempt, and the check is not worth following one.
 func TestHTTPSourceRefusesCrossHostRedirects(t *testing.T) {
 	elsewhere := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("{}"))
+		_, _ = w.Write([]byte("{}"))
 	}))
 	defer elsewhere.Close()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,9 +94,9 @@ func TestGHWebSourceStableUsesLatestWithoutTheAPI(t *testing.T) {
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/owner/repo/releases/latest/download/" + ManifestAssetName:
-			w.Write(manifest)
+			_, _ = w.Write(manifest)
 		case "/owner/repo/releases/latest/download/" + SignatureAssetName:
-			w.Write(signature)
+			_, _ = w.Write(signature)
 		default:
 			http.NotFound(w, r)
 		}
@@ -122,15 +122,15 @@ func TestGHWebSourceBetaResolvesThroughTheAPI(t *testing.T) {
 	key := fixtureKey(t, seedA)
 	manifest, signature := signFixture(t, fixtureManifest("v0.5.0-rc.1", ChannelBeta), key)
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`[{"tag_name":"v0.5.0-rc.1"}]`))
+		_, _ = w.Write([]byte(`[{"tag_name":"v0.5.0-rc.1"}]`))
 	}))
 	defer api.Close()
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/owner/repo/releases/download/v0.5.0-rc.1/" + ManifestAssetName:
-			w.Write(manifest)
+			_, _ = w.Write(manifest)
 		case "/owner/repo/releases/download/v0.5.0-rc.1/" + SignatureAssetName:
-			w.Write(signature)
+			_, _ = w.Write(signature)
 		default:
 			http.NotFound(w, r)
 		}
@@ -157,7 +157,7 @@ func TestGHWebSourceFailsClosedOnUnusableReleaseLists(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Write([]byte(tc.body))
+				_, _ = w.Write([]byte(tc.body))
 			}))
 			defer api.Close()
 			src := GHWebSource{Repo: "owner/repo", WebBase: "https://example.invalid", APIBase: api.URL}
