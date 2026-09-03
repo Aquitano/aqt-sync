@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 )
 
 func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
@@ -94,7 +96,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 		t.Fatalf("remote diff did not isolate incoming changes:\n%s", remoteOut)
 	}
 
-	if err := os.Remove(controlPath(replica, baseFile)); err != nil {
+	if err := os.Remove(folderstate.BasePath(replica)); err != nil {
 		t.Fatal(err)
 	}
 	snapshotOut := captureStdout(t, func() {

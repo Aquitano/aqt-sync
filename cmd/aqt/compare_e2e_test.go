@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -434,12 +435,12 @@ func mustCompareJSON(t *testing.T, dir string) comparison {
 func controlSnapshot(t *testing.T, root string) string {
 	t.Helper()
 	var b strings.Builder
-	for _, name := range []string{baseFile, stateFile} {
-		data, err := os.ReadFile(controlPath(root, name))
+	for _, path := range []string{folderstate.BasePath(root), folderstate.StatePath(root)} {
+		data, err := os.ReadFile(path)
 		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
+			t.Fatalf("read %s: %v", path, err)
 		}
-		b.WriteString(name + "=" + string(data) + "\n")
+		b.WriteString(filepath.Base(path) + "=" + string(data) + "\n")
 	}
 	return b.String()
 }

@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,44 +19,15 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/cliutil"
-	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
-	"github.com/aquitano/aqt-sync/internal/fsatomic"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
 
-// folderState is the per-folder pointer stored in .aqt/state.json: which resource
-// on which server this directory tracks, plus when its packs were last GC'd.
-type folderState struct {
-	ID     string `json:"id"`
-	Server string `json:"server"`
-	// Profile, Account, and Fingerprint bind the folder to the account that owns its
-	// remote resource: Profile is the local profile name commands default to, and
-	// Account is the server-side owner handle — the account's stable identity, which
-	// a root-key rotation preserves and which every identity check keys on.
-	// Fingerprint records the account's current signing key; bindTrackedRoot refreshes
-	// it after a rotation. Profile and Account are written by init/clone/adopt and
-	// required by loadState.
-	Profile     string `json:"profile,omitempty"`
-	Account     string `json:"account,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	LastGC      int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
-	// RemoteVersion is the highest resource version this machine has observed —
-	// the freshness pin. A server reporting a lower version has been rolled back
-	// (restored from backup, or replaying an old state); syncing against it would
-	// read the regression as remote changes and revert local files, so it is
-	// refused unless --accept-rollback. Recorded by every init/clone/adopt and by
-	// every sync, and required by loadState: an absent pin would silently disable
-	// the guard.
-	RemoteVersion int `json:"remoteVersion,omitempty"`
-}
-
 const (
-	stateFile = "state.json"
-	baseFile  = "base.json"
 	// maxSyncAttempts bounds the optimistic-concurrency retry: if this many
 	// reconcile passes each lose the race to a concurrent sync, give up and ask
 	// the user to re-run rather than spin.
@@ -261,14 +231,14 @@ func runInit(dir string, gitChoice *bool) error {
 // resource is cleaned up.
 var commitInitState = func(abs string, prof *identity.Profile, resp api.PutResourceResponse, manifest syncengine.Manifest) error {
 	profileName, account, fingerprint := stateIdentity(prof)
-	if err := saveState(abs, folderState{
+	if err := folderstate.SaveState(abs, folderstate.State{
 		ID: resp.ID, Server: prof.Server,
 		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: resp.Version,
 	}); err != nil {
 		return err
 	}
-	return saveBase(abs, manifest)
+	return folderstate.SaveBase(abs, flagProfile, manifest)
 }
 
 // --- status ---
@@ -287,7 +257,7 @@ func runStatus(dir string, opts statusOptions) error {
 	if err := bindTrackedRoot(root); err != nil {
 		return err
 	}
-	base, err := loadBase(root)
+	base, err := folderstate.LoadBase(root, flagProfile)
 	if err != nil {
 		return err
 	}
@@ -418,7 +388,7 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	if prof == nil {
 		return nil // never logged in: no server to compare against
 	}
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return nil
 	}
@@ -1337,10 +1307,10 @@ func applyLocalTree(c applyCtx, st applyState, w localApply, foldFS bool) (local
 func persistSyncState(c applyCtx, st applyState, syncedVersion int) error {
 	newBaseManifest := manifestFrom(st.newBase, c.version+1)
 	newBaseManifest.Dirs = dirsFrom(st.newBaseDirs)
-	if err := saveBase(c.root, newBaseManifest); err != nil {
+	if err := folderstate.SaveBase(c.root, flagProfile, newBaseManifest); err != nil {
 		return err
 	}
-	recordRemoteVersion(c.root, syncedVersion)
+	folderstate.RecordRemoteVersion(c.root, syncedVersion)
 	return nil
 }
 
@@ -1604,14 +1574,14 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		if err := os.MkdirAll(filepath.Join(staging, syncengine.ControlDir), 0o700); err != nil {
 			return err
 		}
-		if err := saveState(staging, folderState{
+		if err := folderstate.SaveState(staging, folderstate.State{
 			ID: id, Server: prof.Server,
 			Profile: profileName, Account: account, Fingerprint: fingerprint,
 			RemoteVersion: res.Version,
 		}); err != nil {
 			return err
 		}
-		return saveBase(staging, base)
+		return folderstate.SaveBase(staging, flagProfile, base)
 	}); err != nil {
 		return err
 	}
@@ -1724,10 +1694,10 @@ func adoptClone(id, abs string, prof *identity.Profile, version int) error {
 	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
 		return err
 	}
-	// Deliberately no saveBase: an empty base would resurrect deletions; the reconcile
+	// Deliberately no SaveBase: an empty base would resurrect deletions; the reconcile
 	// below writes base.json once local and remote agree.
 	profileName, account, fingerprint := stateIdentity(prof)
-	if err := saveState(abs, folderState{
+	if err := folderstate.SaveState(abs, folderstate.State{
 		ID: id, Server: prof.Server,
 		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: version,
@@ -2331,183 +2301,6 @@ func controlPath(root, name string) string {
 	return filepath.Join(root, syncengine.ControlDir, name)
 }
 
-// recordRemoteVersion pins the freshness guard to the version this sync observed or
-// just committed — including a lower one after an accepted rollback, so subsequent
-// syncs stop tripping the guard. Best-effort like reclaimPacks (the sync itself
-// succeeded); the sync lock makes the read-modify-write race-free.
-func recordRemoteVersion(root string, version int) {
-	st, err := loadState(root)
-	if err != nil || st.RemoteVersion == version {
-		return
-	}
-	st.RemoteVersion = version
-	if err := saveState(root, st); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: recording synced version failed: %v\n", err)
-	}
-}
-
-func saveState(root string, st folderState) error {
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fsatomic.WriteFile(controlPath(root, stateFile), b, 0o600)
-}
-
-// loadState reads the folder pointer and refuses state that is missing the identity
-// binding or the freshness pin. Every init/clone/adopt writes both, so an absence
-// means state from a build that predates them: the folder cannot be tied to an
-// account, and the rollback guard has nothing to compare against. Local state is
-// regenerable, so re-tracking the folder is the fix — via `aqt untrack`, since
-// `aqt init` refuses a directory that still has a control dir.
-func loadState(root string) (folderState, error) {
-	var st folderState
-	path := controlPath(root, stateFile)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return st, err
-	}
-	if err := json.Unmarshal(b, &st); err != nil {
-		return st, err
-	}
-	if st.Profile == "" || st.Account == "" {
-		return st, fmt.Errorf("%s records no owning profile and account, so this folder cannot be bound to an identity; run `aqt untrack` here, then `aqt init` or `aqt clone`, to track it again (your files are left alone)", path)
-	}
-	if st.RemoteVersion <= 0 {
-		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; run `aqt untrack` here, then `aqt init` or `aqt clone`, to track it again (your files are left alone)", path)
-	}
-	return st, nil
-}
-
-// sealedBase is the legacy JSON at-rest envelope for the local base manifest.
-// saveBase writes the binary form below since #236; decodeBase still opens this
-// one so a folder synced by an older build keeps its base across the upgrade.
-type sealedBase struct {
-	Sealed *crypto.SealedBlob `json:"sealed"`
-}
-
-// baseMagic opens the binary base.json envelope: this magic, one compression-alg
-// byte, the sealing nonce, then the raw ciphertext. The JSON envelope it replaces
-// base64-encoded the whole sealed manifest (4/3 the size, decoded through an
-// extra full-size copy), on top of the manifest JSON base64-encoding every inline
-// file's bytes — so a tree of small incompressible files produced a base nearly
-// twice its own size. The manifest is now also compressed before sealing, which
-// wins back most of that inner base64 expansion. base.json holds chunk decryption
-// keys and inline file plaintext, so it stays sealed under the profile's sealing
-// key exactly as before; only the packaging around the ciphertext changed.
-var baseMagic = []byte("aqt-base-v2\n")
-
-const (
-	baseAlgNone byte = 0
-	baseAlgZstd byte = 1
-)
-
-func saveBase(root string, m syncengine.Manifest) error {
-	plain, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	payload, alg := compress.Encode(plain)
-	sealed, err := identity.SealBase(flagProfile, payload)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 0, len(baseMagic)+1+len(sealed.Nonce)+len(sealed.Ciphertext))
-	buf = append(buf, baseMagic...)
-	if alg == compress.Zstd {
-		buf = append(buf, baseAlgZstd)
-	} else {
-		buf = append(buf, baseAlgNone)
-	}
-	buf = append(buf, sealed.Nonce...)
-	buf = append(buf, sealed.Ciphertext...)
-	return fsatomic.WriteFile(controlPath(root, baseFile), buf, 0o600)
-}
-
-// decodeBase opens a sealed base.json into m — the binary envelope, or the legacy
-// JSON one for a base written before the format change. Anything else is refused
-// rather than read as a bare manifest: base.json carries chunk keys and inline
-// plaintext, and an unreadable base is not fatal — the sync degrades to
-// --reconcile, which rebuilds it.
-func decodeBase(b []byte, m *syncengine.Manifest) error {
-	if rest, ok := bytes.CutPrefix(b, baseMagic); ok {
-		return decodeBinaryBase(rest, m)
-	}
-	var env sealedBase
-	if err := json.Unmarshal(b, &env); err != nil {
-		return err
-	}
-	if env.Sealed == nil {
-		return errors.New("base.json is not a sealed envelope; re-run `aqt sync --reconcile` to rebuild it")
-	}
-	plain, err := identity.OpenBase(flagProfile, *env.Sealed)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(plain, m)
-}
-
-// decodeBinaryBase reads the body after baseMagic. The nonce length is fixed by
-// the sealing AEAD, so the layout needs no length fields.
-func decodeBinaryBase(b []byte, m *syncengine.Manifest) error {
-	if len(b) < 1+crypto.NonceSize {
-		return errors.New("base.json envelope is truncated")
-	}
-	var alg string
-	switch b[0] {
-	case baseAlgNone:
-	case baseAlgZstd:
-		alg = compress.Zstd
-	default:
-		return fmt.Errorf("base.json envelope declares unknown compression %d", b[0])
-	}
-	blob := crypto.SealedBlob{Nonce: b[1 : 1+crypto.NonceSize], Ciphertext: b[1+crypto.NonceSize:]}
-	payload, err := identity.OpenBase(flagProfile, blob)
-	if err != nil {
-		return err
-	}
-	plain, err := compress.DecodeSelfSealed(payload, alg)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(plain, m)
-}
-
-// loadBaseForSync returns the last-synced manifest and whether a usable base
-// exists. A missing, corrupt, or unopenable base reports exists=false so the caller
-// can refuse the sync — reconciling against an empty base silently resurrects
-// deletions — unless the user opts into --reconcile.
-func loadBaseForSync(root string) (syncengine.Manifest, bool, error) {
-	var m syncengine.Manifest
-	b, err := os.ReadFile(controlPath(root, baseFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return m, false, nil
-	}
-	if err != nil {
-		return m, false, err
-	}
-	if err := decodeBase(b, &m); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: .aqt/base.json is unreadable (%v)\n", err)
-		return syncengine.Manifest{}, false, nil
-	}
-	return m, true, nil
-}
-
-// loadBase returns the last-synced manifest, or an empty one if none exists yet.
-// Used by the offline `status`, which tolerates a missing base (it shows every
-// file as new). `sync` uses loadBaseForSync, which refuses an absent base.
-func loadBase(root string) (syncengine.Manifest, error) {
-	var m syncengine.Manifest
-	b, err := os.ReadFile(controlPath(root, baseFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return m, nil
-	}
-	if err != nil {
-		return m, err
-	}
-	return m, decodeBase(b, &m)
-}
-
 // trackedRoot walks up from start to find the directory holding .aqt/.
 func trackedRoot(start string) (string, error) {
 	abs, err := filepath.Abs(start)
@@ -2945,7 +2738,7 @@ func entriesBytes(entries []syncengine.Entry) int64 {
 // recorded in folder state; the sync lock makes the read-modify-write race-free.
 // Best-effort: a sync that uploaded fine should not fail on cleanup.
 func reclaimPacks(root string, cl *client.Client) {
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	stateOK := err == nil
 	if stateOK && st.LastGC > 0 && time.Since(time.Unix(st.LastGC, 0)) < gcMinInterval {
 		return
@@ -2965,6 +2758,6 @@ func reclaimPacks(root string, cl *client.Client) {
 	// unthrottled next time rather than clobbering state.json with a partial record.
 	if stateOK {
 		st.LastGC = time.Now().Unix()
-		_ = saveState(root, st)
+		_ = folderstate.SaveState(root, st)
 	}
 }

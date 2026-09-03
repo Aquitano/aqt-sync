@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -182,7 +183,7 @@ func TestWatchGuardGatesRealSync(t *testing.T) {
 	}
 	tracked := func(path string) bool {
 		t.Helper()
-		base, err := loadBase(root)
+		base, err := folderstate.LoadBase(root, flagProfile)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -388,7 +389,7 @@ func TestWatchOnceGuardOffSyncsDespiteLock(t *testing.T) {
 	if err := runWatchOnce(root, 10*time.Millisecond, false); err != nil {
 		t.Fatalf("runWatchOnce(guard off): %v", err)
 	}
-	base, err := loadBase(root)
+	base, err := folderstate.LoadBase(root, flagProfile)
 	if err != nil {
 		t.Fatal(err)
 	}

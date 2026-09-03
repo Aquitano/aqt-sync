@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
@@ -131,12 +132,12 @@ func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 	writeTree(t, origin, "keep.txt", "v1")
 	h.sync(origin)
 
-	st, err := loadState(origin)
+	st, err := folderstate.LoadState(origin)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.RemoteVersion = 0
-	if err := saveState(origin, st); err != nil {
+	if err := folderstate.SaveState(origin, st); err != nil {
 		t.Fatal(err)
 	}
 
@@ -148,7 +149,7 @@ func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 	// A negative pin is equally unusable: every server version would read as an
 	// advance, so the guard could never trip.
 	st.RemoteVersion = -1
-	if err := saveState(origin, st); err != nil {
+	if err := folderstate.SaveState(origin, st); err != nil {
 		t.Fatal(err)
 	}
 	err = runSync(origin, syncOptions{})

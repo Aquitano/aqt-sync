@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -31,9 +32,9 @@ func TestLockLeavesTrackedFoldersSyncable(t *testing.T) {
 		t.Fatalf("lock: %v", err)
 	}
 
-	base, ok, err := loadBaseForSync(dir)
+	base, ok, err := folderstate.LoadBaseForSync(dir, flagProfile)
 	if err != nil {
-		t.Fatalf("loadBaseForSync: %v", err)
+		t.Fatalf("LoadBaseForSync: %v", err)
 	}
 	if !ok {
 		t.Fatal("the sealed base is unreadable after `aqt lock`; sync would refuse with errSyncNoBase")

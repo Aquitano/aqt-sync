@@ -12,6 +12,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -132,7 +133,7 @@ func (c *tuiCtx) unlockCmd(passphrase string) tea.Cmd {
 func (c *tuiCtx) localStatusCmd() tea.Cmd {
 	root := c.root
 	return func() tea.Msg {
-		base, err := loadBase(root)
+		base, err := folderstate.LoadBase(root, flagProfile)
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
@@ -168,7 +169,7 @@ func tuiConflictCopies(root string) ([]string, error) {
 func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 	ctx := *c
 	return func() tea.Msg {
-		st, err := loadState(ctx.root)
+		st, err := folderstate.LoadState(ctx.root)
 		if err != nil {
 			return tuiRemoteMsg{err: err, note: "cannot read .aqt/state.json — " + err.Error()}
 		}
@@ -184,7 +185,7 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 		}
 		// Server is ahead: try the entry-level breakdown.
 		{
-			base, berr := loadBase(ctx.root)
+			base, berr := folderstate.LoadBase(ctx.root, flagProfile)
 			if berr == nil {
 				if inc, ierr := incomingFiles(ctx.cl, res, base, ctx.mk); ierr == nil {
 					note := fmt.Sprintf("incoming: %d change(s) to pull", inc.total())
@@ -229,7 +230,7 @@ func (c *tuiCtx) snapshotsCmd() tea.Cmd {
 	return func() tea.Msg {
 		resourceID := ""
 		if ctx.root != "" {
-			st, err := loadState(ctx.root)
+			st, err := folderstate.LoadState(ctx.root)
 			if err != nil {
 				return tuiSnapshotsMsg{err: err}
 			}

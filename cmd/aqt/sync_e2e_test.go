@@ -26,6 +26,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/cryptotest"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
@@ -644,7 +645,7 @@ func TestSyncRefusesMissingBase(t *testing.T) {
 	h.sync(origin)
 
 	// Drop the base, as a botched restore or older build would.
-	if err := os.Remove(controlPath(origin, baseFile)); err != nil {
+	if err := os.Remove(folderstate.BasePath(origin)); err != nil {
 		t.Fatal(err)
 	}
 	if err := runSync(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {
@@ -943,7 +944,7 @@ func (h *e2eHarness) syncOpts(dir string, opts syncOptions) {
 
 func (h *e2eHarness) folderID(dir string) string {
 	h.t.Helper()
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		h.t.Fatalf("load state %s: %v", dir, err)
 	}

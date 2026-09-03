@@ -10,6 +10,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -20,7 +21,7 @@ import (
 // a fix applied to one copy did not reach the other.
 type syncSession struct {
 	root       string
-	st         folderState
+	st         folderstate.State
 	base       syncengine.Manifest
 	baseExists bool
 	cl         *client.Client
@@ -32,11 +33,11 @@ type syncSession struct {
 // must defer Wipe. An absent base is refused unless --reconcile: reconciling against
 // an empty base silently resurrects deleted files.
 func openSyncSession(root string, opts syncOptions) (syncSession, error) {
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return syncSession{}, err
 	}
-	base, baseExists, err := loadBaseForSync(root)
+	base, baseExists, err := folderstate.LoadBaseForSync(root, flagProfile)
 	if err != nil {
 		return syncSession{}, err
 	}

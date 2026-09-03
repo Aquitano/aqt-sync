@@ -20,6 +20,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/cryptotest"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
@@ -415,7 +416,7 @@ func countPacksIn(t *testing.T, dataDir string) int {
 
 func folderIDOf(t *testing.T, dir string) string {
 	t.Helper()
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		t.Fatalf("load state %s: %v", dir, err)
 	}

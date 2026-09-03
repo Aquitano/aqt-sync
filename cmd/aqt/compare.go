@@ -8,6 +8,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -131,7 +132,7 @@ func compareWorkingTreeToRemote(cl *client.Client, prof *identity.Profile, root 
 // computeRemoteComparison needs the already-unlocked master key: it must never
 // prompt, because the TUI calls it from inside a raw-mode terminal session.
 func computeRemoteComparison(cl *client.Client, mk crypto.MasterKey, root string, res api.GetResourceResponse) (comparison, error) {
-	base, err := loadBase(root)
+	base, err := folderstate.LoadBase(root, flagProfile)
 	if err != nil {
 		return comparison{}, err
 	}

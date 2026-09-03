@@ -11,6 +11,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -97,7 +98,7 @@ func trackedResourceID(ref string) (id string, ok bool, err error) {
 	if abs != root {
 		return "", true, fmt.Errorf("%s is inside the tracked folder %s but is not a resource itself; pass %s to act on the whole folder, or use a resource id", ref, root, root)
 	}
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return "", true, fmt.Errorf("read folder state: %w", err)
 	}

@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -75,7 +76,7 @@ func runTUI(dir string, explicitDir bool) error {
 	}
 	if rerr == nil {
 		ctx.root = root
-		if st, serr := loadState(root); serr == nil {
+		if st, serr := folderstate.LoadState(root); serr == nil {
 			folderID = st.ID
 		}
 	}
