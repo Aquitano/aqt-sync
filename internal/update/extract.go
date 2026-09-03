@@ -169,8 +169,9 @@ func writeBounded(dst string, r io.Reader) (err error) {
 	if err != nil {
 		return err
 	}
-	// A Close that fails after a successful Sync still means bytes never reached
-	// the file, and the caller is about to run what it wrote.
+	// Close is reached on the early returns too, where nothing was synced, and on
+	// a network or FUSE filesystem it is where deferred writeback errors surface.
+	// The caller is about to run what it wrote, so neither may be dropped.
 	defer func() {
 		if closeErr := f.Close(); closeErr != nil {
 			err = errors.Join(err, closeErr)

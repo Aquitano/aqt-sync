@@ -11,13 +11,13 @@ All notable changes to this project are documented in this file.
   failed at close (a full or remote filesystem flushing on the last descriptor) could
   produce a short executable that was then chmodded, verified, and renamed over the
   working one.
-
-### Changed
-
 - **TUI shortcuts and the space menu are one table.** Every entry in a panel's actions
   menu now answers to the key it shows: incoming shares (`h`), contacts (`o`), account
   usage (`U`) and clone-and-adopt (`C`) previously had menu entries without a working
   shortcut.
+
+### Changed
+
 - **Opening a resource you own reports the same three refusals everywhere.** A missing
   owner key, a resource that is not a folder, and a pre-tree folder used to be worded
   differently by each command.
