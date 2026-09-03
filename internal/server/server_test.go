@@ -1113,9 +1113,12 @@ func TestBackgroundWorkersDrainAfterStop(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	stop := make(chan struct{})
+	started := make(chan struct{}, 2)
+	h.srv.workerStarted = func() { started <- struct{}{} }
 	h.srv.StartAutoSnapshot(time.Millisecond, 1, stop)
 	h.srv.StartGC(time.Millisecond, stop)
-	time.Sleep(5 * time.Millisecond)
+	<-started
+	<-started
 	h.srv.BeginShutdown()
 	close(stop)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

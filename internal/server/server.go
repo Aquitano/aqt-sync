@@ -159,6 +159,7 @@ type Server struct {
 	metrics       *Metrics
 	ready         atomic.Bool
 	workers       sync.WaitGroup
+	workerStarted func()
 	accountLimits *keyedMutex
 }
 
@@ -524,6 +525,9 @@ func (s *Server) StartAutoSnapshot(interval time.Duration, keepLast int, stop <-
 	go func() {
 		defer t.Stop()
 		defer s.workers.Done()
+		if s.workerStarted != nil {
+			s.workerStarted()
+		}
 		for {
 			select {
 			case <-stop:
@@ -559,6 +563,9 @@ func (s *Server) StartGC(interval time.Duration, stop <-chan struct{}) {
 	go func() {
 		defer t.Stop()
 		defer s.workers.Done()
+		if s.workerStarted != nil {
+			s.workerStarted()
+		}
 		for {
 			select {
 			case <-stop:
