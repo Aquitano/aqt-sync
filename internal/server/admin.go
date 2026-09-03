@@ -439,7 +439,3 @@ func affectedOne(res sql.Result, err error) error {
 	}
 	return nil
 }
-
-func isMissingTable(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "no such table")
-}

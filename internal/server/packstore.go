@@ -58,10 +58,9 @@ func replaceResourceChunks(tx *sql.Tx, resourceID, owner string, refs []string) 
 			`INSERT OR IGNORE INTO resource_chunks(resource_id, owner_handle, chunk_id) VALUES `+values.String(),
 			args...,
 		); err != nil {
-			// modernc.org/sqlite surfaces constraint violations in the error string;
 			// OR IGNORE does not soften FK failures, so a ref to a swept object lands
 			// here rather than committing dangling.
-			if strings.Contains(err.Error(), "FOREIGN KEY constraint failed") {
+			if isForeignKeyViolation(err) {
 				return ErrDanglingRefs
 			}
 			return err
