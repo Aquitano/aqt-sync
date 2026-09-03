@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
-import { readFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { ImageResponse } from "next/og";
+import { markPixels } from "./mark";
 import { ogDescription, ogTitle } from "./site";
 
 export const alt = ogTitle;
@@ -16,22 +17,17 @@ const ink = "#1d1c19";
 const paper = "#ddc998";
 const paperPale = "#e7d9b3";
 
-// The same 6x6 glyph the site header and the share page draw.
-const markPixels = [
-  1, 1, 1, 0, 0, 1,
-  1, 0, 1, 1, 0, 1,
-  1, 1, 1, 1, 1, 1,
-  0, 1, 0, 1, 0, 0,
-  0, 1, 1, 1, 1, 0,
-  0, 0, 1, 1, 1, 1,
-];
-
 // Satori has no font discovery and no CSS engine: every face has to be handed over
 // as bytes, and only flexbox lays anything out — hence the mark being rows of boxes
-// rather than the grid globals.css uses. The faces are read out of the installed
-// @fontsource packages the site already loads, so the card cannot drift from it.
-function face(pkg: string, file: string) {
-  return readFileSync(path.join(process.cwd(), "node_modules", pkg, "files", file));
+// rather than the grid globals.css uses. The files land in the source tree at
+// build time, copied from the @fontsource packages the site loads
+// (scripts/copy-og-fonts.mjs), so the card cannot drift from the site. They load
+// through a plain filesystem read: the bundler cannot trace computed asset URLs
+// in this route (verified: require.resolve and new-URL fetch variants both fail
+// the production build or render), while a source-tree path stays valid wherever
+// the project itself is deployed.
+async function face(file: "pixelify-sans-latin-600-normal.woff" | "ibm-plex-mono-latin-400-normal.woff") {
+  return readFile(path.join(process.cwd(), "src", "app", "fonts", file));
 }
 
 function PixelMark({ cell }: { cell: number }) {
@@ -56,6 +52,10 @@ function PixelMark({ cell }: { cell: number }) {
 }
 
 export default async function OpengraphImage() {
+  const [pixelify, plexMono] = await Promise.all([
+    face("pixelify-sans-latin-600-normal.woff"),
+    face("ibm-plex-mono-latin-400-normal.woff"),
+  ]);
   return new ImageResponse(
     (
       <div
@@ -126,13 +126,13 @@ export default async function OpengraphImage() {
       fonts: [
         {
           name: "Pixelify Sans",
-          data: face("@fontsource/pixelify-sans", "pixelify-sans-latin-600-normal.woff"),
+          data: pixelify,
           weight: 600,
           style: "normal",
         },
         {
           name: "IBM Plex Mono",
-          data: face("@fontsource/ibm-plex-mono", "ibm-plex-mono-latin-400-normal.woff"),
+          data: plexMono,
           weight: 400,
           style: "normal",
         },

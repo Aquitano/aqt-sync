@@ -39,13 +39,6 @@ func (p *PackBuilder) Add(id string, ciphertext []byte) {
 	p.buf = append(p.buf, ciphertext...)
 }
 
-// Size is the current object-region byte count (the index trailer is not yet
-// written), so a caller can flush once it reaches DefaultPackTarget.
-func (p *PackBuilder) Size() int { return len(p.buf) }
-
-// Objects is the number of objects added so far, for FitsInPack's overhead bound.
-func (p *PackBuilder) Objects() int { return len(p.index) }
-
 // packEntryOverhead over-estimates one index entry's serialized JSON size (a 64-hex
 // id plus keys and two offsets), and packTrailerOverhead the fixed array/length
 // framing, so FitsInPack errs toward dispatching early rather than building a pack
