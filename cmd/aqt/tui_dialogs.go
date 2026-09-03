@@ -120,10 +120,25 @@ func (d *tuiResultDialog) View(width int) string {
 
 // --- menu ---
 
+// tuiMenuOption is one entry of a menu. For the panel action menus it is also
+// the only definition of what a panel shortcut does: handleActionKey looks the
+// pressed key up here instead of repeating the mapping.
+//
+// An option resolves to a dialog or to a command, never both. Holding the dialog
+// unwrapped is what lets a key press open it synchronously while the menu path
+// defers it through tuiOpenDialog.
 type tuiMenuOption struct {
-	key   string // single-key shortcut, "" for none
-	label string
-	cmd   tea.Cmd
+	key    string // single-key shortcut, "" for none
+	label  string
+	dialog tuiDialog
+	cmd    tea.Cmd
+}
+
+func (o tuiMenuOption) command() tea.Cmd {
+	if o.dialog != nil {
+		return tuiOpenDialog(o.dialog)
+	}
+	return o.cmd
 }
 
 type tuiMenu struct {
@@ -147,11 +162,11 @@ func (d *tuiMenu) Update(msg tea.KeyMsg) (tea.Cmd, bool) {
 		}
 		return nil, false
 	case "enter":
-		return d.options[d.cursor].cmd, true
+		return d.options[d.cursor].command(), true
 	}
 	for _, o := range d.options {
 		if o.key != "" && msg.String() == o.key {
-			return o.cmd, true
+			return o.command(), true
 		}
 	}
 	return nil, false

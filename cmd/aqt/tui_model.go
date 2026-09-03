@@ -692,31 +692,67 @@ func (m *tuiModel) handleUnlockKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// handleActionKey dispatches the focused panel's contextual actions. Mutating
+// handleActionKey dispatches the focused panel's contextual actions. The panel's
+// actions menu is the mapping: a key press runs the option carrying that key, so
+// the shortcut and the menu entry cannot drift apart. A key press opens a dialog
+// synchronously (so the model reflects it immediately); the menu wraps the same
+// dialog in tuiOpenDialog so a selection opens it one tick later. Mutating
 // actions resolve to tuiExecRequestMsg, where the busy guard lives; read-only
 // ones (copy, diff) stay usable while an action runs.
 func (m *tuiModel) handleActionKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch m.focus {
-	case tuiPanelStatus:
-		return m.statusAction(msg)
-	case tuiPanelFiles:
-		return m.filesAction(msg)
-	case tuiPanelSnapshots:
-		return m.snapshotsAction(msg)
-	case tuiPanelResources:
-		return m.resourcesAction(msg)
+	pressed := msg.String()
+	for _, o := range m.panelActions() {
+		if o.key == "" || o.key != pressed {
+			continue
+		}
+		if o.dialog != nil {
+			m.dialog = o.dialog
+			return m, textinput.Blink
+		}
+		return m, o.cmd
 	}
-	return m, nil
+	return m, m.unavailableActionHint(pressed)
 }
 
-// The panel action handlers and the space menu share one source of truth per
-// panel: the <panel>Actions builders below own every argument list, and each
-// dialog is built by a named helper. A key press opens the dialog synchronously
-// (so the model reflects it immediately); the menu wraps the same builder in
-// tuiOpenDialog so a selection opens it one tick later.
+// unavailableActionHint explains a shortcut the focused panel would offer under
+// different conditions. Those options are absent from the actions menu, so the
+// key press is the only place the reason can be given.
+func (m *tuiModel) unavailableActionHint(pressed string) tea.Cmd {
+	switch m.focus {
+	case tuiPanelSnapshots:
+		if m.ctx.root != "" {
+			return nil
+		}
+		switch pressed {
+		case "n":
+			return m.toast("open the TUI inside a tracked folder to create snapshots")
+		case "R":
+			if m.selectedSnapshot() != nil {
+				return m.toast("in-place restore needs a tracked folder — use `aqt restore <id> --out` instead")
+			}
+		}
+	case tuiPanelResources:
+		res := m.selectedResource()
+		if res == nil {
+			return nil
+		}
+		folder := res.Kind == string(api.KindFolder)
+		switch {
+		case pressed == "o" && folder:
+			return m.toast("use clone for a whole folder; aqt pull aqt://id/path fetches one entry")
+		case pressed == "v" && folder:
+			return m.toast("cat needs a file or folder subpath")
+		case pressed == "c" && !folder:
+			return m.toast("clone is only available for folders; use pull for files")
+		case pressed == "p" && res.Visibility != string(api.Public):
+			return m.toast("already private")
+		}
+	}
+	return nil
+}
 
-// tuiStartDiffMsg begins a snapshot diff. Both the d key and the actions menu
-// resolve to it so the pending-diff state is set in exactly one place.
+// tuiStartDiffMsg begins a snapshot diff, so the pending-diff state is set in
+// exactly one place.
 type tuiStartDiffMsg struct{ snapshotID string }
 
 func tuiStartDiff(id string) tea.Cmd {
@@ -735,21 +771,8 @@ func tuiOpenDialog(d tuiDialog) tea.Cmd {
 	return func() tea.Msg { return tuiOpenDialogMsg{dialog: d} }
 }
 
-// hasActions reports whether the focused panel has any action to offer right
-// now, without building the (allocating) dialogs panelActions would.
-func (m *tuiModel) hasActions() bool {
-	switch m.focus {
-	case tuiPanelStatus:
-		return true
-	case tuiPanelFiles:
-		return m.ctx.root != ""
-	case tuiPanelSnapshots:
-		return m.ctx.root != "" || m.selectedSnapshot() != nil
-	case tuiPanelResources:
-		return m.selectedResource() != nil
-	}
-	return false
-}
+// hasActions reports whether the focused panel has any action to offer right now.
+func (m *tuiModel) hasActions() bool { return len(m.panelActions()) > 0 }
 
 func (m *tuiModel) panelActions() []tuiMenuOption {
 	switch m.focus {
@@ -765,31 +788,6 @@ func (m *tuiModel) panelActions() []tuiMenuOption {
 	return nil
 }
 
-func (m *tuiModel) filesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.ctx.root == "" {
-		return m, nil
-	}
-	switch msg.String() {
-	case "s":
-		return m, m.syncCmd()
-	case "u":
-		return m, tuiRequestExec("sync", m.ctx.root, "--push-only")
-	case "d":
-		return m, tuiRequestExec("sync", m.ctx.root, "--pull-only")
-	case "w":
-		return m, m.agentToggleCmd()
-	case "S":
-		m.dialog = m.syncOptionsDialog()
-		return m, nil
-	case "c":
-		m.dialog = m.checkpointDialog()
-		return m, textinput.Blink
-	case "C":
-		return m, tuiStartCompare()
-	}
-	return m, nil
-}
-
 func (m *tuiModel) filesActions() []tuiMenuOption {
 	if m.ctx.root == "" {
 		return nil
@@ -799,8 +797,8 @@ func (m *tuiModel) filesActions() []tuiMenuOption {
 		{key: "u", label: "push local changes only", cmd: tuiRequestExec("sync", m.ctx.root, "--push-only")},
 		{key: "d", label: "pull remote changes only", cmd: tuiRequestExec("sync", m.ctx.root, "--pull-only")},
 		{key: "C", label: "compare working tree with remote (read-only)", cmd: tuiStartCompare()},
-		{key: "S", label: "sync options…", cmd: tuiOpenDialog(m.syncOptionsDialog())},
-		{key: "c", label: "checkpoint (named, never pruned)", cmd: tuiOpenDialog(m.checkpointDialog())},
+		{key: "S", label: "sync options…", dialog: m.syncOptionsDialog()},
+		{key: "c", label: "checkpoint (named, never pruned)", dialog: m.checkpointDialog()},
 		{key: "w", label: m.agentToggleLabel(), cmd: m.agentToggleCmd()},
 	}
 }
@@ -817,20 +815,16 @@ func (m *tuiModel) syncOptionsDialog() tuiDialog {
 		{key: "l", label: "pull only", cmd: tuiRequestExec("sync", root, "--pull-only")},
 		{key: "r", label: "reconcile without a base", cmd: tuiRequestExec("sync", root, "--reconcile")},
 		{key: "h", label: "rehash every file", cmd: tuiRequestExec("sync", root, "--rehash")},
-		{key: "b", label: "accept server rollback and reconcile", cmd: func() tea.Msg {
-			return tuiOpenDialogMsg{dialog: &tuiConfirm{
-				title:   "Accept server rollback",
-				body:    "Proceed although the server is older than this device?\nThe trees are reconciled from scratch and differences become conflicts.",
-				confirm: tuiRequestExec("sync", root, "--accept-rollback"),
-			}}
+		{key: "b", label: "accept server rollback and reconcile", dialog: &tuiConfirm{
+			title:   "Accept server rollback",
+			body:    "Proceed although the server is older than this device?\nThe trees are reconciled from scratch and differences become conflicts.",
+			confirm: tuiRequestExec("sync", root, "--accept-rollback"),
 		}},
 		{key: "o", label: "offline status (skip server check)", cmd: tuiRequestExec("status", root, "--offline")},
-		{key: "f", label: "force — local wins every conflict", cmd: func() tea.Msg {
-			return tuiOpenDialogMsg{dialog: &tuiConfirm{
-				title:   "Force sync",
-				body:    "Conflicting remote versions are discarded in favor of local files.",
-				confirm: tuiRequestExec("sync", root, "--force"),
-			}}
+		{key: "f", label: "force — local wins every conflict", dialog: &tuiConfirm{
+			title:   "Force sync",
+			body:    "Conflicting remote versions are discarded in favor of local files.",
+			confirm: tuiRequestExec("sync", root, "--force"),
 		}},
 	}}
 }
@@ -842,52 +836,10 @@ func (m *tuiModel) checkpointDialog() tuiDialog {
 	})
 }
 
-func (m *tuiModel) snapshotsAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "n" {
-		if m.ctx.root == "" {
-			return m, m.toast("open the TUI inside a tracked folder to create snapshots")
-		}
-		m.dialog = m.newSnapshotDialog()
-		return m, textinput.Blink
-	}
-	snap := m.selectedSnapshot()
-	if snap == nil {
-		return m, nil
-	}
-	switch msg.String() {
-	case "d":
-		return m, tuiStartDiff(snap.ID)
-	case "a":
-		return m, m.anchorCmd(*snap)
-	case "o":
-		m.dialog = snapshotRestoreOutDialog(*snap)
-		return m, nil
-	case "e":
-		m.dialog = snapshotExportDialog(*snap)
-		return m, nil
-	case "k":
-		m.dialog = snapshotRetentionDialog(*snap)
-		return m, nil
-	case "f":
-		m.dialog = snapshotListFiltersDialog(*snap)
-		return m, nil
-	case "R":
-		if m.ctx.root == "" {
-			return m, m.toast("in-place restore needs a tracked folder — use `aqt restore <id> --out` instead")
-		}
-		m.dialog = m.restoreDialog(*snap)
-		return m, nil
-	case "x":
-		m.dialog = m.deleteSnapshotDialog(*snap)
-		return m, nil
-	}
-	return m, nil
-}
-
 func (m *tuiModel) snapshotsActions() []tuiMenuOption {
 	var opts []tuiMenuOption
 	if m.ctx.root != "" {
-		opts = append(opts, tuiMenuOption{key: "n", label: "new snapshot (optional label)", cmd: tuiOpenDialog(m.newSnapshotDialog())})
+		opts = append(opts, tuiMenuOption{key: "n", label: "new snapshot (optional label)", dialog: m.newSnapshotDialog()})
 	}
 	snap := m.selectedSnapshot()
 	if snap == nil {
@@ -900,15 +852,15 @@ func (m *tuiModel) snapshotsActions() []tuiMenuOption {
 	opts = append(opts,
 		tuiMenuOption{key: "d", label: "diff against live tree", cmd: tuiStartDiff(snap.ID)},
 		tuiMenuOption{key: "a", label: anchorLabel, cmd: m.anchorCmd(*snap)},
-		tuiMenuOption{key: "o", label: "restore side-by-side…", cmd: tuiOpenDialog(snapshotRestoreOutDialog(*snap))},
-		tuiMenuOption{key: "e", label: "export plaintext…", cmd: tuiOpenDialog(snapshotExportDialog(*snap))},
-		tuiMenuOption{key: "k", label: "retention prune…", cmd: tuiOpenDialog(snapshotRetentionDialog(*snap))},
-		tuiMenuOption{key: "f", label: "list with time/limit filters…", cmd: tuiOpenDialog(snapshotListFiltersDialog(*snap))},
+		tuiMenuOption{key: "o", label: "restore side-by-side…", dialog: snapshotRestoreOutDialog(*snap)},
+		tuiMenuOption{key: "e", label: "export plaintext…", dialog: snapshotExportDialog(*snap)},
+		tuiMenuOption{key: "k", label: "retention prune…", dialog: snapshotRetentionDialog(*snap)},
+		tuiMenuOption{key: "f", label: "list with time/limit filters…", dialog: snapshotListFiltersDialog(*snap)},
 	)
 	if m.ctx.root != "" {
-		opts = append(opts, tuiMenuOption{key: "R", label: "restore in place", cmd: tuiOpenDialog(m.restoreDialog(*snap))})
+		opts = append(opts, tuiMenuOption{key: "R", label: "restore in place", dialog: m.restoreDialog(*snap)})
 	}
-	opts = append(opts, tuiMenuOption{key: "x", label: "delete", cmd: tuiOpenDialog(m.deleteSnapshotDialog(*snap))})
+	opts = append(opts, tuiMenuOption{key: "x", label: "delete", dialog: m.deleteSnapshotDialog(*snap)})
 	return opts
 }
 
@@ -961,58 +913,6 @@ func (m *tuiModel) deleteSnapshotDialog(snap snapshotRow) tuiDialog {
 	return &tuiConfirm{title: "Delete snapshot", body: body, confirm: tuiRequestExec("snapshot", "prune", snap.ID, "-y")}
 }
 
-func (m *tuiModel) resourcesAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	res := m.selectedResource()
-	if res == nil {
-		return m, nil
-	}
-	switch msg.String() {
-	case "y":
-		return m, m.ctx.copyRefCmd(*res)
-	case "o":
-		if res.Kind == string(api.KindFolder) {
-			return m, m.toast("use clone for a whole folder; aqt pull aqt://id/path fetches one entry")
-		}
-		m.dialog = m.pullDialog(*res)
-		return m, nil
-	case "v":
-		if res.Kind == string(api.KindFolder) {
-			return m, m.toast("cat needs a file or folder subpath")
-		}
-		return m, tuiRequestExec("cat", "aqt://"+res.ID)
-	case "g":
-		m.dialog = grantDialog(*res)
-		return m, nil
-	case "r":
-		m.dialog = revokeGrantDialog(*res)
-		return m, nil
-	case "c":
-		if res.Kind != string(api.KindFolder) {
-			return m, m.toast("clone is only available for folders; use pull for files")
-		}
-		m.dialog = resourceCloneDialog(*res, false)
-		return m, nil
-	case "A":
-		return m, autoSnapshotCmd(*res)
-	case "X":
-		m.dialog = deleteResourceWithSnapshotsDialog(*res)
-		return m, nil
-	case "s":
-		m.dialog = m.shareDialog(*res)
-		return m, nil
-	case "p":
-		if res.Visibility != string(api.Public) {
-			return m, m.toast("already private")
-		}
-		m.dialog = m.makePrivateDialog(*res)
-		return m, nil
-	case "x":
-		m.dialog = m.deleteResourceDialog(*res)
-		return m, nil
-	}
-	return m, nil
-}
-
 func (m *tuiModel) resourcesActions() []tuiMenuOption {
 	res := m.selectedResource()
 	if res == nil {
@@ -1028,23 +928,23 @@ func (m *tuiModel) resourcesActions() []tuiMenuOption {
 	}
 	if res.Kind != string(api.KindFolder) {
 		opts = append(opts,
-			tuiMenuOption{key: "o", label: "pull to disk…", cmd: tuiOpenDialog(m.pullDialog(*res))},
+			tuiMenuOption{key: "o", label: "pull to disk…", dialog: m.pullDialog(*res)},
 			tuiMenuOption{key: "v", label: "cat into command log", cmd: tuiRequestExec("cat", "aqt://"+res.ID)})
 	}
 	opts = append(opts,
-		tuiMenuOption{key: "s", label: "share…", cmd: tuiOpenDialog(m.shareDialog(*res))},
-		tuiMenuOption{key: "g", label: "grant read-only access…", cmd: tuiOpenDialog(grantDialog(*res))},
-		tuiMenuOption{key: "r", label: "revoke account grant…", cmd: tuiOpenDialog(revokeGrantDialog(*res))},
+		tuiMenuOption{key: "s", label: "share…", dialog: m.shareDialog(*res)},
+		tuiMenuOption{key: "g", label: "grant read-only access…", dialog: grantDialog(*res)},
+		tuiMenuOption{key: "r", label: "revoke account grant…", dialog: revokeGrantDialog(*res)},
 		tuiMenuOption{key: "A", label: autoSnapshotLabel(*res), cmd: autoSnapshotCmd(*res)})
 	if res.Kind == string(api.KindFolder) {
-		opts = append(opts, tuiMenuOption{key: "c", label: "clone into a new directory…", cmd: tuiOpenDialog(resourceCloneDialog(*res, false))}, tuiMenuOption{key: "C", label: "clone and adopt an existing directory…", cmd: tuiOpenDialog(resourceCloneDialog(*res, true))})
+		opts = append(opts, tuiMenuOption{key: "c", label: "clone into a new directory…", dialog: resourceCloneDialog(*res, false)}, tuiMenuOption{key: "C", label: "clone and adopt an existing directory…", dialog: resourceCloneDialog(*res, true)})
 	}
 	if res.Visibility == string(api.Public) {
-		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", cmd: tuiOpenDialog(m.makePrivateDialog(*res))})
+		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", dialog: m.makePrivateDialog(*res)})
 	}
 	opts = append(opts,
-		tuiMenuOption{key: "x", label: "delete (keep snapshots)", cmd: tuiOpenDialog(m.deleteResourceDialog(*res))},
-		tuiMenuOption{key: "X", label: "delete with every snapshot", cmd: tuiOpenDialog(deleteResourceWithSnapshotsDialog(*res))})
+		tuiMenuOption{key: "x", label: "delete (keep snapshots)", dialog: m.deleteResourceDialog(*res)},
+		tuiMenuOption{key: "X", label: "delete with every snapshot", dialog: deleteResourceWithSnapshotsDialog(*res)})
 	return opts
 }
 
@@ -1067,18 +967,16 @@ func (m *tuiModel) shareDialog(res lsRow) tuiDialog {
 		{key: "d", label: "share for 24 hours", cmd: tuiRequestExec("share", id, "--expire", "24h")},
 		{key: "w", label: "share for 7 days", cmd: tuiRequestExec("share", id, "--expire", "7d")},
 		{key: "b", label: "burn after reading (one download)", cmd: tuiRequestExec("share", id, "--burn")},
-		{key: "e", label: "custom expiry…", cmd: tuiOpenDialog(shareExpiryDialog(res))},
-		{key: "n", label: "custom maximum downloads…", cmd: tuiOpenDialog(shareMaxReadsDialog(res))},
-		{key: "g", label: "grant to an account…", cmd: tuiOpenDialog(grantDialog(res))},
-		{key: "r", label: "revoke an account grant…", cmd: tuiOpenDialog(revokeGrantDialog(res))},
-		{key: "p", label: "password-gated link…", cmd: func() tea.Msg {
-			in := tuiNewSecretInput("Share password", "recipients need link and password", func(pw string) tea.Cmd {
+		{key: "e", label: "custom expiry…", dialog: shareExpiryDialog(res)},
+		{key: "n", label: "custom maximum downloads…", dialog: shareMaxReadsDialog(res)},
+		{key: "g", label: "grant to an account…", dialog: grantDialog(res)},
+		{key: "r", label: "revoke an account grant…", dialog: revokeGrantDialog(res)},
+		{key: "p", label: "password-gated link…", dialog: tuiNewSecretInput(
+			"Share password", "recipients need link and password", func(pw string) tea.Cmd {
 				// Over stdin, not -P: argv is world-readable in ps, and a masked
 				// prompt promising secrecy has to actually deliver it.
 				return tuiRequestExecStdin(pw+"\n", "share", id, "--password-stdin")
-			})
-			return tuiOpenDialogMsg{dialog: in}
-		}},
+			})},
 	}}
 }
 

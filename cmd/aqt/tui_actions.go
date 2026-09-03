@@ -10,29 +10,15 @@ import (
 
 // Account actions are always available from the Status panel, including when
 // the TUI was opened outside a tracked folder.
-func (m *tuiModel) statusAction(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "u":
-		m.dialog = m.pushDialog()
-	case "i":
-		m.dialog = m.initDialog()
-	case "c":
-		m.dialog = m.cloneDialog()
-	case "d":
-		m.dialog = m.devicesDialog()
-	}
-	return m, nil
-}
-
 func (m *tuiModel) statusActions() []tuiMenuOption {
 	return []tuiMenuOption{
-		{key: "u", label: "push a file…", cmd: tuiOpenDialog(m.pushDialog())},
-		{key: "i", label: "init a folder…", cmd: tuiOpenDialog(m.initDialog())},
-		{key: "c", label: "clone a folder ref…", cmd: tuiOpenDialog(m.cloneDialog())},
+		{key: "u", label: "push a file…", dialog: m.pushDialog()},
+		{key: "i", label: "init a folder…", dialog: m.initDialog()},
+		{key: "c", label: "clone a folder ref…", dialog: m.cloneDialog()},
 		{key: "h", label: "incoming shares", cmd: tuiRequestExec("shares")},
 		{key: "o", label: "contacts", cmd: tuiRequestExec("contacts")},
 		{key: "U", label: "account usage", cmd: tuiRequestExec("usage")},
-		{key: "d", label: "revoke a device…", cmd: tuiOpenDialog(m.devicesDialog())},
+		{key: "d", label: "revoke a device…", dialog: m.devicesDialog()},
 	}
 }
 
@@ -74,20 +60,15 @@ func tuiCloneDestinationDialog(ref string, adopt bool) tuiDialog {
 func (m *tuiModel) devicesDialog() tuiDialog {
 	options := make([]tuiMenuOption, 0, len(m.devices))
 	for i, device := range m.devices {
-		device := device
 		label := device.Name + "  " + device.ID
+		body := fmt.Sprintf("Revoke %q (%s)?\nIt must log in again before it can sync.", device.Name, device.ID)
 		if device.Current {
 			label += "  (this device)"
+			body += "\nThis is the current device; the TUI session will stop working."
 		}
-		options = append(options, tuiMenuOption{key: tuiMenuDigit(i), label: label, cmd: func() tea.Msg {
-			body := fmt.Sprintf("Revoke %q (%s)?\nIt must log in again before it can sync.", device.Name, device.ID)
-			if device.Current {
-				body += "\nThis is the current device; the TUI session will stop working."
-			}
-			return tuiOpenDialogMsg{dialog: &tuiConfirm{
-				title: "Revoke device", body: body,
-				confirm: tuiRequestExec("devices", "rm", device.ID, "--yes"),
-			}}
+		options = append(options, tuiMenuOption{key: tuiMenuDigit(i), label: label, dialog: &tuiConfirm{
+			title: "Revoke device", body: body,
+			confirm: tuiRequestExec("devices", "rm", device.ID, "--yes"),
 		}})
 	}
 	if len(options) == 0 {

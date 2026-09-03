@@ -97,38 +97,38 @@ func snapshotExportDialog(snap snapshotRow) tuiDialog {
 
 func snapshotRetentionDialog(snap snapshotRow) tuiDialog {
 	return &tuiMenu{title: "Snapshot retention", options: []tuiMenuOption{
-		{key: "k", label: "keep newest N for this resource…", cmd: tuiOpenDialog(tuiNewInput(
+		{key: "k", label: "keep newest N for this resource…", dialog: tuiNewInput(
 			"Keep newest snapshots", "number to keep", func(n string) tea.Cmd {
 				return tuiOpenDialog(&tuiConfirm{
 					title:   "Prune by retention",
 					body:    fmt.Sprintf("Keep the newest %s unanchored snapshot(s) of %q and delete older ones?", n, snap.Name),
 					confirm: tuiRequestExec("snapshot", "prune", "--id", snap.ResourceID, "--keep-last", n, "--yes"),
 				})
-			}))},
-		{key: "o", label: "delete snapshots older than…", cmd: tuiOpenDialog(tuiNewInput(
+			})},
+		{key: "o", label: "delete snapshots older than…", dialog: tuiNewInput(
 			"Prune old snapshots", "age, e.g. 720h", func(age string) tea.Cmd {
 				return tuiOpenDialog(&tuiConfirm{
 					title:   "Prune by age",
 					body:    fmt.Sprintf("Delete unanchored snapshots of %q older than %s?", snap.Name, age),
 					confirm: tuiRequestExec("snapshot", "prune", "--id", snap.ResourceID, "--before", age, "--yes"),
 				})
-			}))},
+			})},
 	}}
 }
 
 func snapshotListFiltersDialog(snap snapshotRow) tuiDialog {
 	return &tuiMenu{title: "Snapshot list filters", options: []tuiMenuOption{
-		{key: "l", label: "limit results…", cmd: tuiOpenDialog(tuiNewInput(
+		{key: "l", label: "limit results…", dialog: tuiNewInput(
 			"Snapshot limit", "maximum rows", func(limit string) tea.Cmd {
 				return tuiRequestExec("snapshot", "list", "--id", snap.ResourceID, "--limit", limit)
-			}))},
-		{key: "s", label: "created within…", cmd: tuiOpenDialog(tuiNewInput(
+			})},
+		{key: "s", label: "created within…", dialog: tuiNewInput(
 			"Recent snapshots", "window, e.g. 168h", func(window string) tea.Cmd {
 				return tuiRequestExec("snapshot", "list", "--id", snap.ResourceID, "--since", window)
-			}))},
-		{key: "b", label: "older than…", cmd: tuiOpenDialog(tuiNewInput(
+			})},
+		{key: "b", label: "older than…", dialog: tuiNewInput(
 			"Older snapshots", "age, e.g. 720h", func(age string) tea.Cmd {
 				return tuiRequestExec("snapshot", "list", "--id", snap.ResourceID, "--before", age)
-			}))},
+			})},
 	}}
 }
