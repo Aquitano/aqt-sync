@@ -37,6 +37,16 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.13.2
+      # The windows job runs no linter, so the //go:build windows files are only
+      # ever analyzed here, by cross-compiling the analysis.
+      - name: Lint (windows)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.13.2
+          # Both steps derive the same cache key; the linux pass above owns it.
+          skip-save-cache: true
+        env:
+          GOOS: windows
       - name: Build
         run: go build ./cmd/...
       # -race roughly triples the suite, so go test's 10m per-package default is

@@ -25,6 +25,7 @@ vet:
 
 lint:
 	golangci-lint run ./...
+	GOOS=windows golangci-lint run ./...
 
 # Run every fuzz target for a short burst. Native fuzzing runs one target per
 # invocation, so each decoder is listed explicitly.
