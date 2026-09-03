@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log"
@@ -64,21 +65,105 @@ func main() {
 // returns non-zero: a supervisor (the systemd unit ships Restart=on-failure) must be
 // able to tell a port conflict or a lost CAP_NET_BIND_SERVICE from a clean shutdown,
 // and an exit code of 0 makes it treat a server that never came up as an intentional
-// stop and never restart it. Returning rather than calling log.Fatal also lets the
-// deferred store.Close run, so the SQLite WAL is checkpointed on the way out.
-func run() (code int) {
+// stop and never restart it.
+func run() int {
 	// First line of the log, so a start that dies before the listener is still
 	// attributable to a build — which release is running is the first question a
 	// lockstep upgrade asks.
 	log.Printf("aqt-server %s", versionString())
-	dataDir := envOr("AQT_DATA_DIR", "./aqt-data")
-	addr := envOr("AQT_ADDR", "127.0.0.1:8080")
-
 	if os.Getenv("AQT_DEBUG") == "" {
 		gin.SetMode(gin.ReleaseMode)
 	}
+	rt, err := loadRuntime()
+	if err != nil {
+		log.Printf("%v", err)
+		return 1
+	}
+	return serve(rt)
+}
 
-	store, err := server.OpenStore(dataDir)
+// runtimeConfig is everything a server run takes from the environment.
+type runtimeConfig struct {
+	dataDir          string
+	addr             string
+	serverConfig     server.Config
+	snapshotInterval time.Duration
+	snapshotKeep     int
+	gcInterval       time.Duration
+	metricsAddr      string
+	tlsConfig        *tls.Config
+	shutdownGrace    time.Duration
+}
+
+// loadRuntime resolves and validates the environment before anything is opened or
+// bound. Its errors are already phrased for the operator log, so the caller reports
+// them as they are. docs/deploy.md is the reference for every variable read here.
+func loadRuntime() (runtimeConfig, error) {
+	rt := runtimeConfig{
+		dataDir: envOr("AQT_DATA_DIR", "./aqt-data"),
+		addr:    envOr("AQT_ADDR", "127.0.0.1:8080"),
+	}
+
+	cfg, err := loadServerConfig()
+	if err != nil {
+		return runtimeConfig{}, fmt.Errorf("server config: %w", err)
+	}
+	rt.serverConfig = cfg
+
+	// A snapshot is keyless (it copies already-sealed ciphertext), so the server runs
+	// the job itself. AQT_SNAPSHOT_KEEP caps how many scheduled snapshots each resource
+	// retains so storage converges; manual snapshots are never pruned.
+	if rt.snapshotInterval, err = envDurationValue("AQT_SNAPSHOT_INTERVAL", "24h", true); err != nil {
+		return runtimeConfig{}, err
+	}
+	rawKeep := envOr("AQT_SNAPSHOT_KEEP", "30")
+	keep, err := strconv.Atoi(rawKeep)
+	if err != nil || keep < 0 {
+		return runtimeConfig{}, fmt.Errorf("invalid AQT_SNAPSHOT_KEEP: %s", rawKeep)
+	}
+	rt.snapshotKeep = keep
+
+	// Scheduled maintenance: link expiry (retire or reclaim, per the resource's
+	// on_expiry) and pack tidying. Clients trigger the same pass after a sync, and
+	// this timer covers an account whose devices have stopped. Expiry is the server's
+	// own decision; pack tidying is not — it sweeps emptied packs and compacts sparse
+	// ones, but only ever after an `aqt prune` deleted the object rows, since the
+	// server cannot see which objects a resource references.
+	if rt.gcInterval, err = envDurationValue("AQT_GC_INTERVAL", "6h", true); err != nil {
+		return runtimeConfig{}, err
+	}
+
+	// The metrics enumerate opaque per-account owner handles and storage totals, so
+	// the endpoint belongs on a loopback or private interface, never on AQT_ADDR.
+	if rt.metricsAddr = os.Getenv("AQT_METRICS_ADDR"); rt.metricsAddr != "" {
+		if err := validateListenAddress(rt.metricsAddr, true, true); err != nil {
+			return runtimeConfig{}, fmt.Errorf("metrics address: %w", err)
+		}
+	}
+
+	tlsSet, err := loadTLSSettings()
+	if err != nil {
+		return runtimeConfig{}, fmt.Errorf("tls config: %w", err)
+	}
+	if rt.tlsConfig, err = tlsSet.tlsConfig(rt.dataDir); err != nil {
+		return runtimeConfig{}, fmt.Errorf("tls config: %w", err)
+	}
+	allowInsecure := os.Getenv("AQT_ALLOW_INSECURE_HTTP") == "1"
+	if err := validateListenAddress(rt.addr, rt.tlsConfig != nil, allowInsecure); err != nil {
+		return runtimeConfig{}, fmt.Errorf("listen address: %w", err)
+	}
+
+	if rt.shutdownGrace, err = envDurationValue("AQT_SHUTDOWN_GRACE", shutdownGrace.String(), false); err != nil {
+		return runtimeConfig{}, err
+	}
+	return rt, nil
+}
+
+// serve opens the store, starts the background jobs and runs the API until shutdown,
+// returning the process exit code. Returning rather than calling log.Fatal lets the
+// deferred store.Close run, so the SQLite WAL is checkpointed on the way out.
+func serve(rt runtimeConfig) (code int) {
+	store, err := server.OpenStore(rt.dataDir)
 	if err != nil {
 		log.Printf("open store: %v", err)
 		return 1
@@ -95,70 +180,30 @@ func run() (code int) {
 		}
 	}()
 
-	cfg, err := loadServerConfig()
-	if err != nil {
-		log.Printf("server config: %v", err)
-		return 1
-	}
-	api := server.NewWithConfig(store, cfg)
+	api := server.NewWithConfig(store, rt.serverConfig)
 	workerStop := make(chan struct{})
-
-	// Scheduled snapshots. A snapshot is keyless (it copies already-sealed
-	// ciphertext), so the server runs the job itself; AQT_SNAPSHOT_INTERVAL=0 disables
-	// it. Default daily. AQT_SNAPSHOT_KEEP caps how many scheduled snapshots each
-	// resource retains (0 keeps all) so storage converges; manual snapshots are
-	// never pruned.
-	interval, err := envDurationValue("AQT_SNAPSHOT_INTERVAL", "24h", true)
-	if err != nil {
-		log.Printf("%v", err)
-		return 1
+	if rt.snapshotInterval > 0 {
+		log.Printf("scheduled snapshots every %s (keeping last %d per resource; 0 = all)", rt.snapshotInterval, rt.snapshotKeep)
+		api.StartAutoSnapshot(rt.snapshotInterval, rt.snapshotKeep, workerStop)
 	}
-	keep, err := strconv.Atoi(envOr("AQT_SNAPSHOT_KEEP", "30"))
-	if err != nil || keep < 0 {
-		log.Printf("invalid AQT_SNAPSHOT_KEEP: %v", envOr("AQT_SNAPSHOT_KEEP", "30"))
-		return 1
-	}
-	if interval > 0 {
-		log.Printf("scheduled snapshots every %s (keeping last %d per resource; 0 = all)", interval, keep)
-		api.StartAutoSnapshot(interval, keep, workerStop)
+	if rt.gcInterval > 0 {
+		log.Printf("scheduled gc every %s", rt.gcInterval)
+		api.StartGC(rt.gcInterval, workerStop)
 	}
 
-	// Scheduled maintenance: link expiry (retire or reclaim, per the resource's
-	// on_expiry) and pack tidying. Clients trigger the same pass after a sync, and
-	// this timer covers an account whose devices have stopped. Expiry is the server's
-	// own decision; pack tidying is not — it sweeps emptied packs and compacts sparse
-	// ones, but only ever after an `aqt prune` deleted the object rows, since the
-	// server cannot see which objects a resource references. AQT_GC_INTERVAL=0
-	// disables both. Default 6h.
-	gcInterval, err := envDurationValue("AQT_GC_INTERVAL", "6h", true)
-	if err != nil {
-		log.Printf("%v", err)
-		return 1
-	}
-	if gcInterval > 0 {
-		log.Printf("scheduled gc every %s", gcInterval)
-		api.StartGC(gcInterval, workerStop)
-	}
-
+	// Keeping the metrics endpoint a separate plain-HTTP server makes its binding
+	// explicit; see loadRuntime for why it must not share AQT_ADDR.
 	var metricsServer *http.Server
-	// Prometheus metrics on their own listener, off by default. The metrics
-	// enumerate opaque per-account owner handles and storage totals, so the
-	// endpoint belongs on a loopback or private interface, never on AQT_ADDR;
-	// keeping it a separate plain-HTTP server makes that binding explicit.
-	if maddr := os.Getenv("AQT_METRICS_ADDR"); maddr != "" {
+	if rt.metricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", api.MetricsHandler())
-		if err := validateListenAddress(maddr, true, true); err != nil {
-			log.Printf("metrics address: %v", err)
-			return 1
-		}
 		metricsServer = &http.Server{
-			Addr:              maddr,
+			Addr:              rt.metricsAddr,
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
-		log.Printf("metrics on http://%s/metrics", maddr)
+		log.Printf("metrics on http://%s/metrics", rt.metricsAddr)
 		go func() {
 			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("metrics server exited: %v", err)
@@ -166,39 +211,17 @@ func run() (code int) {
 		}()
 	}
 
-	tlsSet, err := loadTLSSettings()
-	if err != nil {
-		log.Printf("tls config: %v", err)
-		return 1
-	}
-	tlsCfg, err := tlsSet.tlsConfig(dataDir)
-	if err != nil {
-		log.Printf("tls config: %v", err)
-		return 1
-	}
-	allowInsecure := os.Getenv("AQT_ALLOW_INSECURE_HTTP") == "1"
-	if err := validateListenAddress(addr, tlsCfg != nil, allowInsecure); err != nil {
-		log.Printf("listen address: %v", err)
-		return 1
-	}
-
-	grace, err := envDurationValue("AQT_SHUTDOWN_GRACE", shutdownGrace.String(), false)
-	if err != nil {
-		log.Printf("%v", err)
-		return 1
-	}
-
 	// No ReadTimeout/WriteTimeout: they span the full body transfer, capping a
 	// 32 MiB pack at ~4.3 Mbps and permanently failing slower links. Handlers
 	// already cap body sizes, ReadHeaderTimeout bounds header slowloris, and
 	// IdleTimeout reaps idle keep-alives.
 	srv := &http.Server{
-		Addr:              addr,
+		Addr:              rt.addr,
 		Handler:           api.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Printf("data dir: %s", dataDir)
+	log.Printf("data dir: %s", rt.dataDir)
 	// serveWithShutdown flips readiness synchronously before closing listeners, then
 	// runs the component drain on the same context as HTTP shutdown. The calls after
 	// it returns are fallbacks for paths that never entered that drain (a listener that
@@ -221,9 +244,9 @@ func run() (code int) {
 		})
 		return drainErr
 	}
-	serveErr := serveWithShutdown(srv, tlsCfg, grace, beginShutdown, shutdownComponents)
+	serveErr := serveWithShutdown(srv, rt.tlsConfig, rt.shutdownGrace, beginShutdown, shutdownComponents)
 	beginShutdown()
-	ctx, cancel := context.WithTimeout(context.Background(), grace)
+	ctx, cancel := context.WithTimeout(context.Background(), rt.shutdownGrace)
 	shutdownErr := shutdownComponents(ctx)
 	cancel()
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
