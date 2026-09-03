@@ -39,51 +39,24 @@ keys.
 ## Package layout
 
 ```text
-cmd/aqt/            CLI: signup/login/logout/lock, whoami, devices, passphrase, account, push, pull, cat, ls, info, find, mv, share, unshare, shares, contacts, rm, init/status/sync/clone/diff/untrack, snapshot, checkpoint, restore, usage, repo, git setup, watch/agent, tui, update  [implemented]
-cmd/aqt-server/     server entrypoint + `admin` account/quota tooling           [implemented + tested]
-cmd/updatectl/      release tooling: generate/sign/verify the update manifest   [implemented + tested]
-internal/crypto/    key hierarchy + blob sealing (Argon2id, XChaCha20)          [implemented + tested]
-internal/compress/  the one pinned zstd codec (convergent ids depend on it)     [implemented + tested]
-internal/api/       shared wire types + capability constants                    [implemented]
-internal/server/    Gin handlers + SQLite/FS store + packed object store + GC   [implemented + tested]
-internal/identity/  local profile, keystore, session cache                      [implemented + tested]
-internal/client/    HTTP API client                                             [implemented]
-internal/safetext/  control-byte and bidi sanitizer for server-supplied text    [implemented + tested]
-internal/cliutil/   formatting and confirmation rules both binaries share       [implemented]
-internal/fsatomic/  write-temp-fsync-rename file replacement                    [implemented]
-internal/folderstate/ .aqt/state.json pointer + the sealed base.json manifest   [implemented + tested]
-internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
-internal/packio/    pack uploader, range-fetching pack source, pack range LRU   [implemented + tested]
-internal/gitremote/ sealed bundle chain + RefsRoot behind `git-remote-aqt`      [implemented + tested]
-internal/update/    signed release manifest, verified download, atomic install  [implemented + tested]
+cmd/aqt/              CLI commands and TUI
+cmd/aqt-server/       server entrypoint and account/quota administration
+cmd/updatectl/        release-manifest generation, signing, and verification
+internal/api/         shared wire types and capability constants
+internal/client/      HTTP API client
+internal/cliutil/     formatting and confirmation rules shared by both binaries
+internal/compress/    pinned zstd codec; convergent ids depend on its output
+internal/crypto/      key hierarchy and blob sealing
+internal/folderstate/ tracked-folder state and the sealed base manifest
+internal/fsatomic/    write-temp-fsync-rename file replacement
+internal/gitremote/   sealed bundle chain and RefsRoot for `git-remote-aqt`
+internal/identity/    local profile, keystore, and session cache
+internal/packio/      pack upload, range fetching, and range cache
+internal/safetext/    control-byte and bidi sanitizer for server-supplied text
+internal/server/      Gin handlers, SQLite/filesystem store, packed objects, and GC
+internal/syncengine/  manifests, ignore/config rules, chunking, planning, and merge
+internal/update/      signed manifests, verified downloads, and atomic install
 ```
 
-The Go package signatures in `internal/` are the authoritative interfaces. The
-protocol documents describe formats and behavior; where prose and signatures
-disagree, the signatures win.
-
-## Status
-
-Working end-to-end: signup and device attach (Ed25519 challenge/response), device
-management, private and public push/pull with the key in the fragment, password-gated
-links, `share`/`unshare` with key rotation, `ls` (which decrypts names and sizes
-locally from each resource's owner-wrapped key), `find` (fzf fuzzy search across files
-and folder contents), and a `login`-cached session key so the passphrase is entered
-once per session. Every push wraps the content key under the owner's master key, so
-even a public resource can later be shared or rotated. Verified by `go test ./...`
-plus live multi-machine cycles.
-
-A public share link (`/x/<id>`) opens a landing page that decrypts locally from the
-`#k.` key or a password-gated `#p.` wrap: inline single files, streamed files
-(chunk-by-chunk through the public objects endpoint, with fzstd for decompression),
-and public folders, which it walks in the browser. `aqt pull` is offered as an
-alternative route, not the only one. The pinned XChaCha20-Poly1305 and Argon2id
-browser runtimes are self-hosted, and the fragment is never sent to the server.
-
-Tracked folders default to **private**. `aqt share <folder-id>` flips a chunked folder
-public and mints a fragment link, and a link holder clones or subpath-pulls it
-read-only through the public object endpoint.
-
-Run locally: `go run ./cmd/aqt-server` (listens on `127.0.0.1:8080` and stores under
-`./aqt-data`; `AQT_DATA_DIR` and `AQT_ADDR` override), then
-`aqt --server http://localhost:8080 login`.
+The packages and protocol documents describe the same contracts. A mismatch between
+them is a bug; update both in the change that alters the contract.
