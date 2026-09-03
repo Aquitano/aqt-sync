@@ -24,6 +24,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -1258,21 +1259,21 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		}
 		chunks := root.Chunks
 		if root.Indirect() {
-			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			segSrc, err := packio.NewSource(cl, root.ChunkIDs())
 			if err != nil {
 				return meta, err
 			}
-			chunks, err = root.Resolve(segSrc.get)
+			chunks, err = root.Resolve(segSrc.Get)
 			if err != nil {
 				return meta, err
 			}
 		}
-		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
+		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 		if err != nil {
 			return meta, err
 		}
 		return meta, fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
-			return syncengine.WriteFileRoot(f, chunks, src.get)
+			return syncengine.WriteFileRoot(f, chunks, src.Get)
 		})
 	}
 	plain, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, res.ID)

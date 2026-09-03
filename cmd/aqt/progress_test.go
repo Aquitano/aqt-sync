@@ -3,20 +3,11 @@
 package main
 
 import (
-	"bytes"
-	"context"
-	"encoding/json"
-	"errors"
-	"fmt"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/client"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -64,7 +55,7 @@ func TestUnsizedBarSilentUntilFirstByte(t *testing.T) {
 	if !p.silent() {
 		t.Fatal("an unsized bar must stay silent before any byte moves")
 	}
-	p.add(100)
+	p.Add(100)
 	if p.silent() {
 		t.Fatal("the bar must draw once bytes have moved")
 	}
@@ -95,7 +86,7 @@ func TestProgressBarLine(t *testing.T) {
 
 func TestProgressBarNilSafe(t *testing.T) {
 	var p *progressBar // progress off => newProgressBar returns nil
-	p.add(10)
+	p.Add(10)
 	p.finish(true)
 }
 
@@ -141,74 +132,5 @@ func TestRunDownloadsCountsProgress(t *testing.T) {
 	}
 	if got := prog.done.Load(); got != 42 {
 		t.Errorf("download progress = %d, want 42", got)
-	}
-}
-
-// TestPackUploaderCountsProgress drives the real upload pipeline against a fake that
-// reports every chunk missing, and asserts the bar credits each pack's plaintext
-// bytes once it is confirmed on the server.
-func TestPackUploaderCountsProgress(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/chunks/check", func(w http.ResponseWriter, r *http.Request) {
-		var req api.ChunkCheckRequest
-		_ = json.NewDecoder(r.Body).Decode(&req)
-		_ = json.NewEncoder(w).Encode(api.ChunkCheckResponse{Missing: req.IDs}) // all missing
-	})
-	mux.HandleFunc("/v1/packs/", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK) // accept the PutPack
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	cl, err := client.New(srv.URL, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	prog := &progressBar{}
-	prog.total.Store(300)
-	up := newPackUploader(cl, prog)
-	for _, id := range []string{"a", "b", "c"} {
-		if err := up.Add(crypto.Chunk{ID: id, Len: 100}, bytes.Repeat([]byte(id), 8)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if err := up.Flush(); err != nil {
-		t.Fatalf("Flush: %v", err)
-	}
-	if got := prog.done.Load(); got != 300 {
-		t.Errorf("upload progress = %d, want 300", got)
-	}
-}
-
-// A ^C between packs cancels the uploader's group without any worker error (the
-// group parents on the root signal context, not only on failing workers). The
-// batch under dispatch is dropped at that point, so Add/Flush must surface the
-// cancellation — returning nil made a canceled push keep sealing the rest of
-// the tree and report every dropped pack as uploaded.
-func TestPackUploaderSurfacesRootCancel(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	origRoot := rootCtx
-	rootCtx = ctx
-	t.Cleanup(func() { rootCtx = origRoot })
-
-	cl, err := client.New("https://127.0.0.1:1/", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	up := newPackUploader(cl.WithContext(ctx), nil)
-	cancel()
-
-	var failed error
-	for i := 0; i < 64 && failed == nil; i++ {
-		failed = up.Add(crypto.Chunk{ID: fmt.Sprintf("chunk-%03d", i), Len: 1 << 20}, make([]byte, 1<<20))
-	}
-	if failed == nil {
-		failed = up.Flush()
-	}
-	if failed == nil {
-		t.Fatal("uploader reported success after cancel; every pack was dropped")
-	}
-	if !errors.Is(failed, context.Canceled) {
-		t.Fatalf("cancel surfaced as %v, want context.Canceled", failed)
 	}
 }

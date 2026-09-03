@@ -4,8 +4,6 @@ package main
 
 import (
 	"bytes"
-	"container/list"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,7 +16,6 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -27,6 +24,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
@@ -60,10 +58,6 @@ type folderState struct {
 const (
 	stateFile = "state.json"
 	baseFile  = "base.json"
-	// packCacheBytes is the download pack-range cache budget: a pack shared by several
-	// files is not re-GET per file, while download memory stays bounded by bytes (not
-	// a fixed pack count) and independent of tree size.
-	packCacheBytes = 128 << 20
 	// maxSyncAttempts bounds the optimistic-concurrency retry: if this many
 	// reconcile passes each lose the race to a concurrent sync, give up and ask
 	// the user to re-run rather than spin.
@@ -771,7 +765,7 @@ func runSync(dir string, opts syncOptions) error {
 		// sizing it up front cost a second full-tree walk — and a second hash of every
 		// file on a first sync, where there is no base to stat against.
 		prog := newUnsizedBar("uploading")
-		up := newPackUploader(cl, prog)
+		up := newUploader(cl, prog)
 		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
 			up.Wait() // drain in-flight uploads before returning the snapshot error
@@ -971,11 +965,11 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 	if len(candidates) == 0 {
 		return nil, fallback, nil
 	}
-	source, err := newPackSource(c.cl, distinctChunkIDs(sourceEntries))
+	source, err := packio.NewSource(c.cl, distinctChunkIDs(sourceEntries))
 	if err != nil {
 		return nil, nil, err
 	}
-	uploader := newPackUploader(c.cl, nil)
+	uploader := newUploader(c.cl, nil)
 	var clean []cleanMerge
 	var held int
 	var deferred []string
@@ -988,7 +982,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			uploader.Wait()
 			return nil, nil, err
 		}
-		remoteData, err := syncengine.FileBytes(re, source.get)
+		remoteData, err := syncengine.FileBytes(re, source.Get)
 		if err != nil {
 			uploader.Wait()
 			if errors.Is(err, client.ErrNotFound) {
@@ -996,7 +990,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			}
 			return nil, nil, err
 		}
-		baseData, err := syncengine.FileBytes(be, source.get)
+		baseData, err := syncengine.FileBytes(be, source.Get)
 		if errors.Is(err, client.ErrNotFound) {
 			fallback[path] = true
 			continue
@@ -1808,44 +1802,18 @@ func stampEntryMTimes(entries []syncengine.Entry, mtimes map[string]int64) {
 
 // --- chunk transfer ---
 
-// packUploader is the ChunkSink Take feeds during a push. It buffers sealed chunks
-// up to ~packTarget, then hands the batch to a bounded pool that asks the server
-// which chunks it lacks, packs only those, and uploads the pack. Dispatching to the
-// pool instead of uploading inline overlaps chunking with the two upload round-trips,
-// so the CPU keeps sealing the next pack while earlier ones are in flight — the win
-// over a WAN, where each pack otherwise cost two sequential RTTs of pure stall.
-//
-// The pool is bounded: group.Go blocks once uploadConcurrency packs are in flight,
-// which is the backpressure that keeps push memory at O(uploadConcurrency packs)
-// rather than O(tree). A per-run seen set dedups a chunk shared by several files
-// within the same sync; it and the candidate buffer are touched only by the single
-// producer goroutine (Take calls Add sequentially), while workers touch only their
-// own batch and the concurrency-safe client, so no further synchronization is needed.
-type packUploader struct {
-	cl       *client.Client
-	target   int
-	seen     map[string]bool
-	cand     []candidate
-	candSize int
-	group    *errgroup.Group
-	ctx      context.Context
-	waitOnce sync.Once
-	waitErr  error
-	prog     *progressBar
-}
-
-type candidate struct {
-	id   string
-	ct   []byte
-	size int // plaintext length, for progress accounting
-}
-
 // uploadConcurrency bounds how many packs are checked-and-uploaded at once. Uploads
 // are IO-bound (two round-trips plus server ingest), so a small fixed fan-out hides
 // latency without a per-core thread; it also caps peak push memory at roughly this
 // many packs (each in-flight upload holds a candidate buffer plus its assembled pack,
 // both ~DefaultPackTarget).
 const uploadConcurrency = 4
+
+// newUploader binds a pack uploader to the root signal context and this stage's
+// transfer limit.
+func newUploader(cl *client.Client, prog *progressBar) *packio.Uploader {
+	return packio.NewUploader(rootCtx, cl, prog, syncTransferLimit(uploadConcurrency))
+}
 
 // syncTransferLimit is the errgroup concurrency for a transfer stage, normally the
 // given fan-out. AQT_SYNC_SERIAL=1 forces it to 1 so the multi-device sim's crash-fault
@@ -1858,123 +1826,10 @@ func syncTransferLimit(n int) int {
 	return n
 }
 
-func newPackUploader(cl *client.Client, prog *progressBar) *packUploader {
-	// Parented on the root signal context so a ^C stops queued uploads from
-	// dispatching, not just the in-flight requests the bound client kills itself.
-	g, ctx := errgroup.WithContext(rootCtx)
-	g.SetLimit(syncTransferLimit(uploadConcurrency))
-	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}, group: g, ctx: ctx, prog: prog}
-}
-
-// Add buffers one sealed chunk, dispatching a pack once the buffer reaches the target.
-func (u *packUploader) Add(ch crypto.Chunk, ciphertext []byte) error {
-	if u.seen[ch.ID] {
-		return nil
-	}
-	u.seen[ch.ID] = true
-	// Dispatch-before-append when this object would push the assembled pack past
-	// the wire cap (see syncengine.FitsInPack); the target flush below runs after
-	// the append and cannot catch that case.
-	if u.candSize > 0 && !syncengine.FitsInPack(u.candSize, len(u.cand), len(ciphertext)) {
-		if err := u.dispatch(); err != nil {
-			return err
-		}
-	}
-	u.cand = append(u.cand, candidate{id: ch.ID, ct: ciphertext, size: ch.Len})
-	u.candSize += len(ciphertext)
-	if u.candSize >= u.target {
-		return u.dispatch()
-	}
-	return nil
-}
-
-// Flush dispatches any buffered remainder, then waits for every in-flight upload;
-// call once after the snapshot pass. The manifest PUT that roots these objects must
-// not race ahead of them, so Flush is the barrier that guarantees they are all stored.
-func (u *packUploader) Flush() error {
-	if err := u.dispatch(); err != nil {
-		return err
-	}
-	return u.Wait()
-}
-
-// Wait blocks until all dispatched uploads finish and returns the first error. It is
-// idempotent — errgroup.Wait must not be called twice — so a caller can drain the
-// pool on a snapshot error and still have Flush return the same result on success.
-func (u *packUploader) Wait() error {
-	u.waitOnce.Do(func() { u.waitErr = u.group.Wait() })
-	return u.waitErr
-}
-
-// dispatch hands the buffered candidates to an upload worker and resets the buffer,
-// transferring ownership of the batch. group.Go blocks when uploadConcurrency uploads
-// are already running — the backpressure that bounds memory. If a prior upload already
-// failed the group context is cancelled, so stop feeding work and surface that error.
-func (u *packUploader) dispatch() error {
-	if len(u.cand) == 0 {
-		return nil
-	}
-	batch := u.cand
-	u.cand = nil
-	u.candSize = 0
-	if u.ctx.Err() != nil {
-		// The batch was just detached and is being dropped, so success must not
-		// be reported. A worker failure surfaces through Wait; a root cancel
-		// leaves the group error-free (the context is no longer only canceled by
-		// failing workers, it parents on rootCtx), so the cancellation itself is
-		// the error — returning nil here would let a ^C'd push keep sealing the
-		// rest of the tree and report every dropped pack as uploaded.
-		if err := u.Wait(); err != nil {
-			return err
-		}
-		return context.Cause(u.ctx)
-	}
-	u.group.Go(func() error { return u.upload(batch) })
-	return nil
-}
-
-// upload runs one pack's have/want gate and PutPack. It owns cand exclusively (each
-// ciphertext is an independent SealChunk allocation), so it needs no locking.
-func (u *packUploader) upload(cand []candidate) error {
-	ids := make([]string, len(cand))
-	var batchBytes int64
-	for i, c := range cand {
-		ids[i] = c.id
-		batchBytes += int64(c.size)
-	}
-	missing, err := u.cl.CheckChunks(ids)
-	if err != nil {
-		return err
-	}
-	want := make(map[string]bool, len(missing))
-	for _, id := range missing {
-		want[id] = true
-	}
-	pb := syncengine.NewPackBuilder()
-	for _, c := range cand {
-		if want[c.id] {
-			pb.Add(c.id, c.ct)
-		}
-	}
-	// Count the batch's plaintext bytes as done once it is confirmed on the server,
-	// whether it was uploaded or already present (dedup) — so the bar reflects content
-	// committed, not bytes on the wire, and still reaches the total on a re-sync.
-	if pb.Empty() {
-		u.prog.add(batchBytes) // every candidate already on the server (a re-sync)
-		return nil
-	}
-	packID, pack := pb.Finish()
-	if err := u.cl.PutPack(packID, pack); err != nil {
-		return err
-	}
-	u.prog.add(batchBytes)
-	return nil
-}
-
 // downloadConcurrency bounds how many files a pull materializes at once. Downloads
 // are IO-bound (each file range-fetches its packs, then writes them out), so a small
 // fixed fan-out overlaps the network latency of independent files without a
-// per-core thread. The shared packSource is concurrency-safe, and every file lands
+// per-core thread. The shared packio.Source is concurrency-safe, and every file lands
 // at a distinct path, so the content-addressed model makes the parallelism trivially
 // correct — no file's bytes depend on another's.
 const downloadConcurrency = 6
@@ -1996,22 +1851,22 @@ const locateBatchChunks = 50_000
 // returned, matching the upload pipeline's aggregation. The returned map gives each
 // written file's resulting mtime, keyed by path, for the caller's base manifest.
 func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
-	src := newEmptyPackSource(cl)
+	src := packio.NewEmptySource(cl)
 	mtimes := make(map[string]int64, len(entries))
 	for _, batch := range batchByChunks(entries, locateBatchChunks) {
 		// locate must not run while workers are calling get, which holds because each
 		// batch's downloads finish before the next batch is located.
-		if err := src.locate(distinctChunkIDs(batch)); err != nil {
+		if err := src.Locate(distinctChunkIDs(batch)); err != nil {
 			return nil, err
 		}
-		batchMTimes, err := runDownloadsFrom(src.get, root, batch, prog)
+		batchMTimes, err := runDownloadsFrom(src.Get, root, batch, prog)
 		if err != nil {
 			return nil, err
 		}
 		for path, mtime := range batchMTimes {
 			mtimes[path] = mtime
 		}
-		src.forgetLocations()
+		src.ForgetLocations()
 	}
 	return mtimes, nil
 }
@@ -2068,7 +1923,7 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 					mu.Lock()
 					skippedLinks = append(skippedLinks, e.Path)
 					mu.Unlock()
-					prog.add(e.Size)
+					prog.Add(e.Size)
 					return nil
 				}
 				if err := syncengine.WriteSymlink(root, e); err != nil {
@@ -2083,7 +1938,7 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 				mtimes[e.Path] = mtime
 				mu.Unlock()
 			}
-			prog.add(e.Size)
+			prog.Add(e.Size)
 			return nil
 		})
 	}
@@ -2113,274 +1968,6 @@ func stampMTimes(byPath map[string]syncengine.Entry, mtimes map[string]int64) {
 			e.MTime = mtime
 			byPath[path] = e
 		}
-	}
-}
-
-// packSpan is a contiguous byte range of a pack covering a run of objects a download
-// needs — fetched in one Range request. A pack may map to several spans when its
-// needed objects are far apart (see spanSplitGap), so a few KiB at opposite ends of a
-// large pack never drags the whole pack down.
-type packSpan struct {
-	base int64
-	end  int64
-}
-
-// spanSplitGap bounds wasted read-ahead within a pack: two needed objects more than
-// this many bytes apart are fetched as separate ranges rather than one span swallowing
-// the dead bytes between them. Needing 2 objects at opposite ends of a 16 MiB pack thus
-// costs two small ranges instead of the whole pack; below the gap, one range
-// still wins (one request, and the skipped bytes are cheap).
-const spanSplitGap = 256 << 10
-
-// packSource resolves chunk ids to pack byte ranges (one locate up front) and
-// serves their ciphertext, fetching each pack's covering span on demand and keeping
-// a small LRU so a pack shared by several files is fetched once.
-//
-// It is safe for concurrent use by the download worker pool: locs and spans are
-// immutable while concurrent gets run (locate and forgetLocations only ever run
-// between batches, see their comments), the LRU is guarded by mu, and sf collapses a
-// stampede of workers that all miss the same pack into one GetPackRange.
-type packSource struct {
-	cl   *client.Client
-	locs map[string]api.ObjectLocation
-	// objSpan maps each object to the covering span its bytes fall in. A pack with
-	// widely-separated needed objects has several spans, so get fetches only the
-	// window around each object rather than min..max across the whole pack.
-	objSpan map[string]packSpan
-	// spans records each pack's assigned spans so a later locate (the tree walk
-	// locates level by level) reuses a span that already contains an object instead
-	// of cutting a new one — the cache key is pack+span base, so reuse is what lets
-	// a level-2 node inside a level-1 window come from the LRU, not the network.
-	spans map[string][]packSpan
-	mu    sync.Mutex // guards cache
-	cache *packCache
-	sf    singleflight.Group
-}
-
-func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
-	s := newEmptyPackSource(cl)
-	if err := s.locate(ids); err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
-// forgetLocations drops the resolved object index once a batch of files has landed,
-// so a download's metadata stays bounded by the batch rather than by the whole tree.
-// The span list and the LRU deliberately survive: spans coalesce contiguous needed
-// runs (16 bytes per run, one per chunk only in the sparsest pull) and the LRU is
-// O(packs), and keeping them lets the next batch reuse a span already fetched.
-func (s *packSource) forgetLocations() {
-	s.locs = map[string]api.ObjectLocation{}
-	s.objSpan = map[string]packSpan{}
-}
-
-// newEmptyPackSource returns a source with no located objects yet, for callers
-// that locate incrementally (the level-batched tree walk) while keeping one LRU
-// across all their fetches.
-func newEmptyPackSource(cl *client.Client) *packSource {
-	return &packSource{
-		cl:      cl,
-		locs:    map[string]api.ObjectLocation{},
-		objSpan: map[string]packSpan{},
-		spans:   map[string][]packSpan{},
-		cache:   newPackCache(packCacheBytes),
-	}
-}
-
-// locate resolves ids to pack spans and records them for get. It mutates locs and
-// objSpan, so it must not run concurrently with get — callers either locate a whole
-// batch before its downloads start (runDownloads) or interleave locate/get on a
-// single goroutine (tree walk).
-func (s *packSource) locate(ids []string) error {
-	unseen := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if _, exists := s.locs[id]; !exists {
-			unseen = append(unseen, id)
-		}
-	}
-	ids = unseen
-	if len(ids) == 0 {
-		return nil
-	}
-	located, err := s.cl.LocateChunks(ids)
-	if err != nil {
-		return err
-	}
-	byPack := map[string][]api.ObjectLocation{}
-	for _, loc := range located {
-		s.locs[loc.ID] = loc
-		byPack[loc.PackID] = append(byPack[loc.PackID], loc)
-	}
-	for _, objs := range byPack {
-		s.assignSpans(objs)
-	}
-	return nil
-}
-
-// assignSpans groups one pack's needed objects into covering spans, opening a new span
-// whenever the gap to the next object exceeds spanSplitGap, and records each object's
-// span so get range-fetches just that window. Objects within a pack never overlap.
-// An object already contained in one of the pack's earlier spans (a prior locate — the
-// tree walk locates level by level) adopts that span, so its bytes are served from the
-// span already fetched rather than a fresh overlapping range.
-func (s *packSource) assignSpans(objs []api.ObjectLocation) {
-	packID := objs[0].PackID
-	fresh := objs[:0]
-	for _, o := range objs {
-		if sp, ok := spanContaining(s.spans[packID], o); ok {
-			s.objSpan[o.ID] = sp
-			continue
-		}
-		fresh = append(fresh, o)
-	}
-	objs = fresh
-	if len(objs) == 0 {
-		return
-	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Off < objs[j].Off })
-	start := 0
-	base := objs[0].Off
-	end := objs[0].Off + objs[0].Len
-	flush := func(hi int) {
-		span := packSpan{base: base, end: end}
-		s.spans[packID] = append(s.spans[packID], span)
-		for _, o := range objs[start:hi] {
-			s.objSpan[o.ID] = span
-		}
-	}
-	for i := 1; i < len(objs); i++ {
-		o := objs[i]
-		if o.Off-end > spanSplitGap {
-			flush(i)
-			start, base = i, o.Off
-		}
-		if o.Off+o.Len > end {
-			end = o.Off + o.Len
-		}
-	}
-	flush(len(objs))
-}
-
-func spanContaining(spans []packSpan, o api.ObjectLocation) (packSpan, bool) {
-	for _, sp := range spans {
-		if o.Off >= sp.base && o.Off+o.Len <= sp.end {
-			return sp, true
-		}
-	}
-	return packSpan{}, false
-}
-
-func (s *packSource) get(id string) ([]byte, error) {
-	loc, ok := s.locs[id]
-	if !ok {
-		// The object was not in the locate response: the owner no longer stores it
-		// (e.g. a concurrent sync superseded this version and GC reaped it). Surface
-		// ErrNotFound so a manifest read can retry against the current version.
-		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
-	}
-	span := s.objSpan[id]
-	data, err := s.fetchSpan(loc.PackID, span)
-	if err != nil {
-		return nil, err
-	}
-	start := loc.Off - span.base
-	return data[start : start+loc.Len], nil
-}
-
-// fetchSpan returns one span's bytes, fetching it at most once even under the
-// concurrent download pool: the LRU is consulted under mu, and singleflight collapses
-// concurrent misses of the same span into a single GetPackRange. The cache key is the
-// pack plus the span base, since a pack now holds several spans. The returned bytes are
-// never mutated after the fetch, so a later eviction cannot disturb a caller still
-// slicing its object out of them.
-func (s *packSource) fetchSpan(packID string, span packSpan) ([]byte, error) {
-	key := fmt.Sprintf("%s@%d", packID, span.base)
-	s.mu.Lock()
-	data, ok := s.cache.get(key)
-	s.mu.Unlock()
-	if ok {
-		return data, nil
-	}
-	v, err, _ := s.sf.Do(key, func() (any, error) {
-		s.mu.Lock()
-		if data, ok := s.cache.get(key); ok {
-			s.mu.Unlock()
-			return data, nil
-		}
-		s.mu.Unlock()
-		data, err := s.cl.GetPackRange(packID, span.base, span.end-span.base)
-		if err != nil {
-			return nil, err
-		}
-		if int64(len(data)) < span.end-span.base {
-			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", packID, len(data), span.end-span.base)
-		}
-		s.mu.Lock()
-		s.cache.put(key, data)
-		s.mu.Unlock()
-		return data, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.([]byte), nil
-}
-
-// packCache is a byte-bounded LRU of fetched pack byte-ranges, so download memory is
-// capped by total bytes (not a fixed pack count): a pack shared by many files is not
-// re-fetched just because a few other packs were touched, while a handful of large
-// packs cannot blow the budget. At least the most-recent entry is always kept, so a
-// single pack larger than the budget still serves.
-type packCache struct {
-	capBytes int
-	bytes    int
-	data     map[string]*list.Element
-	order    *list.List // front = least recently used; element value is packCacheEntry
-}
-
-type packCacheEntry struct {
-	id string
-	b  []byte
-}
-
-func newPackCache(capBytes int) *packCache {
-	return &packCache{capBytes: capBytes, data: map[string]*list.Element{}, order: list.New()}
-}
-
-func (c *packCache) get(id string) ([]byte, bool) {
-	el, ok := c.data[id]
-	if !ok {
-		return nil, false
-	}
-	// O(1): the share-link path caches per-chunk entries, so a linear-scan touch
-	// turned every hit into a walk of the whole recency list.
-	c.order.MoveToBack(el)
-	return el.Value.(packCacheEntry).b, true
-}
-
-func (c *packCache) put(id string, b []byte) {
-	if el, ok := c.data[id]; ok {
-		c.bytes += len(b) - len(el.Value.(packCacheEntry).b)
-		el.Value = packCacheEntry{id: id, b: b}
-		c.order.MoveToBack(el)
-		c.evict()
-		return
-	}
-	c.data[id] = c.order.PushBack(packCacheEntry{id: id, b: b})
-	c.bytes += len(b)
-	c.evict()
-}
-
-// evict drops least-recently-used packs until the cache fits its byte budget, always
-// keeping the most-recently-used entry so get can serve the pack just fetched.
-func (c *packCache) evict() {
-	for c.bytes > c.capBytes && c.order.Len() > 1 {
-		el := c.order.Front()
-		victim := el.Value.(packCacheEntry)
-		c.order.Remove(el)
-		c.bytes -= len(victim.b)
-		delete(c.data, victim.id)
 	}
 }
 
@@ -2495,7 +2082,7 @@ func distinctChunkIDs(entries []syncengine.Entry) []string {
 // file-chunk id reachable from the root. The objects must be on the server before
 // the resource PUT roots them, hence the flush.
 func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.TreeRoot, []string, error) {
-	up := newPackUploader(cl, nil)
+	up := newUploader(cl, nil)
 	root, refs, err := syncengine.SealTree(m, conv, up, openSealMemo())
 	if err != nil {
 		up.Wait() // drain in-flight uploads before returning the seal error
@@ -2537,8 +2124,8 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 
 // newBatchNodeFetcher returns a level-batch fetch for directory-node objects: it
 // locates a whole level's ids in one call and range-fetches their packs grouped (via
-// packSource), so a tree walk pays one locate per level instead of two round-trips per
-// node. One packSource (and its LRU) is shared across every level of the walk, so a
+// packio.Source), so a tree walk pays one locate per level instead of two round-trips per
+// node. One packio.Source (and its LRU) is shared across every level of the walk, so a
 // pack carrying nodes from several levels is fetched once, not once per level. seed
 // carries node ciphertexts already in hand (the base tree in the reuse path), served
 // from memory without a fetch; fetched nodes are cached across levels since the DAG
@@ -2547,14 +2134,14 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 // seen — content addressing makes a disk hit exactly as trustworthy as a server fetch,
 // since OpenNode verifies either against the id. A node the owner no longer stores —
 // a concurrent sync superseded this version and GC reaped it — surfaces from
-// packSource.get as client.ErrNotFound so a manifest read can retry against the
+// packio.Source.Get as client.ErrNotFound so a manifest read can retry against the
 // current version.
 func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
 	cache := make(map[string][]byte, len(seed))
 	for id, ct := range seed {
 		cache[id] = ct
 	}
-	src := newEmptyPackSource(cl)
+	src := packio.NewEmptySource(cl)
 	disk := openNodeCache()
 	return func(ids []string) (map[string][]byte, error) {
 		var missing []string
@@ -2569,11 +2156,11 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 			missing = append(missing, id)
 		}
 		if len(missing) > 0 {
-			if err := src.locate(missing); err != nil {
+			if err := src.Locate(missing); err != nil {
 				return nil, err
 			}
 			for _, id := range missing {
-				b, err := src.get(id)
+				b, err := src.Get(id)
 				if err != nil {
 					return nil, err
 				}

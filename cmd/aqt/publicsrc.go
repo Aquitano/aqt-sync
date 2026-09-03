@@ -12,6 +12,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -73,16 +74,16 @@ func remoteFetch(cl *client.Client, res api.GetResourceResponse, fragment string
 // miss it fetches a forward batch from the missing id (its first-appearance position)
 // large enough to cover the next window. A byte-bounded LRU keeps already-fetched
 // objects so a file's duplicate ids do not refetch while memory stays capped.
-// Single-goroutine use only (pullStream is sequential); packCache is not self-locking.
+// Single-goroutine use only (pullStream is sequential); packio.Cache is not self-locking.
 type publicChunkSource struct {
 	fetch sliceFetch
 	ids   []string       // distinct object ids in first-appearance order
 	idx   map[string]int // id -> position in ids
 	lens  map[string]int // id -> plaintext length, for the batch-size estimate
-	cache *packCache
+	cache *packio.Cache
 }
 
-func newPublicChunkSource(fetch sliceFetch, chunks []crypto.Chunk, cache *packCache) *publicChunkSource {
+func newPublicChunkSource(fetch sliceFetch, chunks []crypto.Chunk, cache *packio.Cache) *publicChunkSource {
 	s := &publicChunkSource{
 		fetch: fetch,
 		idx:   make(map[string]int),
@@ -101,7 +102,7 @@ func newPublicChunkSource(fetch sliceFetch, chunks []crypto.Chunk, cache *packCa
 }
 
 func (s *publicChunkSource) get(id string) ([]byte, error) {
-	if b, ok := s.cache.get(id); ok {
+	if b, ok := s.cache.Get(id); ok {
 		return b, nil
 	}
 	start, ok := s.idx[id]
@@ -111,7 +112,7 @@ func (s *publicChunkSource) get(id string) ([]byte, error) {
 	if err := s.fetchBatch(start); err != nil {
 		return nil, err
 	}
-	if b, ok := s.cache.get(id); ok {
+	if b, ok := s.cache.Get(id); ok {
 		return b, nil
 	}
 	return nil, fmt.Errorf("public read did not return object %s", id)
@@ -140,7 +141,7 @@ func (s *publicChunkSource) fetchBatch(start int) error {
 		if err := verifyFrame(batch[i], frame); err != nil {
 			return err
 		}
-		s.cache.put(batch[i], frame)
+		s.cache.Put(batch[i], frame)
 	}
 	return nil
 }
@@ -227,7 +228,7 @@ func newPublicBatchFetcher(fetch sliceFetch) func([]string) (map[string][]byte, 
 // concurrent download pool over the public endpoint. publicChunkSource is built for a
 // single sequential reader, so a mutex serializes lookup+fetch; decryption and file
 // writes still overlap across the pool's workers.
-func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry, cache *packCache) func(id string) ([]byte, error) {
+func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry, cache *packio.Cache) func(id string) ([]byte, error) {
 	var chunks []crypto.Chunk
 	for _, e := range entries {
 		chunks = append(chunks, e.Chunks...)
@@ -246,7 +247,7 @@ func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry, cache *p
 // stays O(batch) rather than O(tree) — the same bound the authed pack path applies —
 // while one shared LRU carries fetched objects across batches.
 func runPublicDownloads(fetch sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
-	cache := newPackCache(packCacheBytes)
+	cache := packio.NewCache(packio.DefaultCacheBytes)
 	mtimes := make(map[string]int64, len(entries))
 	for _, batch := range batchByChunks(entries, locateBatchChunks) {
 		batchMTimes, err := runDownloadsFrom(newPublicEntrySource(fetch, batch, cache), root, batch, prog)

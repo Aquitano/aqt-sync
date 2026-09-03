@@ -15,6 +15,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -143,13 +144,13 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	}
 	var get func(string) ([]byte, error)
 	if slices != nil {
-		get = newPublicEntrySource(slices, []syncengine.Entry{e}, newPackCache(packCacheBytes))
+		get = newPublicEntrySource(slices, []syncengine.Entry{e}, packio.NewCache(packio.DefaultCacheBytes))
 	} else {
-		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
+		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
 		if err != nil {
 			return err
 		}
-		get = src.get
+		get = src.Get
 	}
 	if toStdout {
 		return syncengine.WriteEntry(os.Stdout, e, get)
@@ -198,11 +199,11 @@ func pullSubtree(cl *client.Client, id string, version int, child syncengine.Tre
 	}
 	var get func(string) ([]byte, error)
 	if slices == nil {
-		src, err := newPackSource(cl, distinctChunkIDs(m.Entries))
+		src, err := packio.NewSource(cl, distinctChunkIDs(m.Entries))
 		if err != nil {
 			return err
 		}
-		get = src.get
+		get = src.Get
 	}
 	if err := materializeStaged(abs, func(staging string) error {
 		prog := newProgressBar("downloading", entriesBytes(m.Entries))

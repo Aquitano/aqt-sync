@@ -16,6 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -926,11 +927,11 @@ func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, o
 		// locate, so fetch them through the authed path first.
 		chunks := root.Chunks
 		if root.Indirect() {
-			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			segSrc, err := packio.NewSource(cl, root.ChunkIDs())
 			if err != nil {
 				return resealed{}, err
 			}
-			chunks, err = root.Resolve(segSrc.get)
+			chunks, err = root.Resolve(segSrc.Get)
 			if err != nil {
 				return resealed{}, err
 			}

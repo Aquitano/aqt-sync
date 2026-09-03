@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -73,62 +72,6 @@ func newFakePackClient(t *testing.T, f *fakePackServer) *client.Client {
 	return cl
 }
 
-// TestPackSourceConcurrentGet proves the download-side packSource is safe under the
-// worker pool and dedups a shared pack: many goroutines fetching objects from the
-// same pack trigger exactly one GetPackRange (singleflight + LRU), and every object
-// comes back byte-correct. Run under -race, it also guards the cache mutation paths.
-func TestPackSourceConcurrentGet(t *testing.T) {
-	p1 := []byte(strings.Repeat("A", 100) + strings.Repeat("B", 100) + strings.Repeat("C", 100))
-	p2 := []byte(strings.Repeat("D", 100))
-	f := &fakePackServer{
-		packs: map[string][]byte{"p1": p1, "p2": p2},
-		locs: map[string]api.ObjectLocation{
-			"a": {ID: "a", PackID: "p1", Off: 0, Len: 100},
-			"b": {ID: "b", PackID: "p1", Off: 100, Len: 100},
-			"c": {ID: "c", PackID: "p1", Off: 200, Len: 100},
-			"d": {ID: "d", PackID: "p2", Off: 0, Len: 100},
-		},
-		getHits: map[string]*int32{"p1": new(int32), "p2": new(int32)},
-	}
-	cl := newFakePackClient(t, f)
-
-	src, err := newPackSource(cl, []string{"a", "b", "c", "d"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := map[string]byte{"a": 'A', "b": 'B', "c": 'C', "d": 'D'}
-
-	var wg sync.WaitGroup
-	ids := []string{"a", "b", "c", "d"}
-	errs := make(chan error, 200)
-	for i := 0; i < 200; i++ {
-		id := ids[i%len(ids)]
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			got, err := src.get(id)
-			if err != nil {
-				errs <- err
-				return
-			}
-			if len(got) != 100 || got[0] != want[id] || got[99] != want[id] {
-				errs <- errUnexpectedBytes
-			}
-		}()
-	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		t.Fatalf("concurrent get: %v", err)
-	}
-	if n := atomic.LoadInt32(f.getHits["p1"]); n != 1 {
-		t.Fatalf("pack p1 fetched %d times, want exactly 1 (dedup failed)", n)
-	}
-	if n := atomic.LoadInt32(f.getHits["p2"]); n != 1 {
-		t.Fatalf("pack p2 fetched %d times, want exactly 1", n)
-	}
-}
-
 // TestRunDownloadsPropagatesFetchError checks the worker pool surfaces the first
 // fetch failure rather than writing a corrupt file: a pack GET that 500s must fail
 // the whole pull.
@@ -191,63 +134,9 @@ func TestBatchByChunks(t *testing.T) {
 	}
 }
 
-// Dropping a batch's location index must not drop the fetched bytes with it: a chunk
-// two batches share is located twice but fetched once, which is what keeps batching
-// from costing extra round-trips.
-func TestForgetLocationsKeepsFetchedSpans(t *testing.T) {
-	f := &fakePackServer{
-		packs:   map[string][]byte{"p1": []byte(strings.Repeat("A", 100))},
-		locs:    map[string]api.ObjectLocation{"a": {ID: "a", PackID: "p1", Off: 0, Len: 100}},
-		getHits: map[string]*int32{"p1": new(int32)},
-	}
-	src := newEmptyPackSource(newFakePackClient(t, f))
-	for i := 0; i < 2; i++ {
-		if err := src.locate([]string{"a"}); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := src.get("a"); err != nil {
-			t.Fatal(err)
-		}
-		src.forgetLocations()
-		if len(src.locs) != 0 || len(src.objSpan) != 0 {
-			t.Fatal("forgetLocations must drop the per-chunk index")
-		}
-	}
-	if n := atomic.LoadInt32(f.getHits["p1"]); n != 1 {
-		t.Fatalf("pack fetched %d times across batches, want 1", n)
-	}
-}
-
-// TestPackSourceSpanSplitting checks that needed objects close together share one span
-// (one range), but a gap wider than spanSplitGap opens a new span so the dead bytes
-// between them are never downloaded.
-func TestPackSourceSpanSplitting(t *testing.T) {
-	s := &packSource{objSpan: map[string]packSpan{}, spans: map[string][]packSpan{}}
-	bEnd := int64(100 + 1000 + 100)  // a: [0,100), b: [1100,1200); gap 1000 < threshold
-	cBase := bEnd + spanSplitGap + 1 // c starts a fresh span (gap beyond threshold)
-	s.assignSpans([]api.ObjectLocation{
-		{ID: "a", PackID: "p", Off: 0, Len: 100},
-		{ID: "b", PackID: "p", Off: 1100, Len: 100},
-		{ID: "c", PackID: "p", Off: cBase, Len: 100},
-	})
-
-	if s.objSpan["a"] != s.objSpan["b"] {
-		t.Fatal("objects within the gap threshold must share a span")
-	}
-	if s.objSpan["a"] == s.objSpan["c"] {
-		t.Fatal("an object beyond the gap threshold must open its own span")
-	}
-	if ab := s.objSpan["a"]; ab.base != 0 || ab.end != bEnd {
-		t.Fatalf("a/b span = %+v, want base 0 end %d", ab, bEnd)
-	}
-	if c := s.objSpan["c"]; c.base != cBase || c.end != cBase+100 {
-		t.Fatalf("c span = %+v, want base %d end %d", c, cBase, cBase+100)
-	}
-}
-
 // TestBatchNodeFetcherSharesPackAcrossLevels drives the level-batched fetcher the
 // way a tree walk does — one call per level — against a pack holding nodes from two
-// levels. The shared packSource must serve the second level's node from the span the
+// levels. The shared packio.Source must serve the second level's node from the span the
 // first level already fetched: exactly one pack GET across both calls.
 func TestBatchNodeFetcherSharesPackAcrossLevels(t *testing.T) {
 	pack := []byte(strings.Repeat("A", 100) + strings.Repeat("B", 100) + strings.Repeat("C", 100))
@@ -281,9 +170,3 @@ func TestBatchNodeFetcherSharesPackAcrossLevels(t *testing.T) {
 		t.Fatalf("pack p1 fetched %d times across levels, want exactly 1", n)
 	}
 }
-
-var errUnexpectedBytes = errBytes("unexpected object bytes")
-
-type errBytes string
-
-func (e errBytes) Error() string { return string(e) }

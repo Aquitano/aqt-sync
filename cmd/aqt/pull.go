@@ -18,6 +18,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -164,13 +165,13 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	// authed pack-locate path.
 	get := func(chunks []crypto.Chunk) (func(id string) ([]byte, error), error) {
 		if slices != nil {
-			return newPublicChunkSource(slices, chunks, newPackCache(packCacheBytes)).get, nil
+			return newPublicChunkSource(slices, chunks, packio.NewCache(packio.DefaultCacheBytes)).get, nil
 		}
-		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
+		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 		if err != nil {
 			return nil, err
 		}
-		return src.get, nil
+		return src.Get, nil
 	}
 	chunks := root.Chunks
 	if root.Indirect() {
