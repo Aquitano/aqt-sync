@@ -549,7 +549,8 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 				_, undo = cl.SetVisibility(id, api.SetVisibilityRequest{Visibility: api.Private})
 			}
 			if undo != nil {
-				return fmt.Errorf("%w; additionally, clearing the policy this attempt stored failed (%w) — the link may still expire destructively, so run `aqt unshare %s` to rotate the key and drop the policy", err, undo, id)
+				//nolint:errorlint // secondary cleanup error must not reach exitCode
+				return fmt.Errorf("%w; additionally, clearing the policy this attempt stored failed (%v) — the link may still expire destructively, so run `aqt unshare %s` to rotate the key and drop the policy", err, undo, id)
 			}
 			return err
 		}

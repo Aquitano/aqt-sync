@@ -214,7 +214,8 @@ func runInit(dir string, gitChoice *bool) error {
 		// user cannot see locally.
 		cleanupLocal()
 		if delErr := cl.DeleteResourceVersion(resp.ID, resp.Version); delErr != nil {
-			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %w; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
+			//nolint:errorlint // secondary cleanup error must not reach exitCode
+			return fmt.Errorf("%w (additionally, the just-created remote resource %s could not be removed: %v; `aqt rm %s` deletes it)", err, resp.ID, delErr, resp.ID)
 		}
 		return err
 	}
