@@ -26,13 +26,13 @@ re-sent, and a file that appears in several folders is stored once.
 
 macOS and Linux:
 
-```
+```sh
 curl -fsSL https://web.sync.aquitano.me/install.sh | sh
 ```
 
 Windows (PowerShell):
 
-```
+```powershell
 iwr -useb https://web.sync.aquitano.me/install.ps1 | iex
 ```
 
@@ -51,7 +51,7 @@ manifest signature against keys compiled into the binary. To verify the first in
 download from the [releases page](https://github.com/Aquitano/aqt-sync/releases) and
 check the build provenance:
 
-```
+```sh
 gh attestation verify aqt_<version>_<os>_<arch>.tar.gz --repo Aquitano/aqt-sync
 ```
 
@@ -59,7 +59,7 @@ gh attestation verify aqt_<version>_<os>_<arch>.tar.gz --repo Aquitano/aqt-sync
 
 Pure Go, no CGO. The Go version is in `go.mod`.
 
-```
+```sh
 make build          # ./bin/aqt, ./bin/aqt-server, ./bin/git-remote-aqt
 make test
 ```
@@ -70,14 +70,14 @@ A source build calls itself `dev` and is never replaced by `aqt update`.
 
 Create an account on the first machine, then attach every other machine to it:
 
-```
+```sh
 aqt --server https://aqt.example.com signup --email you@example.com
 aqt --server https://aqt.example.com login  --email you@example.com
 ```
 
 Push files. Private is the default; `--public` mints a shareable link:
 
-```
+```sh
 aqt push secret.env
 aqt push notes.md --public
 aqt share secret.env --expire 24h
@@ -89,17 +89,18 @@ shorthand for `aqt push <path>`.
 
 Track a folder and sync it two-way:
 
-```
+```sh
 aqt init ~/vault
 aqt sync ~/vault
-aqt diff ~/vault                 # local edits as a unified diff
+aqt diff ~/vault                          # local edits as a unified diff
 aqt sync ~/vault --conflicts=merge
-aqt clone <folder-id> ~/vault    # restore on another machine
+aqt clone <folder-id> ~/vault             # restore on another machine
+aqt clone --adopt <folder-id> ~/existing  # bind an existing directory, reusing files by hash
 ```
 
 Store Git history as an encrypted remote:
 
-```
+```sh
 aqt repo create vault-history
 git remote add origin aqt::vault-history
 git push -u origin main
@@ -109,7 +110,7 @@ git push -u origin main
 
 - `aqt tui` opens a lazygit-style dashboard for the tracked folder you are in. Every
   action runs the matching `aqt` command and streams its output into a log pane.
-- `aqt snapshot` lists, diffs, exports, and prunes folder snapshots. `aqt checkpoint
+- `aqt snapshot list|diff|export|prune` manages folder snapshots. `aqt checkpoint
   <name>` takes one that retention never prunes, and `aqt restore <name>` brings it back.
 - `aqt watch` keeps a tracked folder in sync from file events, in the foreground or as a
   background agent (`aqt agent start`).
@@ -122,7 +123,7 @@ git push -u origin main
 
 ## Self-hosting
 
-```
+```sh
 # Development: plain HTTP on :8080.
 AQT_DATA_DIR=./aqt-data ./bin/aqt-server
 
