@@ -811,26 +811,15 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 // ok=false routes every other shape (single file, pre-tree folder, or a public
 // resource with no owner key) to the materialize fallback.
 func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.TreeRoot, bool, error) {
-	if res.WrappedKey == nil {
+	folder, err := openOwnedFolder(res, mk)
+	switch {
+	case errors.Is(err, errNoOwnerKey), errors.Is(err, errNotAFolder), errors.Is(err, errLegacyFolder):
 		return syncengine.TreeRoot{}, false, nil
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return syncengine.TreeRoot{}, false, fmt.Errorf("unwrap key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
-	if err != nil {
+	case err != nil:
 		return syncengine.TreeRoot{}, false, err
 	}
-	if meta.Kind != api.KindFolder || !meta.Tree {
-		return syncengine.TreeRoot{}, false, nil
-	}
-	root, err := syncengine.OpenTreeRoot(res.Blob, ck, res.ID)
-	if err != nil {
-		return syncengine.TreeRoot{}, false, fmt.Errorf("decrypt folder root: %w", err)
-	}
-	return root, true, nil
+	defer folder.ck.Wipe()
+	return folder.root, true, nil
 }
 
 func printSnapshotDiff(r comparison) {

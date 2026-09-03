@@ -62,28 +62,16 @@ func joinSubpath(a, b string) string {
 	return a + "/" + b
 }
 
-// openFolderRoot validates that res is a chunked tree folder and opens its sealed
-// root. A pre-tree folder has no per-entry objects, so subpath reads and member
-// listings are structurally impossible for it.
+// openFolderRoot opens the sealed tree root of a folder read under a key that is not
+// the owner's — a share link's or a grant's — where the metadata is sealed under that
+// same key.
 func openFolderRoot(res api.GetResourceResponse, ck crypto.ContentKey) (syncengine.TreeRoot, error) {
 	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return syncengine.TreeRoot{}, err
 	}
-	if meta.Kind != api.KindFolder {
-		return syncengine.TreeRoot{}, errNotAFolder
-	}
-	if !meta.Tree {
-		return syncengine.TreeRoot{}, errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
-	}
-	root, err := syncengine.OpenTreeRoot(res.Blob, ck, res.ID)
-	if err != nil {
-		return syncengine.TreeRoot{}, fmt.Errorf("decrypt folder root: %w", err)
-	}
-	return root, nil
+	return openTreeRoot(res, ck, meta)
 }
-
-var errNotAFolder = errors.New("not a folder")
 
 // pullSubpath fetches one entry (or one subtree) out of a chunked folder without
 // downloading anything else: only the directory nodes on the path's spine, then
@@ -269,23 +257,16 @@ func collectFolderRows(cl *client.Client, mk crypto.MasterKey, ref string) ([]fo
 	if err != nil {
 		return nil, err
 	}
-	if res.WrappedKey == nil {
-		return nil, errors.New("not a private folder you own (no owner key)")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return nil, fmt.Errorf("unwrap folder key: %w", err)
-	}
-	defer ck.Wipe()
-	root, err := openFolderRoot(res, ck)
+	folder, err := openOwnedFolder(res, mk)
 	if errors.Is(err, errNotAFolder) {
 		return nil, fmt.Errorf("resource %s is not a folder; `aqt ls` with no arguments lists resources", id)
 	}
 	if err != nil {
 		return nil, err
 	}
+	defer folder.ck.Wipe()
 	fetch := newBatchNodeFetcher(cl, nil)
-	child, err := syncengine.ResolveTreePath(root, sub, fetch)
+	child, err := syncengine.ResolveTreePath(folder.root, sub, fetch)
 	if errors.Is(err, syncengine.ErrPathNotFound) {
 		return nil, fmt.Errorf("%w %s", err, id)
 	}

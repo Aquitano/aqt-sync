@@ -54,26 +54,19 @@ func runRename(ref, newName string) error {
 	if err != nil {
 		return err
 	}
-	if res.WrappedKey == nil {
-		return errors.New("resource has no owner key; cannot decrypt and re-seal its metadata")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
+	owned, err := openOwnedResource(res, mk)
 	if err != nil {
 		return err
 	}
-	oldName := meta.Name
+	defer owned.ck.Wipe()
+	oldName := owned.meta.Name
 	warnOnNameCollision(cl, mk, id, newName)
-	meta.Name = newName
-	plain, err := json.Marshal(meta)
+	owned.meta.Name = newName
+	plain, err := json.Marshal(owned.meta)
 	if err != nil {
 		return err
 	}
-	sealed, err := crypto.SealBound(plain, ck, crypto.AADMeta, id)
+	sealed, err := crypto.SealBound(plain, owned.ck, crypto.AADMeta, id)
 	if err != nil {
 		return err
 	}

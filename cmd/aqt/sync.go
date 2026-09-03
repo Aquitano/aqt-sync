@@ -1495,17 +1495,14 @@ func runClone(ref, dir string, adopt bool, password string) error {
 			defer ck.Wipe()
 			return cloneReadOnly(grantFetch(cl, id), res, ck, id, dir)
 		}
-		return errors.New("not a private folder you own (no owner key)")
+		return errNoOwnerKey
 	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap folder key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
+	owned, err := openOwnedResource(res, mk)
 	if err != nil {
 		return err
 	}
+	defer owned.ck.Wipe()
+	ck, meta := owned.ck, owned.meta
 
 	if dir == "" {
 		dir = id

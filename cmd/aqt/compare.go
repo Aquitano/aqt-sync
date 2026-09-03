@@ -3,7 +3,6 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -164,25 +163,15 @@ func remoteSide(res api.GetResourceResponse) diffSide {
 // node ciphertexts so an unchanged subtree costs no fetch.
 func remoteManifest(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterKey, base syncengine.Manifest) (syncengine.Manifest, error) {
 	var zero syncengine.Manifest
-	if res.WrappedKey == nil {
-		return zero, errors.New("folder resource has no owner key; cannot compare")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return zero, fmt.Errorf("unwrap folder key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
+	owned, err := openOwnedResource(res, mk)
 	if err != nil {
 		return zero, err
 	}
-	if meta.Kind != api.KindFolder {
-		return zero, errors.New("remote resource is not a folder")
+	defer owned.ck.Wipe()
+	if err := requireTreeFolder(owned.meta); err != nil {
+		return zero, err
 	}
-	if !meta.Tree {
-		return zero, errors.New("unsupported remote folder format")
-	}
-	return readRemoteManifest(cl, res, ck, base, mk)
+	return readRemoteManifest(cl, res, owned.ck, base, mk)
 }
 
 // unlockForComparison returns the master key for a read-only comparison, prompting
