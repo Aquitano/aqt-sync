@@ -1037,6 +1037,322 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 	return clean, fallback, nil
 }
 
+// applyState is the manifest half of the working set the phases below hand to one
+// another: the manifest a push commits, and the base this machine records afterwards.
+type applyState struct {
+	merged      map[string]syncengine.Entry
+	newBase     map[string]syncengine.Entry
+	mergedDirs  map[string]syncengine.DirEntry
+	newBaseDirs map[string]syncengine.DirEntry
+}
+
+func newApplyState(c applyCtx) applyState {
+	return applyState{
+		merged:      c.remote.ByPath(),
+		newBase:     c.base.ByPath(),
+		mergedDirs:  c.remote.DirsByPath(),
+		newBaseDirs: c.base.DirsByPath(),
+	}
+}
+
+// actionSides is what one action stream reconciles: the two sides as they stand now,
+// and the two manifests being built from them. merged and newBase are written in place.
+type actionSides[T any] struct {
+	local, remote   map[string]T
+	merged, newBase map[string]T
+}
+
+// applyWork is the transfer work one action stream produces.
+type applyWork[T any] struct {
+	uploads       []T
+	downloads     []T
+	localDeletes  []string
+	remoteChanged bool
+}
+
+// classifyActions folds one action stream into the merged manifest and the new base,
+// and collects the transfers the apply pass will run. Files and tracked directories
+// take the same four-case gate over different element types; --pull-only and
+// --push-only drop the half the caller asked to skip. Nothing is uploaded for a
+// directory — it rides in the manifest — so a directory stream's uploads are unused.
+func classifyActions[T any](actions []syncengine.Action, sides actionSides[T], push, pull bool) applyWork[T] {
+	var w applyWork[T]
+	for _, a := range actions {
+		switch a.Kind {
+		case syncengine.Upload, syncengine.Conflict: // Conflict only survives here with --force
+			if !push {
+				continue
+			}
+			e, ok := sides.local[a.Path]
+			if !ok {
+				// A conflict resolved local-wins where the path is gone locally (local
+				// delete vs remote modify): local winning means deleting it on the remote
+				// too. Recording the zero element here would PUT a path-less empty entry,
+				// drop the remote edit, and corrupt the manifest (several such paths
+				// collapse to one on reload).
+				delete(sides.merged, a.Path)
+				delete(sides.newBase, a.Path)
+				w.remoteChanged = true
+				continue
+			}
+			sides.merged[a.Path] = e
+			sides.newBase[a.Path] = e
+			w.uploads = append(w.uploads, e)
+			w.remoteChanged = true
+		case syncengine.DeleteRemote:
+			if !push {
+				continue
+			}
+			delete(sides.merged, a.Path)
+			delete(sides.newBase, a.Path)
+			w.remoteChanged = true
+		case syncengine.Download:
+			if !pull {
+				continue
+			}
+			e := sides.remote[a.Path]
+			w.downloads = append(w.downloads, e)
+			sides.newBase[a.Path] = e
+		case syncengine.DeleteLocal:
+			if !pull {
+				continue
+			}
+			w.localDeletes = append(w.localDeletes, a.Path)
+			delete(sides.newBase, a.Path)
+		}
+	}
+	return w
+}
+
+// asActions re-types a directory action stream. DirAction is kept separate at the plan
+// boundary so the hardened file apply path is untouched, but it carries the same path
+// and kind, and the classifier gates both identically.
+func asActions(in []syncengine.DirAction) []syncengine.Action {
+	out := make([]syncengine.Action, len(in))
+	for i, a := range in {
+		out[i] = syncengine.Action(a)
+	}
+	return out
+}
+
+// foldConvergedPaths records the paths the two sides already agree on, which Plan emits
+// no action for. Content that converged to the same hash goes into the new base, or it
+// stays "changed on both sides" forever: a later remote-only delete is then misread as a
+// local add, the file is re-pushed, and the deletion never propagates. Keep the local
+// entry (same hash as remote): base.json is local-only bookkeeping, and the local entry
+// carries this machine's mtime, so the next sync stat-fast-paths the file instead of
+// re-hashing it.
+func foldConvergedPaths(st applyState, localByPath, remoteByPath map[string]syncengine.Entry, localDirs, remoteDirs map[string]syncengine.DirEntry) {
+	for p, le := range localByPath {
+		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
+			st.newBase[p] = le
+		}
+	}
+	dropVanished(st.newBase, localByPath, remoteByPath)
+	dropVanished(st.newBaseDirs, localDirs, remoteDirs)
+}
+
+// dropVanished is the deletion counterpart of the fold: a path gone on both sides plans
+// no action (agreement, not conflict), so nothing else removes its base record, and it
+// would read as a forever-pending local delete.
+func dropVanished[T any](recorded, local, remote map[string]T) {
+	for p := range recorded {
+		_, l := local[p]
+		_, r := remote[p]
+		if !l && !r {
+			delete(recorded, p)
+		}
+	}
+}
+
+// materializeConflictCopies preserves the remote side of every content conflict as a
+// local copy BEFORE any local-wins remote mutation runs, so the remote bytes survive on
+// disk even if the push dies mid-apply. The primary path is resolved local-wins by the
+// classifier. Copies land at fresh, collision-checked paths, so they never overwrite
+// anything and skip the download drift guard.
+func materializeConflictCopies(c applyCtx, actions []syncengine.Action, mergeFallback map[string]bool, remoteByPath map[string]syncengine.Entry) error {
+	if c.mode != conflictCopy && c.mode != conflictMerge {
+		return nil
+	}
+	copyActions := actions
+	if c.mode == conflictMerge {
+		copyActions = nil
+		for _, action := range actions {
+			if mergeFallback[action.Path] {
+				copyActions = append(copyActions, action)
+			}
+		}
+	}
+	copies := planConflictCopies(c.root, copyActions, remoteByPath, c.host, c.now, c.copyMemo)
+	if len(copies) == 0 {
+		return nil
+	}
+	entries := copyEntries(copies)
+	cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
+	// A conflict copy lands at a fresh untracked path, so it has no base entry to
+	// stamp an mtime on; the next scan picks it up as a local add.
+	_, cpErr := runDownloads(c.cl, c.root, entries, cpProg)
+	cpProg.finish(cpErr == nil)
+	if cpErr != nil {
+		return cpErr
+	}
+	// Record only after the write lands, so a failed/partial download is re-planned
+	// rather than memoized as done; a retry rewrites the same path.
+	for _, cp := range copies {
+		c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
+		// stderr under --json so the summary object stays the only stdout output;
+		// -q drops the line entirely, like every other per-file line.
+		if flagQuiet {
+			continue
+		}
+		out := os.Stdout
+		if flagJSON {
+			out = os.Stderr
+		}
+		fmt.Fprintf(out, "conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
+	}
+	return nil
+}
+
+// pushMergedManifest commits the server-side change FIRST, before any local file is
+// touched, so a version conflict (another sync committed first) returns with nothing
+// half-applied on disk and the caller can re-plan cleanly. The objects these entries
+// reference were already packed and uploaded during the snapshot pass; this commits
+// only the merged manifest that roots them, and returns the version it landed as.
+func pushMergedManifest(c applyCtx, st applyState) (int, error) {
+	manifest := manifestFrom(st.merged, c.version+1)
+	manifest.Dirs = dirsFrom(st.mergedDirs)
+	if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
+		return 0, err
+	}
+	resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
+	if err != nil {
+		return 0, err // client.ErrConflict on a stale version: retried by the caller
+	}
+	reclaimPacks(c.root, c.cl)
+	return resp.Version, nil
+}
+
+// landCleanMerges writes each merged file to disk now that the root durably references
+// the merged entry, and only if the path still holds the entry resolveTextMerges read.
+// A newer local edit in the merge->PUT window wins on disk: its merge is reported as a
+// conflict, its base record is left at the pre-merge entry, and the next sync re-plans
+// it against the committed merge.
+func landCleanMerges(c applyCtx, merges []cleanMerge, newBase map[string]syncengine.Entry) (landed []cleanMerge, conflicts []string, err error) {
+	baseByPath := c.base.ByPath()
+	landed = make([]cleanMerge, 0, len(merges))
+	for _, resolution := range merges {
+		hash, exists, isDir, err := syncengine.HashOnDisk(c.root, resolution.path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !exists || isDir || (hash != resolution.original.Hash && hash != resolution.entry.Hash) {
+			if baseEntry, ok := baseByPath[resolution.path]; ok {
+				newBase[resolution.path] = baseEntry
+			} else {
+				delete(newBase, resolution.path)
+			}
+			conflicts = append(conflicts, resolution.path)
+			continue
+		}
+		mtime, err := syncengine.WriteFile(c.root, resolution.entry, resolution.data)
+		if err != nil {
+			return nil, nil, err
+		}
+		// A merged file is built in memory, so its entry carries no mtime either.
+		stampMTimes(newBase, map[string]int64{resolution.path: mtime})
+		landed = append(landed, resolution)
+	}
+	return landed, conflicts, nil
+}
+
+// localApply is the disk-side work the push leaves: what to write, and what to remove.
+type localApply struct {
+	downloads    []syncengine.Entry
+	localDeletes []string
+	dirDownloads []syncengine.DirEntry
+	dirRemovals  []string
+}
+
+// applyLocalTree brings the local tree in line with the manifest just committed. It
+// returns the work as executed: a case-only rename consumes the delete that would have
+// destroyed its target, so the summary reports what actually happened.
+func applyLocalTree(c applyCtx, st applyState, w localApply, foldFS bool) (localApply, error) {
+	// A case-only rename arrives as an add+delete pair whose two paths resolve to
+	// the same physical file on a case-folding filesystem: the download lands on the
+	// very file the late delete then destroys, and the next sync pushes that loss
+	// fleet-wide. Convert each such delete into a real rename (executed before any
+	// other byte moves, shallowest first so a renamed directory carries its subtree)
+	// and drop it from the delete lists.
+	if foldFS {
+		var caseRenames []caseRename
+		caseRenames, w.localDeletes, w.dirRemovals = planCaseOnlyRenames(w.localDeletes, w.dirRemovals, st.newBase, st.newBaseDirs)
+		for _, r := range caseRenames {
+			if err := syncengine.RenameCaseOnly(c.root, r.from, r.to); err != nil {
+				return w, err
+			}
+		}
+	}
+
+	// A local file or symlink the remote turned into a directory must be removed before
+	// the download that creates that directory, or the download would write through the
+	// stale entry (refused) or the later delete would hit a now-populated directory.
+	// Every other delete stays after the downloads, so local data is never removed
+	// before its replacement lands.
+	earlyDeletes, lateDeletes := partitionDeletesByDownload(w.localDeletes, w.downloads, foldFS)
+	for _, p := range earlyDeletes {
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return w, err
+		}
+	}
+	dlProg := newProgressBar("downloading", entriesBytes(w.downloads))
+	dlMTimes, dlErr := runDownloads(c.cl, c.root, w.downloads, dlProg)
+	dlProg.finish(dlErr == nil)
+	if dlErr != nil {
+		return w, dlErr
+	}
+	stampMTimes(st.newBase, dlMTimes)
+	for _, p := range lateDeletes {
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return w, err
+		}
+	}
+
+	// Directories last: create/chmod after files land (so a directory exists and gets
+	// its mode), and remove emptied directories after file deletes.
+	if err := syncengine.MaterializeDirs(c.root, w.dirDownloads); err != nil {
+		return w, err
+	}
+	if err := removeDirs(c.root, w.dirRemovals); err != nil {
+		return w, err
+	}
+	// The deletes above prune now-empty parents blind to the tracked set (RemoveFile
+	// and RemoveDir), so emptying a tracked directory takes the directory with it —
+	// and the next sync would read that as a local delete and push it fleet-wide.
+	// Recreate whatever the pruning took from the merged directory set.
+	if len(earlyDeletes)+len(lateDeletes)+len(w.dirRemovals) > 0 {
+		if err := syncengine.EnsureDirs(c.root, dirsFrom(st.newBaseDirs)); err != nil {
+			return w, err
+		}
+	}
+	return w, nil
+}
+
+// persistSyncState records what this pass established: the new base manifest, and the
+// remote version it was reconciled against.
+func persistSyncState(c applyCtx, st applyState, syncedVersion int) error {
+	newBaseManifest := manifestFrom(st.newBase, c.version+1)
+	newBaseManifest.Dirs = dirsFrom(st.newBaseDirs)
+	if err := saveBase(c.root, newBaseManifest); err != nil {
+		return err
+	}
+	recordRemoteVersion(c.root, syncedVersion)
+	return nil
+}
+
+// applySync runs the reconciliation the plan describes, in the one order that is safe:
+// classify both action streams, refuse case collisions, preserve conflicting remote
+// bytes, commit the merged manifest to the server, then touch local files.
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
 	// c holds by-value copies of the caller's keys ([32]byte, so the caller's
 	// deferred wipes do not reach them); scrub this frame's copies on exit.
@@ -1060,134 +1376,21 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		}
 	}
 
-	merged := c.remote.ByPath() // becomes the new server manifest
-	newBase := c.base.ByPath()  // becomes the new last-synced record
-	var uploads []syncengine.Entry
-	var downloads []syncengine.Entry
-	var localDeletes []string
-	remoteChanged := false
-
-	for _, a := range actions {
-		switch a.Kind {
-		case syncengine.Upload, syncengine.Conflict: // Conflict only survives here with --force
-			if !push {
-				continue
-			}
-			e, ok := localByPath[a.Path]
-			if !ok {
-				// A conflict resolved local-wins where the file is gone locally
-				// (local delete vs remote modify): local winning means deleting it
-				// on the remote too. Uploading the zero Entry here would PUT a
-				// path-less empty entry, drop the remote edit, and corrupt the
-				// manifest (several such paths collapse to one on reload).
-				delete(merged, a.Path)
-				delete(newBase, a.Path)
-				remoteChanged = true
-				continue
-			}
-			merged[a.Path] = e
-			newBase[a.Path] = e
-			uploads = append(uploads, e)
-			remoteChanged = true
-		case syncengine.DeleteRemote:
-			if !push {
-				continue
-			}
-			delete(merged, a.Path)
-			delete(newBase, a.Path)
-			remoteChanged = true
-		case syncengine.Download:
-			if !pull {
-				continue
-			}
-			e := remoteByPath[a.Path]
-			downloads = append(downloads, e)
-			newBase[a.Path] = e
-		case syncengine.DeleteLocal:
-			if !pull {
-				continue
-			}
-			localDeletes = append(localDeletes, a.Path)
-			delete(newBase, a.Path)
-		}
-	}
-
-	// Reconcile tracked directories (empty dirs and modes) alongside files. The file
-	// apply path is untouched; directory filesystem ops run in a dedicated pass after
-	// files (below). A directory mode conflict resolves local-wins — it is only
-	// permission metadata, not worth blocking a sync.
-	mergedDirs := c.remote.DirsByPath() // new server dirs
-	newBaseDirs := c.base.DirsByPath()
+	st := newApplyState(c)
+	files := classifyActions(actions, actionSides[syncengine.Entry]{
+		local: localByPath, remote: remoteByPath, merged: st.merged, newBase: st.newBase,
+	}, push, pull)
+	// Tracked directories (empty dirs and modes) reconcile alongside files, but their
+	// filesystem ops run in a dedicated pass after files. A directory mode conflict
+	// resolves local-wins — it is only permission metadata, not worth blocking a sync.
 	localDirs := c.local.DirsByPath()
 	remoteDirs := c.remote.DirsByPath()
-	var dirDownloads []syncengine.DirEntry
-	var dirRemovals []string
-	for _, a := range dirActions {
-		switch a.Kind {
-		case syncengine.Upload, syncengine.Conflict:
-			if !push {
-				continue
-			}
-			if d, ok := localDirs[a.Path]; ok {
-				mergedDirs[a.Path] = d
-				newBaseDirs[a.Path] = d
-			} else { // a conflict resolved local-wins where the dir is gone locally
-				delete(mergedDirs, a.Path)
-				delete(newBaseDirs, a.Path)
-			}
-			remoteChanged = true
-		case syncengine.DeleteRemote:
-			if !push {
-				continue
-			}
-			delete(mergedDirs, a.Path)
-			delete(newBaseDirs, a.Path)
-			remoteChanged = true
-		case syncengine.Download:
-			if !pull {
-				continue
-			}
-			d := remoteDirs[a.Path]
-			dirDownloads = append(dirDownloads, d)
-			newBaseDirs[a.Path] = d
-		case syncengine.DeleteLocal:
-			if !pull {
-				continue
-			}
-			dirRemovals = append(dirRemovals, a.Path)
-			delete(newBaseDirs, a.Path)
-		}
-	}
+	dirs := classifyActions(asActions(dirActions), actionSides[syncengine.DirEntry]{
+		local: localDirs, remote: remoteDirs, merged: st.mergedDirs, newBase: st.newBaseDirs,
+	}, push, pull)
+	remoteChanged := files.remoteChanged || dirs.remoteChanged
 
-	// Fold paths that converged to identical content on both sides into the new
-	// base. Plan emits no action for them (there is nothing to transfer), so without
-	// this they stay "changed on both sides" forever: a later remote-only delete is
-	// then misread as a local add, the file is re-pushed, and the deletion never
-	// propagates. Keep the local entry (same hash as remote): base.json is local-only
-	// bookkeeping, and the local entry carries this machine's mtime, so the next sync
-	// stat-fast-paths the file instead of re-hashing it.
-	for p, le := range localByPath {
-		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
-			newBase[p] = le
-		}
-	}
-	// The deletion counterpart of the fold above: a path gone on both sides plans no
-	// action (agreement, not conflict), so nothing removes its base record. Drop it
-	// here, or it reads as a forever-pending local delete.
-	for p := range newBase {
-		_, l := localByPath[p]
-		_, r := remoteByPath[p]
-		if !l && !r {
-			delete(newBase, p)
-		}
-	}
-	for p := range newBaseDirs {
-		_, l := localDirs[p]
-		_, r := remoteDirs[p]
-		if !l && !r {
-			delete(newBaseDirs, p)
-		}
-	}
+	foldConvergedPaths(st, localByPath, remoteByPath, localDirs, remoteDirs)
 
 	// A push must not commit case-twins to the server — they arm a data-loss trap
 	// for every case-insensitive device — and a pull onto a case-folding filesystem
@@ -1195,178 +1398,51 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	// push too: renaming one member locally is the resolution, and the error says so.
 	foldFS := syncengine.CaseInsensitiveDir(c.root)
 	if (push && remoteChanged) || foldFS {
-		if err := refuseCaseCollisions(manifestFrom(merged, 0).Entries, dirsFrom(mergedDirs)); err != nil {
+		if err := refuseCaseCollisions(manifestFrom(st.merged, 0).Entries, dirsFrom(st.mergedDirs)); err != nil {
 			return err
 		}
 	}
 
-	// Copy mode: preserve the remote side of every content conflict as a local copy
-	// BEFORE any local-wins remote mutation runs, so the remote bytes survive on disk
-	// even if the push below dies mid-apply. The primary path is then resolved
-	// local-wins by the action loop above. Copies land at fresh, collision-checked
-	// paths, so they never overwrite anything and skip the download drift guard.
-	if c.mode == conflictCopy || c.mode == conflictMerge {
-		copyActions := actions
-		if c.mode == conflictMerge {
-			copyActions = nil
-			for _, action := range actions {
-				if mergeFallback[action.Path] {
-					copyActions = append(copyActions, action)
-				}
-			}
-		}
-		if copies := planConflictCopies(c.root, copyActions, remoteByPath, c.host, c.now, c.copyMemo); len(copies) > 0 {
-			entries := copyEntries(copies)
-			cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
-			// A conflict copy lands at a fresh untracked path, so it has no base entry to
-			// stamp an mtime on; the next scan picks it up as a local add.
-			_, cpErr := runDownloads(c.cl, c.root, entries, cpProg)
-			cpProg.finish(cpErr == nil)
-			if cpErr != nil {
-				return cpErr
-			}
-			// Record only after the write lands, so a failed/partial download is
-			// re-planned rather than memoized as done; a retry rewrites the same path.
-			for _, cp := range copies {
-				c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
-				// stderr under --json so the summary object stays the only stdout output;
-				// -q drops the line entirely, like every other per-file line.
-				if flagQuiet {
-					continue
-				}
-				out := os.Stdout
-				if flagJSON {
-					out = os.Stderr
-				}
-				fmt.Fprintf(out, "conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
-			}
-		}
+	if err := materializeConflictCopies(c, actions, mergeFallback, remoteByPath); err != nil {
+		return err
 	}
 
-	// Push the server-side change FIRST, before any local file is touched, so a
-	// version conflict (another sync committed first) returns with nothing
-	// half-applied on disk and the caller can re-plan cleanly. The objects these
-	// entries reference were already packed and uploaded during the snapshot pass;
-	// here we only commit the merged manifest that roots them.
 	syncedVersion := c.version
 	if push && remoteChanged {
-		manifest := manifestFrom(merged, c.version+1)
-		manifest.Dirs = dirsFrom(mergedDirs)
-		if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
-			return err
-		}
-		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
-		if err != nil {
-			return err // client.ErrConflict on a stale version: retried by the caller
-		}
-		syncedVersion = resp.Version
-		reclaimPacks(c.root, c.cl)
-	}
-	// The root now durably references the merged entry. Land the same bytes locally
-	// only after the optimistic PUT succeeds, and only if the path still contains the
-	// entry resolveTextMerges read. A newer local edit in the merge->PUT window wins on
-	// disk and is re-planned against the committed merge on the next sync.
-	baseByPath := c.base.ByPath()
-	var mergeConflicts []string
-	landedMerges := make([]cleanMerge, 0, len(cleanMerges))
-	for _, resolution := range cleanMerges {
-		hash, exists, isDir, err := syncengine.HashOnDisk(c.root, resolution.path)
+		version, err := pushMergedManifest(c, st)
 		if err != nil {
 			return err
 		}
-		if !exists || isDir || (hash != resolution.original.Hash && hash != resolution.entry.Hash) {
-			if baseEntry, ok := baseByPath[resolution.path]; ok {
-				newBase[resolution.path] = baseEntry
-			} else {
-				delete(newBase, resolution.path)
-			}
-			mergeConflicts = append(mergeConflicts, resolution.path)
-			continue
-		}
-		mtime, err := syncengine.WriteFile(c.root, resolution.entry, resolution.data)
-		if err != nil {
-			return err
-		}
-		// A merged file is built in memory, so its entry carries no mtime either.
-		stampMTimes(newBase, map[string]int64{resolution.path: mtime})
-		landedMerges = append(landedMerges, resolution)
+		syncedVersion = version
 	}
 
-	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, downloads, localDeletes, localByPath, remoteByPath, c.base.ByPath(), newBase)
+	landedMerges, mergeConflicts, err := landCleanMerges(c, cleanMerges, st.newBase)
+	if err != nil {
+		return err
+	}
+
+	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, files.downloads, files.localDeletes, localByPath, remoteByPath, c.base.ByPath(), st.newBase)
 	if err != nil {
 		return err
 	}
 	conflicts = append(conflicts, mergeConflicts...)
 
-	// A case-only rename arrives as an add+delete pair whose two paths resolve to
-	// the same physical file on a case-folding filesystem: the download lands on the
-	// very file the late delete then destroys, and the next sync pushes that loss
-	// fleet-wide. Convert each such delete into a real rename (executed before any
-	// other byte moves, shallowest first so a renamed directory carries its subtree)
-	// and drop it from the delete lists.
-	if foldFS {
-		var caseRenames []caseRename
-		caseRenames, localDeletes, dirRemovals = planCaseOnlyRenames(localDeletes, dirRemovals, newBase, newBaseDirs)
-		for _, r := range caseRenames {
-			if err := syncengine.RenameCaseOnly(c.root, r.from, r.to); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Server is updated; now bring the local tree in line. A local file or symlink the
-	// remote turned into a directory must be removed before the download that creates
-	// that directory, or the download would write through the stale entry (refused) or
-	// the later delete would hit a now-populated directory. Every other delete stays
-	// after the downloads, so local data is never removed before its replacement lands.
-	earlyDeletes, lateDeletes := partitionDeletesByDownload(localDeletes, downloads, foldFS)
-	for _, p := range earlyDeletes {
-		if err := syncengine.RemoveFile(c.root, p); err != nil {
-			return err
-		}
-	}
-	dlProg := newProgressBar("downloading", entriesBytes(downloads))
-	dlMTimes, dlErr := runDownloads(c.cl, c.root, downloads, dlProg)
-	dlProg.finish(dlErr == nil)
-	if dlErr != nil {
-		return dlErr
-	}
-	stampMTimes(newBase, dlMTimes)
-	for _, p := range lateDeletes {
-		if err := syncengine.RemoveFile(c.root, p); err != nil {
-			return err
-		}
-	}
-
-	// Directories last: create/chmod after files land (so a directory exists and gets
-	// its mode), and remove emptied directories after file deletes.
-	if err := syncengine.MaterializeDirs(c.root, dirDownloads); err != nil {
+	work, err := applyLocalTree(c, st, localApply{
+		downloads: downloads, localDeletes: localDeletes,
+		dirDownloads: dirs.downloads, dirRemovals: dirs.localDeletes,
+	}, foldFS)
+	if err != nil {
 		return err
 	}
-	if err := removeDirs(c.root, dirRemovals); err != nil {
-		return err
-	}
-	// The deletes above prune now-empty parents blind to the tracked set (RemoveFile
-	// and RemoveDir), so emptying a tracked directory takes the directory with it —
-	// and the next sync would read that as a local delete and push it fleet-wide.
-	// Recreate whatever the pruning took from the merged directory set.
-	if len(earlyDeletes)+len(lateDeletes)+len(dirRemovals) > 0 {
-		if err := syncengine.EnsureDirs(c.root, dirsFrom(newBaseDirs)); err != nil {
-			return err
-		}
-	}
 
-	newBaseManifest := manifestFrom(newBase, c.version+1)
-	newBaseManifest.Dirs = dirsFrom(newBaseDirs)
-	if err := saveBase(c.root, newBaseManifest); err != nil {
+	if err := persistSyncState(c, st, syncedVersion); err != nil {
 		return err
 	}
-	recordRemoteVersion(c.root, syncedVersion)
 	mergedPaths := make([]string, len(landedMerges))
 	for i, resolution := range landedMerges {
 		mergedPaths[i] = resolution.path
 	}
-	summarize(uploads, downloads, localDeletes, mergedPaths)
+	summarize(files.uploads, work.downloads, work.localDeletes, mergedPaths)
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
 		printPaths("conflict", conflicts)
