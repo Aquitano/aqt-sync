@@ -34,7 +34,7 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzPackRoundTrip$$' -fuzztime=10s ./internal/server
 	go test -run='^$$' -fuzz='^FuzzParseRef$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzSplitRefPath$$' -fuzztime=10s ./cmd/aqt
-	go test -run='^$$' -fuzz='^FuzzDecodeBase$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzDecodeBase$$' -fuzztime=10s ./internal/folderstate
 	go test -run='^$$' -fuzz='^FuzzMergeModeEditScripts$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzChangesReconstructsTarget$$' -fuzztime=10s ./internal/syncengine/merge
 	go test -run='^$$' -fuzz='^FuzzThreeWayCleanLinesComeFromInputs$$' -fuzztime=10s ./internal/syncengine/merge
