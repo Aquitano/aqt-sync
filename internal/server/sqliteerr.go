@@ -29,7 +29,10 @@ func isForeignKeyViolation(err error) bool {
 
 // isUnique reports a UNIQUE violation specifically. NOT NULL and CHECK failures
 // are server bugs and must not reach a caller as a duplicate, so they get their own
-// codes here and never match.
+// codes here and never match. A PRIMARY KEY collision reports the distinct code
+// SQLITE_CONSTRAINT_PRIMARYKEY and is deliberately not covered: the only caller is
+// CreateAccount, whose handle is random, so a colliding primary key is a bug rather
+// than the duplicate-account case this answers.
 func isUnique(err error) bool {
 	return sqliteCode(err, sqlite3.SQLITE_CONSTRAINT_UNIQUE)
 }
