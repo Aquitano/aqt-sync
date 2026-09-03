@@ -56,6 +56,30 @@ func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
 	}
 }
 
+// hasActions answers the footer without building any dialog, so it has to stay
+// equal to what panelActions would actually return in every state that can empty
+// a panel: no tracked folder, and an empty snapshot or resource list.
+func TestTUIHasActionsMatchesPanelActions(t *testing.T) {
+	panels := []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources}
+	for _, root := range []string{"/tmp/vault", ""} {
+		for _, empty := range []bool{false, true} {
+			m := testModel(t)
+			m.ctx.root = root
+			if empty {
+				m.snaps, m.resources = nil, nil
+			}
+			m.rebuildAll()
+			for _, panel := range panels {
+				m.setFocus(panel)
+				if got, want := m.hasActions(), len(m.panelActions()) > 0; got != want {
+					t.Fatalf("%s hasActions = %v with root=%q empty=%v, but panelActions has %d",
+						m.panel().title, got, root, empty, len(m.panelActions()))
+				}
+			}
+		}
+	}
+}
+
 func TestTUIIssue92SingleKeyActions(t *testing.T) {
 	m := testModel(t)
 

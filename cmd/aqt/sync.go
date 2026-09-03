@@ -463,22 +463,7 @@ func printIncomingReport(rep *incomingReport) {
 // ciphertexts so an unchanged remote subtree costs no fetch, exactly like a sync's
 // remote read.
 func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengine.Manifest, mk crypto.MasterKey) (changeSet, error) {
-	if res.WrappedKey == nil {
-		return changeSet{}, errors.New("folder resource has no owner key")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return changeSet{}, err
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
-	if err != nil {
-		return changeSet{}, err
-	}
-	if !meta.Tree {
-		return changeSet{}, errors.New("unsupported remote folder format")
-	}
-	remote, err := readRemoteManifest(cl, res, ck, base, mk)
+	remote, err := remoteManifest(cl, res, mk, base)
 	if err != nil {
 		return changeSet{}, err
 	}

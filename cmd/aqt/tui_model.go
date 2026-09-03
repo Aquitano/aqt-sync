@@ -771,8 +771,23 @@ func tuiOpenDialog(d tuiDialog) tea.Cmd {
 	return func() tea.Msg { return tuiOpenDialogMsg{dialog: d} }
 }
 
-// hasActions reports whether the focused panel has any action to offer right now.
-func (m *tuiModel) hasActions() bool { return len(m.panelActions()) > 0 }
+// hasActions reports whether the focused panel has any action to offer right
+// now. The footer asks on every render, so this mirrors the guard each builder
+// below opens with instead of building the (allocating) dialogs panelActions
+// would. TestTUIHasActionsMatchesPanelActions pins the two together.
+func (m *tuiModel) hasActions() bool {
+	switch m.focus {
+	case tuiPanelStatus:
+		return true
+	case tuiPanelFiles:
+		return m.ctx.root != ""
+	case tuiPanelSnapshots:
+		return m.ctx.root != "" || m.selectedSnapshot() != nil
+	case tuiPanelResources:
+		return m.selectedResource() != nil
+	}
+	return false
+}
 
 func (m *tuiModel) panelActions() []tuiMenuOption {
 	switch m.focus {

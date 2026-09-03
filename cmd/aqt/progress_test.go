@@ -3,13 +3,48 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
+
+// packio.Uploader honors whatever context it is handed; what only this package can
+// prove is that newUploader hands it the root signal context, so a ^C stops a push
+// from sealing the rest of the tree. The client is deliberately left on its own
+// context: if the adapter dropped rootCtx, the dispatched pack would reach the
+// unroutable address and fail with a connection error instead of a cancellation.
+func TestNewUploaderObservesRootCancel(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	orig := rootCtx
+	rootCtx = ctx
+	t.Cleanup(func() { rootCtx = orig })
+
+	cl, err := client.New("https://127.0.0.1:1/", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	up := newUploader(cl, nil)
+	cancel()
+
+	var failed error
+	for i := 0; i < 64 && failed == nil; i++ {
+		failed = up.Add(crypto.Chunk{ID: fmt.Sprintf("chunk-%03d", i), Len: 1 << 20}, make([]byte, 1<<20))
+	}
+	if failed == nil {
+		failed = up.Flush()
+	}
+	if !errors.Is(failed, context.Canceled) {
+		t.Fatalf("cancel surfaced as %v, want context.Canceled", failed)
+	}
+}
 
 func TestEntriesBytes(t *testing.T) {
 	got := entriesBytes([]syncengine.Entry{{Size: 100}, {Size: 250}, {Size: 0}})
