@@ -6,7 +6,6 @@ package server
 
 import (
 	"context"
-	"crypto/ed25519"
 	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -14,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,7 +25,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // RegistrationMode selects how POST /v1/account handles a new signup.
@@ -253,8 +250,8 @@ func (s *Server) Router() *gin.Engine {
 	// Human-facing landing page for a public share link. Its pinned crypto assets
 	// decrypt inline files in the browser; the content key remains in the URL
 	// fragment, which never reaches the server.
-	r.GET("/x-assets/:name", s.shareAsset)
-	r.GET("/x/:id", s.shareView)
+	r.GET("/x-assets/:name", s.handleShareAsset)
+	r.GET("/x/:id", s.handleShareView)
 
 	v1 := r.Group("/v1")
 	{
@@ -263,16 +260,16 @@ func (s *Server) Router() *gin.Engine {
 		// pumping.
 		unauth := v1.Group("", s.limiter.middleware, limitBody(maxControlBody))
 		{
-			unauth.POST("/account", s.createAccount)
-			unauth.GET("/account/salt", s.accountSalt)
-			unauth.POST("/auth/challenge", s.authChallenge)
-			unauth.POST("/devices", s.attachDevice)
+			unauth.POST("/account", s.handleCreateAccount)
+			unauth.GET("/account/salt", s.handleAccountSalt)
+			unauth.POST("/auth/challenge", s.handleAuthChallenge)
+			unauth.POST("/devices", s.handleAttachDevice)
 		}
 
 		// Public resource reads need no auth; the id is unguessable and the
 		// decrypt key lives only in the caller's URL fragment.
-		v1.GET("/resources/:id", s.getResource)
-		v1.GET("/public/resources/:id/preflight", s.publicResourcePreflight)
+		v1.GET("/resources/:id", s.handleGetResource)
+		v1.GET("/public/resources/:id/preflight", s.handlePublicResourcePreflight)
 
 		// Public object read for a streamed (large) share: a link holder has the
 		// content key (URL fragment) but object fetch is otherwise owner-scoped. Gated
@@ -281,7 +278,7 @@ func (s *Server) Router() *gin.Engine {
 		// resources, so the client's span coalescing on raw ranges could leak a private
 		// neighbor's gap bytes. Its own limiter, far looser than the unauth bucket,
 		// which is tuned for auth brute force and would strangle a bulk download.
-		v1.POST("/public/resources/:id/objects", s.publicLimiter.middleware, limitBody(maxChunkBody), s.publicObjects)
+		v1.POST("/public/resources/:id/objects", s.publicLimiter.middleware, limitBody(maxChunkBody), s.handlePublicObjects)
 
 		// gzipJSON rides the authed group: it compresses the hex-id JSON of
 		// check/locate/list, and its Content-Type guard leaves the raw pack/blob
@@ -297,36 +294,36 @@ func (s *Server) Router() *gin.Engine {
 			// POST creates a resource (server-assigned id); PUT replaces the one its
 			// envelope names. The single handler dispatches on the id, and refuses a PUT
 			// that carries none.
-			authed.POST("/resources", s.putResource)
-			authed.PUT("/resources", s.putResource)
-			authed.GET("/resources", s.listResources)
-			authed.PUT("/resources/:id/metadata", limitBody(maxControlBody), s.updateResourceMetadata)
+			authed.POST("/resources", s.handlePutResource)
+			authed.PUT("/resources", s.handlePutResource)
+			authed.GET("/resources", s.handleListResources)
+			authed.PUT("/resources/:id/metadata", limitBody(maxControlBody), s.handleUpdateResourceMetadata)
 			// Visibility flips and grants take the chunk-size body cap, not the control
 			// cap: on a client-GC account they may carry the resource's full ChunkRefs
 			// to refresh the read scope they mint.
-			authed.POST("/resources/:id/visibility", limitBody(maxChunkBody), s.setVisibility)
-			authed.DELETE("/resources/:id", s.deleteResource)
+			authed.POST("/resources/:id/visibility", limitBody(maxChunkBody), s.handleSetVisibility)
+			authed.DELETE("/resources/:id", s.handleDeleteResource)
 
 			// Device management. Attach (POST /devices) is unauthenticated above
 			// (it is how a new device proves itself); listing and revoking require
 			// an existing device's token.
-			authed.GET("/devices", s.listDevices)
-			authed.DELETE("/devices/:id", s.deleteDevice)
+			authed.GET("/devices", s.handleListDevices)
+			authed.DELETE("/devices/:id", s.handleDeleteDevice)
 
 			// Re-wrap the account's root key under a new passphrase: a small body
 			// (KDF params + a wrapped key + verifiers), so it keeps the control cap.
 			// Root-key rotation does not — its body carries every re-wrapped
 			// resource, snapshot, and grant key, so it needs the engine-wide cap.
-			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.changePassphrase)
-			authed.PUT("/account/root-key", s.rotateRootKey)
+			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.handleChangePassphrase)
+			authed.PUT("/account/root-key", s.handleRotateRootKey)
 
 			// Storage summary for the calling account: pack bytes against quota plus
 			// row counts. All plaintext-side metadata the owner already implies.
-			authed.GET("/account/usage", s.accountUsage)
+			authed.GET("/account/usage", s.handleAccountUsage)
 
 			// Self-service erasure. The body carries only the passphrase proof, so it
 			// keeps the control cap.
-			authed.DELETE("/account", limitBody(maxControlBody), s.deleteAccount)
+			authed.DELETE("/account", limitBody(maxControlBody), s.handleDeleteAccount)
 
 			// Account-to-account grants. The key lookup answers unknown emails with a
 			// deterministic decoy (like /account/salt), so it is not an existence
@@ -334,46 +331,46 @@ func (s *Server) Router() *gin.Engine {
 			// client-sealed HPKE wraps the server stores opaquely. The grant object
 			// read reuses the public endpoint's exact-slice framing with a grant check
 			// in place of public visibility; it shares the chunk body cap.
-			authed.GET("/account/keys", s.accountKeys)
-			authed.POST("/resources/:id/grants", limitBody(maxChunkBody), s.createGrant)
-			authed.GET("/resources/:id/grants", s.listResourceGrants)
-			authed.DELETE("/resources/:id/grants/:grantee", s.deleteGrant)
-			authed.GET("/shares", s.listShares)
+			authed.GET("/account/keys", s.handleAccountKeys)
+			authed.POST("/resources/:id/grants", limitBody(maxChunkBody), s.handleCreateGrant)
+			authed.GET("/resources/:id/grants", s.handleListResourceGrants)
+			authed.DELETE("/resources/:id/grants/:grantee", s.handleDeleteGrant)
+			authed.GET("/shares", s.handleListShares)
 			// The grantee side of revocation: the delete predicate is the caller's own
 			// grantee handle, and an optional block keeps the grantor from re-adding the
 			// row. Blocks live on their own path rather than under /shares/, whose :id
 			// wildcard would collide with a static segment.
-			authed.DELETE("/shares/:id", s.deleteShare)
-			authed.GET("/share-blocks", s.listShareBlocks)
-			authed.DELETE("/share-blocks/:owner", s.deleteShareBlock)
-			authed.POST("/resources/:id/objects", limitBody(maxChunkBody), s.grantObjects)
+			authed.DELETE("/shares/:id", s.handleDeleteShare)
+			authed.GET("/share-blocks", s.handleListShareBlocks)
+			authed.DELETE("/share-blocks/:owner", s.handleDeleteShareBlock)
+			authed.POST("/resources/:id/objects", limitBody(maxChunkBody), s.handleGrantObjects)
 
 			// Folder-sync packed object store: opaque, content-addressed,
 			// owner-scoped. Objects ship inside raw packs; check/locate negotiate
 			// which objects to up/download by id.
-			authed.POST("/chunks/check", limitBody(maxChunkBody), s.checkChunks)
-			authed.POST("/chunks/locate", limitBody(maxChunkBody), s.locateChunks)
-			authed.PUT("/packs/:id", limitBody(maxPackBody), s.putPack)
-			authed.GET("/packs/:id", s.getPack)
+			authed.POST("/chunks/check", limitBody(maxChunkBody), s.handleCheckChunks)
+			authed.POST("/chunks/locate", limitBody(maxChunkBody), s.handleLocateChunks)
+			authed.PUT("/packs/:id", limitBody(maxPackBody), s.handlePutPack)
+			authed.GET("/packs/:id", s.handleGetPack)
 			// GC is expensive (its planning scans the owner's object table), so it gets a
 			// second, owner-keyed limiter far tighter than the general authed budget.
-			authed.POST("/gc", s.gcLimiter.middlewareKeyed(ownerKey), s.runGC)
+			authed.POST("/gc", s.gcLimiter.middlewareKeyed(ownerKey), s.handleRunGC)
 			// Client-managed GC: a prune reads the full object inventory, diffs it
 			// against the closure of its decrypted roots, and deletes the remainder.
 			// Unlike POST /gc these are bounded per request (one indexed page, one
 			// capped batch), so the general authed limiter is the right budget — the
 			// gcLimiter's drip-rate would stretch a large account's prune into minutes.
-			authed.GET("/chunks", s.listChunks)
-			authed.POST("/chunks/delete", limitBody(maxChunkBody), s.deleteChunks)
+			authed.GET("/chunks", s.handleListChunks)
+			authed.POST("/chunks/delete", limitBody(maxChunkBody), s.handleDeleteChunks)
 
 			// Snapshots: immutable, GC-pinned copies of a resource version. Owner-only;
 			// a snapshot is never public, so unlike a resource there is no unauth read.
-			authed.POST("/snapshots", limitBody(maxControlBody), s.createSnapshot)
-			authed.GET("/snapshots", s.listSnapshots)
-			authed.GET("/snapshots/:id", s.getSnapshot)
-			authed.POST("/snapshots/:id/anchor", limitBody(maxControlBody), s.setSnapshotAnchor)
-			authed.DELETE("/snapshots/:id", s.deleteSnapshot)
-			authed.POST("/resources/:id/auto-snapshot", limitBody(maxControlBody), s.setAutoSnapshot)
+			authed.POST("/snapshots", limitBody(maxControlBody), s.handleCreateSnapshot)
+			authed.GET("/snapshots", s.handleListSnapshots)
+			authed.GET("/snapshots/:id", s.handleGetSnapshot)
+			authed.POST("/snapshots/:id/anchor", limitBody(maxControlBody), s.handleSetSnapshotAnchor)
+			authed.DELETE("/snapshots/:id", s.handleDeleteSnapshot)
+			authed.POST("/resources/:id/auto-snapshot", limitBody(maxControlBody), s.handleSetAutoSnapshot)
 		}
 	}
 	return r
@@ -433,390 +430,7 @@ func bearerToken(c *gin.Context) (string, bool) {
 	return strings.TrimPrefix(h, prefix), true
 }
 
-// --- account & device handlers ---
-
-func (s *Server) createAccount(c *gin.Context) {
-	var req api.CreateAccountRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if req.Email == "" || len(req.PublicKey) != ed25519.PublicKeySize {
-		abort(c, http.StatusBadRequest, "email and a valid public key are required")
-		return
-	}
-	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.AuthVerifier) == 0 {
-		abort(c, http.StatusBadRequest, "wrapped root and auth verifier are required")
-		return
-	}
-	// Invite mode gates every signup on a server-issued token, so an attacker cannot
-	// register (and thereby squat) an unclaimed email. The response is uniform whether
-	// the token is missing or wrong, so it leaks nothing about the token set.
-	if s.cfg.Registration == RegistrationInvite && !s.cfg.inviteAccepted(req.InviteToken) {
-		abortCode(c, http.StatusForbidden, "a valid invite token is required to register on this server", api.ErrCodeInviteRequired)
-		return
-	}
-	// The enc key is what makes the account a grant target, so it is registered at
-	// signup rather than backfilled later. Its identity self-signature must verify,
-	// or a bad key would poison every future grant.
-	if len(req.EncPublicKey) != crypto.EncPublicKeySize ||
-		!crypto.VerifyEncKey(req.PublicKey, req.EncPublicKey, req.EncKeySig) {
-		abort(c, http.StatusBadRequest, "enc public key must be 32 bytes and self-signed by the identity key")
-		return
-	}
-	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
-	if errors.Is(err, ErrConflict) {
-		// The email is taken. Tell the caller so only if they prove they are its owner
-		// by presenting the account's passphrase verifier; anyone else gets the decoy,
-		// a success-shaped response whose token authenticates nothing. The existing
-		// account is untouched either way — a duplicate signup creates no device on it.
-		//
-		// Note this does not make open registration unenumerable, and no server-side
-		// response shape can: signing up for a free email must succeed, so "the token
-		// worked" still means "the email was free". Registration=invite is the setting
-		// that actually closes it. What the decoy buys is that a prober cannot confirm
-		// a *specific* address without also taking it. See docs/threat-model.md.
-		if s.signupProvesOwnership(req.Email, req.AuthVerifier) {
-			abortCode(c, http.StatusConflict, "an account already exists for this email; use `aqt login` to attach this device", api.ErrCodeAccountExists)
-			return
-		}
-		c.JSON(http.StatusCreated, s.decoyAuthResponse())
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "create account failed")
-		return
-	}
-	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName), 1, s.cfg.MaxDevices)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "create device failed")
-		return
-	}
-	c.JSON(http.StatusCreated, api.AuthResponse{
-		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token, Epoch: 1,
-	})
-}
-
-// signupProvesOwnership reports whether a duplicate signup carried the existing
-// account's own passphrase verifier. Only then is it safe to confirm the account
-// exists: the caller already knows the secret that would let them log in, so the
-// confirmation tells them nothing they could not learn from `aqt login`.
-func (s *Server) signupProvesOwnership(email string, verifier []byte) bool {
-	_, _, storedHash, _, err := s.store.AccountForAuth(email)
-	if err != nil {
-		return false
-	}
-	sum := sha256.Sum256(verifier)
-	return subtle.ConstantTimeCompare(sum[:], storedHash) == 1
-}
-
-// decoyAuthResponse builds a success-shaped auth response whose fields match a real
-// one's lengths but authenticate nothing. It backs the enumeration-safe duplicate
-// signup path: the handle/device/token are random, so the response is
-// indistinguishable on the wire from a genuine account creation.
-func (s *Server) decoyAuthResponse() api.AuthResponse {
-	return api.AuthResponse{
-		OwnerHandle: newID(12),
-		DeviceID:    newID(10),
-		Token:       newID(32),
-		Epoch:       1,
-	}
-}
-
-// accountSalt is the new-device bootstrap: it returns the KDF params and wrapped
-// root key for an email. An unknown email gets a deterministic decoy (200, not 404)
-// so the endpoint does not reveal which emails have accounts; only someone who knows
-// the passphrase can tell a decoy from a real account (the decoy never unwraps).
-func (s *Server) accountSalt(c *gin.Context) {
-	email := c.Query("email")
-	if email == "" {
-		abort(c, http.StatusBadRequest, "email query param required")
-		return
-	}
-	acc, err := s.store.AccountByEmail(email)
-	if errors.Is(err, ErrNotFound) {
-		decoy, derr := s.decoyBootstrap(email)
-		if derr != nil {
-			abort(c, http.StatusInternalServerError, "lookup failed")
-			return
-		}
-		c.JSON(http.StatusOK, decoy)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "lookup failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot})
-}
-
-// decoyBootstrap synthesizes a bootstrap response for an unknown email,
-// deterministically from the server secret so the same email always yields the same
-// decoy. The salt and wrapped-root bytes are indistinguishable from a real account's
-// to anyone without the passphrase, so a registered and an unregistered email look
-// identical on the wire.
-func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
-	email = api.NormalizeEmail(email)
-	secret, err := s.store.ServerSecret()
-	if err != nil {
-		return api.SaltResponse{}, err
-	}
-	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
-	// Derive the decoy's Argon2id costs from the same value set a real moderate
-	// calibration produces, seeded deterministically per email. The package-default
-	// (3, 64 MiB, 4) marked every decoy identically; drawing from the realistic
-	// distribution instead means a decoy's params are indistinguishable from a
-	// calibrated account's.
-	timeCost, memoryKiB, threads := crypto.DecoyKdfCosts(stream("aqt-decoy-costs", 2))
-	def, err := crypto.ManualKdfParams(timeCost, memoryKiB, threads)
-	if err != nil {
-		return api.SaltResponse{}, err
-	}
-	def.Salt = stream("aqt-decoy-salt", len(def.Salt))
-	// A real wrapped root is a 32-byte key sealed with XChaCha20-Poly1305: a 24-byte
-	// nonce and 48 bytes of ciphertext+tag. Match those lengths exactly.
-	return api.SaltResponse{
-		Kdf: def,
-		WrappedRoot: crypto.SealedBlob{
-			Nonce:      stream("aqt-decoy-nonce", crypto.NonceSize),
-			Ciphertext: stream("aqt-decoy-ct", crypto.KeySize+16),
-		},
-	}, nil
-}
-
-// decoyStream derives one decoy field deterministically from the server secret, so
-// repeated lookups for the same email return the same decoy. The email must already
-// be normalized: real accounts answer any casing of their address, so a decoy that
-// varied by case would out an email as unregistered. decoyBootstrap normalizes it
-// itself; decoyAccountKeys takes it normalized from its caller.
-func (s *Server) decoyStream(secret []byte, email, label string, n int) []byte {
-	out, err := hkdf.Key(sha256.New, secret, []byte(email), label, n)
-	if err != nil {
-		panic("hkdf decoy: " + err.Error()) // unreachable: every decoy field is a fixed, short length
-	}
-	return out
-}
-
-func (s *Server) authChallenge(c *gin.Context) {
-	var req api.ChallengeRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if req.Email == "" {
-		abort(c, http.StatusBadRequest, "email required")
-		return
-	}
-	id, nonce, err := s.store.CreateChallenge(req.Email)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "challenge failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.ChallengeResponse{ChallengeID: id, Nonce: nonce})
-}
-
-func (s *Server) attachDevice(c *gin.Context) {
-	var req api.AttachDeviceRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	// Consume the challenge first so a bad attempt can't be replayed against it.
-	nonce, err := s.store.ConsumeChallenge(req.ChallengeID, req.Email)
-	if errors.Is(err, ErrNotFound) {
-		abortCode(c, http.StatusUnauthorized, "invalid or expired challenge", api.ErrCodeInvalidChallenge)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "challenge lookup failed")
-		return
-	}
-	owner, pub, verifierHash, epoch, err := s.store.AccountForAuth(req.Email)
-	// Attaching needs both the signing key (proves the master key) and the passphrase
-	// verifier (proves the current passphrase), so a stale passphrase or a cached
-	// master key alone cannot attach. A missing account, a bad signature, and a bad
-	// verifier all return the same 401: no oracle.
-	sigOK := err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature)
-	verifierOK := err == nil && verifierMatches(req.AuthVerifier, verifierHash)
-	if sigOK && verifierOK {
-		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch, s.cfg.MaxDevices)
-		if errors.Is(err, ErrDeviceLimit) {
-			u, _ := s.store.AccountUsage(owner)
-			c.AbortWithStatusJSON(http.StatusForbidden, api.ErrorResponse{Error: "device limit reached; revoke a device before attaching another", Code: api.ErrCodeDeviceLimit, LimitKind: "devices", Current: u.Devices, Limit: int64(s.cfg.MaxDevices)})
-			return
-		}
-		if err != nil {
-			abort(c, http.StatusInternalServerError, "create device failed")
-			return
-		}
-		c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
-		return
-	}
-	if err != nil && !errors.Is(err, ErrNotFound) {
-		abort(c, http.StatusInternalServerError, "lookup failed")
-		return
-	}
-	abortCode(c, http.StatusUnauthorized, "invalid credentials", api.ErrCodeInvalidCredentials)
-}
-
-// verifierMatches reports whether the presented auth verifier hashes to the stored
-// hash, in constant time.
-func verifierMatches(verifier, storedHash []byte) bool {
-	if len(verifier) == 0 || len(storedHash) != sha256.Size {
-		return false
-	}
-	h := sha256.Sum256(verifier)
-	return subtle.ConstantTimeCompare(h[:], storedHash) == 1
-}
-
-// changePassphrase re-wraps the account's root key under a new passphrase. The store
-// verifies the caller knows the current passphrase and bumps the account epoch, so
-// every other device's token stops authenticating (they re-login with the new
-// passphrase); the calling device keeps working.
-func (s *Server) changePassphrase(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	deviceID := c.GetString(deviceContextKey)
-	var req api.PassphraseChangeRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 {
-		abort(c, http.StatusBadRequest, "wrapped root and both verifiers are required")
-		return
-	}
-	newEpoch, err := s.store.ChangePassphrase(owner, deviceID, req.Kdf, req.WrappedRoot, req.OldAuthVerifier, req.NewAuthVerifier, req.ExpectedEpoch)
-	if errors.Is(err, ErrNotFound) {
-		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
-		return
-	}
-	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "the passphrase changed on another device; re-run with the current one", api.ErrCodeVersionConflict)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "passphrase change failed")
-		return
-	}
-	// The calling device's token is unchanged (its epoch was advanced with the
-	// account's), so no new token is issued; the client keeps using it.
-	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Epoch: newEpoch})
-}
-
-// rotateRootKey performs the account-wide recovery operation: it mints a new account
-// identity and re-wraps everything derived from the old one.
-func (s *Server) rotateRootKey(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	deviceID := c.GetString(deviceContextKey)
-	var req api.RootKeyRotationRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 || len(req.PublicKey) != ed25519.PublicKeySize || len(req.EncPublicKey) != crypto.EncPublicKeySize || !crypto.VerifyEncKey(ed25519.PublicKey(req.PublicKey), req.EncPublicKey, req.EncKeySig) {
-		abort(c, http.StatusBadRequest, "complete, self-consistent new account identity is required")
-		return
-	}
-	token, epoch, err := s.store.RotateRootKey(owner, deviceID, req)
-	if errors.Is(err, ErrNotFound) {
-		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
-		return
-	}
-	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "account or a protected key changed while rotating; re-run root-key rotation", api.ErrCodeVersionConflict)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "root-key rotation failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
-}
-
-// deleteAccount erases the calling account and everything stored under it. It
-// requires the passphrase proof, not just a device token: a token is a credential
-// the account holder may have lost control of, and this is the one operation no
-// backup can undo. The server holds no plaintext, so there is nothing to hand back
-// first — the client is expected to have pulled anything it wants to keep.
-func (s *Server) deleteAccount(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.DeleteAccountRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if len(req.AuthVerifier) == 0 {
-		abort(c, http.StatusBadRequest, "passphrase proof is required")
-		return
-	}
-	// Read the storage total before erasing it, so the receipt can quote the number
-	// the caller confirmed against. DeletedAccount.Bytes counts only the blob and
-	// pack files unlinked, which is a fraction of what `aqt usage` reports (that
-	// total also models the account's database rows), so it is not a substitute: a
-	// failed read omits the total rather than quietly swapping in a smaller one, and
-	// never blocks the deletion.
-	usage, usageErr := s.store.AccountUsage(owner)
-
-	acct, err := s.store.DeleteAccountWithProof(owner, req.AuthVerifier)
-	if errors.Is(err, ErrNotFound) {
-		abortCode(c, http.StatusForbidden, "passphrase proof did not match", api.ErrCodeProofMismatch)
-		return
-	}
-	// The middleware answered this from a cache an operator suspending in another
-	// process cannot invalidate; the store re-read the row, so a hold that landed
-	// inside that window still holds.
-	if errors.Is(err, ErrAccountDisabled) {
-		abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "account deletion failed")
-		return
-	}
-	var freed *int64
-	if usageErr == nil {
-		freed = &usage.StorageBytes
-	}
-	// The rows are gone, so the account is deleted whatever happened to the files.
-	// The paths are operator detail and must not go back to a client, so they are
-	// logged here; the caller is told only how many, which is enough to know their
-	// ciphertext may still be on disk and to ask.
-	for _, e := range acct.FileErrors {
-		log.Printf("delete account %s: %s", owner, e)
-	}
-	c.JSON(http.StatusOK, api.DeleteAccountResponse{
-		OwnerHandle: acct.OwnerHandle,
-		Resources:   acct.Resources,
-		Snapshots:   acct.Snapshots,
-		Devices:     acct.Devices,
-		Packs:       acct.Packs,
-		Objects:     acct.Objects,
-		Grants:      acct.Grants,
-		Bytes:       freed,
-		FileErrors:  len(acct.FileErrors),
-	})
-}
-
-func (s *Server) accountUsage(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	u, err := s.store.AccountUsage(owner)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "usage lookup failed")
-		return
-	}
-	// Report the cap that actually applies, so `aqt usage` on an account with an
-	// operator-set override does not show the server-wide default it is exempt from.
-	quota, err := s.effectiveQuota(owner)
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "usage lookup failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.UsageResponse{
-		StorageBytes: u.StorageBytes,
-		QuotaBytes:   quota,
-		Packs:        u.Packs,
-		Objects:      u.Objects,
-		Resources:    u.Resources,
-		Snapshots:    u.Snapshots,
-		Devices:      u.Devices,
-		MaxResources: int64(s.cfg.MaxResources), MaxSnapshots: int64(s.cfg.MaxSnapshots),
-		MaxObjects: int64(s.cfg.MaxObjects), MaxDevices: int64(s.cfg.MaxDevices),
-	})
-}
+// --- account limits ---
 
 // effectiveQuota resolves the byte cap for one account: its operator-set override
 // when present, otherwise the server-wide default. 0 means unlimited. A missing
@@ -893,674 +507,7 @@ func estimatedResourceBytes(req api.PutResourceRequest) int64 {
 	return int64(len(req.Blob.Ciphertext) + len(req.Blob.Nonce) + len(b) + len(w) + 256)
 }
 
-func (s *Server) listDevices(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	page, ok := parsePage(c)
-	if !ok {
-		return
-	}
-	devices, next, err := s.store.ListDevices(owner, page)
-	if errors.Is(err, errBadCursor) {
-		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "list devices failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.ListDevicesResponse{Devices: devices, NextCursor: next})
-}
-
-func (s *Server) deleteDevice(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	err := s.store.DeleteDevice(owner, c.Param("id"))
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "delete device failed")
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
-// --- resource handlers ---
-
-func (s *Server) putResource(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	capability := requestCapability(c)
-	req, ok := decodePutResource(c)
-	if !ok {
-		return
-	}
-	// Create is POST, so it can be replayed under an Idempotency-Key without the
-	// client having to guess an id; PUT names the resource it replaces.
-	if c.Request.Method == http.MethodPut && req.ID == "" {
-		abort(c, http.StatusBadRequest, "PUT /v1/resources requires the id of the resource to replace; POST to create one")
-		return
-	}
-	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
-		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
-		return
-	} else {
-		req.IdempotencyKey = key
-	}
-	// A client cannot declare content unreadable by itself: that would be a resource
-	// it just wrote but could never read back. Reject it as a client bug.
-	if req.MinClient > capability {
-		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
-		return
-	}
-	// Nor can it declare less than the format every release reads. Every client
-	// declares its own capability, so a lower value is a client bug rather than
-	// something for the server to quietly floor.
-	if req.MinClient < api.CapabilityBaseline {
-		abort(c, http.StatusBadRequest, fmt.Sprintf("declared min_client is below the capability baseline (%d)", api.CapabilityBaseline))
-		return
-	}
-	if req.CompactAt < 0 {
-		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
-		return
-	}
-	switch req.Visibility {
-	case api.Private:
-		if req.WrappedKey == nil {
-			abort(c, http.StatusBadRequest, "private resource requires a wrapped key")
-			return
-		}
-	case api.Public:
-		// A wrapped key is optional and welcome: it is the owner's recovery path
-		// (so they can later share/rotate), and GetResource strips it from
-		// non-owner reads.
-	default:
-		abort(c, http.StatusBadRequest, "visibility must be private or public")
-		return
-	}
-	// An in-place update writes just as many physical bytes as a create, so it is
-	// charged too; it replaces the resource's current bytes rather than adding to
-	// them, so only the difference counts, and it adds no row (no count check).
-	// A replayed create is already stored and must not be charged again.
-	if !s.store.ResourceCreateKeyRecorded(owner, req) {
-		defer s.accountLimits.lock(owner)()
-		added, kind := estimatedResourceBytes(req), "resources"
-		if req.ID != "" {
-			kind = ""
-			stored, err := s.store.ResourceStoredBytes(owner, req.ID)
-			if err != nil {
-				abort(c, http.StatusInternalServerError, "usage lookup failed")
-				return
-			}
-			added = max(0, added-stored)
-		}
-		if err := s.checkAccountLimit(owner, kind, added); err != nil {
-			if !abortLimit(c, err) {
-				abort(c, http.StatusInternalServerError, "usage lookup failed")
-			}
-			return
-		}
-	}
-	id, version, err := s.store.PutResource(owner, capability, req)
-	var upgrade *UpgradeRequiredError
-	if errors.As(err, &upgrade) {
-		abortUpgradeRequired(c, upgrade.MinClient, capability)
-		return
-	}
-	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; re-sync", api.ErrCodeVersionConflict)
-		return
-	}
-	if errors.Is(err, ErrIdempotencyConflict) {
-		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
-		return
-	}
-	if errors.Is(err, ErrSharedNeedsRefs) {
-		abortCode(c, http.StatusBadRequest, "a public or granted resource must carry its chunk refs (they scope what its readers may fetch); re-push with refs before sharing", api.ErrCodeSharedNeedsRefs)
-		return
-	}
-	if errors.Is(err, ErrDanglingRefs) {
-		abortCode(c, http.StatusBadRequest, "manifest references chunks the server no longer stores (they were garbage-collected before this push committed); re-run sync to re-upload them", api.ErrCodeMissingChunks)
-		return
-	}
-	if errors.Is(err, ErrNonceReuse) {
-		abort(c, http.StatusBadRequest, "blob nonce matches the stored one; every reseal must draw a fresh nonce")
-		return
-	}
-	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
-		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
-		return
-	}
-	if errors.Is(err, ErrGitRemotePolicy) {
-		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
-		return
-	}
-	if errors.Is(err, ErrNotFound) {
-		// Update targeting an id the caller doesn't own (or that doesn't exist).
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "store failed")
-		return
-	}
-	status := http.StatusCreated
-	if req.ID != "" {
-		status = http.StatusOK
-	}
-	expiresAt, maxReads := policyExpiresAt(req), policyMaxReads(req)
-	c.JSON(status, api.PutResourceResponse{
-		ID: id, Version: version,
-		ExpiresAt: expiresAt, MaxReads: maxReads,
-		OnExpiry: echoedOnExpiry(req.OnExpiry, expiresAt, maxReads),
-	})
-}
-
-// policyExpiresAt is the absolute expiry the server just stored, echoed so a new client
-// can confirm an old server did not silently drop the policy. It recomputes now + TTL;
-// the microsecond drift from the store's own clock is immaterial (the client's sanity
-// check tolerates it). Zero unless a policy was accepted on a public resource.
-func policyExpiresAt(req api.PutResourceRequest) int64 {
-	if req.Visibility == api.Public && req.ExpireSeconds > 0 {
-		return time.Now().Unix() + req.ExpireSeconds
-	}
-	return 0
-}
-
-func policyMaxReads(req api.PutResourceRequest) int64 {
-	if req.Visibility == api.Public {
-		return req.MaxReads
-	}
-	return 0
-}
-
-// echoedOnExpiry reports the end-of-life action the server just stored, so a client that
-// asked to retire the link can fail closed against a server that would instead destroy
-// the content behind it. A server that predates the field echoes nothing at all, which
-// is how the client tells the two apart. Empty when no policy was accepted: there is
-// then no end of life to act on.
-//
-// The value comes from storedOnExpiry, the same mapping the write used, rather than a
-// second reading of the request: an action mapped one way into the row and another way
-// into the echo is exactly the mismatch the client's check exists to catch.
-func echoedOnExpiry(requested api.OnExpiry, expiresAt, maxReads int64) api.OnExpiry {
-	if expiresAt == 0 && maxReads == 0 {
-		return ""
-	}
-	action, err := storedOnExpiry(requested)
-	if err != nil {
-		// Unreachable: the same error already rejected the write with a 400.
-		return ""
-	}
-	return api.OnExpiry(action)
-}
-
-func (s *Server) publicResourcePreflight(c *gin.Context) {
-	preflight, err := s.store.PublicResourcePreflight(c.Param("id"))
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if errors.Is(err, ErrGone) {
-		abortGone(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "preflight failed")
-		return
-	}
-	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, preflight)
-}
-
-func (s *Server) getResource(c *gin.Context) {
-	// An authenticated owner can read their private resources; anyone can read a
-	// public one. We pass the owner (empty if unauthenticated) to the store so a
-	// private id returns 404 to everyone else.
-	var owner string
-	if token, ok := bearerToken(c); ok {
-		if o, err := s.store.OwnerByToken(token); err == nil {
-			owner = o
-		}
-	}
-	// Negotiate before the resource is touched at all: a request whose Accept we
-	// cannot satisfy must not spend one of a `--burn` link's reads.
-	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
-	if !ok {
-		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
-		return
-	}
-	res, countRead, err := s.store.GetResourceUncounted(c.Param("id"), owner)
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if errors.Is(err, ErrGone) {
-		abortGone(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "fetch failed")
-		return
-	}
-	// Gate the read on the requester's capability before any payload is written: a
-	// client too old to open the sealed format gets an actionable 426 instead of the
-	// bytes and a downstream AEAD failure. This route is public, so the check lives
-	// here rather than in the authed middleware. It precedes the read count for the
-	// same reason the Accept check does.
-	if capability := requestCapability(c); capability < res.MinClient {
-		abortUpgradeRequired(c, res.MinClient, capability)
-		return
-	}
-	// Everything that could refuse this read has passed, so the permit is spent now.
-	// This is also what enforces exhaustion: an already-spent link answers 410 here.
-	if countRead {
-		if err := s.store.CountResourceRead(c.Param("id")); err != nil {
-			if errors.Is(err, ErrGone) {
-				abortGone(c)
-			} else {
-				abort(c, http.StatusInternalServerError, "fetch failed")
-			}
-			return
-		}
-	}
-	if format == resourceEnvelope {
-		body, err := api.EncodeResourceDownload(res)
-		if err != nil {
-			abort(c, http.StatusInternalServerError, "encode failed")
-			return
-		}
-		c.Data(http.StatusOK, api.ResourceEnvelopeMediaType, body)
-		return
-	}
-	c.Header("Content-Type", api.ResourceJSONMediaType)
-	c.JSON(http.StatusOK, res)
-}
-
-// decodePutResource reads a resource upload. The body is always the raw envelope
-// (JSON header + blob ciphertext, single-buffered and never JSON-decoded), so it
-// must declare the envelope media type; it sits behind the maxResourceBody cap.
-// Responses are still negotiated — see negotiateResourceResponse — because the
-// browser share page reads the JSON form.
-func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
-	if !isResourceEnvelope(c.GetHeader("Content-Type")) {
-		abort(c, http.StatusUnsupportedMediaType, "resource uploads must be sent as "+api.ResourceEnvelopeMediaType)
-		return api.PutResourceRequest{}, false
-	}
-	req, err := api.DecodeResourceUpload(c.Request.Body)
-	if err != nil {
-		var tooLarge *http.MaxBytesError
-		switch {
-		case errors.As(err, &tooLarge):
-			abort(c, http.StatusRequestEntityTooLarge, "resource body exceeds limit")
-		case errors.Is(err, api.ErrHeaderTooLarge):
-			// 400 rather than 413: the request as a whole is within the cap, it is the
-			// manifest's chunk-ref set that cannot be expressed in one upload. The code
-			// and the message name that instead of saying "invalid resource body".
-			abortCode(c, http.StatusBadRequest,
-				"resource header exceeds the 32 MiB request cap; the chunk-ref set of this manifest is too large to upload in one request",
-				api.ErrCodeResourceTooLarge)
-		default:
-			abort(c, http.StatusBadRequest, "invalid resource body")
-		}
-		return api.PutResourceRequest{}, false
-	}
-	return req, true
-}
-
-// isResourceEnvelope reports whether a request Content-Type declares the version=1
-// resource envelope. Nothing else is accepted on a write: an unlabelled or
-// generically-labelled body is a client that has not been taught the format.
-func isResourceEnvelope(header string) bool {
-	mediaType, params, err := mime.ParseMediaType(header)
-	if err != nil {
-		return false
-	}
-	return mediaType == "application/vnd.aqt.resource+octet-stream" && params["version"] == "1"
-}
-
-type resourceFormat int
-
-const (
-	resourceJSON resourceFormat = iota
-	resourceEnvelope
-)
-
-func negotiateResourceResponse(header string) (resourceFormat, bool) {
-	if strings.TrimSpace(header) == "" {
-		return resourceJSON, true
-	}
-	bestQ, bestSpecificity, best := -1.0, -1, resourceJSON
-	for _, item := range strings.Split(header, ",") {
-		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(item))
-		if err != nil {
-			continue
-		}
-		q := 1.0
-		if raw := params["q"]; raw != "" {
-			q, err = strconv.ParseFloat(raw, 64)
-			if err != nil || q < 0 || q > 1 {
-				continue
-			}
-		}
-		if q == 0 {
-			continue
-		}
-		var format resourceFormat
-		specificity := 2
-		switch mediaType {
-		case "application/vnd.aqt.resource+octet-stream":
-			if params["version"] != "1" {
-				continue
-			}
-			format = resourceEnvelope
-		case "application/vnd.aqt.resource+json":
-			if params["version"] != "1" {
-				continue
-			}
-			format = resourceJSON
-		case "application/octet-stream":
-			format = resourceEnvelope
-		case "application/json":
-			format = resourceJSON
-		case "application/*":
-			format, specificity = resourceJSON, 1
-		case "*/*":
-			format, specificity = resourceJSON, 0
-		default:
-			continue
-		}
-		if q > bestQ || q == bestQ && specificity > bestSpecificity {
-			bestQ, bestSpecificity, best = q, specificity, format
-		}
-	}
-	return best, bestQ >= 0
-}
-
-// listResources is the owner's own inventory, and the one read path that does not
-// gate on the requester's capability: 426ing the whole listing because one row is
-// too new would hide every other resource the client can read. Each row carries its
-// min_client instead, so an under-capable client names the release a row needs.
-func (s *Server) listResources(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	page, ok := parsePage(c)
-	if !ok {
-		return
-	}
-	items, next, err := s.store.ListResources(owner, page)
-	if errors.Is(err, errBadCursor) {
-		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "list failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.ListResourcesResponse{Resources: items, NextCursor: next})
-}
-
-func (s *Server) updateResourceMetadata(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.UpdateResourceMetadataRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if len(req.EncryptedMeta.Nonce) == 0 || len(req.EncryptedMeta.Ciphertext) == 0 || req.ExpectedVersion <= 0 {
-		abort(c, http.StatusBadRequest, "encrypted metadata and expectedVersion are required")
-		return
-	}
-	capability := requestCapability(c)
-	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), capability, req)
-	var upgrade *UpgradeRequiredError
-	if errors.As(err, &upgrade) {
-		abortUpgradeRequired(c, upgrade.MinClient, capability)
-		return
-	}
-	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the rename", api.ErrCodeVersionConflict)
-		return
-	}
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "metadata update failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.PutResourceResponse{ID: c.Param("id"), Version: version})
-}
-
-func (s *Server) setVisibility(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.SetVisibilityRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if req.Visibility != api.Private && req.Visibility != api.Public {
-		abort(c, http.StatusBadRequest, "visibility must be private or public")
-		return
-	}
-	version, err := s.store.SetVisibility(owner, c.Param("id"), req)
-	if errors.Is(err, ErrGone) {
-		// A reclaimed tombstone: nothing left to expose or hide.
-		abortGone(c)
-		return
-	}
-	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the visibility change", api.ErrCodeVersionConflict)
-		return
-	}
-	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
-		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
-		return
-	}
-	if errors.Is(err, ErrGitRemotePolicy) {
-		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
-		return
-	}
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "update failed")
-		return
-	}
-	resp := api.PutResourceResponse{ID: c.Param("id"), Version: version}
-	if req.Visibility == api.Public {
-		if req.ExpireSeconds > 0 {
-			resp.ExpiresAt = time.Now().Unix() + req.ExpireSeconds
-		}
-		resp.MaxReads = req.MaxReads
-		resp.OnExpiry = echoedOnExpiry(req.OnExpiry, resp.ExpiresAt, resp.MaxReads)
-	}
-	c.JSON(http.StatusOK, resp)
-}
-
-func (s *Server) deleteResource(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	expected, ok := parseIfMatch(c)
-	if !ok {
-		return
-	}
-	err := s.store.DeleteResourceVersion(owner, c.Param("id"), expected)
-	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the delete", api.ErrCodeVersionConflict)
-		return
-	}
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "delete failed")
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
-func parseIfMatch(c *gin.Context) (int, bool) {
-	raw := strings.TrimSpace(c.GetHeader("If-Match"))
-	if raw == "" {
-		return 0, true
-	}
-	if len(raw) >= 2 && strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"") {
-		raw = raw[1 : len(raw)-1]
-	}
-	n, err := strconv.Atoi(raw)
-	if err != nil || n <= 0 {
-		abort(c, http.StatusBadRequest, "If-Match must contain a positive resource version")
-		return 0, false
-	}
-	return n, true
-}
-
-// --- snapshot handlers ---
-
-func (s *Server) createSnapshot(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.CreateSnapshotRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if req.ResourceID == "" {
-		abort(c, http.StatusBadRequest, "resourceId is required")
-		return
-	}
-	defer s.accountLimits.lock(owner)()
-	resource, err := s.store.GetResource(req.ResourceID, owner)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotFound):
-			abortNotFound(c)
-		case errors.Is(err, ErrGone):
-			// A reclaimed tombstone has no ciphertext left to pin. Answer the stable
-			// 410 rather than a 500, which doIdempotent would retry against an
-			// operation that can never succeed.
-			abortGone(c)
-		default:
-			abort(c, http.StatusInternalServerError, "resource lookup failed")
-		}
-		return
-	}
-	if err := s.checkAccountLimit(owner, "snapshots", estimatedResourceBytes(api.PutResourceRequest{Blob: resource.Blob, EncryptedMeta: resource.EncryptedMeta, WrappedKey: resource.WrappedKey})); err != nil {
-		if !abortLimit(c, err) {
-			abort(c, http.StatusInternalServerError, "usage lookup failed")
-		}
-		return
-	}
-	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
-		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
-		return
-	} else {
-		req.IdempotencyKey = key
-	}
-	info, err := s.store.CreateSnapshotIdempotent(owner, req)
-	if errors.Is(err, ErrIdempotencyConflict) {
-		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
-		return
-	}
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "snapshot failed")
-		return
-	}
-	c.JSON(http.StatusCreated, info)
-}
-
-func (s *Server) setSnapshotAnchor(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.SetSnapshotAnchorRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	info, err := s.store.SetSnapshotAnchor(owner, c.Param("id"), req.Anchored)
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "update failed")
-		return
-	}
-	c.JSON(http.StatusOK, info)
-}
-
-func (s *Server) listSnapshots(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	page, ok := parsePage(c)
-	if !ok {
-		return
-	}
-	snaps, next, err := s.store.ListSnapshots(owner, c.Query("resource"), page)
-	if errors.Is(err, errBadCursor) {
-		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "list snapshots failed")
-		return
-	}
-	c.JSON(http.StatusOK, api.ListSnapshotsResponse{Snapshots: snaps, NextCursor: next})
-}
-
-func (s *Server) getSnapshot(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	resp, err := s.store.GetSnapshot(owner, c.Param("id"))
-	if errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	}
-	if err != nil {
-		abort(c, http.StatusInternalServerError, "fetch snapshot failed")
-		return
-	}
-	// A snapshot copies its source resource's sealed format, so restore is gated the
-	// same way a resource read is: a client below the snapshot's min_client gets a 426.
-	if capability := requestCapability(c); capability < resp.MinClient {
-		abortUpgradeRequired(c, resp.MinClient, capability)
-		return
-	}
-	c.JSON(http.StatusOK, resp)
-}
-
-func (s *Server) deleteSnapshot(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	if err := s.store.DeleteSnapshot(owner, c.Param("id")); errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	} else if errors.Is(err, ErrSnapshotAnchored) {
-		c.AbortWithStatusJSON(http.StatusConflict, api.ErrorResponse{
-			Error: "snapshot is anchored and protected from pruning; run `aqt snapshot unanchor " +
-				c.Param("id") + "` first",
-			Code: api.ErrCodeSnapshotAnchored,
-		})
-		return
-	} else if err != nil {
-		abort(c, http.StatusInternalServerError, "delete snapshot failed")
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
-
-func (s *Server) setAutoSnapshot(c *gin.Context) {
-	owner := c.GetString(ownerContextKey)
-	var req api.SetAutoSnapshotRequest
-	if !bindJSON(c, &req) {
-		return
-	}
-	if err := s.store.SetAutoSnapshot(owner, c.Param("id"), req.Enabled); errors.Is(err, ErrNotFound) {
-		abortNotFound(c)
-		return
-	} else if err != nil {
-		abort(c, http.StatusInternalServerError, "update failed")
-		return
-	}
-	c.Status(http.StatusNoContent)
-}
+// --- background workers ---
 
 // StartAutoSnapshot runs the scheduled snapshot job every interval until stop is
 // closed (a non-positive interval disables it). A snapshot is keyless — the server
@@ -1687,16 +634,6 @@ func abortNotFound(c *gin.Context) {
 	abortCode(c, http.StatusNotFound, "not found", api.ErrCodeNotFound)
 }
 
-// policyErrorMessage maps the two lifecycle-policy validation errors to fixed,
-// user-facing messages, so the handler answers a stable string (and a stable Code)
-// rather than echoing the raw error value.
-func policyErrorMessage(err error) string {
-	if errors.Is(err, ErrPolicyOnPrivate) {
-		return "a link lifecycle policy can only be set on a public resource"
-	}
-	return "link lifecycle policy values must be non-negative"
-}
-
 // requestCapability fails closed for a caller that announces nothing — a bare curl
 // of a public link, or any tool that is not aqt. Reading absent or malformed values
 // as baseline gates such a request at the format boundary, before any encrypted
@@ -1732,9 +669,31 @@ func abortGone(c *gin.Context) {
 	})
 }
 
-func deviceName(name string) string {
-	if name == "" {
-		return "unnamed-device"
+func parseIfMatch(c *gin.Context) (int, bool) {
+	raw := strings.TrimSpace(c.GetHeader("If-Match"))
+	if raw == "" {
+		return 0, true
 	}
-	return name
+	if len(raw) >= 2 && strings.HasPrefix(raw, "\"") && strings.HasSuffix(raw, "\"") {
+		raw = raw[1 : len(raw)-1]
+	}
+	n, err := strconv.Atoi(raw)
+	if err != nil || n <= 0 {
+		abort(c, http.StatusBadRequest, "If-Match must contain a positive resource version")
+		return 0, false
+	}
+	return n, true
+}
+
+// decoyStream derives one decoy field deterministically from the server secret, so
+// repeated lookups for the same email return the same decoy. The email must already
+// be normalized: real accounts answer any casing of their address, so a decoy that
+// varied by case would out an email as unregistered. decoyBootstrap normalizes it
+// itself; decoyAccountKeys takes it normalized from its caller.
+func (s *Server) decoyStream(secret []byte, email, label string, n int) []byte {
+	out, err := hkdf.Key(sha256.New, secret, []byte(email), label, n)
+	if err != nil {
+		panic("hkdf decoy: " + err.Error()) // unreachable: every decoy field is a fixed, short length
+	}
+	return out
 }

@@ -4,13 +4,18 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
+	"net/http"
 	"os"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -882,4 +887,415 @@ func recordIdempotency(tx *sql.Tx, owner, kind, key string, digest []byte, respo
 	}
 	_, err = tx.Exec(`INSERT INTO idempotency_keys(owner_handle, kind, key, request_hash, response, created_at) VALUES(?,?,?,?,?,unixepoch())`, owner, kind, key, digest, string(b))
 	return err
+}
+
+// --- handlers ---
+
+func (s *Server) handleCreateAccount(c *gin.Context) {
+	var req api.CreateAccountRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Email == "" || len(req.PublicKey) != ed25519.PublicKeySize {
+		abort(c, http.StatusBadRequest, "email and a valid public key are required")
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.AuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "wrapped root and auth verifier are required")
+		return
+	}
+	// Invite mode gates every signup on a server-issued token, so an attacker cannot
+	// register (and thereby squat) an unclaimed email. The response is uniform whether
+	// the token is missing or wrong, so it leaks nothing about the token set.
+	if s.cfg.Registration == RegistrationInvite && !s.cfg.inviteAccepted(req.InviteToken) {
+		abortCode(c, http.StatusForbidden, "a valid invite token is required to register on this server", api.ErrCodeInviteRequired)
+		return
+	}
+	// The enc key is what makes the account a grant target, so it is registered at
+	// signup rather than backfilled later. Its identity self-signature must verify,
+	// or a bad key would poison every future grant.
+	if len(req.EncPublicKey) != crypto.EncPublicKeySize ||
+		!crypto.VerifyEncKey(req.PublicKey, req.EncPublicKey, req.EncKeySig) {
+		abort(c, http.StatusBadRequest, "enc public key must be 32 bytes and self-signed by the identity key")
+		return
+	}
+	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
+	if errors.Is(err, ErrConflict) {
+		// The email is taken. Tell the caller so only if they prove they are its owner
+		// by presenting the account's passphrase verifier; anyone else gets the decoy,
+		// a success-shaped response whose token authenticates nothing. The existing
+		// account is untouched either way — a duplicate signup creates no device on it.
+		//
+		// Note this does not make open registration unenumerable, and no server-side
+		// response shape can: signing up for a free email must succeed, so "the token
+		// worked" still means "the email was free". Registration=invite is the setting
+		// that actually closes it. What the decoy buys is that a prober cannot confirm
+		// a *specific* address without also taking it. See docs/threat-model.md.
+		if s.signupProvesOwnership(req.Email, req.AuthVerifier) {
+			abortCode(c, http.StatusConflict, "an account already exists for this email; use `aqt login` to attach this device", api.ErrCodeAccountExists)
+			return
+		}
+		c.JSON(http.StatusCreated, s.decoyAuthResponse())
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "create account failed")
+		return
+	}
+	deviceID, token, err := s.store.CreateDevice(acc.OwnerHandle, deviceName(req.DeviceName), 1, s.cfg.MaxDevices)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "create device failed")
+		return
+	}
+	c.JSON(http.StatusCreated, api.AuthResponse{
+		OwnerHandle: acc.OwnerHandle, DeviceID: deviceID, Token: token, Epoch: 1,
+	})
+}
+
+// signupProvesOwnership reports whether a duplicate signup carried the existing
+// account's own passphrase verifier. Only then is it safe to confirm the account
+// exists: the caller already knows the secret that would let them log in, so the
+// confirmation tells them nothing they could not learn from `aqt login`.
+func (s *Server) signupProvesOwnership(email string, verifier []byte) bool {
+	_, _, storedHash, _, err := s.store.AccountForAuth(email)
+	if err != nil {
+		return false
+	}
+	sum := sha256.Sum256(verifier)
+	return subtle.ConstantTimeCompare(sum[:], storedHash) == 1
+}
+
+// decoyAuthResponse builds a success-shaped auth response whose fields match a real
+// one's lengths but authenticate nothing. It backs the enumeration-safe duplicate
+// signup path: the handle/device/token are random, so the response is
+// indistinguishable on the wire from a genuine account creation.
+func (s *Server) decoyAuthResponse() api.AuthResponse {
+	return api.AuthResponse{
+		OwnerHandle: newID(12),
+		DeviceID:    newID(10),
+		Token:       newID(32),
+		Epoch:       1,
+	}
+}
+
+// handleAccountSalt is the new-device bootstrap: it returns the KDF params and wrapped
+// root key for an email. An unknown email gets a deterministic decoy (200, not 404)
+// so the endpoint does not reveal which emails have accounts; only someone who knows
+// the passphrase can tell a decoy from a real account (the decoy never unwraps).
+func (s *Server) handleAccountSalt(c *gin.Context) {
+	email := c.Query("email")
+	if email == "" {
+		abort(c, http.StatusBadRequest, "email query param required")
+		return
+	}
+	acc, err := s.store.AccountByEmail(email)
+	if errors.Is(err, ErrNotFound) {
+		decoy, derr := s.decoyBootstrap(email)
+		if derr != nil {
+			abort(c, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		c.JSON(http.StatusOK, decoy)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot})
+}
+
+// decoyBootstrap synthesizes a bootstrap response for an unknown email,
+// deterministically from the server secret so the same email always yields the same
+// decoy. The salt and wrapped-root bytes are indistinguishable from a real account's
+// to anyone without the passphrase, so a registered and an unregistered email look
+// identical on the wire.
+func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
+	email = api.NormalizeEmail(email)
+	secret, err := s.store.ServerSecret()
+	if err != nil {
+		return api.SaltResponse{}, err
+	}
+	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
+	// Derive the decoy's Argon2id costs from the same value set a real moderate
+	// calibration produces, seeded deterministically per email. The package-default
+	// (3, 64 MiB, 4) marked every decoy identically; drawing from the realistic
+	// distribution instead means a decoy's params are indistinguishable from a
+	// calibrated account's.
+	timeCost, memoryKiB, threads := crypto.DecoyKdfCosts(stream("aqt-decoy-costs", 2))
+	def, err := crypto.ManualKdfParams(timeCost, memoryKiB, threads)
+	if err != nil {
+		return api.SaltResponse{}, err
+	}
+	def.Salt = stream("aqt-decoy-salt", len(def.Salt))
+	// A real wrapped root is a 32-byte key sealed with XChaCha20-Poly1305: a 24-byte
+	// nonce and 48 bytes of ciphertext+tag. Match those lengths exactly.
+	return api.SaltResponse{
+		Kdf: def,
+		WrappedRoot: crypto.SealedBlob{
+			Nonce:      stream("aqt-decoy-nonce", crypto.NonceSize),
+			Ciphertext: stream("aqt-decoy-ct", crypto.KeySize+16),
+		},
+	}, nil
+}
+
+func (s *Server) handleAuthChallenge(c *gin.Context) {
+	var req api.ChallengeRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Email == "" {
+		abort(c, http.StatusBadRequest, "email required")
+		return
+	}
+	id, nonce, err := s.store.CreateChallenge(req.Email)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "challenge failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ChallengeResponse{ChallengeID: id, Nonce: nonce})
+}
+
+func (s *Server) handleAttachDevice(c *gin.Context) {
+	var req api.AttachDeviceRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	// Consume the challenge first so a bad attempt can't be replayed against it.
+	nonce, err := s.store.ConsumeChallenge(req.ChallengeID, req.Email)
+	if errors.Is(err, ErrNotFound) {
+		abortCode(c, http.StatusUnauthorized, "invalid or expired challenge", api.ErrCodeInvalidChallenge)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "challenge lookup failed")
+		return
+	}
+	owner, pub, verifierHash, epoch, err := s.store.AccountForAuth(req.Email)
+	// Attaching needs both the signing key (proves the master key) and the passphrase
+	// verifier (proves the current passphrase), so a stale passphrase or a cached
+	// master key alone cannot attach. A missing account, a bad signature, and a bad
+	// verifier all return the same 401: no oracle.
+	sigOK := err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature)
+	verifierOK := err == nil && verifierMatches(req.AuthVerifier, verifierHash)
+	if sigOK && verifierOK {
+		deviceID, token, err := s.store.CreateDevice(owner, deviceName(req.DeviceName), epoch, s.cfg.MaxDevices)
+		if errors.Is(err, ErrDeviceLimit) {
+			u, _ := s.store.AccountUsage(owner)
+			c.AbortWithStatusJSON(http.StatusForbidden, api.ErrorResponse{Error: "device limit reached; revoke a device before attaching another", Code: api.ErrCodeDeviceLimit, LimitKind: "devices", Current: u.Devices, Limit: int64(s.cfg.MaxDevices)})
+			return
+		}
+		if err != nil {
+			abort(c, http.StatusInternalServerError, "create device failed")
+			return
+		}
+		c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
+		return
+	}
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	abortCode(c, http.StatusUnauthorized, "invalid credentials", api.ErrCodeInvalidCredentials)
+}
+
+// verifierMatches reports whether the presented auth verifier hashes to the stored
+// hash, in constant time.
+func verifierMatches(verifier, storedHash []byte) bool {
+	if len(verifier) == 0 || len(storedHash) != sha256.Size {
+		return false
+	}
+	h := sha256.Sum256(verifier)
+	return subtle.ConstantTimeCompare(h[:], storedHash) == 1
+}
+
+// handleChangePassphrase re-wraps the account's root key under a new passphrase. The store
+// verifies the caller knows the current passphrase and bumps the account epoch, so
+// every other device's token stops authenticating (they re-login with the new
+// passphrase); the calling device keeps working.
+func (s *Server) handleChangePassphrase(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	deviceID := c.GetString(deviceContextKey)
+	var req api.PassphraseChangeRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "wrapped root and both verifiers are required")
+		return
+	}
+	newEpoch, err := s.store.ChangePassphrase(owner, deviceID, req.Kdf, req.WrappedRoot, req.OldAuthVerifier, req.NewAuthVerifier, req.ExpectedEpoch)
+	if errors.Is(err, ErrNotFound) {
+		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "the passphrase changed on another device; re-run with the current one", api.ErrCodeVersionConflict)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "passphrase change failed")
+		return
+	}
+	// The calling device's token is unchanged (its epoch was advanced with the
+	// account's), so no new token is issued; the client keeps using it.
+	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Epoch: newEpoch})
+}
+
+// handleRotateRootKey performs the account-wide recovery operation: it mints a new account
+// identity and re-wraps everything derived from the old one.
+func (s *Server) handleRotateRootKey(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	deviceID := c.GetString(deviceContextKey)
+	var req api.RootKeyRotationRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 || len(req.PublicKey) != ed25519.PublicKeySize || len(req.EncPublicKey) != crypto.EncPublicKeySize || !crypto.VerifyEncKey(ed25519.PublicKey(req.PublicKey), req.EncPublicKey, req.EncKeySig) {
+		abort(c, http.StatusBadRequest, "complete, self-consistent new account identity is required")
+		return
+	}
+	token, epoch, err := s.store.RotateRootKey(owner, deviceID, req)
+	if errors.Is(err, ErrNotFound) {
+		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "account or a protected key changed while rotating; re-run root-key rotation", api.ErrCodeVersionConflict)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "root-key rotation failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
+}
+
+// handleDeleteAccount erases the calling account and everything stored under it. It
+// requires the passphrase proof, not just a device token: a token is a credential
+// the account holder may have lost control of, and this is the one operation no
+// backup can undo. The server holds no plaintext, so there is nothing to hand back
+// first — the client is expected to have pulled anything it wants to keep.
+func (s *Server) handleDeleteAccount(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.DeleteAccountRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.AuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "passphrase proof is required")
+		return
+	}
+	// Read the storage total before erasing it, so the receipt can quote the number
+	// the caller confirmed against. DeletedAccount.Bytes counts only the blob and
+	// pack files unlinked, which is a fraction of what `aqt usage` reports (that
+	// total also models the account's database rows), so it is not a substitute: a
+	// failed read omits the total rather than quietly swapping in a smaller one, and
+	// never blocks the deletion.
+	usage, usageErr := s.store.AccountUsage(owner)
+
+	acct, err := s.store.DeleteAccountWithProof(owner, req.AuthVerifier)
+	if errors.Is(err, ErrNotFound) {
+		abortCode(c, http.StatusForbidden, "passphrase proof did not match", api.ErrCodeProofMismatch)
+		return
+	}
+	// The middleware answered this from a cache an operator suspending in another
+	// process cannot invalidate; the store re-read the row, so a hold that landed
+	// inside that window still holds.
+	if errors.Is(err, ErrAccountDisabled) {
+		abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "account deletion failed")
+		return
+	}
+	var freed *int64
+	if usageErr == nil {
+		freed = &usage.StorageBytes
+	}
+	// The rows are gone, so the account is deleted whatever happened to the files.
+	// The paths are operator detail and must not go back to a client, so they are
+	// logged here; the caller is told only how many, which is enough to know their
+	// ciphertext may still be on disk and to ask.
+	for _, e := range acct.FileErrors {
+		log.Printf("delete account %s: %s", owner, e)
+	}
+	c.JSON(http.StatusOK, api.DeleteAccountResponse{
+		OwnerHandle: acct.OwnerHandle,
+		Resources:   acct.Resources,
+		Snapshots:   acct.Snapshots,
+		Devices:     acct.Devices,
+		Packs:       acct.Packs,
+		Objects:     acct.Objects,
+		Grants:      acct.Grants,
+		Bytes:       freed,
+		FileErrors:  len(acct.FileErrors),
+	})
+}
+
+func (s *Server) handleAccountUsage(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	u, err := s.store.AccountUsage(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	// Report the cap that actually applies, so `aqt usage` on an account with an
+	// operator-set override does not show the server-wide default it is exempt from.
+	quota, err := s.effectiveQuota(owner)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.UsageResponse{
+		StorageBytes: u.StorageBytes,
+		QuotaBytes:   quota,
+		Packs:        u.Packs,
+		Objects:      u.Objects,
+		Resources:    u.Resources,
+		Snapshots:    u.Snapshots,
+		Devices:      u.Devices,
+		MaxResources: int64(s.cfg.MaxResources), MaxSnapshots: int64(s.cfg.MaxSnapshots),
+		MaxObjects: int64(s.cfg.MaxObjects), MaxDevices: int64(s.cfg.MaxDevices),
+	})
+}
+
+func (s *Server) handleListDevices(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	devices, next, err := s.store.ListDevices(owner, page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "list devices failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ListDevicesResponse{Devices: devices, NextCursor: next})
+}
+
+func (s *Server) handleDeleteDevice(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	err := s.store.DeleteDevice(owner, c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "delete device failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func deviceName(name string) string {
+	if name == "" {
+		return "unnamed-device"
+	}
+	return name
 }
