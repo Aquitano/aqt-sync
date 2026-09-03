@@ -10,6 +10,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -20,7 +21,7 @@ import (
 // a fix applied to one copy did not reach the other.
 type syncSession struct {
 	root       string
-	st         folderState
+	st         folderstate.State
 	base       syncengine.Manifest
 	baseExists bool
 	cl         *client.Client
@@ -32,11 +33,11 @@ type syncSession struct {
 // must defer Wipe. An absent base is refused unless --reconcile: reconciling against
 // an empty base silently resurrects deleted files.
 func openSyncSession(root string, opts syncOptions) (syncSession, error) {
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return syncSession{}, err
 	}
-	base, baseExists, err := loadBaseForSync(root)
+	base, baseExists, err := folderstate.LoadBaseForSync(root, flagProfile)
 	if err != nil {
 		return syncSession{}, err
 	}
@@ -107,23 +108,15 @@ func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 			res.Version, s.st.RemoteVersion)
 		trustBase = false
 	}
-	if res.WrappedKey == nil {
-		return remoteSync{}, errors.New("folder resource has no owner key; cannot sync")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(s.mk))
+	owned, err := openOwnedResource(res, s.mk)
 	if err != nil {
-		return remoteSync{}, fmt.Errorf("unwrap folder key: %w", err)
-	}
-	meta, err := decodeMeta(res.EncryptedMeta, ck, s.st.ID)
-	if err != nil {
-		ck.Wipe()
 		return remoteSync{}, err
 	}
-	if err := checkSyncFormat(meta); err != nil {
-		ck.Wipe()
+	if err := checkSyncFormat(owned.meta); err != nil {
+		owned.ck.Wipe()
 		return remoteSync{}, err
 	}
-	return remoteSync{res: res, ck: ck, meta: meta, trustBase: trustBase}, nil
+	return remoteSync{res: res, ck: owned.ck, meta: owned.meta, trustBase: trustBase}, nil
 }
 
 // checkSyncFormat routes by the server's truth, not just local .aqtconfig: a
@@ -132,7 +125,7 @@ func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 // gives the actionable message.)
 func checkSyncFormat(meta api.Metadata) error {
 	if !meta.Tree {
-		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
+		return errLegacyFolder
 	}
 	return nil
 }

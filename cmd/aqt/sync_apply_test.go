@@ -68,7 +68,7 @@ func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
 }
 
 // applyTestCtx builds the apply context plus the actions for a pull-only reconcile,
-// creating the control dir saveBase needs.
+// creating the control dir folderstate.SaveBase needs.
 func applyTestCtx(t *testing.T, root string, base, local, remote syncengine.Manifest) (applyCtx, []syncengine.Action) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(root, syncengine.ControlDir), 0o700); err != nil {

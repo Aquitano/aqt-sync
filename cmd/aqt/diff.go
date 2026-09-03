@@ -15,7 +15,9 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
@@ -110,7 +112,7 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 		local, err = syncengine.Scan(root)
 	} else {
 		var exists bool
-		base, exists, err = loadBaseForSync(root)
+		base, exists, err = folderstate.LoadBaseForSync(root, flagProfile)
 		if err == nil && !exists {
 			return errSyncNoBase
 		}
@@ -181,7 +183,7 @@ func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filte
 		return err
 	}
 	warnSkipped(local.Skipped)
-	base, err := loadBase(root)
+	base, err := folderstate.LoadBase(root, flagProfile)
 	if err != nil {
 		return err
 	}
@@ -194,7 +196,7 @@ func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filte
 
 // folderResource fetches the resource a tracked root points at.
 func folderResource(cl *client.Client, root string) (api.GetResourceResponse, error) {
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return api.GetResourceResponse{}, err
 	}
@@ -230,7 +232,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 	if err != nil {
 		return err
 	}
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return err
 	}
@@ -244,7 +246,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 		// rather than reconstructing the whole tree on disk to hash back what the
 		// manifest records. base.json is only a node-reuse hint here; an absent one
 		// loads empty, which is why this mode never required it.
-		base, err := loadBase(root)
+		base, err := folderstate.LoadBase(root, flagProfile)
 		if err != nil {
 			return err
 		}
@@ -275,7 +277,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 type entryReader func(syncengine.Entry) ([]byte, error)
 
 func manifestEntryReader(cl *client.Client) entryReader {
-	source := newEmptyPackSource(cl)
+	source := packio.NewEmptySource(cl)
 	return func(e syncengine.Entry) ([]byte, error) {
 		if e.IsSymlink() {
 			return []byte(e.Link), nil
@@ -283,10 +285,10 @@ func manifestEntryReader(cl *client.Client) entryReader {
 		if len(e.Chunks) == 0 {
 			return syncengine.FileBytes(e, nil)
 		}
-		if err := source.locate(distinctChunkIDs([]syncengine.Entry{e})); err != nil {
+		if err := source.Locate(distinctChunkIDs([]syncengine.Entry{e})); err != nil {
 			return nil, err
 		}
-		return syncengine.FileBytes(e, source.get)
+		return syncengine.FileBytes(e, source.Get)
 	}
 }
 

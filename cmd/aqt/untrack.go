@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -58,11 +59,11 @@ func runUntrack(dir string, deleteRemote, assumeYes bool) error {
 		return fmt.Errorf("a watch agent is running here (pid %d); stop it with `aqt agent stop` first", pid)
 	}
 
-	// Untracking is the escape hatch for exactly the folders loadState refuses, so a
+	// Untracking is the escape hatch for exactly the folders LoadState refuses, so a
 	// bad state.json must not block it. State that decoded but failed validation still
 	// carries the resource id, which is what the prompt names; only an unreadable file
 	// costs it.
-	st, stateErr := loadState(root)
+	st, stateErr := folderstate.LoadState(root)
 
 	remoteLine := "the server-side resource is kept"
 	if deleteRemote {

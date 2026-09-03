@@ -12,6 +12,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 )
 
 func tempSealMemo(t *testing.T) *sealMemo {
@@ -168,7 +169,7 @@ func TestSealMemoReuseAcrossSyncAndPrune(t *testing.T) {
 		t.Fatalf("prune after a reused push: %v", err)
 	}
 
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}

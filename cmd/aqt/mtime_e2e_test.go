@@ -5,6 +5,7 @@ package main
 import (
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -41,7 +42,7 @@ func assertScanReadsNothing(t *testing.T, root string) {
 	if err := bindTrackedRoot(root); err != nil {
 		t.Fatal(err)
 	}
-	base, err := loadBase(root)
+	base, err := folderstate.LoadBase(root, flagProfile)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 )
 
 // usageObjects reports the account's stored-object count, for asserting what a
@@ -35,7 +36,7 @@ func TestClientGCSyncAndPrune(t *testing.T) {
 	dir := t.TempDir()
 	h.init(dir)
 
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		t.Fatalf("load state: %v", err)
 	}

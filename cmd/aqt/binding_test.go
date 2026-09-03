@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
@@ -20,7 +21,7 @@ func TestInitRecordsIdentityBinding(t *testing.T) {
 	dir := t.TempDir()
 	h.init(dir)
 
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,24 +70,24 @@ func TestBindingRefusesStateWithoutOwner(t *testing.T) {
 
 	for _, tc := range []struct {
 		name  string
-		clear func(*folderState)
+		clear func(*folderstate.State)
 	}{
-		{"no profile", func(st *folderState) { st.Profile = "" }},
-		{"no account", func(st *folderState) { st.Account = "" }},
+		{"no profile", func(st *folderstate.State) { st.Profile = "" }},
+		{"no account", func(st *folderstate.State) { st.Account = "" }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			b, err := os.ReadFile(controlPath(dir, stateFile))
+			b, err := os.ReadFile(folderstate.StatePath(dir))
 			if err != nil {
 				t.Fatal(err)
 			}
-			t.Cleanup(func() { os.WriteFile(controlPath(dir, stateFile), b, 0o600) })
+			t.Cleanup(func() { os.WriteFile(folderstate.StatePath(dir), b, 0o600) })
 
-			st, err := loadState(dir)
+			st, err := folderstate.LoadState(dir)
 			if err != nil {
 				t.Fatal(err)
 			}
 			tc.clear(&st)
-			if err := saveState(dir, st); err != nil {
+			if err := folderstate.SaveState(dir, st); err != nil {
 				t.Fatal(err)
 			}
 
@@ -105,12 +106,12 @@ func TestBindingRefusesAccountMismatch(t *testing.T) {
 	dir := t.TempDir()
 	h.init(dir)
 
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Account = "recorded-owner-handle"
-	if err := saveState(dir, st); err != nil {
+	if err := folderstate.SaveState(dir, st); err != nil {
 		t.Fatal(err)
 	}
 
@@ -140,7 +141,7 @@ func TestBindingToleratesRootKeyRotation(t *testing.T) {
 	if err := runSync(dir, syncOptions{}); err != nil {
 		t.Fatalf("sync after a root-key rotation = %v, want success", err)
 	}
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		t.Fatal(err)
 	}

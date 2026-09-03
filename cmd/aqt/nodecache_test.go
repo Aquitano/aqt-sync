@@ -84,7 +84,7 @@ func TestNodeCachePruneEvictsOldestFirst(t *testing.T) {
 
 // TestBatchNodeFetcherServesFromDiskCache proves a fully cached walk makes no network
 // call at all: the fetcher is built with a nil client, which would panic inside
-// newPackSource if any id missed the disk cache.
+// packio.NewSource if any id missed the disk cache.
 func TestBatchNodeFetcherServesFromDiskCache(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("AQT_NODE_CACHE_DIR", dir)

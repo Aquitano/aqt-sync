@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
@@ -22,7 +23,7 @@ import (
 // global flagProfile, which everything downstream (client auth, base sealing)
 // already keys on.
 func bindTrackedRoot(root string) error {
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil || st.ID == "" {
 		// No usable state — unreadable, or written before the identity binding
 		// existed: the command's own load will produce the real error.
@@ -76,7 +77,7 @@ func bindTrackedRoot(root string) error {
 		if keyRotated {
 			st.Fingerprint = prof.Fingerprint
 		}
-		if err := saveState(root, st); err != nil {
+		if err := folderstate.SaveState(root, st); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: could not record the folder's profile binding: %v\n", err)
 		}
 	}
@@ -98,11 +99,11 @@ func bindTrackedDir(dir string) error {
 // are the same account. The owner handle is the authority: it is the account's
 // server-side identity and survives `aqt passphrase rotate-root`, which mints a new
 // signing key and so changes the fingerprint on every device.
-func sameAccount(st folderState, prof *identity.Profile) bool {
+func sameAccount(st folderstate.State, prof *identity.Profile) bool {
 	return st.Account == prof.OwnerHandle
 }
 
-// stateIdentity returns the folderState identity fields for a freshly written
+// stateIdentity returns the folderstate.State identity fields for a freshly written
 // state, binding the folder to the profile that created or cloned it.
 func stateIdentity(prof *identity.Profile) (profile, account, fingerprint string) {
 	return prof.Name, prof.OwnerHandle, prof.Fingerprint

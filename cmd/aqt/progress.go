@@ -18,7 +18,7 @@ import (
 // progressBar renders a single-line transfer bar to stderr while bytes move. It is
 // opt-in (--progress) and only draws on a terminal, so scripted/CI output is
 // unchanged. Every method is nil-safe: when progress is off newProgressBar returns
-// nil and all calls are no-ops, so call sites need no conditionals. add() is called
+// nil and all calls are no-ops, so call sites need no conditionals. Add() is called
 // from the upload/download worker pools, so it must stay a lock-free atomic add.
 type progressBar struct {
 	label string
@@ -71,7 +71,7 @@ func newUnsizedBar(label string) *progressBar {
 	return p
 }
 
-func (p *progressBar) add(n int64) {
+func (p *progressBar) Add(n int64) {
 	if p == nil {
 		return
 	}

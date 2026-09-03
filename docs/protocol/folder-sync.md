@@ -175,7 +175,7 @@ so GC has roots. Object ids are `hex(sha256(ciphertext))`, so pack non-determini
 (ordering) does not affect dedup.
 
 A push does not stall the chunker on each pack's two upload round-trips
-(`CheckChunks` + `PutPack`): `packUploader` dispatches a full pack to a bounded pool,
+(`CheckChunks` + `PutPack`): `packio.Uploader` dispatches a full pack to a bounded pool,
 so the CPU keeps sealing the next pack while earlier ones are in flight, hiding both
 server ingest time and, over a WAN, the sequential RTTs. The pool bounds in-flight
 packs, so push memory stays O(a few packs). Server-side, `PutPack` writes the pack's

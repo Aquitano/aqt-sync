@@ -16,6 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -317,7 +318,7 @@ func runShareWith(idArg, email string) error {
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource; only resources you own can be granted")
 	}
-	keys, err := openResourceKeys(prof, res, id)
+	keys, err := openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -441,7 +442,7 @@ func runShareRevoke(idArg, email string) error {
 		fmt.Printf("revoked %s from aqt://%s (no owner key; content key not rotated)\n", email, id)
 		return nil
 	}
-	keys, err := openResourceKeys(prof, res, id)
+	keys, err := openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -503,7 +504,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		return errors.New("no owner key stored for this resource (it was pushed --public); use the share link from that push")
 	}
 	// Opening the keys sanity-checks the unwrapped key before flipping visibility.
-	keys, err := openResourceKeys(prof, res, id)
+	keys, err := openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -603,7 +604,7 @@ func runPrivate(idArg string) error {
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource; cannot rotate it")
 	}
-	keys, err := openResourceKeys(prof, res, id)
+	keys, err := openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -693,21 +694,14 @@ func (k *resourceKeys) close() {
 	k.mk.Wipe()
 }
 
-// openResourceKeys unlocks the profile's master key, unwraps the resource's content key
-// with it, and decodes the metadata that key opens — the prologue every owner-side share
-// operation runs. Decoding the metadata doubles as a check that the unwrapped key is the
-// right one, before a caller acts on it.
+// openResourceKeys unlocks the profile's master key and opens the resource under it —
+// the prologue every owner-side share operation runs.
 //
-// res.WrappedKey must be non-nil. Callers report its absence themselves: what a missing
-// owner key means differs per command, and for a revoke it is not an error at all.
+// Callers report a missing owner key themselves before calling: what its absence means
+// differs per command, and for a revoke it is not an error at all.
 //
 // Both keys are wiped if any step fails, so a caller only ever receives keys it owns.
-func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse, id string) (_ *resourceKeys, err error) {
-	if res.WrappedKey == nil {
-		// Unreachable from the current callers, which all report the absence in their
-		// own words first. A backstop so a later one gets an error, not a nil deref.
-		return nil, errors.New("no owner key stored for this resource")
-	}
+func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse) (_ *resourceKeys, err error) {
 	k := &resourceKeys{}
 	defer func() {
 		if err != nil {
@@ -717,12 +711,11 @@ func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse, id st
 	if k.mk, err = unlockMaster(prof); err != nil {
 		return nil, err
 	}
-	if k.ck, err = crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(k.mk)); err != nil {
-		return nil, fmt.Errorf("unwrap key: %w", err)
-	}
-	if k.meta, err = decodeMeta(res.EncryptedMeta, k.ck, id); err != nil {
+	owned, err := openOwnedResource(res, k.mk)
+	if err != nil {
 		return nil, err
 	}
+	k.ck, k.meta = owned.ck, owned.meta
 	return k, nil
 }
 
@@ -934,11 +927,11 @@ func rotateStreamed(cl *client.Client, id string, res api.GetResourceResponse, o
 		// locate, so fetch them through the authed path first.
 		chunks := root.Chunks
 		if root.Indirect() {
-			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			segSrc, err := packio.NewSource(cl, root.ChunkIDs())
 			if err != nil {
 				return resealed{}, err
 			}
-			chunks, err = root.Resolve(segSrc.get)
+			chunks, err = root.Resolve(segSrc.Get)
 			if err != nil {
 				return resealed{}, err
 			}

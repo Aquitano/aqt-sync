@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 )
 
 // TestAdoptReusesLocalFiles covers the happy path: a directory that already holds a
@@ -34,7 +36,7 @@ func TestAdoptReusesLocalFiles(t *testing.T) {
 	if got := h.countPacks(); got != before {
 		t.Fatalf("adopt re-uploaded content: pack count %d -> %d", before, got)
 	}
-	if _, err := os.Stat(controlPath(adoptee, baseFile)); err != nil {
+	if _, err := os.Stat(folderstate.BasePath(adoptee)); err != nil {
 		t.Fatalf("adopt did not write base.json: %v", err)
 	}
 	if got := h.folderID(adoptee); got != id {
@@ -74,10 +76,10 @@ func TestAdoptDivergenceConflicts(t *testing.T) {
 		t.Fatalf("adopt of a diverging tree: want errConflictsRemain, got %v", err)
 	}
 	// Tracking must survive the conflict abort so the user can resolve and re-run.
-	if st, err := loadState(adoptee); err != nil || st.ID != id {
+	if st, err := folderstate.LoadState(adoptee); err != nil || st.ID != id {
 		t.Fatalf("adopt did not leave state.json (id=%q err=%v)", st.ID, err)
 	}
-	if _, err := os.Stat(controlPath(adoptee, baseFile)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(folderstate.BasePath(adoptee)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("adopt wrote base.json despite conflicts: %v", err)
 	}
 
@@ -129,7 +131,7 @@ func TestAdoptGuards(t *testing.T) {
 	if err := runClone(id, mismatched, true, ""); err == nil {
 		t.Fatal("adopt with an unparsable .aqtconfig did not error")
 	}
-	if _, err := os.Stat(controlPath(mismatched, stateFile)); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(folderstate.StatePath(mismatched)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("refused adopt still wrote tracking: %v", err)
 	}
 }

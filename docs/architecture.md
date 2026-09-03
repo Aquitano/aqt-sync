@@ -51,7 +51,9 @@ internal/client/    HTTP API client                                             
 internal/safetext/  control-byte and bidi sanitizer for server-supplied text    [implemented + tested]
 internal/cliutil/   formatting and confirmation rules both binaries share       [implemented]
 internal/fsatomic/  write-temp-fsync-rename file replacement                    [implemented]
+internal/folderstate/ .aqt/state.json pointer + the sealed base.json manifest   [implemented + tested]
 internal/syncengine/  manifest, .aqtignore/.aqtconfig, FastCDC chunking, 3-way plan [implemented + tested]
+internal/packio/    pack uploader, range-fetching pack source, pack range LRU   [implemented + tested]
 internal/gitremote/ sealed bundle chain + RefsRoot behind `git-remote-aqt`      [implemented + tested]
 internal/update/    signed release manifest, verified download, atomic install  [implemented + tested]
 ```

@@ -28,11 +28,56 @@ func menuCommand(t *testing.T, menu *tuiMenu, want string) tea.Cmd {
 	t.Helper()
 	for _, option := range menu.options {
 		if option.key == want {
-			return option.cmd
+			return option.command()
 		}
 	}
 	t.Fatalf("menu %q has no %q option", menu.title, want)
 	return nil
+}
+
+// The actions menu is the only definition of a panel's key mapping, so every
+// entry has to answer to its own key with the same kind of action the menu
+// promises. A menu-only entry is an action the shortcut silently dropped.
+func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
+	m := testModel(t)
+	for _, panel := range []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources} {
+		m.setFocus(panel)
+		for _, option := range m.panelActions() {
+			if option.key == "" {
+				t.Fatalf("%s option %q has no key", m.panel().title, option.label)
+			}
+			m.dialog = nil
+			_, cmd := m.handleActionKey(key(option.key))
+			if (m.dialog != nil) != (option.dialog != nil) || (m.dialog == nil && cmd == nil) {
+				t.Fatalf("%s key %q resolved to dialog=%T cmd=%v, want the menu's %T",
+					m.panel().title, option.key, m.dialog, cmd != nil, option.dialog)
+			}
+		}
+	}
+}
+
+// hasActions answers the footer without building any dialog, so it has to stay
+// equal to what panelActions would actually return in every state that can empty
+// a panel: no tracked folder, and an empty snapshot or resource list.
+func TestTUIHasActionsMatchesPanelActions(t *testing.T) {
+	panels := []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources}
+	for _, root := range []string{"/tmp/vault", ""} {
+		for _, empty := range []bool{false, true} {
+			m := testModel(t)
+			m.ctx.root = root
+			if empty {
+				m.snaps, m.resources = nil, nil
+			}
+			m.rebuildAll()
+			for _, panel := range panels {
+				m.setFocus(panel)
+				if got, want := m.hasActions(), len(m.panelActions()) > 0; got != want {
+					t.Fatalf("%s hasActions = %v with root=%q empty=%v, but panelActions has %d",
+						m.panel().title, got, root, empty, len(m.panelActions()))
+				}
+			}
+		}
+	}
 }
 
 func TestTUIIssue92SingleKeyActions(t *testing.T) {

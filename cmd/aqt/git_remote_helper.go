@@ -21,6 +21,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/gitremote"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -263,7 +264,7 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 			ids = append(ids, segment.ID)
 		}
 	}
-	source, err := newPackSource(remote.client, ids)
+	source, err := packio.NewSource(remote.client, ids)
 	if err != nil {
 		return err
 	}
@@ -276,7 +277,7 @@ func (h *remoteHelper) fetch(requests []helperFetch) error {
 		if h.progress || h.verbosity > 0 {
 			fmt.Fprintf(h.errOut, "aqt: applying bundle %s\n", bundle.ID)
 		}
-		if err := applyBundle(bundle, remote.key, source.get); err != nil {
+		if err := applyBundle(bundle, remote.key, source.Get); err != nil {
 			return err
 		}
 	}

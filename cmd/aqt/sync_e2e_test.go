@@ -26,6 +26,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/cryptotest"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
 )
@@ -602,20 +603,6 @@ func TestLsNamesTheCapabilityGap(t *testing.T) {
 	}
 }
 
-// A located-but-missing object surfaces client.ErrNotFound, which the reconcile
-// loop maps to a conflict-retry: a manifest whose objects were GC'd by a concurrent
-// supersede is re-read against the current version instead of hard-failing.
-func TestPackSourceMissingObjectIsNotFound(t *testing.T) {
-	src := &packSource{
-		locs:    map[string]api.ObjectLocation{},
-		objSpan: map[string]packSpan{},
-		cache:   newPackCache(1),
-	}
-	if _, err := src.get("deadbeef"); !errors.Is(err, client.ErrNotFound) {
-		t.Fatalf("get of an unlocated object = %v, want client.ErrNotFound", err)
-	}
-}
-
 // TestSyncDedupHoldsOnResync checks that a re-sync with no local
 // changes uploads no new packs (the have/want gate dedups), and a clone reconstructs
 // the chunked content byte-for-byte from the packs.
@@ -658,7 +645,7 @@ func TestSyncRefusesMissingBase(t *testing.T) {
 	h.sync(origin)
 
 	// Drop the base, as a botched restore or older build would.
-	if err := os.Remove(controlPath(origin, baseFile)); err != nil {
+	if err := os.Remove(folderstate.BasePath(origin)); err != nil {
 		t.Fatal(err)
 	}
 	if err := runSync(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {
@@ -957,7 +944,7 @@ func (h *e2eHarness) syncOpts(dir string, opts syncOptions) {
 
 func (h *e2eHarness) folderID(dir string) string {
 	h.t.Helper()
-	st, err := loadState(dir)
+	st, err := folderstate.LoadState(dir)
 	if err != nil {
 		h.t.Fatalf("load state %s: %v", dir, err)
 	}

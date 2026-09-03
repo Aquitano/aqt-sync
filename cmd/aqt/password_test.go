@@ -81,7 +81,7 @@ func TestTUISharePasswordNeverHitsArgv(t *testing.T) {
 	var open tea.Cmd
 	for _, o := range menu.options {
 		if o.key == "p" {
-			open = o.cmd
+			open = o.command()
 		}
 	}
 	if open == nil {

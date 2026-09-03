@@ -223,7 +223,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		return err
 	}
 
-	up := newPackUploader(cl, nil)
+	up := newUploader(cl, nil)
 	chunker := syncengine.DefaultChunkSelector().ChunkerFor(info.Size())
 	chunks, size, err := syncengine.ChunkFile(f, conv, chunker, up)
 	if err != nil {

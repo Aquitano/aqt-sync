@@ -22,8 +22,10 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -493,7 +495,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err != nil {
 		return err
 	}
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return fmt.Errorf("read folder state: %w", err)
 	}
@@ -811,26 +813,15 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 // ok=false routes every other shape (single file, pre-tree folder, or a public
 // resource with no owner key) to the materialize fallback.
 func treeRootOf(res api.GetResourceResponse, mk crypto.MasterKey) (syncengine.TreeRoot, bool, error) {
-	if res.WrappedKey == nil {
+	folder, err := openOwnedFolder(res, mk)
+	switch {
+	case errors.Is(err, errNoOwnerKey), errors.Is(err, errNotAFolder), errors.Is(err, errLegacyFolder):
 		return syncengine.TreeRoot{}, false, nil
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return syncengine.TreeRoot{}, false, fmt.Errorf("unwrap key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
-	if err != nil {
+	case err != nil:
 		return syncengine.TreeRoot{}, false, err
 	}
-	if meta.Kind != api.KindFolder || !meta.Tree {
-		return syncengine.TreeRoot{}, false, nil
-	}
-	root, err := syncengine.OpenTreeRoot(res.Blob, ck, res.ID)
-	if err != nil {
-		return syncengine.TreeRoot{}, false, fmt.Errorf("decrypt folder root: %w", err)
-	}
-	return root, true, nil
+	defer folder.ck.Wipe()
+	return folder.root, true, nil
 }
 
 func printSnapshotDiff(r comparison) {
@@ -1269,21 +1260,21 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 		}
 		chunks := root.Chunks
 		if root.Indirect() {
-			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			segSrc, err := packio.NewSource(cl, root.ChunkIDs())
 			if err != nil {
 				return meta, err
 			}
-			chunks, err = root.Resolve(segSrc.get)
+			chunks, err = root.Resolve(segSrc.Get)
 			if err != nil {
 				return meta, err
 			}
 		}
-		src, err := newPackSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
+		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
 		if err != nil {
 			return meta, err
 		}
 		return meta, fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
-			return syncengine.WriteFileRoot(f, chunks, src.get)
+			return syncengine.WriteFileRoot(f, chunks, src.Get)
 		})
 	}
 	plain, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, res.ID)
@@ -1321,7 +1312,7 @@ func resolveResourceID(dir, id string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return "", fmt.Errorf("read folder state: %w", err)
 	}

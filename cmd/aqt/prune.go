@@ -16,6 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/gitremote"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -219,19 +220,14 @@ func rootsDrifted(items, itemsNow []api.ResourceListItem, snaps, snapsNow []api.
 // cannot compute means the diff against the inventory would count that root's
 // chunks as garbage.
 func addClosure(cl *client.Client, reachable map[string]bool, blob crypto.SealedBlob, wrapped *crypto.WrappedKey, encMeta crypto.SealedBlob, id string, mk crypto.MasterKey, conv crypto.ConvergenceKey) error {
-	if wrapped == nil {
-		return errors.New("no owner key stored; its chunk closure cannot be computed")
-	}
-	ck, err := crypto.UnwrapKey(*wrapped, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(encMeta, ck, id)
+	// A snapshot is the same sealed trio as a resource, captured from a different
+	// record, so both roots open through the resource-shaped helper.
+	owned, err := openOwnedResource(api.GetResourceResponse{ID: id, Blob: blob, EncryptedMeta: encMeta, WrappedKey: wrapped}, mk)
 	if err != nil {
 		return err
 	}
-	refs, err := closureRefs(cl, blob, ck, id, meta, conv)
+	defer owned.ck.Wipe()
+	refs, err := closureRefs(cl, blob, owned.ck, id, owned.meta, conv)
 	if err != nil {
 		return err
 	}
@@ -279,11 +275,11 @@ func closureRefs(cl *client.Client, blob crypto.SealedBlob, ck crypto.ContentKey
 		}
 		chunks := root.Chunks
 		if root.Indirect() {
-			segSrc, err := newPackSource(cl, root.ChunkIDs())
+			segSrc, err := packio.NewSource(cl, root.ChunkIDs())
 			if err != nil {
 				return nil, err
 			}
-			chunks, err = root.Resolve(segSrc.get)
+			chunks, err = root.Resolve(segSrc.Get)
 			if err != nil {
 				return nil, err
 			}

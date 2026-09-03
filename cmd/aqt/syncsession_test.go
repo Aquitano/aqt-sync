@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 )
 
 // TestCheckSyncFormat pins the server-truth routing: a pre-tree folder is refused
@@ -50,7 +51,7 @@ func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 	writeTree(t, origin, "a.txt", "A")
 	h.sync(origin)
 
-	if err := os.Remove(controlPath(origin, baseFile)); err != nil {
+	if err := os.Remove(folderstate.BasePath(origin)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openSyncSession(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {

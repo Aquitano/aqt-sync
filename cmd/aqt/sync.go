@@ -3,9 +3,6 @@
 package main
 
 import (
-	"bytes"
-	"container/list"
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,52 +15,19 @@ import (
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
-	"golang.org/x/sync/singleflight"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/cliutil"
-	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
-	"github.com/aquitano/aqt-sync/internal/fsatomic"
+	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
+	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 	textmerge "github.com/aquitano/aqt-sync/internal/syncengine/merge"
 )
 
-// folderState is the per-folder pointer stored in .aqt/state.json: which resource
-// on which server this directory tracks, plus when its packs were last GC'd.
-type folderState struct {
-	ID     string `json:"id"`
-	Server string `json:"server"`
-	// Profile, Account, and Fingerprint bind the folder to the account that owns its
-	// remote resource: Profile is the local profile name commands default to, and
-	// Account is the server-side owner handle — the account's stable identity, which
-	// a root-key rotation preserves and which every identity check keys on.
-	// Fingerprint records the account's current signing key; bindTrackedRoot refreshes
-	// it after a rotation. Profile and Account are written by init/clone/adopt and
-	// required by loadState.
-	Profile     string `json:"profile,omitempty"`
-	Account     string `json:"account,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty"`
-	LastGC      int64  `json:"lastGC,omitempty"` // Unix seconds of the last reclaimPacks GC; throttles the next
-	// RemoteVersion is the highest resource version this machine has observed —
-	// the freshness pin. A server reporting a lower version has been rolled back
-	// (restored from backup, or replaying an old state); syncing against it would
-	// read the regression as remote changes and revert local files, so it is
-	// refused unless --accept-rollback. Recorded by every init/clone/adopt and by
-	// every sync, and required by loadState: an absent pin would silently disable
-	// the guard.
-	RemoteVersion int `json:"remoteVersion,omitempty"`
-}
-
 const (
-	stateFile = "state.json"
-	baseFile  = "base.json"
-	// packCacheBytes is the download pack-range cache budget: a pack shared by several
-	// files is not re-GET per file, while download memory stays bounded by bytes (not
-	// a fixed pack count) and independent of tree size.
-	packCacheBytes = 128 << 20
 	// maxSyncAttempts bounds the optimistic-concurrency retry: if this many
 	// reconcile passes each lose the race to a concurrent sync, give up and ask
 	// the user to re-run rather than spin.
@@ -267,14 +231,14 @@ func runInit(dir string, gitChoice *bool) error {
 // resource is cleaned up.
 var commitInitState = func(abs string, prof *identity.Profile, resp api.PutResourceResponse, manifest syncengine.Manifest) error {
 	profileName, account, fingerprint := stateIdentity(prof)
-	if err := saveState(abs, folderState{
+	if err := folderstate.SaveState(abs, folderstate.State{
 		ID: resp.ID, Server: prof.Server,
 		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: resp.Version,
 	}); err != nil {
 		return err
 	}
-	return saveBase(abs, manifest)
+	return folderstate.SaveBase(abs, flagProfile, manifest)
 }
 
 // --- status ---
@@ -293,7 +257,7 @@ func runStatus(dir string, opts statusOptions) error {
 	if err := bindTrackedRoot(root); err != nil {
 		return err
 	}
-	base, err := loadBase(root)
+	base, err := folderstate.LoadBase(root, flagProfile)
 	if err != nil {
 		return err
 	}
@@ -424,7 +388,7 @@ func collectIncoming(root string, base syncengine.Manifest) *incomingReport {
 	if prof == nil {
 		return nil // never logged in: no server to compare against
 	}
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return nil
 	}
@@ -499,22 +463,7 @@ func printIncomingReport(rep *incomingReport) {
 // ciphertexts so an unchanged remote subtree costs no fetch, exactly like a sync's
 // remote read.
 func incomingFiles(cl *client.Client, res api.GetResourceResponse, base syncengine.Manifest, mk crypto.MasterKey) (changeSet, error) {
-	if res.WrappedKey == nil {
-		return changeSet{}, errors.New("folder resource has no owner key")
-	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return changeSet{}, err
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
-	if err != nil {
-		return changeSet{}, err
-	}
-	if !meta.Tree {
-		return changeSet{}, errors.New("unsupported remote folder format")
-	}
-	remote, err := readRemoteManifest(cl, res, ck, base, mk)
+	remote, err := remoteManifest(cl, res, mk, base)
 	if err != nil {
 		return changeSet{}, err
 	}
@@ -771,7 +720,7 @@ func runSync(dir string, opts syncOptions) error {
 		// sizing it up front cost a second full-tree walk — and a second hash of every
 		// file on a first sync, where there is no base to stat against.
 		prog := newUnsizedBar("uploading")
-		up := newPackUploader(cl, prog)
+		up := newUploader(cl, prog)
 		local, err = syncengine.Take(root, conv, selector, &base, up, opts.rehash)
 		if err != nil {
 			up.Wait() // drain in-flight uploads before returning the snapshot error
@@ -971,11 +920,11 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 	if len(candidates) == 0 {
 		return nil, fallback, nil
 	}
-	source, err := newPackSource(c.cl, distinctChunkIDs(sourceEntries))
+	source, err := packio.NewSource(c.cl, distinctChunkIDs(sourceEntries))
 	if err != nil {
 		return nil, nil, err
 	}
-	uploader := newPackUploader(c.cl, nil)
+	uploader := newUploader(c.cl, nil)
 	var clean []cleanMerge
 	var held int
 	var deferred []string
@@ -988,7 +937,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			uploader.Wait()
 			return nil, nil, err
 		}
-		remoteData, err := syncengine.FileBytes(re, source.get)
+		remoteData, err := syncengine.FileBytes(re, source.Get)
 		if err != nil {
 			uploader.Wait()
 			if errors.Is(err, client.ErrNotFound) {
@@ -996,7 +945,7 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 			}
 			return nil, nil, err
 		}
-		baseData, err := syncengine.FileBytes(be, source.get)
+		baseData, err := syncengine.FileBytes(be, source.Get)
 		if errors.Is(err, client.ErrNotFound) {
 			fallback[path] = true
 			continue
@@ -1037,6 +986,322 @@ func resolveTextMerges(c applyCtx, actions []syncengine.Action, localByPath, rem
 	return clean, fallback, nil
 }
 
+// applyState is the manifest half of the working set the phases below hand to one
+// another: the manifest a push commits, and the base this machine records afterwards.
+type applyState struct {
+	merged      map[string]syncengine.Entry
+	newBase     map[string]syncengine.Entry
+	mergedDirs  map[string]syncengine.DirEntry
+	newBaseDirs map[string]syncengine.DirEntry
+}
+
+func newApplyState(c applyCtx) applyState {
+	return applyState{
+		merged:      c.remote.ByPath(),
+		newBase:     c.base.ByPath(),
+		mergedDirs:  c.remote.DirsByPath(),
+		newBaseDirs: c.base.DirsByPath(),
+	}
+}
+
+// actionSides is what one action stream reconciles: the two sides as they stand now,
+// and the two manifests being built from them. merged and newBase are written in place.
+type actionSides[T any] struct {
+	local, remote   map[string]T
+	merged, newBase map[string]T
+}
+
+// applyWork is the transfer work one action stream produces.
+type applyWork[T any] struct {
+	uploads       []T
+	downloads     []T
+	localDeletes  []string
+	remoteChanged bool
+}
+
+// classifyActions folds one action stream into the merged manifest and the new base,
+// and collects the transfers the apply pass will run. Files and tracked directories
+// take the same four-case gate over different element types; --pull-only and
+// --push-only drop the half the caller asked to skip. Nothing is uploaded for a
+// directory — it rides in the manifest — so a directory stream's uploads are unused.
+func classifyActions[T any](actions []syncengine.Action, sides actionSides[T], push, pull bool) applyWork[T] {
+	var w applyWork[T]
+	for _, a := range actions {
+		switch a.Kind {
+		case syncengine.Upload, syncengine.Conflict: // Conflict only survives here with --force
+			if !push {
+				continue
+			}
+			e, ok := sides.local[a.Path]
+			if !ok {
+				// A conflict resolved local-wins where the path is gone locally (local
+				// delete vs remote modify): local winning means deleting it on the remote
+				// too. Recording the zero element here would PUT a path-less empty entry,
+				// drop the remote edit, and corrupt the manifest (several such paths
+				// collapse to one on reload).
+				delete(sides.merged, a.Path)
+				delete(sides.newBase, a.Path)
+				w.remoteChanged = true
+				continue
+			}
+			sides.merged[a.Path] = e
+			sides.newBase[a.Path] = e
+			w.uploads = append(w.uploads, e)
+			w.remoteChanged = true
+		case syncengine.DeleteRemote:
+			if !push {
+				continue
+			}
+			delete(sides.merged, a.Path)
+			delete(sides.newBase, a.Path)
+			w.remoteChanged = true
+		case syncengine.Download:
+			if !pull {
+				continue
+			}
+			e := sides.remote[a.Path]
+			w.downloads = append(w.downloads, e)
+			sides.newBase[a.Path] = e
+		case syncengine.DeleteLocal:
+			if !pull {
+				continue
+			}
+			w.localDeletes = append(w.localDeletes, a.Path)
+			delete(sides.newBase, a.Path)
+		}
+	}
+	return w
+}
+
+// asActions re-types a directory action stream. DirAction is kept separate at the plan
+// boundary so the hardened file apply path is untouched, but it carries the same path
+// and kind, and the classifier gates both identically.
+func asActions(in []syncengine.DirAction) []syncengine.Action {
+	out := make([]syncengine.Action, len(in))
+	for i, a := range in {
+		out[i] = syncengine.Action(a)
+	}
+	return out
+}
+
+// foldConvergedPaths records the paths the two sides already agree on, which Plan emits
+// no action for. Content that converged to the same hash goes into the new base, or it
+// stays "changed on both sides" forever: a later remote-only delete is then misread as a
+// local add, the file is re-pushed, and the deletion never propagates. Keep the local
+// entry (same hash as remote): base.json is local-only bookkeeping, and the local entry
+// carries this machine's mtime, so the next sync stat-fast-paths the file instead of
+// re-hashing it.
+func foldConvergedPaths(st applyState, localByPath, remoteByPath map[string]syncengine.Entry, localDirs, remoteDirs map[string]syncengine.DirEntry) {
+	for p, le := range localByPath {
+		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
+			st.newBase[p] = le
+		}
+	}
+	dropVanished(st.newBase, localByPath, remoteByPath)
+	dropVanished(st.newBaseDirs, localDirs, remoteDirs)
+}
+
+// dropVanished is the deletion counterpart of the fold: a path gone on both sides plans
+// no action (agreement, not conflict), so nothing else removes its base record, and it
+// would read as a forever-pending local delete.
+func dropVanished[T any](recorded, local, remote map[string]T) {
+	for p := range recorded {
+		_, l := local[p]
+		_, r := remote[p]
+		if !l && !r {
+			delete(recorded, p)
+		}
+	}
+}
+
+// materializeConflictCopies preserves the remote side of every content conflict as a
+// local copy BEFORE any local-wins remote mutation runs, so the remote bytes survive on
+// disk even if the push dies mid-apply. The primary path is resolved local-wins by the
+// classifier. Copies land at fresh, collision-checked paths, so they never overwrite
+// anything and skip the download drift guard.
+func materializeConflictCopies(c applyCtx, actions []syncengine.Action, mergeFallback map[string]bool, remoteByPath map[string]syncengine.Entry) error {
+	if c.mode != conflictCopy && c.mode != conflictMerge {
+		return nil
+	}
+	copyActions := actions
+	if c.mode == conflictMerge {
+		copyActions = nil
+		for _, action := range actions {
+			if mergeFallback[action.Path] {
+				copyActions = append(copyActions, action)
+			}
+		}
+	}
+	copies := planConflictCopies(c.root, copyActions, remoteByPath, c.host, c.now, c.copyMemo)
+	if len(copies) == 0 {
+		return nil
+	}
+	entries := copyEntries(copies)
+	cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
+	// A conflict copy lands at a fresh untracked path, so it has no base entry to
+	// stamp an mtime on; the next scan picks it up as a local add.
+	_, cpErr := runDownloads(c.cl, c.root, entries, cpProg)
+	cpProg.finish(cpErr == nil)
+	if cpErr != nil {
+		return cpErr
+	}
+	// Record only after the write lands, so a failed/partial download is re-planned
+	// rather than memoized as done; a retry rewrites the same path.
+	for _, cp := range copies {
+		c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
+		// stderr under --json so the summary object stays the only stdout output;
+		// -q drops the line entirely, like every other per-file line.
+		if flagQuiet {
+			continue
+		}
+		out := os.Stdout
+		if flagJSON {
+			out = os.Stderr
+		}
+		fmt.Fprintf(out, "conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
+	}
+	return nil
+}
+
+// pushMergedManifest commits the server-side change FIRST, before any local file is
+// touched, so a version conflict (another sync committed first) returns with nothing
+// half-applied on disk and the caller can re-plan cleanly. The objects these entries
+// reference were already packed and uploaded during the snapshot pass; this commits
+// only the merged manifest that roots them, and returns the version it landed as.
+func pushMergedManifest(c applyCtx, st applyState) (int, error) {
+	manifest := manifestFrom(st.merged, c.version+1)
+	manifest.Dirs = dirsFrom(st.mergedDirs)
+	if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
+		return 0, err
+	}
+	resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
+	if err != nil {
+		return 0, err // client.ErrConflict on a stale version: retried by the caller
+	}
+	reclaimPacks(c.root, c.cl)
+	return resp.Version, nil
+}
+
+// landCleanMerges writes each merged file to disk now that the root durably references
+// the merged entry, and only if the path still holds the entry resolveTextMerges read.
+// A newer local edit in the merge->PUT window wins on disk: its merge is reported as a
+// conflict, its base record is left at the pre-merge entry, and the next sync re-plans
+// it against the committed merge.
+func landCleanMerges(c applyCtx, merges []cleanMerge, newBase map[string]syncengine.Entry) (landed []cleanMerge, conflicts []string, err error) {
+	baseByPath := c.base.ByPath()
+	landed = make([]cleanMerge, 0, len(merges))
+	for _, resolution := range merges {
+		hash, exists, isDir, err := syncengine.HashOnDisk(c.root, resolution.path)
+		if err != nil {
+			return nil, nil, err
+		}
+		if !exists || isDir || (hash != resolution.original.Hash && hash != resolution.entry.Hash) {
+			if baseEntry, ok := baseByPath[resolution.path]; ok {
+				newBase[resolution.path] = baseEntry
+			} else {
+				delete(newBase, resolution.path)
+			}
+			conflicts = append(conflicts, resolution.path)
+			continue
+		}
+		mtime, err := syncengine.WriteFile(c.root, resolution.entry, resolution.data)
+		if err != nil {
+			return nil, nil, err
+		}
+		// A merged file is built in memory, so its entry carries no mtime either.
+		stampMTimes(newBase, map[string]int64{resolution.path: mtime})
+		landed = append(landed, resolution)
+	}
+	return landed, conflicts, nil
+}
+
+// localApply is the disk-side work the push leaves: what to write, and what to remove.
+type localApply struct {
+	downloads    []syncengine.Entry
+	localDeletes []string
+	dirDownloads []syncengine.DirEntry
+	dirRemovals  []string
+}
+
+// applyLocalTree brings the local tree in line with the manifest just committed. It
+// returns the work as executed: a case-only rename consumes the delete that would have
+// destroyed its target, so the summary reports what actually happened.
+func applyLocalTree(c applyCtx, st applyState, w localApply, foldFS bool) (localApply, error) {
+	// A case-only rename arrives as an add+delete pair whose two paths resolve to
+	// the same physical file on a case-folding filesystem: the download lands on the
+	// very file the late delete then destroys, and the next sync pushes that loss
+	// fleet-wide. Convert each such delete into a real rename (executed before any
+	// other byte moves, shallowest first so a renamed directory carries its subtree)
+	// and drop it from the delete lists.
+	if foldFS {
+		var caseRenames []caseRename
+		caseRenames, w.localDeletes, w.dirRemovals = planCaseOnlyRenames(w.localDeletes, w.dirRemovals, st.newBase, st.newBaseDirs)
+		for _, r := range caseRenames {
+			if err := syncengine.RenameCaseOnly(c.root, r.from, r.to); err != nil {
+				return w, err
+			}
+		}
+	}
+
+	// A local file or symlink the remote turned into a directory must be removed before
+	// the download that creates that directory, or the download would write through the
+	// stale entry (refused) or the later delete would hit a now-populated directory.
+	// Every other delete stays after the downloads, so local data is never removed
+	// before its replacement lands.
+	earlyDeletes, lateDeletes := partitionDeletesByDownload(w.localDeletes, w.downloads, foldFS)
+	for _, p := range earlyDeletes {
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return w, err
+		}
+	}
+	dlProg := newProgressBar("downloading", entriesBytes(w.downloads))
+	dlMTimes, dlErr := runDownloads(c.cl, c.root, w.downloads, dlProg)
+	dlProg.finish(dlErr == nil)
+	if dlErr != nil {
+		return w, dlErr
+	}
+	stampMTimes(st.newBase, dlMTimes)
+	for _, p := range lateDeletes {
+		if err := syncengine.RemoveFile(c.root, p); err != nil {
+			return w, err
+		}
+	}
+
+	// Directories last: create/chmod after files land (so a directory exists and gets
+	// its mode), and remove emptied directories after file deletes.
+	if err := syncengine.MaterializeDirs(c.root, w.dirDownloads); err != nil {
+		return w, err
+	}
+	if err := removeDirs(c.root, w.dirRemovals); err != nil {
+		return w, err
+	}
+	// The deletes above prune now-empty parents blind to the tracked set (RemoveFile
+	// and RemoveDir), so emptying a tracked directory takes the directory with it —
+	// and the next sync would read that as a local delete and push it fleet-wide.
+	// Recreate whatever the pruning took from the merged directory set.
+	if len(earlyDeletes)+len(lateDeletes)+len(w.dirRemovals) > 0 {
+		if err := syncengine.EnsureDirs(c.root, dirsFrom(st.newBaseDirs)); err != nil {
+			return w, err
+		}
+	}
+	return w, nil
+}
+
+// persistSyncState records what this pass established: the new base manifest, and the
+// remote version it was reconciled against.
+func persistSyncState(c applyCtx, st applyState, syncedVersion int) error {
+	newBaseManifest := manifestFrom(st.newBase, c.version+1)
+	newBaseManifest.Dirs = dirsFrom(st.newBaseDirs)
+	if err := folderstate.SaveBase(c.root, flagProfile, newBaseManifest); err != nil {
+		return err
+	}
+	folderstate.RecordRemoteVersion(c.root, syncedVersion)
+	return nil
+}
+
+// applySync runs the reconciliation the plan describes, in the one order that is safe:
+// classify both action streams, refuse case collisions, preserve conflicting remote
+// bytes, commit the merged manifest to the server, then touch local files.
 func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.DirAction) error {
 	// c holds by-value copies of the caller's keys ([32]byte, so the caller's
 	// deferred wipes do not reach them); scrub this frame's copies on exit.
@@ -1060,134 +1325,21 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 		}
 	}
 
-	merged := c.remote.ByPath() // becomes the new server manifest
-	newBase := c.base.ByPath()  // becomes the new last-synced record
-	var uploads []syncengine.Entry
-	var downloads []syncengine.Entry
-	var localDeletes []string
-	remoteChanged := false
-
-	for _, a := range actions {
-		switch a.Kind {
-		case syncengine.Upload, syncengine.Conflict: // Conflict only survives here with --force
-			if !push {
-				continue
-			}
-			e, ok := localByPath[a.Path]
-			if !ok {
-				// A conflict resolved local-wins where the file is gone locally
-				// (local delete vs remote modify): local winning means deleting it
-				// on the remote too. Uploading the zero Entry here would PUT a
-				// path-less empty entry, drop the remote edit, and corrupt the
-				// manifest (several such paths collapse to one on reload).
-				delete(merged, a.Path)
-				delete(newBase, a.Path)
-				remoteChanged = true
-				continue
-			}
-			merged[a.Path] = e
-			newBase[a.Path] = e
-			uploads = append(uploads, e)
-			remoteChanged = true
-		case syncengine.DeleteRemote:
-			if !push {
-				continue
-			}
-			delete(merged, a.Path)
-			delete(newBase, a.Path)
-			remoteChanged = true
-		case syncengine.Download:
-			if !pull {
-				continue
-			}
-			e := remoteByPath[a.Path]
-			downloads = append(downloads, e)
-			newBase[a.Path] = e
-		case syncengine.DeleteLocal:
-			if !pull {
-				continue
-			}
-			localDeletes = append(localDeletes, a.Path)
-			delete(newBase, a.Path)
-		}
-	}
-
-	// Reconcile tracked directories (empty dirs and modes) alongside files. The file
-	// apply path is untouched; directory filesystem ops run in a dedicated pass after
-	// files (below). A directory mode conflict resolves local-wins — it is only
-	// permission metadata, not worth blocking a sync.
-	mergedDirs := c.remote.DirsByPath() // new server dirs
-	newBaseDirs := c.base.DirsByPath()
+	st := newApplyState(c)
+	files := classifyActions(actions, actionSides[syncengine.Entry]{
+		local: localByPath, remote: remoteByPath, merged: st.merged, newBase: st.newBase,
+	}, push, pull)
+	// Tracked directories (empty dirs and modes) reconcile alongside files, but their
+	// filesystem ops run in a dedicated pass after files. A directory mode conflict
+	// resolves local-wins — it is only permission metadata, not worth blocking a sync.
 	localDirs := c.local.DirsByPath()
 	remoteDirs := c.remote.DirsByPath()
-	var dirDownloads []syncengine.DirEntry
-	var dirRemovals []string
-	for _, a := range dirActions {
-		switch a.Kind {
-		case syncengine.Upload, syncengine.Conflict:
-			if !push {
-				continue
-			}
-			if d, ok := localDirs[a.Path]; ok {
-				mergedDirs[a.Path] = d
-				newBaseDirs[a.Path] = d
-			} else { // a conflict resolved local-wins where the dir is gone locally
-				delete(mergedDirs, a.Path)
-				delete(newBaseDirs, a.Path)
-			}
-			remoteChanged = true
-		case syncengine.DeleteRemote:
-			if !push {
-				continue
-			}
-			delete(mergedDirs, a.Path)
-			delete(newBaseDirs, a.Path)
-			remoteChanged = true
-		case syncengine.Download:
-			if !pull {
-				continue
-			}
-			d := remoteDirs[a.Path]
-			dirDownloads = append(dirDownloads, d)
-			newBaseDirs[a.Path] = d
-		case syncengine.DeleteLocal:
-			if !pull {
-				continue
-			}
-			dirRemovals = append(dirRemovals, a.Path)
-			delete(newBaseDirs, a.Path)
-		}
-	}
+	dirs := classifyActions(asActions(dirActions), actionSides[syncengine.DirEntry]{
+		local: localDirs, remote: remoteDirs, merged: st.mergedDirs, newBase: st.newBaseDirs,
+	}, push, pull)
+	remoteChanged := files.remoteChanged || dirs.remoteChanged
 
-	// Fold paths that converged to identical content on both sides into the new
-	// base. Plan emits no action for them (there is nothing to transfer), so without
-	// this they stay "changed on both sides" forever: a later remote-only delete is
-	// then misread as a local add, the file is re-pushed, and the deletion never
-	// propagates. Keep the local entry (same hash as remote): base.json is local-only
-	// bookkeeping, and the local entry carries this machine's mtime, so the next sync
-	// stat-fast-paths the file instead of re-hashing it.
-	for p, le := range localByPath {
-		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
-			newBase[p] = le
-		}
-	}
-	// The deletion counterpart of the fold above: a path gone on both sides plans no
-	// action (agreement, not conflict), so nothing removes its base record. Drop it
-	// here, or it reads as a forever-pending local delete.
-	for p := range newBase {
-		_, l := localByPath[p]
-		_, r := remoteByPath[p]
-		if !l && !r {
-			delete(newBase, p)
-		}
-	}
-	for p := range newBaseDirs {
-		_, l := localDirs[p]
-		_, r := remoteDirs[p]
-		if !l && !r {
-			delete(newBaseDirs, p)
-		}
-	}
+	foldConvergedPaths(st, localByPath, remoteByPath, localDirs, remoteDirs)
 
 	// A push must not commit case-twins to the server — they arm a data-loss trap
 	// for every case-insensitive device — and a pull onto a case-folding filesystem
@@ -1195,178 +1347,51 @@ func applySync(c applyCtx, actions []syncengine.Action, dirActions []syncengine.
 	// push too: renaming one member locally is the resolution, and the error says so.
 	foldFS := syncengine.CaseInsensitiveDir(c.root)
 	if (push && remoteChanged) || foldFS {
-		if err := refuseCaseCollisions(manifestFrom(merged, 0).Entries, dirsFrom(mergedDirs)); err != nil {
+		if err := refuseCaseCollisions(manifestFrom(st.merged, 0).Entries, dirsFrom(st.mergedDirs)); err != nil {
 			return err
 		}
 	}
 
-	// Copy mode: preserve the remote side of every content conflict as a local copy
-	// BEFORE any local-wins remote mutation runs, so the remote bytes survive on disk
-	// even if the push below dies mid-apply. The primary path is then resolved
-	// local-wins by the action loop above. Copies land at fresh, collision-checked
-	// paths, so they never overwrite anything and skip the download drift guard.
-	if c.mode == conflictCopy || c.mode == conflictMerge {
-		copyActions := actions
-		if c.mode == conflictMerge {
-			copyActions = nil
-			for _, action := range actions {
-				if mergeFallback[action.Path] {
-					copyActions = append(copyActions, action)
-				}
-			}
-		}
-		if copies := planConflictCopies(c.root, copyActions, remoteByPath, c.host, c.now, c.copyMemo); len(copies) > 0 {
-			entries := copyEntries(copies)
-			cpProg := newProgressBar("writing conflict copies", entriesBytes(entries))
-			// A conflict copy lands at a fresh untracked path, so it has no base entry to
-			// stamp an mtime on; the next scan picks it up as a local add.
-			_, cpErr := runDownloads(c.cl, c.root, entries, cpProg)
-			cpProg.finish(cpErr == nil)
-			if cpErr != nil {
-				return cpErr
-			}
-			// Record only after the write lands, so a failed/partial download is
-			// re-planned rather than memoized as done; a retry rewrites the same path.
-			for _, cp := range copies {
-				c.copyMemo[cp.orig] = conflictCopyRecord{copyPath: cp.entry.Path, remoteHash: cp.entry.Hash}
-				// stderr under --json so the summary object stays the only stdout output;
-				// -q drops the line entirely, like every other per-file line.
-				if flagQuiet {
-					continue
-				}
-				out := os.Stdout
-				if flagJSON {
-					out = os.Stderr
-				}
-				fmt.Fprintf(out, "conflict-copy %s -> %s\n", cp.orig, cp.entry.Path)
-			}
-		}
+	if err := materializeConflictCopies(c, actions, mergeFallback, remoteByPath); err != nil {
+		return err
 	}
 
-	// Push the server-side change FIRST, before any local file is touched, so a
-	// version conflict (another sync committed first) returns with nothing
-	// half-applied on disk and the caller can re-plan cleanly. The objects these
-	// entries reference were already packed and uploaded during the snapshot pass;
-	// here we only commit the merged manifest that roots them.
 	syncedVersion := c.version
 	if push && remoteChanged {
-		manifest := manifestFrom(merged, c.version+1)
-		manifest.Dirs = dirsFrom(mergedDirs)
-		if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
-			return err
-		}
-		resp, err := putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
-		if err != nil {
-			return err // client.ErrConflict on a stale version: retried by the caller
-		}
-		syncedVersion = resp.Version
-		reclaimPacks(c.root, c.cl)
-	}
-	// The root now durably references the merged entry. Land the same bytes locally
-	// only after the optimistic PUT succeeds, and only if the path still contains the
-	// entry resolveTextMerges read. A newer local edit in the merge->PUT window wins on
-	// disk and is re-planned against the committed merge on the next sync.
-	baseByPath := c.base.ByPath()
-	var mergeConflicts []string
-	landedMerges := make([]cleanMerge, 0, len(cleanMerges))
-	for _, resolution := range cleanMerges {
-		hash, exists, isDir, err := syncengine.HashOnDisk(c.root, resolution.path)
+		version, err := pushMergedManifest(c, st)
 		if err != nil {
 			return err
 		}
-		if !exists || isDir || (hash != resolution.original.Hash && hash != resolution.entry.Hash) {
-			if baseEntry, ok := baseByPath[resolution.path]; ok {
-				newBase[resolution.path] = baseEntry
-			} else {
-				delete(newBase, resolution.path)
-			}
-			mergeConflicts = append(mergeConflicts, resolution.path)
-			continue
-		}
-		mtime, err := syncengine.WriteFile(c.root, resolution.entry, resolution.data)
-		if err != nil {
-			return err
-		}
-		// A merged file is built in memory, so its entry carries no mtime either.
-		stampMTimes(newBase, map[string]int64{resolution.path: mtime})
-		landedMerges = append(landedMerges, resolution)
+		syncedVersion = version
 	}
 
-	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, downloads, localDeletes, localByPath, remoteByPath, c.base.ByPath(), newBase)
+	landedMerges, mergeConflicts, err := landCleanMerges(c, cleanMerges, st.newBase)
+	if err != nil {
+		return err
+	}
+
+	downloads, localDeletes, conflicts, err := filterDriftedTargets(c.root, files.downloads, files.localDeletes, localByPath, remoteByPath, c.base.ByPath(), st.newBase)
 	if err != nil {
 		return err
 	}
 	conflicts = append(conflicts, mergeConflicts...)
 
-	// A case-only rename arrives as an add+delete pair whose two paths resolve to
-	// the same physical file on a case-folding filesystem: the download lands on the
-	// very file the late delete then destroys, and the next sync pushes that loss
-	// fleet-wide. Convert each such delete into a real rename (executed before any
-	// other byte moves, shallowest first so a renamed directory carries its subtree)
-	// and drop it from the delete lists.
-	if foldFS {
-		var caseRenames []caseRename
-		caseRenames, localDeletes, dirRemovals = planCaseOnlyRenames(localDeletes, dirRemovals, newBase, newBaseDirs)
-		for _, r := range caseRenames {
-			if err := syncengine.RenameCaseOnly(c.root, r.from, r.to); err != nil {
-				return err
-			}
-		}
-	}
-
-	// Server is updated; now bring the local tree in line. A local file or symlink the
-	// remote turned into a directory must be removed before the download that creates
-	// that directory, or the download would write through the stale entry (refused) or
-	// the later delete would hit a now-populated directory. Every other delete stays
-	// after the downloads, so local data is never removed before its replacement lands.
-	earlyDeletes, lateDeletes := partitionDeletesByDownload(localDeletes, downloads, foldFS)
-	for _, p := range earlyDeletes {
-		if err := syncengine.RemoveFile(c.root, p); err != nil {
-			return err
-		}
-	}
-	dlProg := newProgressBar("downloading", entriesBytes(downloads))
-	dlMTimes, dlErr := runDownloads(c.cl, c.root, downloads, dlProg)
-	dlProg.finish(dlErr == nil)
-	if dlErr != nil {
-		return dlErr
-	}
-	stampMTimes(newBase, dlMTimes)
-	for _, p := range lateDeletes {
-		if err := syncengine.RemoveFile(c.root, p); err != nil {
-			return err
-		}
-	}
-
-	// Directories last: create/chmod after files land (so a directory exists and gets
-	// its mode), and remove emptied directories after file deletes.
-	if err := syncengine.MaterializeDirs(c.root, dirDownloads); err != nil {
+	work, err := applyLocalTree(c, st, localApply{
+		downloads: downloads, localDeletes: localDeletes,
+		dirDownloads: dirs.downloads, dirRemovals: dirs.localDeletes,
+	}, foldFS)
+	if err != nil {
 		return err
 	}
-	if err := removeDirs(c.root, dirRemovals); err != nil {
-		return err
-	}
-	// The deletes above prune now-empty parents blind to the tracked set (RemoveFile
-	// and RemoveDir), so emptying a tracked directory takes the directory with it —
-	// and the next sync would read that as a local delete and push it fleet-wide.
-	// Recreate whatever the pruning took from the merged directory set.
-	if len(earlyDeletes)+len(lateDeletes)+len(dirRemovals) > 0 {
-		if err := syncengine.EnsureDirs(c.root, dirsFrom(newBaseDirs)); err != nil {
-			return err
-		}
-	}
 
-	newBaseManifest := manifestFrom(newBase, c.version+1)
-	newBaseManifest.Dirs = dirsFrom(newBaseDirs)
-	if err := saveBase(c.root, newBaseManifest); err != nil {
+	if err := persistSyncState(c, st, syncedVersion); err != nil {
 		return err
 	}
-	recordRemoteVersion(c.root, syncedVersion)
 	mergedPaths := make([]string, len(landedMerges))
 	for i, resolution := range landedMerges {
 		mergedPaths[i] = resolution.path
 	}
-	summarize(uploads, downloads, localDeletes, mergedPaths)
+	summarize(files.uploads, work.downloads, work.localDeletes, mergedPaths)
 	if len(conflicts) > 0 {
 		sort.Strings(conflicts)
 		printPaths("conflict", conflicts)
@@ -1495,17 +1520,14 @@ func runClone(ref, dir string, adopt bool, password string) error {
 			defer ck.Wipe()
 			return cloneReadOnly(grantFetch(cl, id), res, ck, id, dir)
 		}
-		return errors.New("not a private folder you own (no owner key)")
+		return errNoOwnerKey
 	}
-	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
-	if err != nil {
-		return fmt.Errorf("unwrap folder key: %w", err)
-	}
-	defer ck.Wipe()
-	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
+	owned, err := openOwnedResource(res, mk)
 	if err != nil {
 		return err
 	}
+	defer owned.ck.Wipe()
+	ck, meta := owned.ck, owned.meta
 
 	if dir == "" {
 		dir = id
@@ -1537,14 +1559,14 @@ func runClone(ref, dir string, adopt bool, password string) error {
 		if err := os.MkdirAll(filepath.Join(staging, syncengine.ControlDir), 0o700); err != nil {
 			return err
 		}
-		if err := saveState(staging, folderState{
+		if err := folderstate.SaveState(staging, folderstate.State{
 			ID: id, Server: prof.Server,
 			Profile: profileName, Account: account, Fingerprint: fingerprint,
 			RemoteVersion: res.Version,
 		}); err != nil {
 			return err
 		}
-		return saveBase(staging, base)
+		return folderstate.SaveBase(staging, flagProfile, base)
 	}); err != nil {
 		return err
 	}
@@ -1657,10 +1679,10 @@ func adoptClone(id, abs string, prof *identity.Profile, version int) error {
 	if err := os.MkdirAll(filepath.Join(abs, syncengine.ControlDir), 0o700); err != nil {
 		return err
 	}
-	// Deliberately no saveBase: an empty base would resurrect deletions; the reconcile
+	// Deliberately no SaveBase: an empty base would resurrect deletions; the reconcile
 	// below writes base.json once local and remote agree.
 	profileName, account, fingerprint := stateIdentity(prof)
-	if err := saveState(abs, folderState{
+	if err := folderstate.SaveState(abs, folderstate.State{
 		ID: id, Server: prof.Server,
 		Profile: profileName, Account: account, Fingerprint: fingerprint,
 		RemoteVersion: version,
@@ -1735,44 +1757,18 @@ func stampEntryMTimes(entries []syncengine.Entry, mtimes map[string]int64) {
 
 // --- chunk transfer ---
 
-// packUploader is the ChunkSink Take feeds during a push. It buffers sealed chunks
-// up to ~packTarget, then hands the batch to a bounded pool that asks the server
-// which chunks it lacks, packs only those, and uploads the pack. Dispatching to the
-// pool instead of uploading inline overlaps chunking with the two upload round-trips,
-// so the CPU keeps sealing the next pack while earlier ones are in flight — the win
-// over a WAN, where each pack otherwise cost two sequential RTTs of pure stall.
-//
-// The pool is bounded: group.Go blocks once uploadConcurrency packs are in flight,
-// which is the backpressure that keeps push memory at O(uploadConcurrency packs)
-// rather than O(tree). A per-run seen set dedups a chunk shared by several files
-// within the same sync; it and the candidate buffer are touched only by the single
-// producer goroutine (Take calls Add sequentially), while workers touch only their
-// own batch and the concurrency-safe client, so no further synchronization is needed.
-type packUploader struct {
-	cl       *client.Client
-	target   int
-	seen     map[string]bool
-	cand     []candidate
-	candSize int
-	group    *errgroup.Group
-	ctx      context.Context
-	waitOnce sync.Once
-	waitErr  error
-	prog     *progressBar
-}
-
-type candidate struct {
-	id   string
-	ct   []byte
-	size int // plaintext length, for progress accounting
-}
-
 // uploadConcurrency bounds how many packs are checked-and-uploaded at once. Uploads
 // are IO-bound (two round-trips plus server ingest), so a small fixed fan-out hides
 // latency without a per-core thread; it also caps peak push memory at roughly this
 // many packs (each in-flight upload holds a candidate buffer plus its assembled pack,
 // both ~DefaultPackTarget).
 const uploadConcurrency = 4
+
+// newUploader binds a pack uploader to the root signal context and this stage's
+// transfer limit.
+func newUploader(cl *client.Client, prog *progressBar) *packio.Uploader {
+	return packio.NewUploader(rootCtx, cl, prog, syncTransferLimit(uploadConcurrency))
+}
 
 // syncTransferLimit is the errgroup concurrency for a transfer stage, normally the
 // given fan-out. AQT_SYNC_SERIAL=1 forces it to 1 so the multi-device sim's crash-fault
@@ -1785,123 +1781,10 @@ func syncTransferLimit(n int) int {
 	return n
 }
 
-func newPackUploader(cl *client.Client, prog *progressBar) *packUploader {
-	// Parented on the root signal context so a ^C stops queued uploads from
-	// dispatching, not just the in-flight requests the bound client kills itself.
-	g, ctx := errgroup.WithContext(rootCtx)
-	g.SetLimit(syncTransferLimit(uploadConcurrency))
-	return &packUploader{cl: cl, target: syncengine.DefaultPackTarget, seen: map[string]bool{}, group: g, ctx: ctx, prog: prog}
-}
-
-// Add buffers one sealed chunk, dispatching a pack once the buffer reaches the target.
-func (u *packUploader) Add(ch crypto.Chunk, ciphertext []byte) error {
-	if u.seen[ch.ID] {
-		return nil
-	}
-	u.seen[ch.ID] = true
-	// Dispatch-before-append when this object would push the assembled pack past
-	// the wire cap (see syncengine.FitsInPack); the target flush below runs after
-	// the append and cannot catch that case.
-	if u.candSize > 0 && !syncengine.FitsInPack(u.candSize, len(u.cand), len(ciphertext)) {
-		if err := u.dispatch(); err != nil {
-			return err
-		}
-	}
-	u.cand = append(u.cand, candidate{id: ch.ID, ct: ciphertext, size: ch.Len})
-	u.candSize += len(ciphertext)
-	if u.candSize >= u.target {
-		return u.dispatch()
-	}
-	return nil
-}
-
-// Flush dispatches any buffered remainder, then waits for every in-flight upload;
-// call once after the snapshot pass. The manifest PUT that roots these objects must
-// not race ahead of them, so Flush is the barrier that guarantees they are all stored.
-func (u *packUploader) Flush() error {
-	if err := u.dispatch(); err != nil {
-		return err
-	}
-	return u.Wait()
-}
-
-// Wait blocks until all dispatched uploads finish and returns the first error. It is
-// idempotent — errgroup.Wait must not be called twice — so a caller can drain the
-// pool on a snapshot error and still have Flush return the same result on success.
-func (u *packUploader) Wait() error {
-	u.waitOnce.Do(func() { u.waitErr = u.group.Wait() })
-	return u.waitErr
-}
-
-// dispatch hands the buffered candidates to an upload worker and resets the buffer,
-// transferring ownership of the batch. group.Go blocks when uploadConcurrency uploads
-// are already running — the backpressure that bounds memory. If a prior upload already
-// failed the group context is cancelled, so stop feeding work and surface that error.
-func (u *packUploader) dispatch() error {
-	if len(u.cand) == 0 {
-		return nil
-	}
-	batch := u.cand
-	u.cand = nil
-	u.candSize = 0
-	if u.ctx.Err() != nil {
-		// The batch was just detached and is being dropped, so success must not
-		// be reported. A worker failure surfaces through Wait; a root cancel
-		// leaves the group error-free (the context is no longer only canceled by
-		// failing workers, it parents on rootCtx), so the cancellation itself is
-		// the error — returning nil here would let a ^C'd push keep sealing the
-		// rest of the tree and report every dropped pack as uploaded.
-		if err := u.Wait(); err != nil {
-			return err
-		}
-		return context.Cause(u.ctx)
-	}
-	u.group.Go(func() error { return u.upload(batch) })
-	return nil
-}
-
-// upload runs one pack's have/want gate and PutPack. It owns cand exclusively (each
-// ciphertext is an independent SealChunk allocation), so it needs no locking.
-func (u *packUploader) upload(cand []candidate) error {
-	ids := make([]string, len(cand))
-	var batchBytes int64
-	for i, c := range cand {
-		ids[i] = c.id
-		batchBytes += int64(c.size)
-	}
-	missing, err := u.cl.CheckChunks(ids)
-	if err != nil {
-		return err
-	}
-	want := make(map[string]bool, len(missing))
-	for _, id := range missing {
-		want[id] = true
-	}
-	pb := syncengine.NewPackBuilder()
-	for _, c := range cand {
-		if want[c.id] {
-			pb.Add(c.id, c.ct)
-		}
-	}
-	// Count the batch's plaintext bytes as done once it is confirmed on the server,
-	// whether it was uploaded or already present (dedup) — so the bar reflects content
-	// committed, not bytes on the wire, and still reaches the total on a re-sync.
-	if pb.Empty() {
-		u.prog.add(batchBytes) // every candidate already on the server (a re-sync)
-		return nil
-	}
-	packID, pack := pb.Finish()
-	if err := u.cl.PutPack(packID, pack); err != nil {
-		return err
-	}
-	u.prog.add(batchBytes)
-	return nil
-}
-
 // downloadConcurrency bounds how many files a pull materializes at once. Downloads
 // are IO-bound (each file range-fetches its packs, then writes them out), so a small
 // fixed fan-out overlaps the network latency of independent files without a
-// per-core thread. The shared packSource is concurrency-safe, and every file lands
+// per-core thread. The shared packio.Source is concurrency-safe, and every file lands
 // at a distinct path, so the content-addressed model makes the parallelism trivially
 // correct — no file's bytes depend on another's.
 const downloadConcurrency = 6
@@ -1923,22 +1806,22 @@ const locateBatchChunks = 50_000
 // returned, matching the upload pipeline's aggregation. The returned map gives each
 // written file's resulting mtime, keyed by path, for the caller's base manifest.
 func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
-	src := newEmptyPackSource(cl)
+	src := packio.NewEmptySource(cl)
 	mtimes := make(map[string]int64, len(entries))
 	for _, batch := range batchByChunks(entries, locateBatchChunks) {
 		// locate must not run while workers are calling get, which holds because each
 		// batch's downloads finish before the next batch is located.
-		if err := src.locate(distinctChunkIDs(batch)); err != nil {
+		if err := src.Locate(distinctChunkIDs(batch)); err != nil {
 			return nil, err
 		}
-		batchMTimes, err := runDownloadsFrom(src.get, root, batch, prog)
+		batchMTimes, err := runDownloadsFrom(src.Get, root, batch, prog)
 		if err != nil {
 			return nil, err
 		}
 		for path, mtime := range batchMTimes {
 			mtimes[path] = mtime
 		}
-		src.forgetLocations()
+		src.ForgetLocations()
 	}
 	return mtimes, nil
 }
@@ -1995,7 +1878,7 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 					mu.Lock()
 					skippedLinks = append(skippedLinks, e.Path)
 					mu.Unlock()
-					prog.add(e.Size)
+					prog.Add(e.Size)
 					return nil
 				}
 				if err := syncengine.WriteSymlink(root, e); err != nil {
@@ -2010,7 +1893,7 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 				mtimes[e.Path] = mtime
 				mu.Unlock()
 			}
-			prog.add(e.Size)
+			prog.Add(e.Size)
 			return nil
 		})
 	}
@@ -2040,274 +1923,6 @@ func stampMTimes(byPath map[string]syncengine.Entry, mtimes map[string]int64) {
 			e.MTime = mtime
 			byPath[path] = e
 		}
-	}
-}
-
-// packSpan is a contiguous byte range of a pack covering a run of objects a download
-// needs — fetched in one Range request. A pack may map to several spans when its
-// needed objects are far apart (see spanSplitGap), so a few KiB at opposite ends of a
-// large pack never drags the whole pack down.
-type packSpan struct {
-	base int64
-	end  int64
-}
-
-// spanSplitGap bounds wasted read-ahead within a pack: two needed objects more than
-// this many bytes apart are fetched as separate ranges rather than one span swallowing
-// the dead bytes between them. Needing 2 objects at opposite ends of a 16 MiB pack thus
-// costs two small ranges instead of the whole pack; below the gap, one range
-// still wins (one request, and the skipped bytes are cheap).
-const spanSplitGap = 256 << 10
-
-// packSource resolves chunk ids to pack byte ranges (one locate up front) and
-// serves their ciphertext, fetching each pack's covering span on demand and keeping
-// a small LRU so a pack shared by several files is fetched once.
-//
-// It is safe for concurrent use by the download worker pool: locs and spans are
-// immutable while concurrent gets run (locate and forgetLocations only ever run
-// between batches, see their comments), the LRU is guarded by mu, and sf collapses a
-// stampede of workers that all miss the same pack into one GetPackRange.
-type packSource struct {
-	cl   *client.Client
-	locs map[string]api.ObjectLocation
-	// objSpan maps each object to the covering span its bytes fall in. A pack with
-	// widely-separated needed objects has several spans, so get fetches only the
-	// window around each object rather than min..max across the whole pack.
-	objSpan map[string]packSpan
-	// spans records each pack's assigned spans so a later locate (the tree walk
-	// locates level by level) reuses a span that already contains an object instead
-	// of cutting a new one — the cache key is pack+span base, so reuse is what lets
-	// a level-2 node inside a level-1 window come from the LRU, not the network.
-	spans map[string][]packSpan
-	mu    sync.Mutex // guards cache
-	cache *packCache
-	sf    singleflight.Group
-}
-
-func newPackSource(cl *client.Client, ids []string) (*packSource, error) {
-	s := newEmptyPackSource(cl)
-	if err := s.locate(ids); err != nil {
-		return nil, err
-	}
-	return s, nil
-}
-
-// forgetLocations drops the resolved object index once a batch of files has landed,
-// so a download's metadata stays bounded by the batch rather than by the whole tree.
-// The span list and the LRU deliberately survive: spans coalesce contiguous needed
-// runs (16 bytes per run, one per chunk only in the sparsest pull) and the LRU is
-// O(packs), and keeping them lets the next batch reuse a span already fetched.
-func (s *packSource) forgetLocations() {
-	s.locs = map[string]api.ObjectLocation{}
-	s.objSpan = map[string]packSpan{}
-}
-
-// newEmptyPackSource returns a source with no located objects yet, for callers
-// that locate incrementally (the level-batched tree walk) while keeping one LRU
-// across all their fetches.
-func newEmptyPackSource(cl *client.Client) *packSource {
-	return &packSource{
-		cl:      cl,
-		locs:    map[string]api.ObjectLocation{},
-		objSpan: map[string]packSpan{},
-		spans:   map[string][]packSpan{},
-		cache:   newPackCache(packCacheBytes),
-	}
-}
-
-// locate resolves ids to pack spans and records them for get. It mutates locs and
-// objSpan, so it must not run concurrently with get — callers either locate a whole
-// batch before its downloads start (runDownloads) or interleave locate/get on a
-// single goroutine (tree walk).
-func (s *packSource) locate(ids []string) error {
-	unseen := make([]string, 0, len(ids))
-	for _, id := range ids {
-		if _, exists := s.locs[id]; !exists {
-			unseen = append(unseen, id)
-		}
-	}
-	ids = unseen
-	if len(ids) == 0 {
-		return nil
-	}
-	located, err := s.cl.LocateChunks(ids)
-	if err != nil {
-		return err
-	}
-	byPack := map[string][]api.ObjectLocation{}
-	for _, loc := range located {
-		s.locs[loc.ID] = loc
-		byPack[loc.PackID] = append(byPack[loc.PackID], loc)
-	}
-	for _, objs := range byPack {
-		s.assignSpans(objs)
-	}
-	return nil
-}
-
-// assignSpans groups one pack's needed objects into covering spans, opening a new span
-// whenever the gap to the next object exceeds spanSplitGap, and records each object's
-// span so get range-fetches just that window. Objects within a pack never overlap.
-// An object already contained in one of the pack's earlier spans (a prior locate — the
-// tree walk locates level by level) adopts that span, so its bytes are served from the
-// span already fetched rather than a fresh overlapping range.
-func (s *packSource) assignSpans(objs []api.ObjectLocation) {
-	packID := objs[0].PackID
-	fresh := objs[:0]
-	for _, o := range objs {
-		if sp, ok := spanContaining(s.spans[packID], o); ok {
-			s.objSpan[o.ID] = sp
-			continue
-		}
-		fresh = append(fresh, o)
-	}
-	objs = fresh
-	if len(objs) == 0 {
-		return
-	}
-	sort.Slice(objs, func(i, j int) bool { return objs[i].Off < objs[j].Off })
-	start := 0
-	base := objs[0].Off
-	end := objs[0].Off + objs[0].Len
-	flush := func(hi int) {
-		span := packSpan{base: base, end: end}
-		s.spans[packID] = append(s.spans[packID], span)
-		for _, o := range objs[start:hi] {
-			s.objSpan[o.ID] = span
-		}
-	}
-	for i := 1; i < len(objs); i++ {
-		o := objs[i]
-		if o.Off-end > spanSplitGap {
-			flush(i)
-			start, base = i, o.Off
-		}
-		if o.Off+o.Len > end {
-			end = o.Off + o.Len
-		}
-	}
-	flush(len(objs))
-}
-
-func spanContaining(spans []packSpan, o api.ObjectLocation) (packSpan, bool) {
-	for _, sp := range spans {
-		if o.Off >= sp.base && o.Off+o.Len <= sp.end {
-			return sp, true
-		}
-	}
-	return packSpan{}, false
-}
-
-func (s *packSource) get(id string) ([]byte, error) {
-	loc, ok := s.locs[id]
-	if !ok {
-		// The object was not in the locate response: the owner no longer stores it
-		// (e.g. a concurrent sync superseded this version and GC reaped it). Surface
-		// ErrNotFound so a manifest read can retry against the current version.
-		return nil, fmt.Errorf("server could not locate chunk %s: %w", id, client.ErrNotFound)
-	}
-	span := s.objSpan[id]
-	data, err := s.fetchSpan(loc.PackID, span)
-	if err != nil {
-		return nil, err
-	}
-	start := loc.Off - span.base
-	return data[start : start+loc.Len], nil
-}
-
-// fetchSpan returns one span's bytes, fetching it at most once even under the
-// concurrent download pool: the LRU is consulted under mu, and singleflight collapses
-// concurrent misses of the same span into a single GetPackRange. The cache key is the
-// pack plus the span base, since a pack now holds several spans. The returned bytes are
-// never mutated after the fetch, so a later eviction cannot disturb a caller still
-// slicing its object out of them.
-func (s *packSource) fetchSpan(packID string, span packSpan) ([]byte, error) {
-	key := fmt.Sprintf("%s@%d", packID, span.base)
-	s.mu.Lock()
-	data, ok := s.cache.get(key)
-	s.mu.Unlock()
-	if ok {
-		return data, nil
-	}
-	v, err, _ := s.sf.Do(key, func() (any, error) {
-		s.mu.Lock()
-		if data, ok := s.cache.get(key); ok {
-			s.mu.Unlock()
-			return data, nil
-		}
-		s.mu.Unlock()
-		data, err := s.cl.GetPackRange(packID, span.base, span.end-span.base)
-		if err != nil {
-			return nil, err
-		}
-		if int64(len(data)) < span.end-span.base {
-			return nil, fmt.Errorf("pack %s returned %d bytes, want %d", packID, len(data), span.end-span.base)
-		}
-		s.mu.Lock()
-		s.cache.put(key, data)
-		s.mu.Unlock()
-		return data, nil
-	})
-	if err != nil {
-		return nil, err
-	}
-	return v.([]byte), nil
-}
-
-// packCache is a byte-bounded LRU of fetched pack byte-ranges, so download memory is
-// capped by total bytes (not a fixed pack count): a pack shared by many files is not
-// re-fetched just because a few other packs were touched, while a handful of large
-// packs cannot blow the budget. At least the most-recent entry is always kept, so a
-// single pack larger than the budget still serves.
-type packCache struct {
-	capBytes int
-	bytes    int
-	data     map[string]*list.Element
-	order    *list.List // front = least recently used; element value is packCacheEntry
-}
-
-type packCacheEntry struct {
-	id string
-	b  []byte
-}
-
-func newPackCache(capBytes int) *packCache {
-	return &packCache{capBytes: capBytes, data: map[string]*list.Element{}, order: list.New()}
-}
-
-func (c *packCache) get(id string) ([]byte, bool) {
-	el, ok := c.data[id]
-	if !ok {
-		return nil, false
-	}
-	// O(1): the share-link path caches per-chunk entries, so a linear-scan touch
-	// turned every hit into a walk of the whole recency list.
-	c.order.MoveToBack(el)
-	return el.Value.(packCacheEntry).b, true
-}
-
-func (c *packCache) put(id string, b []byte) {
-	if el, ok := c.data[id]; ok {
-		c.bytes += len(b) - len(el.Value.(packCacheEntry).b)
-		el.Value = packCacheEntry{id: id, b: b}
-		c.order.MoveToBack(el)
-		c.evict()
-		return
-	}
-	c.data[id] = c.order.PushBack(packCacheEntry{id: id, b: b})
-	c.bytes += len(b)
-	c.evict()
-}
-
-// evict drops least-recently-used packs until the cache fits its byte budget, always
-// keeping the most-recently-used entry so get can serve the pack just fetched.
-func (c *packCache) evict() {
-	for c.bytes > c.capBytes && c.order.Len() > 1 {
-		el := c.order.Front()
-		victim := el.Value.(packCacheEntry)
-		c.order.Remove(el)
-		c.bytes -= len(victim.b)
-		delete(c.data, victim.id)
 	}
 }
 
@@ -2422,7 +2037,7 @@ func distinctChunkIDs(entries []syncengine.Entry) []string {
 // file-chunk id reachable from the root. The objects must be on the server before
 // the resource PUT roots them, hence the flush.
 func uploadTreeObjects(cl *client.Client, conv crypto.ConvergenceKey, m syncengine.Manifest) (syncengine.TreeRoot, []string, error) {
-	up := newPackUploader(cl, nil)
+	up := newUploader(cl, nil)
 	root, refs, err := syncengine.SealTree(m, conv, up, openSealMemo())
 	if err != nil {
 		up.Wait() // drain in-flight uploads before returning the seal error
@@ -2464,8 +2079,8 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 
 // newBatchNodeFetcher returns a level-batch fetch for directory-node objects: it
 // locates a whole level's ids in one call and range-fetches their packs grouped (via
-// packSource), so a tree walk pays one locate per level instead of two round-trips per
-// node. One packSource (and its LRU) is shared across every level of the walk, so a
+// packio.Source), so a tree walk pays one locate per level instead of two round-trips per
+// node. One packio.Source (and its LRU) is shared across every level of the walk, so a
 // pack carrying nodes from several levels is fetched once, not once per level. seed
 // carries node ciphertexts already in hand (the base tree in the reuse path), served
 // from memory without a fetch; fetched nodes are cached across levels since the DAG
@@ -2474,14 +2089,14 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 // seen — content addressing makes a disk hit exactly as trustworthy as a server fetch,
 // since OpenNode verifies either against the id. A node the owner no longer stores —
 // a concurrent sync superseded this version and GC reaped it — surfaces from
-// packSource.get as client.ErrNotFound so a manifest read can retry against the
+// packio.Source.Get as client.ErrNotFound so a manifest read can retry against the
 // current version.
 func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
 	cache := make(map[string][]byte, len(seed))
 	for id, ct := range seed {
 		cache[id] = ct
 	}
-	src := newEmptyPackSource(cl)
+	src := packio.NewEmptySource(cl)
 	disk := openNodeCache()
 	return func(ids []string) (map[string][]byte, error) {
 		var missing []string
@@ -2496,11 +2111,11 @@ func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]strin
 			missing = append(missing, id)
 		}
 		if len(missing) > 0 {
-			if err := src.locate(missing); err != nil {
+			if err := src.Locate(missing); err != nil {
 				return nil, err
 			}
 			for _, id := range missing {
-				b, err := src.get(id)
+				b, err := src.Get(id)
 				if err != nil {
 					return nil, err
 				}
@@ -2669,183 +2284,6 @@ func removeDirs(root string, paths []string) error {
 
 func controlPath(root, name string) string {
 	return filepath.Join(root, syncengine.ControlDir, name)
-}
-
-// recordRemoteVersion pins the freshness guard to the version this sync observed or
-// just committed — including a lower one after an accepted rollback, so subsequent
-// syncs stop tripping the guard. Best-effort like reclaimPacks (the sync itself
-// succeeded); the sync lock makes the read-modify-write race-free.
-func recordRemoteVersion(root string, version int) {
-	st, err := loadState(root)
-	if err != nil || st.RemoteVersion == version {
-		return
-	}
-	st.RemoteVersion = version
-	if err := saveState(root, st); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: recording synced version failed: %v\n", err)
-	}
-}
-
-func saveState(root string, st folderState) error {
-	b, err := json.MarshalIndent(st, "", "  ")
-	if err != nil {
-		return err
-	}
-	return fsatomic.WriteFile(controlPath(root, stateFile), b, 0o600)
-}
-
-// loadState reads the folder pointer and refuses state that is missing the identity
-// binding or the freshness pin. Every init/clone/adopt writes both, so an absence
-// means state from a build that predates them: the folder cannot be tied to an
-// account, and the rollback guard has nothing to compare against. Local state is
-// regenerable, so re-tracking the folder is the fix — via `aqt untrack`, since
-// `aqt init` refuses a directory that still has a control dir.
-func loadState(root string) (folderState, error) {
-	var st folderState
-	path := controlPath(root, stateFile)
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return st, err
-	}
-	if err := json.Unmarshal(b, &st); err != nil {
-		return st, err
-	}
-	if st.Profile == "" || st.Account == "" {
-		return st, fmt.Errorf("%s records no owning profile and account, so this folder cannot be bound to an identity; run `aqt untrack` here, then `aqt init` or `aqt clone`, to track it again (your files are left alone)", path)
-	}
-	if st.RemoteVersion <= 0 {
-		return st, fmt.Errorf("%s records no synced server version, so a rolled-back server would go undetected; run `aqt untrack` here, then `aqt init` or `aqt clone`, to track it again (your files are left alone)", path)
-	}
-	return st, nil
-}
-
-// sealedBase is the legacy JSON at-rest envelope for the local base manifest.
-// saveBase writes the binary form below since #236; decodeBase still opens this
-// one so a folder synced by an older build keeps its base across the upgrade.
-type sealedBase struct {
-	Sealed *crypto.SealedBlob `json:"sealed"`
-}
-
-// baseMagic opens the binary base.json envelope: this magic, one compression-alg
-// byte, the sealing nonce, then the raw ciphertext. The JSON envelope it replaces
-// base64-encoded the whole sealed manifest (4/3 the size, decoded through an
-// extra full-size copy), on top of the manifest JSON base64-encoding every inline
-// file's bytes — so a tree of small incompressible files produced a base nearly
-// twice its own size. The manifest is now also compressed before sealing, which
-// wins back most of that inner base64 expansion. base.json holds chunk decryption
-// keys and inline file plaintext, so it stays sealed under the profile's sealing
-// key exactly as before; only the packaging around the ciphertext changed.
-var baseMagic = []byte("aqt-base-v2\n")
-
-const (
-	baseAlgNone byte = 0
-	baseAlgZstd byte = 1
-)
-
-func saveBase(root string, m syncengine.Manifest) error {
-	plain, err := json.Marshal(m)
-	if err != nil {
-		return err
-	}
-	payload, alg := compress.Encode(plain)
-	sealed, err := identity.SealBase(flagProfile, payload)
-	if err != nil {
-		return err
-	}
-	buf := make([]byte, 0, len(baseMagic)+1+len(sealed.Nonce)+len(sealed.Ciphertext))
-	buf = append(buf, baseMagic...)
-	if alg == compress.Zstd {
-		buf = append(buf, baseAlgZstd)
-	} else {
-		buf = append(buf, baseAlgNone)
-	}
-	buf = append(buf, sealed.Nonce...)
-	buf = append(buf, sealed.Ciphertext...)
-	return fsatomic.WriteFile(controlPath(root, baseFile), buf, 0o600)
-}
-
-// decodeBase opens a sealed base.json into m — the binary envelope, or the legacy
-// JSON one for a base written before the format change. Anything else is refused
-// rather than read as a bare manifest: base.json carries chunk keys and inline
-// plaintext, and an unreadable base is not fatal — the sync degrades to
-// --reconcile, which rebuilds it.
-func decodeBase(b []byte, m *syncengine.Manifest) error {
-	if rest, ok := bytes.CutPrefix(b, baseMagic); ok {
-		return decodeBinaryBase(rest, m)
-	}
-	var env sealedBase
-	if err := json.Unmarshal(b, &env); err != nil {
-		return err
-	}
-	if env.Sealed == nil {
-		return errors.New("base.json is not a sealed envelope; re-run `aqt sync --reconcile` to rebuild it")
-	}
-	plain, err := identity.OpenBase(flagProfile, *env.Sealed)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(plain, m)
-}
-
-// decodeBinaryBase reads the body after baseMagic. The nonce length is fixed by
-// the sealing AEAD, so the layout needs no length fields.
-func decodeBinaryBase(b []byte, m *syncengine.Manifest) error {
-	if len(b) < 1+crypto.NonceSize {
-		return errors.New("base.json envelope is truncated")
-	}
-	var alg string
-	switch b[0] {
-	case baseAlgNone:
-	case baseAlgZstd:
-		alg = compress.Zstd
-	default:
-		return fmt.Errorf("base.json envelope declares unknown compression %d", b[0])
-	}
-	blob := crypto.SealedBlob{Nonce: b[1 : 1+crypto.NonceSize], Ciphertext: b[1+crypto.NonceSize:]}
-	payload, err := identity.OpenBase(flagProfile, blob)
-	if err != nil {
-		return err
-	}
-	plain, err := compress.DecodeSelfSealed(payload, alg)
-	if err != nil {
-		return err
-	}
-	return json.Unmarshal(plain, m)
-}
-
-// loadBaseForSync returns the last-synced manifest and whether a usable base
-// exists. A missing, corrupt, or unopenable base reports exists=false so the caller
-// can refuse the sync — reconciling against an empty base silently resurrects
-// deletions — unless the user opts into --reconcile.
-func loadBaseForSync(root string) (syncengine.Manifest, bool, error) {
-	var m syncengine.Manifest
-	b, err := os.ReadFile(controlPath(root, baseFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return m, false, nil
-	}
-	if err != nil {
-		return m, false, err
-	}
-	if err := decodeBase(b, &m); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: .aqt/base.json is unreadable (%v)\n", err)
-		return syncengine.Manifest{}, false, nil
-	}
-	return m, true, nil
-}
-
-// loadBase returns the last-synced manifest, or an empty one if none exists yet.
-// Used by the offline `status`, which tolerates a missing base (it shows every
-// file as new). `sync` uses loadBaseForSync, which refuses an absent base.
-func loadBase(root string) (syncengine.Manifest, error) {
-	var m syncengine.Manifest
-	b, err := os.ReadFile(controlPath(root, baseFile))
-	if errors.Is(err, os.ErrNotExist) {
-		return m, nil
-	}
-	if err != nil {
-		return m, err
-	}
-	return m, decodeBase(b, &m)
 }
 
 // trackedRoot walks up from start to find the directory holding .aqt/.
@@ -3285,7 +2723,7 @@ func entriesBytes(entries []syncengine.Entry) int64 {
 // recorded in folder state; the sync lock makes the read-modify-write race-free.
 // Best-effort: a sync that uploaded fine should not fail on cleanup.
 func reclaimPacks(root string, cl *client.Client) {
-	st, err := loadState(root)
+	st, err := folderstate.LoadState(root)
 	stateOK := err == nil
 	if stateOK && st.LastGC > 0 && time.Since(time.Unix(st.LastGC, 0)) < gcMinInterval {
 		return
@@ -3305,6 +2743,6 @@ func reclaimPacks(root string, cl *client.Client) {
 	// unthrottled next time rather than clobbering state.json with a partial record.
 	if stateOK {
 		st.LastGC = time.Now().Unix()
-		_ = saveState(root, st)
+		_ = folderstate.SaveState(root, st)
 	}
 }
