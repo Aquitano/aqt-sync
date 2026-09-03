@@ -10,6 +10,7 @@ package crypto
 
 import (
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -21,7 +22,6 @@ import (
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/crypto/hkdf"
 )
 
 const (
@@ -234,12 +234,7 @@ func UnwrapRoot(w SealedBlob, uk UnlockKey) (MasterKey, error) {
 // key or an old passphrase alone cannot attach a new device after a passphrase
 // change. It is one-way (HKDF), so it leaks nothing about the passphrase.
 func DeriveAuthVerifier(uk UnlockKey) []byte {
-	r := hkdf.New(sha256.New, uk[:], nil, []byte("aqt-auth-verifier-v1"))
-	out := make([]byte, KeySize)
-	if _, err := io.ReadFull(r, out); err != nil {
-		panic("hkdf auth verifier: " + err.Error()) // unreachable for an in-memory reader
-	}
-	return out
+	return derive(uk[:], nil, "aqt-auth-verifier-v1", KeySize)
 }
 
 // DeriveSigningKey derives the account's Ed25519 signing key from the master key
@@ -248,12 +243,20 @@ func DeriveAuthVerifier(uk UnlockKey) []byte {
 // sent to the server, and a server breach leaks only public keys — it can never
 // yield the master key (one-way HKDF) nor impersonate the account.
 func DeriveSigningKey(mk MasterKey) ed25519.PrivateKey {
-	r := hkdf.New(sha256.New, mk[:], nil, []byte("aqt-auth-ed25519-v1"))
-	seed := make([]byte, ed25519.SeedSize)
-	if _, err := io.ReadFull(r, seed); err != nil {
-		panic("hkdf expand failed: " + err.Error()) // unreachable for an in-memory reader
+	return ed25519.NewKeyFromSeed(derive(mk[:], nil, "aqt-auth-ed25519-v1", ed25519.SeedSize))
+}
+
+// derive is HKDF-SHA256 with label as the info string. Every key in the hierarchy
+// comes from here, so the labels are a wire contract: changing one changes every
+// value derived under it. It panics rather than returning an error because hkdf.Key
+// only fails for an output longer than 255 hashes, and no caller asks for more than
+// a keypair seed.
+func derive(secret, salt []byte, label string, n int) []byte {
+	out, err := hkdf.Key(sha256.New, secret, salt, label, n)
+	if err != nil {
+		panic("hkdf " + label + ": " + err.Error())
 	}
-	return ed25519.NewKeyFromSeed(seed)
+	return out
 }
 
 // KeyFingerprint returns a stable, human-comparable fingerprint of a public key

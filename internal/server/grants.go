@@ -4,17 +4,14 @@ package server
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -510,9 +507,7 @@ func (s *Store) ResourceObjectSlices(resourceID, caller string, ids []string) (s
 // from the server secret, self-signed like a genuine one, so the response is
 // indistinguishable on the wire and a grant wrapped to it simply never decrypts.
 func (s *Server) accountKeys(c *gin.Context) {
-	// Normalize before both the real lookup and the decoy derivation: if only
-	// the lookup folded case, "X@a.com" and "x@a.com" would agree for real
-	// accounts but produce two different decoys — a case-probe oracle.
+	// Normalized once, for the real lookup and the decoy alike (see decoyStream).
 	email := api.NormalizeEmail(c.Query("email"))
 	if email == "" {
 		abort(c, http.StatusBadRequest, "email query param required")
@@ -543,14 +538,7 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 	if err != nil {
 		return api.AccountKeysResponse{}, err
 	}
-	stream := func(label string, n int) []byte {
-		out := make([]byte, n)
-		r := hkdf.New(sha256.New, secret, []byte(email), []byte(label))
-		if _, err := io.ReadFull(r, out); err != nil {
-			panic("hkdf decoy: " + err.Error()) // unreachable for an in-memory reader
-		}
-		return out
-	}
+	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	identity := ed25519.NewKeyFromSeed(stream("aqt-decoy-ed25519", ed25519.SeedSize))
 	encPub := crypto.DeriveEncKeyFromSeed(stream("aqt-decoy-x25519", 32)).Public()
 	return api.AccountKeysResponse{

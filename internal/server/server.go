@@ -7,12 +7,12 @@ package server
 import (
 	"context"
 	"crypto/ed25519"
+	"crypto/hkdf"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"mime"
 	"net"
@@ -25,7 +25,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -556,22 +555,12 @@ func (s *Server) accountSalt(c *gin.Context) {
 // to anyone without the passphrase, so a registered and an unregistered email look
 // identical on the wire.
 func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
-	// Derive from the normalized form: real accounts answer any casing of their
-	// email, so if the decoy varied by case, a case-stable salt would out an email
-	// as registered.
 	email = api.NormalizeEmail(email)
 	secret, err := s.store.ServerSecret()
 	if err != nil {
 		return api.SaltResponse{}, err
 	}
-	stream := func(label string, n int) []byte {
-		out := make([]byte, n)
-		r := hkdf.New(sha256.New, secret, []byte(email), []byte(label))
-		if _, err := io.ReadFull(r, out); err != nil {
-			panic("hkdf decoy: " + err.Error()) // unreachable for an in-memory reader
-		}
-		return out
-	}
+	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	// Derive the decoy's Argon2id costs from the same value set a real moderate
 	// calibration produces, seeded deterministically per email. The package-default
 	// (3, 64 MiB, 4) marked every decoy identically; drawing from the realistic
@@ -592,6 +581,19 @@ func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
 			Ciphertext: stream("aqt-decoy-ct", crypto.KeySize+16),
 		},
 	}, nil
+}
+
+// decoyStream derives one decoy field deterministically from the server secret, so
+// repeated lookups for the same email return the same decoy. The email must already
+// be normalized: real accounts answer any casing of their address, so a decoy that
+// varied by case would out an email as unregistered. decoyBootstrap normalizes it
+// itself; decoyAccountKeys takes it normalized from its caller.
+func (s *Server) decoyStream(secret []byte, email, label string, n int) []byte {
+	out, err := hkdf.Key(sha256.New, secret, []byte(email), label, n)
+	if err != nil {
+		panic("hkdf decoy: " + err.Error()) // unreachable: every decoy field is a fixed, short length
+	}
+	return out
 }
 
 func (s *Server) authChallenge(c *gin.Context) {

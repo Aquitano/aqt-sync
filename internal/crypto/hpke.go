@@ -6,15 +6,12 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/cloudflare/circl/hpke"
 	"github.com/cloudflare/circl/kem"
-	"golang.org/x/crypto/hkdf"
 )
 
 // Account-to-account grants wrap a resource's content key to a grantee's X25519
@@ -56,12 +53,7 @@ type EncKeyPair struct {
 // published on the account; the private half is re-derived on demand and never
 // stored or sent.
 func DeriveEncKey(mk MasterKey) EncKeyPair {
-	r := hkdf.New(sha256.New, mk[:], nil, []byte("aqt-share-x25519-v1"))
-	seed := make([]byte, grantKEM().SeedSize())
-	if _, err := io.ReadFull(r, seed); err != nil {
-		panic("hkdf expand failed: " + err.Error()) // unreachable for an in-memory reader
-	}
-	return DeriveEncKeyFromSeed(seed)
+	return DeriveEncKeyFromSeed(derive(mk[:], nil, "aqt-share-x25519-v1", grantKEM().SeedSize()))
 }
 
 // DeriveEncKeyFromSeed deterministically derives an X25519 keypair from a
