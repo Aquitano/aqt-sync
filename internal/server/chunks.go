@@ -36,7 +36,7 @@ const gcMinAge = time.Hour
 // forward the link and let someone else pull) until the GC sweep reclaims the row.
 const exhaustedObjectGrace = 10 * time.Minute
 
-func (s *Server) checkChunks(c *gin.Context) {
+func (s *Server) handleCheckChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.ChunkCheckRequest
 	if !bindJSON(c, &req) {
@@ -54,9 +54,9 @@ func (s *Server) checkChunks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ChunkCheckResponse{Missing: missing})
 }
 
-// listChunks pages the calling account's complete object inventory for a client
+// handleListChunks pages the calling account's complete object inventory for a client
 // prune.
-func (s *Server) listChunks(c *gin.Context) {
+func (s *Server) handleListChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	ids, next, err := s.store.ListOwnerChunks(owner, c.Query("cursor"))
 	if errors.Is(err, errBadCursor) {
@@ -70,10 +70,10 @@ func (s *Server) listChunks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ChunkListResponse{IDs: ids, NextCursor: next})
 }
 
-// deleteChunks drops objects a client prune found unreachable from every root it
+// handleDeleteChunks drops objects a client prune found unreachable from every root it
 // holds. The store enforces the pack age guard; ids it skips as too young are
 // reported, not failed, so the pruner retries them later.
-func (s *Server) deleteChunks(c *gin.Context) {
+func (s *Server) handleDeleteChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.ChunkDeleteRequest
 	if !bindJSON(c, &req) {
@@ -91,10 +91,10 @@ func (s *Server) deleteChunks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ChunkDeleteResponse{Deleted: deleted, SkippedRecent: skipped, FreedBytes: freed})
 }
 
-// putPack stores one raw pack (application/octet-stream). The id in the path is the
+// handlePutPack stores one raw pack (application/octet-stream). The id in the path is the
 // pack's content address; the store verifies it and every object slice, so a
 // corrupt or mislabeled pack is rejected wholesale.
-func (s *Server) putPack(c *gin.Context) {
+func (s *Server) handlePutPack(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	packID := c.Param("id")
 	data, err := io.ReadAll(c.Request.Body)
@@ -147,10 +147,10 @@ func (s *Server) putPack(c *gin.Context) {
 	c.JSON(http.StatusOK, api.PutPackResponse{StoredObjects: stored})
 }
 
-// getPack serves a pack's raw bytes, honoring Range so a pull can fetch only the
+// handleGetPack serves a pack's raw bytes, honoring Range so a pull can fetch only the
 // byte span covering the objects it needs. The pack is streamed straight from disk,
 // never loaded whole into memory.
-func (s *Server) getPack(c *gin.Context) {
+func (s *Server) handleGetPack(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	path, err := s.store.PackFileForOwner(owner, c.Param("id"))
 	if errors.Is(err, ErrNotFound) {
@@ -178,8 +178,8 @@ func (s *Server) getPack(c *gin.Context) {
 	addResponseBytes(s.metrics.packBytesOut, c.Writer.Size())
 }
 
-// locateChunks resolves object ids to pack byte ranges for the pull path.
-func (s *Server) locateChunks(c *gin.Context) {
+// handleLocateChunks resolves object ids to pack byte ranges for the pull path.
+func (s *Server) handleLocateChunks(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.LocateRequest
 	if !bindJSON(c, &req) {
@@ -197,7 +197,7 @@ func (s *Server) locateChunks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.LocateResponse{Locations: locations})
 }
 
-// publicObjects serves exact object slices for a public streamed resource without
+// handlePublicObjects serves exact object slices for a public streamed resource without
 // auth. A share-link holder already has the content key (URL fragment) but object
 // fetch is otherwise owner-scoped, so this is the only unauthenticated path to the
 // packed object bytes. It answers EXACT per-object slices, never a raw pack range: a
@@ -206,7 +206,7 @@ func (s *Server) locateChunks(c *gin.Context) {
 //
 // The response is a positional binary framing — for each requested id, a 4-byte
 // big-endian length followed by exactly that many bytes, in request order.
-func (s *Server) publicObjects(c *gin.Context) {
+func (s *Server) handlePublicObjects(c *gin.Context) {
 	var req api.PublicObjectsRequest
 	if !bindJSON(c, &req) {
 		return
@@ -308,7 +308,7 @@ func acceptsObjectFrames(header string) bool {
 	return false
 }
 
-func (s *Server) runGC(c *gin.Context) {
+func (s *Server) handleRunGC(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	// GC sweeps fully-dead packs first, then compacts the dead objects trapped in
 	// still-live ones; both honor the same age guard, and the whole sequence is

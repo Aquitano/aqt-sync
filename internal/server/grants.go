@@ -4,17 +4,14 @@ package server
 
 import (
 	"crypto/ed25519"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -504,15 +501,13 @@ func (s *Store) ResourceObjectSlices(resourceID, caller string, ids []string) (s
 
 // --- handlers ---
 
-// accountKeys is the grant-target lookup (GET /v1/account/keys?email=...). Like
+// handleAccountKeys is the grant-target lookup (GET /v1/account/keys?email=...). Like
 // the bootstrap endpoint, an unknown email — or an account that has not published
 // an enc key — gets a deterministic decoy (200, not 404): a real keypair derived
 // from the server secret, self-signed like a genuine one, so the response is
 // indistinguishable on the wire and a grant wrapped to it simply never decrypts.
-func (s *Server) accountKeys(c *gin.Context) {
-	// Normalize before both the real lookup and the decoy derivation: if only
-	// the lookup folded case, "X@a.com" and "x@a.com" would agree for real
-	// accounts but produce two different decoys — a case-probe oracle.
+func (s *Server) handleAccountKeys(c *gin.Context) {
+	// Normalized once, for the real lookup and the decoy alike (see decoyStream).
 	email := api.NormalizeEmail(c.Query("email"))
 	if email == "" {
 		abort(c, http.StatusBadRequest, "email query param required")
@@ -543,14 +538,7 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 	if err != nil {
 		return api.AccountKeysResponse{}, err
 	}
-	stream := func(label string, n int) []byte {
-		out := make([]byte, n)
-		r := hkdf.New(sha256.New, secret, []byte(email), []byte(label))
-		if _, err := io.ReadFull(r, out); err != nil {
-			panic("hkdf decoy: " + err.Error()) // unreachable for an in-memory reader
-		}
-		return out
-	}
+	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	identity := ed25519.NewKeyFromSeed(stream("aqt-decoy-ed25519", ed25519.SeedSize))
 	encPub := crypto.DeriveEncKeyFromSeed(stream("aqt-decoy-x25519", 32)).Public()
 	return api.AccountKeysResponse{
@@ -561,10 +549,10 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 	}, nil
 }
 
-// createGrant stores a client-sealed grant on a resource the caller owns
+// handleCreateGrant stores a client-sealed grant on a resource the caller owns
 // (POST /v1/resources/:id/grants). Upserting an existing grantee replaces the
 // wrap, which is how key rotation re-wraps for remaining grantees.
-func (s *Server) createGrant(c *gin.Context) {
+func (s *Server) handleCreateGrant(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	var req api.CreateGrantRequest
 	if !bindJSON(c, &req) {
@@ -607,8 +595,8 @@ func (s *Server) createGrant(c *gin.Context) {
 	c.Status(http.StatusCreated)
 }
 
-// listResourceGrants lists a resource's grants for its owner.
-func (s *Server) listResourceGrants(c *gin.Context) {
+// handleListResourceGrants lists a resource's grants for its owner.
+func (s *Server) handleListResourceGrants(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	page, ok := parsePage(c)
 	if !ok {
@@ -630,8 +618,8 @@ func (s *Server) listResourceGrants(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ListGrantsResponse{Grants: grants, NextCursor: next})
 }
 
-// deleteGrant revokes one grant (DELETE /v1/resources/:id/grants/:grantee).
-func (s *Server) deleteGrant(c *gin.Context) {
+// handleDeleteGrant revokes one grant (DELETE /v1/resources/:id/grants/:grantee).
+func (s *Server) handleDeleteGrant(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	expected, ok := parseIfMatch(c)
 	if !ok {
@@ -653,8 +641,8 @@ func (s *Server) deleteGrant(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// listShares lists the caller's incoming grants (GET /v1/shares).
-func (s *Server) listShares(c *gin.Context) {
+// handleListShares lists the caller's incoming grants (GET /v1/shares).
+func (s *Server) handleListShares(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	page, ok := parsePage(c)
 	if !ok {
@@ -672,11 +660,11 @@ func (s *Server) listShares(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ListSharesResponse{Shares: shares, NextCursor: next})
 }
 
-// deleteShare drops one of the caller's incoming grants (DELETE /v1/shares/:id),
+// handleDeleteShare drops one of the caller's incoming grants (DELETE /v1/shares/:id),
 // optionally blocking the account that made it (?block=true). The grantee side of
 // `unshare --with`: the owner could otherwise put a row in anyone's share list and
 // be the only one able to take it out.
-func (s *Server) deleteShare(c *gin.Context) {
+func (s *Server) handleDeleteShare(c *gin.Context) {
 	grantee := c.GetString(ownerContextKey)
 	block := c.Query("block") == "true" || c.Query("block") == "1"
 	owner, removed, err := s.store.DeleteShare(grantee, c.Param("id"), block)
@@ -697,8 +685,8 @@ func (s *Server) deleteShare(c *gin.Context) {
 	c.JSON(http.StatusOK, api.RemoveShareResponse{OwnerHandle: owner, Removed: removed, Blocked: block})
 }
 
-// listShareBlocks lists the accounts the caller refuses grants from (GET /v1/share-blocks).
-func (s *Server) listShareBlocks(c *gin.Context) {
+// handleListShareBlocks lists the accounts the caller refuses grants from (GET /v1/share-blocks).
+func (s *Server) handleListShareBlocks(c *gin.Context) {
 	grantee := c.GetString(ownerContextKey)
 	page, ok := parsePage(c)
 	if !ok {
@@ -716,8 +704,8 @@ func (s *Server) listShareBlocks(c *gin.Context) {
 	c.JSON(http.StatusOK, api.ListShareBlocksResponse{Blocks: blocks, NextCursor: next})
 }
 
-// deleteShareBlock lifts one block (DELETE /v1/share-blocks/:owner).
-func (s *Server) deleteShareBlock(c *gin.Context) {
+// handleDeleteShareBlock lifts one block (DELETE /v1/share-blocks/:owner).
+func (s *Server) handleDeleteShareBlock(c *gin.Context) {
 	grantee := c.GetString(ownerContextKey)
 	err := s.store.DeleteShareBlock(grantee, c.Param("owner"))
 	if errors.Is(err, ErrNotFound) {
@@ -731,11 +719,11 @@ func (s *Server) deleteShareBlock(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// grantObjects serves exact object slices of a granted (or owned) resource to an
+// handleGrantObjects serves exact object slices of a granted (or owned) resource to an
 // authenticated caller (POST /v1/resources/:id/objects), the read path a grantee's
 // clone/pull uses. Same request shape and positional framing as the public
 // endpoint; access is the grant check instead of public visibility.
-func (s *Server) grantObjects(c *gin.Context) {
+func (s *Server) handleGrantObjects(c *gin.Context) {
 	caller := c.GetString(ownerContextKey)
 	var req api.PublicObjectsRequest
 	if !bindJSON(c, &req) {

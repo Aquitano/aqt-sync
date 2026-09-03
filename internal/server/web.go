@@ -47,11 +47,11 @@ var shareScriptAssets = map[string]struct {
 	"share.js":                     {"webassets/share.js", false},
 }
 
-// shareAsset serves the pinned crypto runtime and the page script used by the
+// handleShareAsset serves the pinned crypto runtime and the page script used by the
 // browser decryptor. Keeping the allowlist here avoids turning the embedded
 // directory (which also contains license files and the HTML template) into a
 // file server.
-func (s *Server) shareAsset(c *gin.Context) {
+func (s *Server) handleShareAsset(c *gin.Context) {
 	asset, ok := shareScriptAssets[c.Param("name")]
 	if !ok {
 		c.Status(http.StatusNotFound)
@@ -72,14 +72,14 @@ func (s *Server) shareAsset(c *gin.Context) {
 	c.Data(http.StatusOK, "application/javascript; charset=utf-8", body)
 }
 
-// shareView serves the human landing page for a public share link (GET /x/:id).
+// handleShareView serves the human landing page for a public share link (GET /x/:id).
 //
 // It never decrypts and never sees the content key: the key lives in the URL
 // fragment, which browsers do not send to the server. The page decrypts
 // client-side (or shows the `aqt pull` command); the server only confirms the
 // resource is a public aqt resource. A private or unknown id 404s, so the page
 // never confirms a private resource's existence (matching the JSON API).
-func (s *Server) shareView(c *gin.Context) {
+func (s *Server) handleShareView(c *gin.Context) {
 	id := c.Param("id")
 	vis, gone, err := s.store.ResourceVisibility(id)
 	switch {

@@ -7,10 +7,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"io"
 
 	"golang.org/x/crypto/chacha20poly1305"
-	"golang.org/x/crypto/hkdf"
 
 	"github.com/aquitano/aqt-sync/internal/compress"
 )
@@ -36,11 +34,8 @@ func (k *ConvergenceKey) Wipe() {
 // DeriveConvergenceKey derives the convergence key from the master key via HKDF.
 // It is one-way: a leaked convergence key reveals nothing about the master key.
 func DeriveConvergenceKey(mk MasterKey) ConvergenceKey {
-	r := hkdf.New(sha256.New, mk[:], nil, []byte("aqt-convergence-v1"))
 	var ck ConvergenceKey
-	if _, err := io.ReadFull(r, ck[:]); err != nil {
-		panic("hkdf convergence key: " + err.Error()) // unreachable for an in-memory reader
-	}
+	copy(ck[:], derive(mk[:], nil, "aqt-convergence-v1", KeySize))
 	return ck
 }
 
@@ -86,11 +81,8 @@ var aadChunkList = []byte("aqt-chunklist-v1")
 // deriveChunkKey binds the plaintext and the account secret into a unique key.
 func deriveChunkKey(conv ConvergenceKey, plaintext []byte) [KeySize]byte {
 	salt := sha256.Sum256(plaintext)
-	r := hkdf.New(sha256.New, conv[:], salt[:], []byte("aqt-chunk-v1"))
 	var key [KeySize]byte
-	if _, err := io.ReadFull(r, key[:]); err != nil {
-		panic("hkdf chunk key: " + err.Error())
-	}
+	copy(key[:], derive(conv[:], salt[:], "aqt-chunk-v1", KeySize))
 	return key
 }
 

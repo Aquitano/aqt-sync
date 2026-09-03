@@ -7,9 +7,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
-
-	"golang.org/x/crypto/hkdf"
 )
 
 // Node-seal reuse. SealNode is deterministic — the same plaintext under the same
@@ -44,12 +41,8 @@ type NodeSealMemo interface {
 // the exact oracle account-keyed convergence exists to prevent), and digests
 // from different accounts can never land in each other's slots.
 func nodeSealDigest(conv ConvergenceKey, plaintext []byte) string {
-	r := hkdf.New(sha256.New, conv[:], nil, []byte("aqt-seal-memo-v1"))
-	var mk [KeySize]byte
-	if _, err := io.ReadFull(r, mk[:]); err != nil {
-		panic("hkdf seal-memo key: " + err.Error()) // unreachable for an in-memory reader
-	}
-	h := hmac.New(sha256.New, mk[:])
+	mk := derive(conv[:], nil, "aqt-seal-memo-v1", KeySize)
+	h := hmac.New(sha256.New, mk)
 	h.Write(plaintext)
 	return hex.EncodeToString(h.Sum(nil))
 }

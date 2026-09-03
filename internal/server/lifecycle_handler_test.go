@@ -111,7 +111,7 @@ func TestGetResourceExhaustedReturns410(t *testing.T) {
 	}
 }
 
-// publicObjects 410s on an expired/reclaimed resource, but still serves an exhausted
+// handlePublicObjects 410s on an expired/reclaimed resource, but still serves an exhausted
 // (not-yet-swept) one so the final permitted streamed pull can complete.
 func TestPublicObjectsGoneVsExhausted(t *testing.T) {
 	t.Parallel()

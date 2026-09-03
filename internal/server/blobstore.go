@@ -157,12 +157,3 @@ func randomBytes(n int) []byte {
 	}
 	return b
 }
-
-func isUnique(err error) bool {
-	// modernc.org/sqlite surfaces constraint violations in the error string;
-	// matching on it avoids depending on the driver's internal error type. Match the
-	// full "UNIQUE constraint failed" and not the bare "constraint failed" it shares
-	// with NOT NULL and CHECK, which are server bugs and must not be reported to the
-	// caller as a duplicate.
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
-}

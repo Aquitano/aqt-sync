@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -588,4 +591,151 @@ func (s *Store) PruneAutoSnapshots(keepLast int) (int, error) {
 		pruned++
 	}
 	return pruned, firstErr
+}
+
+// --- handlers ---
+
+func (s *Server) handleCreateSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.CreateSnapshotRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.ResourceID == "" {
+		abort(c, http.StatusBadRequest, "resourceId is required")
+		return
+	}
+	defer s.accountLimits.lock(owner)()
+	resource, err := s.store.GetResource(req.ResourceID, owner)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrNotFound):
+			abortNotFound(c)
+		case errors.Is(err, ErrGone):
+			// A reclaimed tombstone has no ciphertext left to pin. Answer the stable
+			// 410 rather than a 500, which doIdempotent would retry against an
+			// operation that can never succeed.
+			abortGone(c)
+		default:
+			abort(c, http.StatusInternalServerError, "resource lookup failed")
+		}
+		return
+	}
+	if err := s.checkAccountLimit(owner, "snapshots", estimatedResourceBytes(api.PutResourceRequest{Blob: resource.Blob, EncryptedMeta: resource.EncryptedMeta, WrappedKey: resource.WrappedKey})); err != nil {
+		if !abortLimit(c, err) {
+			abort(c, http.StatusInternalServerError, "usage lookup failed")
+		}
+		return
+	}
+	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
+		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
+		return
+	} else {
+		req.IdempotencyKey = key
+	}
+	info, err := s.store.CreateSnapshotIdempotent(owner, req)
+	if errors.Is(err, ErrIdempotencyConflict) {
+		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "snapshot failed")
+		return
+	}
+	c.JSON(http.StatusCreated, info)
+}
+
+func (s *Server) handleSetSnapshotAnchor(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.SetSnapshotAnchorRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	info, err := s.store.SetSnapshotAnchor(owner, c.Param("id"), req.Anchored)
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "update failed")
+		return
+	}
+	c.JSON(http.StatusOK, info)
+}
+
+func (s *Server) handleListSnapshots(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	snaps, next, err := s.store.ListSnapshots(owner, c.Query("resource"), page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "list snapshots failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ListSnapshotsResponse{Snapshots: snaps, NextCursor: next})
+}
+
+func (s *Server) handleGetSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	resp, err := s.store.GetSnapshot(owner, c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "fetch snapshot failed")
+		return
+	}
+	// A snapshot copies its source resource's sealed format, so restore is gated the
+	// same way a resource read is: a client below the snapshot's min_client gets a 426.
+	if capability := requestCapability(c); capability < resp.MinClient {
+		abortUpgradeRequired(c, resp.MinClient, capability)
+		return
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) handleDeleteSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	if err := s.store.DeleteSnapshot(owner, c.Param("id")); errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	} else if errors.Is(err, ErrSnapshotAnchored) {
+		c.AbortWithStatusJSON(http.StatusConflict, api.ErrorResponse{
+			Error: "snapshot is anchored and protected from pruning; run `aqt snapshot unanchor " +
+				c.Param("id") + "` first",
+			Code: api.ErrCodeSnapshotAnchored,
+		})
+		return
+	} else if err != nil {
+		abort(c, http.StatusInternalServerError, "delete snapshot failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) handleSetAutoSnapshot(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.SetAutoSnapshotRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if err := s.store.SetAutoSnapshot(owner, c.Param("id"), req.Enabled); errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	} else if err != nil {
+		abort(c, http.StatusInternalServerError, "update failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
 }

@@ -8,8 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"mime"
+	"net/http"
 	"os"
+	"strconv"
+	"strings"
 	"time"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -816,4 +822,488 @@ func (s *Store) ResourcePolicyForTest(id string) (hasExpiry, hasMaxReads bool, e
 	err = s.rdb.QueryRow(`SELECT expires_at, max_reads FROM resources WHERE id = ?`, id).
 		Scan(&expiresAt, &maxReads)
 	return expiresAt.Valid, maxReads.Valid, err
+}
+
+// --- handlers ---
+
+func (s *Server) handlePutResource(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	capability := requestCapability(c)
+	req, ok := decodePutResource(c)
+	if !ok {
+		return
+	}
+	// Create is POST, so it can be replayed under an Idempotency-Key without the
+	// client having to guess an id; PUT names the resource it replaces.
+	if c.Request.Method == http.MethodPut && req.ID == "" {
+		abort(c, http.StatusBadRequest, "PUT /v1/resources requires the id of the resource to replace; POST to create one")
+		return
+	}
+	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
+		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
+		return
+	} else {
+		req.IdempotencyKey = key
+	}
+	// A client cannot declare content unreadable by itself: that would be a resource
+	// it just wrote but could never read back. Reject it as a client bug.
+	if req.MinClient > capability {
+		abort(c, http.StatusBadRequest, "declared min_client exceeds this client's capability")
+		return
+	}
+	// Nor can it declare less than the format every release reads. Every client
+	// declares its own capability, so a lower value is a client bug rather than
+	// something for the server to quietly floor.
+	if req.MinClient < api.CapabilityBaseline {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("declared min_client is below the capability baseline (%d)", api.CapabilityBaseline))
+		return
+	}
+	if req.CompactAt < 0 {
+		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
+		return
+	}
+	switch req.Visibility {
+	case api.Private:
+		if req.WrappedKey == nil {
+			abort(c, http.StatusBadRequest, "private resource requires a wrapped key")
+			return
+		}
+	case api.Public:
+		// A wrapped key is optional and welcome: it is the owner's recovery path
+		// (so they can later share/rotate), and GetResource strips it from
+		// non-owner reads.
+	default:
+		abort(c, http.StatusBadRequest, "visibility must be private or public")
+		return
+	}
+	// An in-place update writes just as many physical bytes as a create, so it is
+	// charged too; it replaces the resource's current bytes rather than adding to
+	// them, so only the difference counts, and it adds no row (no count check).
+	// A replayed create is already stored and must not be charged again.
+	if !s.store.ResourceCreateKeyRecorded(owner, req) {
+		defer s.accountLimits.lock(owner)()
+		added, kind := estimatedResourceBytes(req), "resources"
+		if req.ID != "" {
+			kind = ""
+			stored, err := s.store.ResourceStoredBytes(owner, req.ID)
+			if err != nil {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+				return
+			}
+			added = max(0, added-stored)
+		}
+		if err := s.checkAccountLimit(owner, kind, added); err != nil {
+			if !abortLimit(c, err) {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+			}
+			return
+		}
+	}
+	id, version, err := s.store.PutResource(owner, capability, req)
+	var upgrade *UpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		abortUpgradeRequired(c, upgrade.MinClient, capability)
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; re-sync", api.ErrCodeVersionConflict)
+		return
+	}
+	if errors.Is(err, ErrIdempotencyConflict) {
+		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
+		return
+	}
+	if errors.Is(err, ErrSharedNeedsRefs) {
+		abortCode(c, http.StatusBadRequest, "a public or granted resource must carry its chunk refs (they scope what its readers may fetch); re-push with refs before sharing", api.ErrCodeSharedNeedsRefs)
+		return
+	}
+	if errors.Is(err, ErrDanglingRefs) {
+		abortCode(c, http.StatusBadRequest, "manifest references chunks the server no longer stores (they were garbage-collected before this push committed); re-run sync to re-upload them", api.ErrCodeMissingChunks)
+		return
+	}
+	if errors.Is(err, ErrNonceReuse) {
+		abort(c, http.StatusBadRequest, "blob nonce matches the stored one; every reseal must draw a fresh nonce")
+		return
+	}
+	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
+		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
+		return
+	}
+	if errors.Is(err, ErrGitRemotePolicy) {
+		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		// Update targeting an id the caller doesn't own (or that doesn't exist).
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "store failed")
+		return
+	}
+	status := http.StatusCreated
+	if req.ID != "" {
+		status = http.StatusOK
+	}
+	expiresAt, maxReads := policyExpiresAt(req), policyMaxReads(req)
+	c.JSON(status, api.PutResourceResponse{
+		ID: id, Version: version,
+		ExpiresAt: expiresAt, MaxReads: maxReads,
+		OnExpiry: echoedOnExpiry(req.OnExpiry, expiresAt, maxReads),
+	})
+}
+
+// policyExpiresAt is the absolute expiry the server just stored, echoed so a new client
+// can confirm an old server did not silently drop the policy. It recomputes now + TTL;
+// the microsecond drift from the store's own clock is immaterial (the client's sanity
+// check tolerates it). Zero unless a policy was accepted on a public resource.
+func policyExpiresAt(req api.PutResourceRequest) int64 {
+	if req.Visibility == api.Public && req.ExpireSeconds > 0 {
+		return time.Now().Unix() + req.ExpireSeconds
+	}
+	return 0
+}
+
+func policyMaxReads(req api.PutResourceRequest) int64 {
+	if req.Visibility == api.Public {
+		return req.MaxReads
+	}
+	return 0
+}
+
+// echoedOnExpiry reports the end-of-life action the server just stored, so a client that
+// asked to retire the link can fail closed against a server that would instead destroy
+// the content behind it. A server that predates the field echoes nothing at all, which
+// is how the client tells the two apart. Empty when no policy was accepted: there is
+// then no end of life to act on.
+//
+// The value comes from storedOnExpiry, the same mapping the write used, rather than a
+// second reading of the request: an action mapped one way into the row and another way
+// into the echo is exactly the mismatch the client's check exists to catch.
+func echoedOnExpiry(requested api.OnExpiry, expiresAt, maxReads int64) api.OnExpiry {
+	if expiresAt == 0 && maxReads == 0 {
+		return ""
+	}
+	action, err := storedOnExpiry(requested)
+	if err != nil {
+		// Unreachable: the same error already rejected the write with a 400.
+		return ""
+	}
+	return api.OnExpiry(action)
+}
+
+func (s *Server) handlePublicResourcePreflight(c *gin.Context) {
+	preflight, err := s.store.PublicResourcePreflight(c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if errors.Is(err, ErrGone) {
+		abortGone(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "preflight failed")
+		return
+	}
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, preflight)
+}
+
+func (s *Server) handleGetResource(c *gin.Context) {
+	// An authenticated owner can read their private resources; anyone can read a
+	// public one. We pass the owner (empty if unauthenticated) to the store so a
+	// private id returns 404 to everyone else.
+	var owner string
+	if token, ok := bearerToken(c); ok {
+		if o, err := s.store.OwnerByToken(token); err == nil {
+			owner = o
+		}
+	}
+	// Negotiate before the resource is touched at all: a request whose Accept we
+	// cannot satisfy must not spend one of a `--burn` link's reads.
+	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
+	if !ok {
+		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
+		return
+	}
+	res, countRead, err := s.store.GetResourceUncounted(c.Param("id"), owner)
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if errors.Is(err, ErrGone) {
+		abortGone(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "fetch failed")
+		return
+	}
+	// Gate the read on the requester's capability before any payload is written: a
+	// client too old to open the sealed format gets an actionable 426 instead of the
+	// bytes and a downstream AEAD failure. This route is public, so the check lives
+	// here rather than in the authed middleware. It precedes the read count for the
+	// same reason the Accept check does.
+	if capability := requestCapability(c); capability < res.MinClient {
+		abortUpgradeRequired(c, res.MinClient, capability)
+		return
+	}
+	// Everything that could refuse this read has passed, so the permit is spent now.
+	// This is also what enforces exhaustion: an already-spent link answers 410 here.
+	if countRead {
+		if err := s.store.CountResourceRead(c.Param("id")); err != nil {
+			if errors.Is(err, ErrGone) {
+				abortGone(c)
+			} else {
+				abort(c, http.StatusInternalServerError, "fetch failed")
+			}
+			return
+		}
+	}
+	if format == resourceEnvelope {
+		body, err := api.EncodeResourceDownload(res)
+		if err != nil {
+			abort(c, http.StatusInternalServerError, "encode failed")
+			return
+		}
+		c.Data(http.StatusOK, api.ResourceEnvelopeMediaType, body)
+		return
+	}
+	c.Header("Content-Type", api.ResourceJSONMediaType)
+	c.JSON(http.StatusOK, res)
+}
+
+// decodePutResource reads a resource upload. The body is always the raw envelope
+// (JSON header + blob ciphertext, single-buffered and never JSON-decoded), so it
+// must declare the envelope media type; it sits behind the maxResourceBody cap.
+// Responses are still negotiated — see negotiateResourceResponse — because the
+// browser share page reads the JSON form.
+func decodePutResource(c *gin.Context) (api.PutResourceRequest, bool) {
+	if !isResourceEnvelope(c.GetHeader("Content-Type")) {
+		abort(c, http.StatusUnsupportedMediaType, "resource uploads must be sent as "+api.ResourceEnvelopeMediaType)
+		return api.PutResourceRequest{}, false
+	}
+	req, err := api.DecodeResourceUpload(c.Request.Body)
+	if err != nil {
+		var tooLarge *http.MaxBytesError
+		switch {
+		case errors.As(err, &tooLarge):
+			abort(c, http.StatusRequestEntityTooLarge, "resource body exceeds limit")
+		case errors.Is(err, api.ErrHeaderTooLarge):
+			// 400 rather than 413: the request as a whole is within the cap, it is the
+			// manifest's chunk-ref set that cannot be expressed in one upload. The code
+			// and the message name that instead of saying "invalid resource body".
+			abortCode(c, http.StatusBadRequest,
+				"resource header exceeds the 32 MiB request cap; the chunk-ref set of this manifest is too large to upload in one request",
+				api.ErrCodeResourceTooLarge)
+		default:
+			abort(c, http.StatusBadRequest, "invalid resource body")
+		}
+		return api.PutResourceRequest{}, false
+	}
+	return req, true
+}
+
+// isResourceEnvelope reports whether a request Content-Type declares the version=1
+// resource envelope. Nothing else is accepted on a write: an unlabelled or
+// generically-labelled body is a client that has not been taught the format.
+func isResourceEnvelope(header string) bool {
+	mediaType, params, err := mime.ParseMediaType(header)
+	if err != nil {
+		return false
+	}
+	return mediaType == "application/vnd.aqt.resource+octet-stream" && params["version"] == "1"
+}
+
+type resourceFormat int
+
+const (
+	resourceJSON resourceFormat = iota
+	resourceEnvelope
+)
+
+func negotiateResourceResponse(header string) (resourceFormat, bool) {
+	if strings.TrimSpace(header) == "" {
+		return resourceJSON, true
+	}
+	bestQ, bestSpecificity, best := -1.0, -1, resourceJSON
+	for _, item := range strings.Split(header, ",") {
+		mediaType, params, err := mime.ParseMediaType(strings.TrimSpace(item))
+		if err != nil {
+			continue
+		}
+		q := 1.0
+		if raw := params["q"]; raw != "" {
+			q, err = strconv.ParseFloat(raw, 64)
+			if err != nil || q < 0 || q > 1 {
+				continue
+			}
+		}
+		if q == 0 {
+			continue
+		}
+		var format resourceFormat
+		specificity := 2
+		switch mediaType {
+		case "application/vnd.aqt.resource+octet-stream":
+			if params["version"] != "1" {
+				continue
+			}
+			format = resourceEnvelope
+		case "application/vnd.aqt.resource+json":
+			if params["version"] != "1" {
+				continue
+			}
+			format = resourceJSON
+		case "application/octet-stream":
+			format = resourceEnvelope
+		case "application/json":
+			format = resourceJSON
+		case "application/*":
+			format, specificity = resourceJSON, 1
+		case "*/*":
+			format, specificity = resourceJSON, 0
+		default:
+			continue
+		}
+		if q > bestQ || q == bestQ && specificity > bestSpecificity {
+			bestQ, bestSpecificity, best = q, specificity, format
+		}
+	}
+	return best, bestQ >= 0
+}
+
+// handleListResources is the owner's own inventory, and the one read path that does not
+// gate on the requester's capability: 426ing the whole listing because one row is
+// too new would hide every other resource the client can read. Each row carries its
+// min_client instead, so an under-capable client names the release a row needs.
+func (s *Server) handleListResources(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	page, ok := parsePage(c)
+	if !ok {
+		return
+	}
+	items, next, err := s.store.ListResources(owner, page)
+	if errors.Is(err, errBadCursor) {
+		abortCode(c, http.StatusBadRequest, "invalid pagination cursor", api.ErrCodeInvalidCursor)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "list failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.ListResourcesResponse{Resources: items, NextCursor: next})
+}
+
+func (s *Server) handleUpdateResourceMetadata(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.UpdateResourceMetadataRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.EncryptedMeta.Nonce) == 0 || len(req.EncryptedMeta.Ciphertext) == 0 || req.ExpectedVersion <= 0 {
+		abort(c, http.StatusBadRequest, "encrypted metadata and expectedVersion are required")
+		return
+	}
+	capability := requestCapability(c)
+	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), capability, req)
+	var upgrade *UpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		abortUpgradeRequired(c, upgrade.MinClient, capability)
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the rename", api.ErrCodeVersionConflict)
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "metadata update failed")
+		return
+	}
+	c.JSON(http.StatusOK, api.PutResourceResponse{ID: c.Param("id"), Version: version})
+}
+
+func (s *Server) handleSetVisibility(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.SetVisibilityRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Visibility != api.Private && req.Visibility != api.Public {
+		abort(c, http.StatusBadRequest, "visibility must be private or public")
+		return
+	}
+	version, err := s.store.SetVisibility(owner, c.Param("id"), req)
+	if errors.Is(err, ErrGone) {
+		// A reclaimed tombstone: nothing left to expose or hide.
+		abortGone(c)
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the visibility change", api.ErrCodeVersionConflict)
+		return
+	}
+	if errors.Is(err, ErrPolicyOnPrivate) || errors.Is(err, ErrBadPolicy) {
+		abortCode(c, http.StatusBadRequest, policyErrorMessage(err), api.ErrCodeInvalidPolicy)
+		return
+	}
+	if errors.Is(err, ErrGitRemotePolicy) {
+		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "update failed")
+		return
+	}
+	resp := api.PutResourceResponse{ID: c.Param("id"), Version: version}
+	if req.Visibility == api.Public {
+		if req.ExpireSeconds > 0 {
+			resp.ExpiresAt = time.Now().Unix() + req.ExpireSeconds
+		}
+		resp.MaxReads = req.MaxReads
+		resp.OnExpiry = echoedOnExpiry(req.OnExpiry, resp.ExpiresAt, resp.MaxReads)
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+func (s *Server) handleDeleteResource(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	expected, ok := parseIfMatch(c)
+	if !ok {
+		return
+	}
+	err := s.store.DeleteResourceVersion(owner, c.Param("id"), expected)
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "resource changed since you last fetched it; retry the delete", api.ErrCodeVersionConflict)
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "delete failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// policyErrorMessage maps the two lifecycle-policy validation errors to fixed,
+// user-facing messages, so the handler answers a stable string (and a stable Code)
+// rather than echoing the raw error value.
+func policyErrorMessage(err error) string {
+	if errors.Is(err, ErrPolicyOnPrivate) {
+		return "a link lifecycle policy can only be set on a public resource"
+	}
+	return "link lifecycle policy values must be non-negative"
 }
