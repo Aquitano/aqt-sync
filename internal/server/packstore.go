@@ -310,7 +310,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 	inserted, _ := res.RowsAffected()
 	if inserted == 0 {
 		// The pack already exists; re-arm its GC age guard so a concurrent read of it
-		// is not reaped, exactly as the prior DO UPDATE did.
+		// is not reaped.
 		if _, err := tx.Exec(
 			`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`, now, owner, packID,
 		); err != nil {

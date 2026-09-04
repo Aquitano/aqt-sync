@@ -190,7 +190,7 @@ func (s *Source) Get(id string) ([]byte, error) {
 // fetchSpan returns one span's bytes, fetching it at most once even under the
 // concurrent download pool: the LRU is consulted under mu, and singleflight collapses
 // concurrent misses of the same span into a single GetPackRange. The cache key is the
-// pack plus the span base, since a pack now holds several spans. The returned bytes are
+// pack plus the span base because a pack can hold several spans. The returned bytes are
 // never mutated after the fetch, so a later eviction cannot disturb a caller still
 // slicing its object out of them.
 func (s *Source) fetchSpan(packID string, span packSpan) ([]byte, error) {

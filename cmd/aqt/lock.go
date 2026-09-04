@@ -66,9 +66,9 @@ func releaseHeldSyncLock(root string, drop func()) {
 // acquirePIDFile takes an exclusive OS lock (flock/LockFileEx) on the file at
 // path, creating it if needed, and returns a release. The kernel drops the lock
 // when the holding process exits, so a crashed holder frees it with no reclaim
-// step — the old pid-file dance (check the recorded pid, remove, recreate) was a
-// check-then-act that let two racing reclaimers both hold the lock. The recorded
-// pid is now informational only, for busyMsg; the lock itself is the OS lock.
+// step. Checking a recorded pid and replacing the file would introduce a race
+// between two reclaimers. The pid is only used for busyMsg; the OS lock decides
+// ownership.
 func acquirePIDFile(path string, busyMsg func(pid int) error) (release func(), err error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
