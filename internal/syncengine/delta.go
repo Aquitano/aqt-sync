@@ -56,10 +56,6 @@ func Diff(old, cur Manifest) Delta {
 // Empty reports whether the two manifests describe the same tree.
 func (d Delta) Empty() bool { return len(d.Changes) == 0 && len(d.Renamed) == 0 }
 
-// Total counts every reported difference, a rename counting once rather than as the
-// delete and add it replaced.
-func (d Delta) Total() int { return len(d.Changes) + len(d.Renamed) }
-
 // Paths returns the sorted paths of the changes matching any of kinds.
 func (d Delta) Paths(kinds ...ChangeKind) []string {
 	var out []string

@@ -5,6 +5,8 @@ out/
 # Copied from ../scripts at build time; the repository copy is the original.
 public/install.sh
 public/install.ps1
+# Copied from the installed @fontsource packages at build time (copy-og-fonts.mjs).
+src/app/fonts/
 *.log
 *.tsbuildinfo
 .DS_Store
