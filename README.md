@@ -74,11 +74,24 @@ A source build calls itself `dev` and is never replaced by `aqt update`.
 
 ## Quickstart
 
-Create an account on the first machine, then attach every other machine to it:
+You need an aqt server URL. Use one from your server operator, or follow the
+[self-hosting instructions](#self-hosting). Installing the client alone does not
+create a server. Replace `https://aqt.example.com` below with your server URL.
+
+The [first-sync guide](docs/getting-started.md) walks through setup, a test upload,
+and recovery on another device.
+
+Create an account on the first machine:
 
 ```sh
 aqt --server https://aqt.example.com signup --email you@example.com
-aqt --server https://aqt.example.com login  --email you@example.com
+```
+
+Signup signs you in and saves the server URL. Keep your passphrase in a password
+manager; it cannot be reset. On each additional device, use the same account:
+
+```sh
+aqt --server https://aqt.example.com login --email you@example.com
 ```
 
 Push files. Private is the default; `--public` mints a shareable link:
@@ -154,6 +167,7 @@ clean client profile, and compare the restored files byte for byte.
 
 | Document | Covers |
 | --- | --- |
+| [docs/getting-started.md](docs/getting-started.md) | First account, first sync, and recovery on another device |
 | [docs/architecture.md](docs/architecture.md) | Design, locked decisions, package layout |
 | [docs/threat-model.md](docs/threat-model.md) | Key hierarchy, what the server can and cannot see |
 | [docs/cli.md](docs/cli.md) | Exit codes, `--json` shapes, what scripts can rely on |

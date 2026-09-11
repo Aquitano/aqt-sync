@@ -6,6 +6,10 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Bare-path upload rejects extra arguments instead of silently ignoring them.
+- Init explains that files have not been uploaded and directs users to run sync
+  from the tracked folder.
+
 - **`aqt update` now fails if closing the extracted binary fails.** The extractor
   synced the new binary but discarded the error from closing it, so a write that only
   failed at close (a full or remote filesystem flushing on the last descriptor) could
@@ -17,6 +21,13 @@ All notable changes to this project are documented in this file.
   shortcut.
 
 ### Changed
+
+- CLI help groups commands by task and includes first-sync examples. Signup and
+  empty-state messages explain the next step.
+- Login reuses the selected profile's email on the same server when `--email` is
+  omitted. A piped login in this case now reads only the passphrase.
+- Added a first-sync guide covering server setup, signup, sync, and recovery. The
+  landing page links to it and states which metadata the server can see.
 
 - **Opening a resource you own reports the same three refusals everywhere.** A missing
   owner key, a resource that is not a folder, and a pre-tree folder used to be worded

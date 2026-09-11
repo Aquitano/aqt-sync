@@ -8,7 +8,8 @@ the contracts a script depends on and the behavior `--help` cannot express.
 `aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>` when
 the argument contains a path separator; a bare word that names an existing file asks
 for confirmation first, and errors as an unknown command without a terminal, so a
-typo'd subcommand never uploads a file.
+typo'd subcommand never uploads a file. Bare-path upload accepts exactly one path;
+extra arguments are rejected before any upload.
 
 `--server <url>` (default `http://localhost:8080`), `--profile <name>`, and
 `-h/--help` apply to every command. `-v/--version` is registered on the root command
@@ -42,6 +43,19 @@ Everyday resource arguments accept a unique name, an id, or a tracked path:
 all resolve the name column `aqt ls` prints. Addressing one entry *inside* a folder
 still needs the ref form (`aqt://<id>/<path>`, or a share URL), since a name and a
 path inside it cannot be told apart in `<folder>/<path>`.
+
+## Sign in
+
+`signup` creates an account and signs this device in. `login` attaches an existing
+account or unlocks this device's session. Both save the server URL in the profile.
+
+Without `--email`, login uses the selected profile's email if its saved server
+matches the resolved server URL. Otherwise it prompts for an email. `--email`
+always overrides that default. In a piped login with a saved email, stdin contains
+only the passphrase; on a fresh profile, supply `--email` or pipe the email first.
+Changing `--server` does not send a saved email to the other server automatically.
+
+See [getting started](getting-started.md) for a complete first-sync walkthrough.
 
 ## Exit codes
 

@@ -83,7 +83,7 @@ func syncCmd() *cobra.Command {
 	var opts syncOptions
 	cmd := &cobra.Command{
 		Use:   "sync [dir]",
-		Short: "Two-way reconcile a tracked folder with the server",
+		Short: "Upload and download changes in a tracked folder",
 		Args:  cobra.MaximumNArgs(1),
 		RunE:  func(cmd *cobra.Command, args []string) error { return runSyncCmd(dirArg(args), opts) },
 	}
@@ -109,7 +109,7 @@ func cloneCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "clone <name-or-id|tracked-path|share-url> [dir]",
-		Short: "Materialize a tracked folder (or a shared folder link) on this machine",
+		Short: "Download a folder and track it on this device",
 		Args:  cobra.RangeArgs(1, 2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir := ""
@@ -224,7 +224,7 @@ func runInit(dir string, gitChoice *bool) error {
 		return nil
 	}
 	fmt.Printf("tracking %s\naqt://%s\n", abs, resp.ID)
-	fmt.Fprintln(os.Stderr, "run `aqt sync` to push the current contents")
+	fmt.Fprintln(os.Stderr, "No files uploaded yet. Open this folder, review .aqtignore, then run `aqt sync --dry-run` to preview and `aqt sync` to upload.")
 	return nil
 }
 

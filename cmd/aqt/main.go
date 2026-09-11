@@ -208,11 +208,19 @@ func isNetworkError(err error) bool {
 
 func rootCmd() *cobra.Command {
 	root := &cobra.Command{
-		Use:           "aqt",
-		Short:         "Zero-knowledge encrypted file & folder sync",
+		Use:   "aqt",
+		Short: "Encrypted file and folder sync through your own server",
+		Long: "aqt encrypts files and filenames on this device before syncing them.\n" +
+			"Start with a server URL from your server operator, or host aqt-server yourself.\n" +
+			"Create an account once with signup; use login on your other devices.",
+		Example: "  aqt --server https://aqt.example.com signup --email you@example.com\n" +
+			"  aqt init ./notes\n" +
+			"  aqt sync ./notes --dry-run\n" +
+			"  aqt sync ./notes\n" +
+			"  aqt push ./note.txt",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.ArbitraryArgs,
+		Args:          cobra.MaximumNArgs(1),
 		// --json, -q and --progress are global flags, so a command that does not
 		// implement one must say so rather than accept it and behave identically:
 		// silently printing prose a script would try to parse, or promising a bar it
@@ -248,13 +256,19 @@ func rootCmd() *cobra.Command {
 	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
 	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (on a terminal, for pull/sync/clone/watch/restore)")
 
-	root.AddCommand(signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), pruneCmd(), passphraseCmd(), accountCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
-	root.AddCommand(initCmd(), untrackCmd(), statusCmd(), diffCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
-	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
-	root.AddCommand(sharesCmd(), contactsCmd())
-	root.AddCommand(repoCmd(), gitCmd())
-	root.AddCommand(gitRemoteHelperCmd())
-	root.AddCommand(tuiCmd(), updateCmd())
+	addGroup := func(id, title string, commands ...*cobra.Command) {
+		root.AddGroup(&cobra.Group{ID: id, Title: title})
+		for _, cmd := range commands {
+			cmd.GroupID = id
+		}
+		root.AddCommand(commands...)
+	}
+	addGroup("sync", "Sync folders:", initCmd(), syncCmd(), statusCmd(), diffCmd(), cloneCmd(), watchCmd(), untrackCmd(), tuiCmd())
+	addGroup("files", "Files and sharing:", pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd(), sharesCmd(), contactsCmd())
+	addGroup("history", "History and recovery:", snapshotCmd(), checkpointCmd(), restoreCmd())
+	addGroup("account", "Account and devices:", signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), accountCmd(), devicesCmd())
+	addGroup("git", "Git remotes:", repoCmd(), gitCmd(), gitRemoteHelperCmd())
+	addGroup("maintenance", "Maintenance:", agentCmd(), pruneCmd(), updateCmd())
 
 	// The bare-path push sugar runs push's own printer, so root carries push's flags.
 	markJSONSupported(root)

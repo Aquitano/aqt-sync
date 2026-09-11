@@ -28,7 +28,10 @@ func signupCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "signup",
 		Short: "Create a new account and attach this device",
-		Args:  cobra.NoArgs,
+		Long: "Create an account on your aqt server and sign in on this device.\n" +
+			"Use --server with your server URL. Save your passphrase in a password manager;\n" +
+			"it cannot be reset. If you already have an account, use aqt login.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runSignup(email, firstNonEmpty(invite, os.Getenv("AQT_INVITE_TOKEN")), ttl, kc)
 		},
@@ -48,12 +51,15 @@ func loginCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Attach or unlock an existing account on this device",
-		Args:  cobra.NoArgs,
+		Long: "Sign in with your account email and passphrase. On a configured device,\n" +
+			"aqt reuses the saved email and server. On a new device, provide --server\n" +
+			"and --email. To create an account, use aqt signup.",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runLogin(email, ttl)
 		},
 	}
-	cmd.Flags().StringVar(&email, "email", "", "existing account email")
+	cmd.Flags().StringVar(&email, "email", "", "existing account email (defaults to the saved profile on this server)")
 	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until lock or logout)")
 	return cmd
 }
@@ -159,6 +165,13 @@ func runLogin(email string, ttl time.Duration) error {
 	if err := validateSessionTTL(ttl); err != nil {
 		return err
 	}
+	server := serverURL()
+	if email == "" {
+		if prof, err := identity.Load(flagProfile); err == nil && sameServer(prof.Server, server) {
+			email = prof.Email
+			fmt.Fprintf(os.Stderr, "Signing in as %s on %s\n", foreignText(email), foreignText(server))
+		}
+	}
 	if email == "" {
 		entered, err := promptLine("email: ")
 		if err != nil {
@@ -170,7 +183,6 @@ func runLogin(email string, ttl time.Duration) error {
 	if email == "" {
 		return errors.New("email is required")
 	}
-	server := serverURL()
 	// Logging a *different* account into an occupied profile would overwrite its token
 	// and device id, orphaning that device's server-side session with nothing left to
 	// revoke it by. `aqt signup` refuses exactly this; login must too — and before
@@ -319,10 +331,10 @@ func logoutCmd() *cobra.Command {
 
 // createAccount mints a random root key, wraps it under the passphrase-derived
 // unlock key, and registers the account with the wrapped root, the verifier, and the
-// signing public key. The root key never leaves this machine; the passphrase change
-// later re-wraps it without touching any data.
+// signing public key. Only the wrapped root leaves this machine; a passphrase
+// change re-wraps it without changing file contents.
 func createAccount(cl *client.Client, server, email, pass, invite string, ttl time.Duration, kc kdfChoice) error {
-	fmt.Fprintln(os.Stderr, "Your passphrase wraps your encryption key. We never see it and it CANNOT be reset.")
+	fmt.Fprintln(os.Stderr, "Save your passphrase in a password manager. You need it to recover your files on a new device; it cannot be reset.")
 
 	kdf, err := kc.resolve()
 	if err != nil {
@@ -382,6 +394,7 @@ func createAccount(cl *client.Client, server, email, pass, invite string, ttl ti
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "signed up as %s · device %s · %s\n", email, resp.DeviceID, server)
+	fmt.Fprintln(os.Stderr, "You are signed in. To sync a folder, run `aqt init <folder>` followed by `aqt sync <folder>`.\nOn another device, use `aqt login` with this server URL and email.")
 	return nil
 }
 

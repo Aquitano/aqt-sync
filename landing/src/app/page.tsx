@@ -92,9 +92,9 @@ const workflow = [
   {
     verb: "Recover",
     title: "Prove the restore works.",
-    body: "Clone on a clean machine or roll a tracked folder back to an anchored checkpoint.",
-    command: "aqt restore pre-release",
-    output: "restored ~/vault",
+    body: "Clone on a new device or restore a checkpoint into a separate folder. In-place restore is an explicit option.",
+    command: "aqt restore pre-release --out ./recovered",
+    output: "restored ./recovered",
     meta: "verified / byte exact",
   },
 ];
@@ -109,8 +109,8 @@ const tuiKeys = [
 const specRows = [
   { term: "Cipher", detail: "XChaCha20-Poly1305, role-separated AADs" },
   { term: "KDF", detail: "Argon2id, calibrated on your device" },
-  { term: "Keys", detail: "Derived locally, never transmitted" },
-  { term: "Server stores", detail: "Ciphertext and opaque IDs" },
+  { term: "Keys", detail: "Plaintext decryption keys stay on your devices" },
+  { term: "Server stores", detail: "Ciphertext, public keys, wrapped keys, sizes, and timestamps" },
   { term: "Transport", detail: "HTTPS enforced off loopback" },
   { term: "Updates", detail: "Ed25519-signed manifest, verified before install" },
 ];
@@ -141,7 +141,7 @@ export default function Home() {
               <span className="hero-line"><span data-hero-line>Only yours.</span></span>
             </h1>
             <p data-hero-copy className="hero-lede">
-              Encrypted file and folder sync that keeps filenames, contents, and keys invisible to the server.
+              Sync files and folders between your devices through a server you run. File contents and filenames are encrypted before upload.
             </p>
             <div data-hero-actions className="hero-actions">
               <a className="button button-dark" href="#install">Install aqt</a>
@@ -176,12 +176,12 @@ export default function Home() {
             <span>BY DEFAULT</span>
           </div>
           <div className="manifesto-copy">
-            <h2 id="manifesto-title" data-reveal>The storage provider is no longer a trusted party.</h2>
+            <h2 id="manifesto-title" data-reveal>Your server stores encrypted files.</h2>
             <p data-reveal>
-              aqt encrypts locally with XChaCha20-Poly1305. Your root key never leaves your device, and your server only coordinates opaque objects.
+              aqt encrypts locally with XChaCha20-Poly1305. Your server stores your root key encrypted under your passphrase, so you can recover it on another device.
             </p>
             <div className="knowledge-grid" data-reveal>
-              <div><span>Server sees</span><strong>Opaque IDs</strong></div>
+              <div><span>Server sees</span><strong>IDs, sizes, timestamps</strong></div>
               <div><span>Server stores</span><strong>Ciphertext</strong></div>
               <div><span>Server cannot read</span><strong>Names or files</strong></div>
               <div><span>You control</span><strong>Every key</strong></div>
@@ -204,8 +204,8 @@ export default function Home() {
                 <div className="dissolve-caption"><span>PLAINTEXT</span><span>CIPHERTEXT</span></div>
                 <div className="dissolve-band" />
               </div>
-              <h3>Nothing readable reaches the server.</h3>
-              <p>Filenames, file contents, metadata, and keys are encrypted on your machine before upload.</p>
+              <h3>File contents and filenames stay encrypted.</h3>
+              <p>File contents and filenames are encrypted before upload. Sizes, timestamps, public keys, and encrypted key records remain visible to the server.</p>
             </article>
 
             <article data-feature className="feature-cell feature-dag">
@@ -293,8 +293,8 @@ export default function Home() {
         <section data-triptych className="triptych-section poster-section section-pad" aria-labelledby="triptych-title">
           <CornerMarks />
           <div className="triptych-head" data-reveal>
-            <h2 id="triptych-title">From plaintext to sealed matter.</h2>
-            <p>Blocks converge, encrypt, and move. The network only carries what it cannot understand.</p>
+            <h2 id="triptych-title">Encrypted blocks, stored once.</h2>
+            <p>aqt reuses unchanged chunks and uploads new ones as ciphertext.</p>
           </div>
           <div className="triptych-frames">
             {triptychPanels.map((panel) => (
@@ -321,7 +321,7 @@ export default function Home() {
             {workflow.map((step, index) => (
               <article className={`workflow-panel workflow-panel-${index + 1}`} key={step.verb}>
                 <div className="workflow-copy">
-                  {index === 0 ? <h2 id="workflow-title">One binary. Three essential moves.</h2> : null}
+                  {index === 0 ? <h2 id="workflow-title">Upload, sync, and recover.</h2> : null}
                   <p className="workflow-verb" aria-hidden="true">{step.verb}</p>
                   <h3>{step.title}</h3>
                   <p>{step.body}</p>
@@ -381,7 +381,7 @@ export default function Home() {
               aqt-server is a static Go binary backed by SQLite and a ciphertext data directory. Put it behind Caddy, systemd, or Docker.
             </p>
             <p>
-              Accounts are managed from the data directory, not a privileged HTTP surface: inspect one, cap its storage, suspend it, or erase it and sweep its ciphertext, with any file left behind named in the receipt.
+              Use aqt-server admin to inspect accounts, set storage limits, suspend access, or delete an account. The deploy guide covers setup and backups.
             </p>
             <a className="text-link text-link-light" href="https://github.com/aquitano/aqt-sync/blob/main/docs/deploy.md">Read the deploy guide <span aria-hidden="true">&#8599;</span></a>
           </div>
@@ -405,11 +405,11 @@ export default function Home() {
           <CornerMarks />
           <div data-reveal>
             <PixelMark compact />
-            <h2 id="install-title">Your files are ready to disappear.</h2>
-            <p>From everyone except you.</p>
+            <h2 id="install-title">Sync your first folder.</h2>
+            <p>Install the client, then connect it to your own aqt server or one your server operator provides.</p>
           </div>
           <InstallPicker />
-          <a className="button button-dark" href="https://github.com/aquitano/aqt-sync">View on GitHub</a>
+          <a className="button button-dark" href="https://github.com/aquitano/aqt-sync/blob/main/docs/getting-started.md">Set up your first sync</a>
         </section>
       </main>
 
@@ -426,7 +426,8 @@ export default function Home() {
           </div>
           <div className="footer-links">
             <a href="https://github.com/aquitano/aqt-sync">GitHub</a>
-            <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/architecture.md">Protocol</a>
+            <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/getting-started.md">Getting started</a>
+            <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/architecture.md">Architecture</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/git-repositories.md">Git remotes</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/docs/deploy.md">Deploy</a>
             <a href="https://github.com/aquitano/aqt-sync/blob/main/LICENSE">AGPL-3.0</a>

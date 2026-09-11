@@ -98,7 +98,7 @@ func listResources(cl *client.Client, mk crypto.MasterKey, opts lsOptions) error
 		return printJSON(rows)
 	}
 	if len(rows) == 0 {
-		emptyMessage := "no resources yet"
+		emptyMessage := "no resources yet; run `aqt push <file>` to upload a file or `aqt init <folder>` to start syncing a folder"
 		if opts.filter != "" || opts.kind != "" || opts.visibility != "" {
 			emptyMessage = "no matching resources"
 		}

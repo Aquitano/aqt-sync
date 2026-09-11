@@ -107,10 +107,12 @@ func restoreCmd() *cobra.Command {
 		force   bool
 	)
 	cmd := &cobra.Command{
-		Use:   "restore <name-or-id> [dir]",
+		Use:   "restore <name-or-id> [tracked-dir]",
 		Short: "Restore a checkpoint by name or a snapshot by id (side-by-side by default)",
 		Long: "Look up <name-or-id> against the tracked folder's checkpoint names first, then as\n" +
-			"a snapshot id, and restore it. By default the snapshot is materialized side-by-side\n" +
+			"a snapshot id, and restore it. [tracked-dir] selects the source folder, not the\n" +
+			"destination. Use --out to choose where to write the restored copy.\n" +
+			"By default the snapshot is materialized side-by-side\n" +
 			"into a new directory (aqt-restore-<snapshot-id>, or --out). --in-place instead\n" +
 			"rolls the live tracked folder back (with a confirmation prompt) and re-syncs the\n" +
 			"rollback to every device.",

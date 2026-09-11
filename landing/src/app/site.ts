@@ -14,7 +14,7 @@ export const siteName = "aqt";
 export const siteTitle = "aqt | Zero-knowledge encrypted sync";
 
 export const siteDescription =
-  "End-to-end encrypted file and folder sync. The server stores only ciphertext and opaque metadata.";
+  "Sync files and folders through your own server. File contents and filenames are encrypted before upload.";
 
 export const ogTitle = "aqt | Every file. Only yours.";
 
