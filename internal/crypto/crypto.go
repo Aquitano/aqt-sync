@@ -2,10 +2,10 @@
 
 // Package crypto implements aqt's zero-knowledge key hierarchy and blob sealing.
 //
-// The hierarchy is: passphrase --Argon2id--> master key --wraps--> content key,
-// where each resource gets its own random content key and the content key seals
-// the resource bytes with XChaCha20-Poly1305. The server never sees a passphrase,
-// a master key, or an unwrapped content key.
+// Argon2id derives an unlock key from the passphrase. The unlock key wraps a
+// randomly generated root key, which wraps each resource's content key. Content
+// keys seal resource bytes with XChaCha20-Poly1305. The server stores wrapped
+// keys, never the passphrase or plaintext decryption keys.
 package crypto
 
 import (
@@ -37,8 +37,8 @@ const (
 // passing one where another is meant.
 //
 //   - MasterKey is the account's random root key: it wraps content keys and derives
-//     the signing and convergence keys. It is minted once at signup and never
-//     changes for the account's life (changing a passphrase does not change it).
+//     the signing and convergence keys. It is minted at signup and changes only
+//     on explicit root-key rotation, not on a passphrase change.
 //   - ContentKey seals a single resource's bytes.
 //   - UnlockKey is the passphrase-derived key (Argon2id) whose only job is to wrap
 //     the master key. Changing the passphrase re-derives it and re-wraps the master

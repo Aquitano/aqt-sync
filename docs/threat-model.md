@@ -5,11 +5,11 @@ imperfect. The protocol documents describe *how* the formats work
 ([folder sync](protocol/folder-sync.md), [Git remotes](protocol/git-remote.md),
 [HTTP API](protocol/api.md)); this one describes what they protect.
 
-The short version: the client encrypts everything before it leaves the machine. The
-server stores ciphertext and opaque metadata and never sees a key, a filename, or a
-plaintext byte. It still sees sizes, timing, and the operational metadata it needs to
-enforce a policy it cannot read — those are enumerated below, and the residual limits
-are collected under [Still open](#still-open).
+The client encrypts file contents and filenames before upload. The server stores
+ciphertext, public keys, and wrapped keys, but does not receive the passphrase or
+plaintext decryption keys. It also sees sizes, timing, and operational metadata for
+routing requests and enforcing access policies. These are enumerated below; residual
+limits are collected under [Still open](#still-open).
 
 ## Key hierarchy
 
@@ -168,9 +168,9 @@ only to the account the recipient deliberately blocked.
 ## Deliberate side channels
 
 **Lifecycle metadata.** Expiry timestamps and read counters are plaintext
-operational metadata the server necessarily sees to enforce a policy it cannot read
-the content of. It still never sees the file, its name, or any key; it only knows
-*when* a link dies and *how many times* it has been fetched.
+operational metadata the server uses to enforce link limits. It knows *when* a link
+expires and *how many times* it has been fetched, but does not receive plaintext
+file contents, filenames, or decryption keys.
 
 **Chunk size sequence (chunked folders).** FastCDC boundaries are content-derived
 and the pack index stores each object's ciphertext length, so the *sequence of chunk
