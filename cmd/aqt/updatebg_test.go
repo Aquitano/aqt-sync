@@ -67,6 +67,7 @@ func TestBackgroundUpdateSuppression(t *testing.T) {
 		// update is already doing this deliberately, and tui owns the screen.
 		{name: "the update command", command: "update", terminal: true},
 		{name: "the tui command", command: "tui", terminal: true},
+		{name: "read-only doctor", command: "doctor", terminal: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

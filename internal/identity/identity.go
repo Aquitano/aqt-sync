@@ -244,41 +244,82 @@ func SaveSession(name string, mk crypto.MasterKey, ttl time.Duration) error {
 	return fsatomic.WriteFile(path, b, 0o600)
 }
 
+// SessionInfo describes a cached key without exposing it.
+type SessionInfo struct {
+	State     string
+	ExpiresAt int64
+}
+
+const (
+	SessionMissing  = "missing"
+	SessionExpired  = "expired"
+	SessionInvalid  = "invalid"
+	SessionUnlocked = "unlocked"
+)
+
+// InspectSession checks the cache without deleting expired or invalid files.
+func InspectSession(name string) (SessionInfo, error) {
+	info, mk, err := inspectSession(name)
+	defer mk.Wipe()
+	return info, err
+}
+
 // LoadSession returns the cached master key if present and unexpired. An expired
 // or malformed cache is removed and reported as a miss.
 func LoadSession(name string) (crypto.MasterKey, bool) {
+	info, mk, err := inspectSession(name)
+	if info.State == SessionExpired || info.State == SessionInvalid {
+		if path, pathErr := sessionPath(name); pathErr == nil {
+			_ = os.Remove(path)
+		}
+	}
+	return mk, err == nil && info.State == SessionUnlocked
+}
+
+func inspectSession(name string) (SessionInfo, crypto.MasterKey, error) {
 	if name == "" {
 		name = DefaultProfile
 	}
+	info := SessionInfo{State: SessionMissing}
 	var mk crypto.MasterKey
 	path, err := sessionPath(name)
 	if err != nil {
-		return mk, false
+		return info, mk, err
 	}
 	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return info, mk, nil
+	}
 	if err != nil {
-		return mk, false
+		return info, mk, err
 	}
 	var s session
 	if err := json.Unmarshal(b, &s); err != nil {
-		_ = os.Remove(path)
-		return mk, false
+		info.State = SessionInvalid
+		return info, mk, err
 	}
+	info.ExpiresAt = s.ExpiresAt
 	if s.ExpiresAt != 0 && time.Now().Unix() > s.ExpiresAt {
-		_ = os.Remove(path)
-		return mk, false
+		info.State = SessionExpired
+		return info, mk, nil
 	}
-	// Try the keychain sealing key, then the machine-bound fallback. A failure on
-	// all candidates means the file was copied from another machine, the keychain
-	// entry is gone, or it predates this format — treat any of them as a miss.
+	// Try both stores so a cache survives a keychain becoming available or
+	// unavailable. Reading must not create a replacement sealing key.
 	for _, ck := range loadSealingKeys(name) {
-		if plain, err := crypto.Open(s.Sealed, ck, []byte(sessionAAD)); err == nil && len(plain) == crypto.KeySize {
+		plain, err := crypto.Open(s.Sealed, ck, []byte(sessionAAD))
+		ck.Wipe()
+		valid := err == nil && len(plain) == crypto.KeySize
+		if valid {
 			copy(mk[:], plain)
-			return mk, true
+		}
+		clear(plain)
+		if valid {
+			info.State = SessionUnlocked
+			return info, mk, nil
 		}
 	}
-	_ = os.Remove(path)
-	return mk, false
+	info.State = SessionInvalid
+	return info, mk, nil
 }
 
 // ClearSession removes any cached master key and its keychain sealing key. The

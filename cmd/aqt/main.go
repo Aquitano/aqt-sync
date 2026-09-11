@@ -268,7 +268,7 @@ func rootCmd() *cobra.Command {
 	addGroup("history", "History and recovery:", snapshotCmd(), checkpointCmd(), restoreCmd())
 	addGroup("account", "Account and devices:", signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), passphraseCmd(), accountCmd(), devicesCmd())
 	addGroup("git", "Git remotes:", repoCmd(), gitCmd(), gitRemoteHelperCmd())
-	addGroup("maintenance", "Maintenance:", agentCmd(), pruneCmd(), updateCmd())
+	addGroup("maintenance", "Maintenance:", agentCmd(), pruneCmd(), updateCmd(), doctorCmd())
 
 	// The bare-path push sugar runs push's own printer, so root carries push's flags.
 	markJSONSupported(root)

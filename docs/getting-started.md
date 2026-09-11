@@ -115,6 +115,11 @@ Snapshots live on the same server as the synced files. Keep
 
 ## When something stops you
 
+Start with `aqt doctor`, or `aqt doctor ./aqt-trial` for a particular folder.
+It reports setup problems and the next step without changing files. Use
+`--offline` for local checks or `--json` for a report you can inspect or share.
+
+
 | What you see | What to do |
 | --- | --- |
 | No profile found | Use `signup` for a new account or `login` for an existing one. Include your server URL. |

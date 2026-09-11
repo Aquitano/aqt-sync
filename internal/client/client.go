@@ -246,6 +246,20 @@ func isLoopbackHost(host string) bool {
 	return false
 }
 
+// Ready checks the server's readiness probe and validates its response.
+func (c *Client) Ready() error {
+	var res struct {
+		Status string `json:"status"`
+	}
+	if err := c.do(http.MethodGet, "/readyz", nil, &res); err != nil {
+		return err
+	}
+	if res.Status != "ready" {
+		return errors.New("server returned an unexpected readiness response")
+	}
+	return nil
+}
+
 func (c *Client) CreateAccount(req api.CreateAccountRequest) (api.AuthResponse, error) {
 	var r api.AuthResponse
 	err := c.do(http.MethodPost, "/v1/account", req, &r)

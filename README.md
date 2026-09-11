@@ -127,6 +127,8 @@ git push -u origin main
 
 `aqt --help` lists everything. A few more things worth knowing about:
 
+- `aqt doctor` checks your setup and reports next steps. Add `--offline` for local
+  checks or `--json` for a structured report.
 - `aqt tui` opens a lazygit-style dashboard for the tracked folder you are in. Every
   action runs the matching `aqt` command and streams its output into a log pane.
 - `aqt snapshot list|diff|export|prune` manages folder snapshots. `aqt checkpoint

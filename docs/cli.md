@@ -57,6 +57,80 @@ Changing `--server` does not send a saved email to the other server automaticall
 
 See [getting started](getting-started.md) for a complete first-sync walkthrough.
 
+## Doctor
+
+`aqt doctor [dir]` checks the selected profile, cached session, folder binding,
+server readiness, and device authentication. It does not upload, repair, delete,
+refresh tracking state, or run automatic updates. It never asks for a passphrase.
+The OS keychain may ask for permission to read existing credentials. Expired or
+invalid session files remain untouched.
+
+With no directory argument, doctor checks the current directory and its parents
+for a tracked folder. A folder's recorded profile is the default; `--profile`
+overrides it without changing local state. A directory outside a tracked folder
+skips the folder check unless you supplied that directory explicitly, in which
+case it reports a problem.
+
+`--offline` skips readiness and authentication. `--timeout` bounds the combined
+network checks and defaults to `5s`; it does not bound filesystem or OS keychain
+access. Readiness uses an unauthenticated `GET /readyz`. Authentication uses
+`GET /v1/devices` and verifies that the saved device appears in the response.
+An explicit `--server` that differs from the profile's server never receives its
+token. Server logs, metrics, and rate-limit counters may record these reads.
+
+```sh
+aqt doctor
+aqt doctor ./notes --offline
+aqt doctor ./notes --json --timeout 10s
+```
+
+JSON has this shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "ok": false,
+  "profile": "default",
+  "server": "https://aqt.example.com",
+  "checks": [
+    {
+      "name": "session",
+      "status": "error",
+      "code": "session_expired",
+      "message": "The cached session has expired.",
+      "action": "Run `aqt login` with the selected --profile to unlock this device.",
+      "expiresAt": 1789000000
+    }
+  ]
+}
+```
+
+The example shows one check; a full report contains `profile`, `session`, `folder`,
+`server`, and `authentication`. Each check has `name`, `status`, `code`, and
+`message`. `action` is an optional next step. `expiresAt` is Unix seconds in a
+session check and is omitted when no expiry is available or configured.
+
+`status` is `ok`, `error`, or `skipped`. `ok` at the report level means no check
+returned `error`; skipped checks make no claim about the untested condition.
+Messages can change. Scripts should use names, statuses, and codes, and tolerate
+new codes and fields within schema version 1.
+
+| Check | Codes |
+| --- | --- |
+| Profile | `profile_loaded`, `profile_missing`, `profile_unreadable` |
+| Session | `session_unlocked`, `session_missing`, `session_expired`, `session_invalid`, `session_unreadable`, `profile_unavailable` |
+| Folder | `folder_bound`, `folder_untracked`, `folder_unreadable`, `folder_account_mismatch`, `folder_server_mismatch`, `profile_unavailable` |
+| Server | `server_ready`, `server_url_invalid`, `server_unavailable`, `server_timeout`, `offline` |
+| Authentication | `device_authenticated`, `device_token_missing`, `device_unauthorized`, `server_profile_mismatch`, `server_insecure`, `authentication_failed`, `authentication_timeout`, `server_unavailable`, `server_not_checked` |
+
+Doctor returns `0` when performed checks pass, `1` when a check fails or the command
+cannot run, and `130` on interruption. Failed checks still produce the complete
+report on stdout, with a short failure summary on stderr. Doctor uses `1` for all
+failed checks rather than the operation-specific auth and network exit codes below.
+The report omits account tokens, encryption keys, passphrases, raw server errors,
+and URL credentials, queries, and fragments. It includes the selected profile name
+and server address, which may still identify a private setup.
+
 ## Exit codes
 
 | Code | Meaning |

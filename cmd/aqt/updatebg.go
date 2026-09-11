@@ -24,12 +24,14 @@ const backgroundApplyTimeout = 2 * time.Minute
 
 // backgroundSilent commands never trigger a background check. `watch` and `agent`
 // are long-lived or detached, `update` is already doing this on purpose, and `tui`
-// owns the screen, so a stray line would corrupt what it drew.
+// owns the screen, so a stray line would corrupt what it drew. Doctor must stay
+// read-only, including when an automatic update policy is enabled.
 var backgroundSilent = map[string]bool{
 	"watch":  true,
 	"agent":  true,
 	"update": true,
 	"tui":    true,
+	"doctor": true,
 }
 
 // maybeBackgroundUpdate runs after a command that succeeded. It is entirely

@@ -4,6 +4,12 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `aqt doctor [dir]` reports profile, session, folder binding, server readiness,
+  and device authentication problems with next steps. Supports `--offline`,
+  `--json`, and a network timeout; leaves local state unchanged.
+
 ### Fixed
 
 - Bare-path upload rejects extra arguments instead of silently ignoring them.
