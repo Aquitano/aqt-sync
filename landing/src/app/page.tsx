@@ -3,15 +3,7 @@
 import Image from "next/image";
 import { InstallPicker } from "@/components/install-picker";
 import { MotionLayer } from "@/components/motion-layer";
-
-const markPixels = [
-  1, 1, 1, 0, 0, 1,
-  1, 0, 1, 1, 0, 1,
-  1, 1, 1, 1, 1, 1,
-  0, 1, 0, 1, 0, 0,
-  0, 1, 1, 1, 1, 0,
-  0, 0, 1, 1, 1, 1,
-];
+import { markPixels } from "./mark";
 
 function PixelMark({ compact = false }: { compact?: boolean }) {
   return (

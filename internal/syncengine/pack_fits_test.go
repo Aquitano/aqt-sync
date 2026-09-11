@@ -35,15 +35,19 @@ func TestPackBuilderStaysUnderWireCap(t *testing.T) {
 	sizes := []int{1, 64 << 10, 8 << 20, MaxNodeBytes, 3, 12 << 20, 24 << 20, 5 << 20}
 	pb := NewPackBuilder()
 	var packs [][]byte
+	region, entries := 0, 0
 	for i, n := range sizes {
 		obj := make([]byte, n)
 		rand.Read(obj)
-		if !pb.Empty() && !FitsInPack(pb.Size(), pb.Objects(), len(obj)) {
+		if !pb.Empty() && !FitsInPack(region, entries, len(obj)) {
 			_, pack := pb.Finish()
 			packs = append(packs, pack)
 			pb = NewPackBuilder()
+			region, entries = 0, 0
 		}
 		pb.Add(fmt.Sprintf("%064d", i), obj)
+		region += len(obj)
+		entries++
 	}
 	if !pb.Empty() {
 		_, pack := pb.Finish()
