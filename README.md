@@ -9,9 +9,9 @@
 [![license](https://img.shields.io/badge/license-AGPL--3.0--or--later-1d1c19?labelColor=544e42)](LICENSE)
 
 aqt syncs files and folders between your machines through a server you run yourself.
-Everything is encrypted on your machine before upload. The server stores ciphertext and
-the metadata it needs to route requests, and never sees a key, a filename, or a plaintext
-byte.
+File contents and filenames are encrypted on your machine before upload. The server
+stores ciphertext, public keys, encrypted key records, and operational metadata such as
+sizes and timestamps. It does not receive your passphrase or plaintext decryption keys.
 
 - **Push a file** and get a private ref or a public link (`aqt push`).
 - **Sync a folder** two-way, git-style, with snapshots and conflict handling (`aqt sync`).
@@ -19,8 +19,14 @@ byte.
 - **Run the server** as one static Go binary with a SQLite data directory.
 
 Encryption is XChaCha20-Poly1305. Argon2id turns your passphrase into a key that wraps a
-random root key, and the root key never leaves your machine. Unchanged chunks are not
-re-sent, and a file that appears in several folders is stored once.
+random root key. The server stores that root key only in encrypted form. Unchanged
+chunks are not re-sent, and a file that appears in several folders is stored once.
+
+## How I use it
+
+I use aqt as an encrypted offsite Git remote for my personal notes. Git handles the
+history and merges; aqt encrypts the bundles before they reach my server. The
+[restore drill](#self-hosting) checks recovery on a clean client profile.
 
 ## Install
 
@@ -137,10 +143,12 @@ The client refuses to send its token over plain HTTP to anything but loopback, s
 offsite server has to serve HTTPS. `GET /livez` and `GET /readyz` are the probes, and
 `AQT_METRICS_ADDR` exposes Prometheus metrics on a private listener.
 
-Nothing in the data directory identifies your content, so you can back it up somewhere
-you do not control. `make restore-drill` proves the whole cycle against real binaries:
-back up, start a fresh server from the copy, recover from an email and a passphrase,
-and byte-diff the result.
+Server backups contain encrypted content, wrapped decryption keys, public keys, and
+operational metadata.
+See the [threat model](docs/threat-model.md) for what remains visible.
+`make restore-drill` tests recovery against real binaries: back up a test server,
+start a fresh server from the copy, recover from an email and a passphrase on a
+clean client profile, and compare the restored files byte for byte.
 
 ## Documentation
 

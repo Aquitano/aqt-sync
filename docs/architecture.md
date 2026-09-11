@@ -2,20 +2,21 @@
 
 Zero-knowledge, end-to-end-encrypted file and folder sync for developers: a private
 encrypted pastebin (`aqt push`), a git-style tracked folder (`aqt sync`), an
-auto-watch daemon (`aqt watch`), and encrypted Git remotes (`aqt::`). The server only
-ever stores ciphertext and opaque metadata; it can never read filenames, contents, or
-keys.
+auto-watch daemon (`aqt watch`), and encrypted Git remotes (`aqt::`). The client
+encrypts file contents and filenames before upload. The server stores
+ciphertext, public keys, wrapped keys, and operational metadata; it does not receive
+plaintext decryption keys. See the [threat model](threat-model.md) for the limits.
 
 ## Locked decisions
 
 | Decision | Choice |
 | --- | --- |
 | Encryption | Full E2E. Server is zero-knowledge. |
-| Key derivation | Passphrase → Argon2id(+stored salt) → master key. Re-derivable on any machine. |
+| Key derivation | Passphrase + stored salt → Argon2id → unlock key, which unwraps a randomly generated root key. New devices recover the root from its server-stored encrypted record. |
 | Public sharing | Content key travels in the URL **fragment** (`#…`), never sent to the server. |
 | Make private again | Rotate the content key, re-encrypt, old links die. |
 | Default visibility | **Private.** `--public` opts into a shareable link. |
-| CLI shape | One-liner spine (`aqt push`) + explicit verbs + share/unshare model. |
+| CLI shape | Explicit commands for uploading (`aqt push`), syncing, and sharing. |
 | Extras | `-P` password gate, clipboard auto-copy. |
 | Out of scope | FUSE `mount`. (Root-key rotation shipped as `aqt passphrase rotate-root`.) |
 | Runtime | Go. CLI on cobra; server on Gin; SQLite (modernc, pure-Go) + filesystem blobs. |
