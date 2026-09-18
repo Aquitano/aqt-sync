@@ -9,168 +9,132 @@ import { ScrambleTextPlugin } from "gsap/ScrambleTextPlugin";
 
 gsap.registerPlugin(useGSAP, ScrollTrigger, ScrambleTextPlugin);
 
-// Restricted to glyphs Pixelify Sans covers, so scrambled frames never fall back to another font.
-const cipherChars = "ABCDEFGHJKMNPQRSTUVWXYZ0123456789#/*";
+const cipherChars = "abcdefghijklmnopqrstuvwxyz0123456789#/*.:|";
+
+// Renders every cipher character once in the headline's own face and returns them
+// narrowest first, so each glyph cell can be given the set that fits inside it.
+function measureCipherWidths(sample: HTMLElement) {
+  const probe = document.createElement("span");
+  probe.style.visibility = "hidden";
+  probe.style.position = "absolute";
+  sample.parentElement?.append(probe);
+  const measured = [...cipherChars].map((char) => {
+    probe.textContent = char;
+    return { char, width: probe.getBoundingClientRect().width };
+  });
+  probe.remove();
+  return measured.sort((a, b) => a.width - b.width);
+}
 
 export function MotionLayer() {
   useGSAP(() => {
     const media = gsap.matchMedia();
 
-    media.add(
-      {
-        reduce: "(prefers-reduced-motion: reduce)",
-        allow: "(prefers-reduced-motion: no-preference)",
-        desktop: "(min-width: 768px)",
-      },
-      (context) => {
-        const { reduce, allow, desktop } = context.conditions as {
-          reduce: boolean;
-          allow: boolean;
-          desktop: boolean;
-        };
+    media.add("(prefers-reduced-motion: no-preference)", () => {
+      // One orchestrated load, in stages rather than all at once: the headline
+      // decrypts, the copy settles under it, the poster unrolls, the mark assembles
+      // pixel by pixel. Everything after that is driven by the reader's scroll.
+      // The headline is shown as ciphertext first, flickering for a beat, and then
+      // decrypts glyph by glyph. Each glyph runs inside a cell locked to its final
+      // width and only draws cipher characters that fit that cell, so nothing is
+      // clipped and the line never reflows. Widths are measured once Archivo has
+      // loaded; the cells are released when the sequence ends, or on cleanup, so the
+      // headline can wrap normally again.
+      const chars = gsap.utils.toArray<HTMLElement>("[data-hero-char]");
+      const glyphs = chars.map((char) => char.textContent ?? "");
+      const releaseCells = () => {
+        chars.forEach((char, index) => {
+          char.style.width = "";
+          char.style.display = "";
+          char.textContent = glyphs[index];
+        });
+      };
+      let cancelled = false;
+      let hero: gsap.core.Timeline | undefined;
 
-        if (reduce || !allow) return;
-
-        const hero = gsap.timeline({ defaults: { ease: "power4.out" } });
+      document.fonts.ready.then(() => {
+        if (cancelled) return;
+        const widths = chars.map((char) => char.getBoundingClientRect().width);
+        const cipherWidths = measureCipherWidths(chars[0]);
+        const fitting = widths.map((width) => {
+          const fits = cipherWidths.filter((entry) => entry.width <= width + 0.5).map((entry) => entry.char);
+          return fits.length > 0 ? fits.join("") : cipherWidths[0].char;
+        });
+        const randomFrom = (pool: string) => pool[Math.floor(Math.random() * pool.length)];
+        chars.forEach((char, index) => {
+          char.style.width = `${widths[index]}px`;
+          char.style.display = "inline-block";
+          char.textContent = randomFrom(fitting[index]);
+        });
+        hero = gsap.timeline({ defaults: { ease: "power3.out" }, onComplete: releaseCells });
+        hero.from("[data-hero-kicker]", { opacity: 0, duration: 0.4 }, 0);
+        chars.forEach((char, index) => {
+          hero
+            ?.to(
+              char,
+              { duration: 0.45, ease: "none", scrambleText: { text: randomFrom(fitting[index]), chars: fitting[index], speed: 1 } },
+              0.05,
+            )
+            .to(
+              char,
+              { duration: 0.5, ease: "none", scrambleText: { text: glyphs[index], chars: fitting[index], speed: 1 } },
+              0.5 + index * 0.035,
+            );
+        });
         hero
-          .to(
-            "[data-hero-kicker]",
-            {
-              duration: 0.6,
-              ease: "none",
-              scrambleText: {
-                text: "{original}",
-                chars: cipherChars,
-                speed: 0.6,
-                tweenLength: false,
-              },
-            },
-            0,
-          )
-          .to(
-            "[data-hero-line]",
-            {
-              duration: 1.05,
-              stagger: 0.22,
-              ease: "none",
-              scrambleText: {
-                text: "{original}",
-                chars: cipherChars,
-                speed: 0.55,
-                tweenLength: false,
-              },
-            },
-            0,
-          )
-          // Opacity only: everything else in the hero resolves in place, so a y-slide
-          // reads as a different language — and a clipPath wipe slices the glyphs.
-          .from("[data-hero-copy]", { opacity: 0, duration: 0.7 }, "-=0.55")
-          .from(
-            "[data-hero-actions] > *",
-            { opacity: 0, duration: 0.55, stagger: 0.08 },
-            "-=0.45",
-          )
-          .from(
-            "[data-hero-visual]",
-            { clipPath: "inset(0 0 100% 0)", duration: 1.05 },
-            "-=0.9",
-          )
+          .from("[data-hero-copy]", { opacity: 0, duration: 0.5 }, 1.7)
+          .from("[data-hero-actions] > *", { opacity: 0, duration: 0.45, stagger: 0.1, clearProps: "opacity" }, 1.85)
+          .from("[data-hero-visual]", { clipPath: "inset(0 0 100% 0)", duration: 0.9, ease: "power4.out" }, 2)
           .from(
             "[data-hero-visual] [data-pixel]",
-            { opacity: 0, scale: 0.82, duration: 0.35, stagger: 0.018 },
-            "-=0.55",
+            { opacity: 0, scale: 0.82, duration: 0.45, stagger: 0.03 },
+            2.6,
           );
+        ScrollTrigger.refresh();
+      });
 
-        gsap.utils.toArray<HTMLElement>("[data-reveal]").forEach((element) => {
-          gsap.from(element, {
-            opacity: 0,
-            y: 44,
-            duration: 0.8,
-            ease: "power3.out",
-            scrollTrigger: {
-              trigger: element,
-              start: "top 84%",
-              once: true,
-            },
-          });
-        });
-
-        gsap.from("[data-feature]", {
+      gsap.utils.toArray<HTMLElement>("[data-reveal]").forEach((element) => {
+        gsap.from(element, {
           opacity: 0,
-          y: 56,
-          duration: 0.8,
-          stagger: 0.09,
+          y: 28,
+          duration: 0.7,
           ease: "power3.out",
-          scrollTrigger: {
-            trigger: "[data-feature-grid]",
-            start: "top 72%",
-            once: true,
-          },
+          scrollTrigger: { trigger: element, start: "top 86%", once: true },
         });
+      });
 
-        gsap.from("[data-triptych-panel]", {
+      for (const [grid, cell] of [
+        ["[data-feature-grid]", "[data-feature]"],
+        ["[data-workflow-grid]", "[data-workflow]"],
+      ]) {
+        gsap.from(cell, {
           opacity: 0,
-          y: 48,
-          duration: 0.8,
-          stagger: 0.12,
+          y: 32,
+          duration: 0.7,
+          stagger: 0.07,
           ease: "power3.out",
-          scrollTrigger: {
-            trigger: "[data-triptych]",
-            start: "top 74%",
-            once: true,
+          scrollTrigger: { trigger: grid, start: "top 78%", once: true },
+        });
+      }
+
+      gsap.utils.toArray<HTMLElement>("[data-triptych-image]").forEach((image) => {
+        gsap.fromTo(
+          image,
+          { scale: 1.12 },
+          {
+            scale: 1,
+            ease: "none",
+            scrollTrigger: { trigger: image, start: "top bottom", end: "bottom top", scrub: 0.8 },
           },
-        });
+        );
+      });
 
-        gsap.utils.toArray<HTMLElement>("[data-triptych-image]").forEach((image) => {
-          gsap.fromTo(
-            image,
-            { scale: 1.12 },
-            {
-              scale: 1,
-              ease: "none",
-              scrollTrigger: {
-                trigger: image,
-                start: "top bottom",
-                end: "bottom top",
-                scrub: 0.8,
-              },
-            },
-          );
-        });
-
-        if (desktop) {
-          const wrapper = document.querySelector<HTMLElement>("[data-horizontal]");
-          const track = document.querySelector<HTMLElement>("[data-horizontal-track]");
-
-          if (wrapper && track) {
-            const distance = () => Math.max(0, track.scrollWidth - window.innerWidth);
-
-            gsap.to(track, {
-              x: () => -distance(),
-              ease: "none",
-              scrollTrigger: {
-                trigger: wrapper,
-                start: "top top",
-                end: () => `+=${distance()}`,
-                pin: true,
-                scrub: 0.8,
-                invalidateOnRefresh: true,
-                anticipatePin: 1,
-              },
-            });
-          }
-        }
-
-        let cancelled = false;
-        document.fonts.ready.then(() => {
-          if (!cancelled) ScrollTrigger.refresh();
-        });
-
-        return () => {
-          cancelled = true;
-        };
-      },
-    );
+      return () => {
+        cancelled = true;
+        hero?.kill();
+        releaseCells();
+      };
+    });
 
     return () => media.revert();
   }, []);

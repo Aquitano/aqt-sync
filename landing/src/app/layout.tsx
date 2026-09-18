@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 
 import type { Metadata, Viewport } from "next";
-import "@fontsource-variable/space-grotesk";
+import "@fontsource-variable/archivo/wdth.css";
 import "@fontsource/ibm-plex-mono/400.css";
 import "@fontsource/ibm-plex-mono/600.css";
 import "@fontsource/pixelify-sans/600.css";
@@ -36,7 +36,7 @@ export const metadata: Metadata = {
 };
 
 export const viewport: Viewport = {
-  themeColor: "#f3dea3",
+  themeColor: "#dfcd9e",
   colorScheme: "light",
 };
 

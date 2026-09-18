@@ -13,9 +13,9 @@ export const contentType = "image/png";
 // The palette is the poster sections' inverted pair from globals.css: ink ground,
 // paper ink. A link preview lands in someone else's timeline, so the dark side of
 // the site's two is the one that holds its own there.
-const ink = "#1d1c19";
-const paper = "#ddc998";
-const paperPale = "#e7d9b3";
+const ink = "#1c1b18";
+const paper = "#dfcd9e";
+const paperPale = "#ebdfbb";
 
 // Satori has no font discovery and no CSS engine: every face has to be handed over
 // as bytes, and only flexbox lays anything out — hence the mark being rows of boxes
@@ -78,7 +78,7 @@ export default async function OpengraphImage() {
             left: 40,
             right: 40,
             bottom: 40,
-            border: `1px dashed ${paper}`,
+            border: `1px solid ${paper}`,
             opacity: 0.28,
           }}
         />
