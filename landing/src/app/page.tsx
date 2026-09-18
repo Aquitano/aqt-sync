@@ -356,15 +356,17 @@ export default function Home() {
             <div className="security-detail" data-reveal>
               <div className="spec-groups">
                 {specGroups.map((group) => (
-                  <dl key={group.name} className="spec-group">
+                  <div key={group.name} className="spec-group">
                     <p>{group.name}</p>
-                    {group.rows.map((row) => (
-                      <div key={row.term}>
-                        <dt>{row.term}</dt>
-                        <dd>{row.detail}</dd>
-                      </div>
-                    ))}
-                  </dl>
+                    <dl>
+                      {group.rows.map((row) => (
+                        <div key={row.term}>
+                          <dt>{row.term}</dt>
+                          <dd>{row.detail}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  </div>
                 ))}
               </div>
               <div className="security-proof">

@@ -37,49 +37,61 @@ export function MotionLayer() {
       // The headline is shown as ciphertext first, flickering for a beat, and then
       // decrypts glyph by glyph. Each glyph runs inside a cell locked to its final
       // width and only draws cipher characters that fit that cell, so nothing is
-      // clipped and the line never reflows. The cells are released once the sequence
-      // ends so the headline can wrap normally on resize.
+      // clipped and the line never reflows. Widths are measured once Archivo has
+      // loaded; the cells are released when the sequence ends, or on cleanup, so the
+      // headline can wrap normally again.
       const chars = gsap.utils.toArray<HTMLElement>("[data-hero-char]");
       const glyphs = chars.map((char) => char.textContent ?? "");
-      const widths = chars.map((char) => char.getBoundingClientRect().width);
-      const cipherWidths = measureCipherWidths(chars[0]);
-      const fitting = widths.map((width) => {
-        const fits = cipherWidths.filter((entry) => entry.width <= width + 0.5).map((entry) => entry.char);
-        return fits.length > 0 ? fits.join("") : cipherWidths[0].char;
-      });
-      const randomFrom = (pool: string) => pool[Math.floor(Math.random() * pool.length)];
-      chars.forEach((char, index) => {
-        char.style.width = `${widths[index]}px`;
-        char.style.display = "inline-block";
-        char.textContent = randomFrom(fitting[index]);
-      });
-      const hero = gsap.timeline({
-        defaults: { ease: "power3.out" },
-        onComplete: () => gsap.set(chars, { clearProps: "width,display" }),
-      });
-      hero.from("[data-hero-kicker]", { opacity: 0, duration: 0.4 }, 0);
-      chars.forEach((char, index) => {
+      const releaseCells = () => {
+        chars.forEach((char, index) => {
+          char.style.width = "";
+          char.style.display = "";
+          char.textContent = glyphs[index];
+        });
+      };
+      let cancelled = false;
+      let hero: gsap.core.Timeline | undefined;
+
+      document.fonts.ready.then(() => {
+        if (cancelled) return;
+        const widths = chars.map((char) => char.getBoundingClientRect().width);
+        const cipherWidths = measureCipherWidths(chars[0]);
+        const fitting = widths.map((width) => {
+          const fits = cipherWidths.filter((entry) => entry.width <= width + 0.5).map((entry) => entry.char);
+          return fits.length > 0 ? fits.join("") : cipherWidths[0].char;
+        });
+        const randomFrom = (pool: string) => pool[Math.floor(Math.random() * pool.length)];
+        chars.forEach((char, index) => {
+          char.style.width = `${widths[index]}px`;
+          char.style.display = "inline-block";
+          char.textContent = randomFrom(fitting[index]);
+        });
+        hero = gsap.timeline({ defaults: { ease: "power3.out" }, onComplete: releaseCells });
+        hero.from("[data-hero-kicker]", { opacity: 0, duration: 0.4 }, 0);
+        chars.forEach((char, index) => {
+          hero
+            ?.to(
+              char,
+              { duration: 0.45, ease: "none", scrambleText: { text: randomFrom(fitting[index]), chars: fitting[index], speed: 1 } },
+              0.05,
+            )
+            .to(
+              char,
+              { duration: 0.5, ease: "none", scrambleText: { text: glyphs[index], chars: fitting[index], speed: 1 } },
+              0.5 + index * 0.035,
+            );
+        });
         hero
-          .to(
-            char,
-            { duration: 0.45, ease: "none", scrambleText: { text: randomFrom(fitting[index]), chars: fitting[index], speed: 1 } },
-            0.05,
-          )
-          .to(
-            char,
-            { duration: 0.5, ease: "none", scrambleText: { text: glyphs[index], chars: fitting[index], speed: 1 } },
-            0.5 + index * 0.035,
+          .from("[data-hero-copy]", { opacity: 0, duration: 0.5 }, 1.7)
+          .from("[data-hero-actions] > *", { opacity: 0, duration: 0.45, stagger: 0.1, clearProps: "opacity" }, 1.85)
+          .from("[data-hero-visual]", { clipPath: "inset(0 0 100% 0)", duration: 0.9, ease: "power4.out" }, 2)
+          .from(
+            "[data-hero-visual] [data-pixel]",
+            { opacity: 0, scale: 0.82, duration: 0.45, stagger: 0.03 },
+            2.6,
           );
+        ScrollTrigger.refresh();
       });
-      hero
-        .from("[data-hero-copy]", { opacity: 0, duration: 0.5 }, 1.7)
-        .from("[data-hero-actions] > *", { opacity: 0, duration: 0.45, stagger: 0.1, clearProps: "opacity" }, 1.85)
-        .from("[data-hero-visual]", { clipPath: "inset(0 0 100% 0)", duration: 0.9, ease: "power4.out" }, 2)
-        .from(
-          "[data-hero-visual] [data-pixel]",
-          { opacity: 0, scale: 0.82, duration: 0.45, stagger: 0.03 },
-          2.6,
-        );
 
       gsap.utils.toArray<HTMLElement>("[data-reveal]").forEach((element) => {
         gsap.from(element, {
@@ -117,13 +129,10 @@ export function MotionLayer() {
         );
       });
 
-      let cancelled = false;
-      document.fonts.ready.then(() => {
-        if (!cancelled) ScrollTrigger.refresh();
-      });
-
       return () => {
         cancelled = true;
+        hero?.kill();
+        releaseCells();
       };
     });
 
