@@ -18,7 +18,6 @@ import (
 
 func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -151,7 +150,6 @@ func (w *countingWriter) Write(b []byte) (int, error) {
 // directory in plaintext.
 func TestDiffAgainstSnapshotPathLevelSkipsContent(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var counting atomic.Bool
 	var served atomic.Int64
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {

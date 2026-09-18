@@ -29,7 +29,6 @@ func (f *fakeSnapshotPruner) DeleteSnapshot(id string) error {
 
 func TestSnapshotPruneDryRunExplicitIDsNeverDeletes(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.json = true
 
 	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{{ID: "one"}}}
@@ -43,7 +42,6 @@ func TestSnapshotPruneDryRunExplicitIDsNeverDeletes(t *testing.T) {
 
 func TestSnapshotPrunePreflightsLateBlocker(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.json = true
 
 	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{
@@ -61,7 +59,6 @@ func TestSnapshotPrunePreflightsLateBlocker(t *testing.T) {
 
 func TestSnapshotPruneDeduplicatesExplicitIDs(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.json = true
 
 	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{{ID: "one"}}}
@@ -88,7 +85,6 @@ func (f *fakeDeviceRemover) DeleteDevice(id string) error {
 
 func TestDeviceBatchRevokesCurrentDeviceLastAndClearsOnLostResponse(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.json = true
 
 	lost := errors.New("response lost")
@@ -114,7 +110,6 @@ func TestDeviceBatchRevokesCurrentDeviceLastAndClearsOnLostResponse(t *testing.T
 
 func TestDeviceBatchStopsAfterMidBatchFailure(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.json = true
 
 	boom := errors.New("network down")
@@ -147,7 +142,6 @@ func TestDeviceBatchStopsAfterMidBatchFailure(t *testing.T) {
 
 func TestDeviceBatchDeduplicatesIDs(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.json = true
 
 	cl := &fakeDeviceRemover{devices: []api.Device{{ID: "one"}}}

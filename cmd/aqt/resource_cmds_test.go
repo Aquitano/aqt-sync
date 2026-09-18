@@ -19,7 +19,6 @@ import (
 // deletes the resource so a later fetch 404s.
 func TestInfoCatRm(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	fdir := t.TempDir()
@@ -89,7 +88,6 @@ func TestInfoCatRm(t *testing.T) {
 // so nothing keeps the data alive.
 func TestRmSnapshotSemantics(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 	cl, prof, err := app.authedClient()
 	if err != nil {
@@ -151,7 +149,6 @@ func TestRmSnapshotSemantics(t *testing.T) {
 // rename by name, inspect/share/delete by the renamed name, and retain content.
 func TestEverydayResourceRefsAndRename(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 	path := filepath.Join(t.TempDir(), "original.txt")
 	const body = "metadata-only rename keeps these bytes"
@@ -209,7 +206,6 @@ func TestEverydayResourceRefsAndRename(t *testing.T) {
 // widening to the whole folder resource.
 func TestResolveTrackedResourcePath(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	root := t.TempDir()
 	h.init(root)
@@ -243,7 +239,6 @@ func TestResolveTrackedResourcePath(t *testing.T) {
 // being selected for a destructive or sharing command.
 func TestFriendlyNameMustBeUnique(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 	for _, body := range []string{"one", "two"} {
 		path := filepath.Join(t.TempDir(), "source.txt")
@@ -271,7 +266,6 @@ func TestFriendlyNameMustBeUnique(t *testing.T) {
 // folder form of ls resolve it, so a script never has to look an id up first.
 func TestPullCatCloneLsResolveNames(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	const body = "API_KEY=xyz"

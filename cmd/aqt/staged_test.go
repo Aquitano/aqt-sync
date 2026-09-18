@@ -148,7 +148,6 @@ func TestMaterializeStaged(t *testing.T) {
 // directory at all, not a partial tree.
 func TestCloneInterruptedLeavesNoDestination(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var failPacks atomic.Bool
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if failPacks.Load() && strings.Contains(r.URL.Path, "/packs") {

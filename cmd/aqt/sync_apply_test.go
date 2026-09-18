@@ -29,7 +29,6 @@ func contentHash(s string) string {
 // the sync. The whole pull must complete and leave foo a regular file.
 func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, syncengine.ControlDir), 0o700); err != nil {
 		t.Fatal(err)
@@ -86,7 +85,6 @@ func applyTestCtx(t *testing.T, root string, base, local, remote syncengine.Mani
 // to a conflict and the local edit survives.
 func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := t.TempDir()
 	writeTree(t, root, "f", "edited in the window") // what is actually on disk now
 
@@ -106,7 +104,6 @@ func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
 // A file edited in the window must not be overwritten by a remote download either.
 func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := t.TempDir()
 	writeTree(t, root, "g", "edited in the window")
 
@@ -129,7 +126,6 @@ func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
 // snapshot saw is applied normally.
 func TestApplySyncOverwritesUnchangedFile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := t.TempDir()
 	writeTree(t, root, "g", "orig") // on disk == snapshot
 

@@ -39,7 +39,6 @@ func runCmd(t *testing.T, cmd interface {
 // rolls the tree back, both side-by-side and in place over a modified tree.
 func TestCheckpointRestoreByName(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -108,7 +107,6 @@ func TestCheckpointRestoreByName(t *testing.T) {
 // disambiguates a reused name by preferring the anchored snapshot.
 func TestRestoreByIDAndAmbiguity(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -170,7 +168,6 @@ func TestRestoreByIDAndAmbiguity(t *testing.T) {
 // error naming the escape hatch); removing the anchor makes the same delete succeed.
 func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -211,7 +208,6 @@ func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 // requested one — a server that ignores the anchor field entirely.
 func TestSetSnapshotAnchorFailsClosed(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Echo a snapshot with no anchored field, so it reads back as unanchored.
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "s1"})
@@ -266,7 +262,6 @@ func anchorStrippingProxy(t *testing.T, backend string) *httptest.Server {
 // "checkpoint" is left behind.
 func TestCheckpointFailsClosedWhenTheServerDropsTheAnchor(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {

@@ -39,7 +39,6 @@ import (
 // to run the shell drill.
 func TestFullBackupRestoreDrill(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("skips the full backup/restore drill under -short")
 	}

@@ -73,7 +73,6 @@ func TestPasswordFlagsResolve(t *testing.T) {
 // to the child in argv, where any local user can read it out of ps.
 func TestTUISharePasswordNeverHitsArgv(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 
@@ -138,7 +137,6 @@ func contains(ss []string, want string) bool {
 // hang or silently take an empty password. docs/cli.md promises the prompt.
 func TestPasswordFlagPromptsWithoutValue(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	cmd := app.pushCmd()
 	f := cmd.Flags().Lookup("password")
 	if f == nil {
@@ -157,7 +155,6 @@ func TestPasswordFlagPromptsWithoutValue(t *testing.T) {
 
 func TestPasswordFlagHelpIsPrintable(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	cmd := app.pushCmd()
 	var out bytes.Buffer
 	cmd.SetOut(&out)

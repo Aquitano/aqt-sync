@@ -150,7 +150,6 @@ func TestSealMemoRejectsBadNames(t *testing.T) {
 // a cold seal would — and the clone proves no live object was collected.
 func TestSealMemoReuseAcrossSyncAndPrune(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)

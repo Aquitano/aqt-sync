@@ -150,7 +150,6 @@ func (app *application) ownerFileRoot(t *testing.T, id string) syncengine.FileRo
 // the share link alone.
 func TestShareStreamedLinkPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	id, data, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
@@ -174,7 +173,6 @@ func TestShareStreamedLinkPull(t *testing.T) {
 // the public endpoint too, before the content objects.
 func TestShareStreamedIndirectLinkPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	// A chunk list goes indirect strictly above chunkListInlineMax (128) records.
@@ -210,7 +208,6 @@ func TestShareStreamedIndirectLinkPull(t *testing.T) {
 // file byte-for-byte (the rotation preserved ChunkRefs and re-sealed the root).
 func TestPrivateRotatesStreamedLink(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	id, data, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
@@ -268,7 +265,6 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 // (rather than sealing in memory) and the printed URL pulls from a fresh env.
 func TestPublicStreamedPushLinkPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	_, data, printed := app.pushRandomStreamedFile(t, 9<<20, pushOptions{public: true, noClip: true})
@@ -285,7 +281,6 @@ func TestPublicStreamedPushLinkPull(t *testing.T) {
 // link carries a gated fragment and pulls only with the password.
 func TestGatedStreamedShareLinkPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	const password = "hunter2 correct horse"

@@ -16,7 +16,6 @@ import (
 // snapshotted version), then a client-side reconstruct of the snapshot.
 func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -76,7 +75,6 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 // without the server ever seeing the plaintext.
 func TestSnapshotLabelEndToEnd(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -110,7 +108,6 @@ func TestSnapshotLabelEndToEnd(t *testing.T) {
 // Pruning a snapshot deletes it; a subsequent fetch is a not-found.
 func TestSnapshotPrune(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {

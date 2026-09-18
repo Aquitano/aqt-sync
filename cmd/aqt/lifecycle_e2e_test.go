@@ -30,7 +30,6 @@ func (app *application) pullFreshErr(t *testing.T, ref, password string) error {
 // exit code 7.
 func TestPushBurnPullOnce(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 	id, data, ref := app.pushRandomStreamedFile(t, 1024, pushOptions{
 		public: true, noClip: true, policy: linkPolicy{maxReads: 1},
@@ -53,7 +52,6 @@ func TestPushBurnPullOnce(t *testing.T) {
 // A --public --max-reads 2 inline push serves two pulls; the third is gone.
 func TestPushMaxReadsInline(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 	_, data, ref := app.pushRandomStreamedFile(t, 512, pushOptions{
 		public: true, noClip: true, policy: linkPolicy{maxReads: 2},
@@ -73,7 +71,6 @@ func TestPushMaxReadsInline(t *testing.T) {
 // fetches after the root read succeed), and a second pull is gone at the root.
 func TestStreamedBurnPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	_, data, ref := app.pushRandomStreamedFile(t, 9<<20, pushOptions{
 		public: true, noClip: true, policy: linkPolicy{maxReads: 1},
@@ -93,7 +90,6 @@ func TestStreamedBurnPull(t *testing.T) {
 // the past makes the link gone.
 func TestShareExpireAfterFact(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	src := filepath.Join(t.TempDir(), "note.txt")
@@ -128,7 +124,6 @@ func TestShareExpireAfterFact(t *testing.T) {
 // The flag layer rejects --burn with --max-reads and a policy without --public.
 func TestPushPolicyFlagValidation(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	cmd := app.pushCmd()
 	cmd.SetArgs([]string{"somefile", "--burn", "--max-reads", "2"})
 	if err := cmd.Execute(); err == nil {

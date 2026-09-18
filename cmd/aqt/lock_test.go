@@ -93,7 +93,6 @@ func TestSyncLockReclaimsStale(t *testing.T) {
 // pushing the user into a --reconcile that resurrects deletions.
 func TestLockLeavesTrackedFoldersSyncable(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("hello"), 0o644); err != nil {

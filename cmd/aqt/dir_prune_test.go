@@ -18,7 +18,6 @@ import (
 // that as a fleet-wide directory delete (issue #175).
 func TestPullEmptyingTrackedDirKeepsIt(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

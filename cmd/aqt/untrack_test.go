@@ -20,7 +20,6 @@ import (
 // ends now point at it.
 func TestUntrackRecoversAFolderWhoseResourceIsGone(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -62,7 +61,6 @@ func TestUntrackRecoversAFolderWhoseResourceIsGone(t *testing.T) {
 // leave the daemon failing in the background against a folder that no longer exists.
 func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -100,7 +98,6 @@ func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
 // cloned elsewhere. --delete-remote is the opt-in that also removes it.
 func TestUntrackRemoteChoice(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	kept := t.TempDir()

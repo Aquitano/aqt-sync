@@ -112,7 +112,6 @@ func withBuild(t *testing.T, v, kind string) {
 
 func TestUpdateCheckJSONContract(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	requirePublishedPlatform(t)
 	serveUpdateFixture(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
@@ -148,7 +147,6 @@ func TestUpdateCheckJSONContract(t *testing.T) {
 
 func TestUpdateCheckReportsTheAvailableAssetForThisPlatform(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	requirePublishedPlatform(t)
 	serveUpdateFixture(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
@@ -169,7 +167,6 @@ func TestUpdateCheckReportsTheAvailableAssetForThisPlatform(t *testing.T) {
 
 func TestUpdateCheckReportsUpToDate(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	serveUpdateFixture(t, "v0.3.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
@@ -187,7 +184,6 @@ func TestUpdateCheckReportsUpToDate(t *testing.T) {
 // contacting anything to find out.
 func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	withUpdateStore(t)
 	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
 	withBuild(t, "0.3.0-dev", "dev")
@@ -205,7 +201,6 @@ func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
 // A published release older than the running build is refused rather than offered.
 func TestUpdateCheckRefusesARollback(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	serveUpdateFixture(t, "v0.2.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
@@ -220,7 +215,6 @@ func TestUpdateCheckRefusesARollback(t *testing.T) {
 // way through after a real upstream retraction.
 func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	requirePublishedPlatform(t)
 	store := serveUpdateFixture(t, "v0.5.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
@@ -304,7 +298,6 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 // the floor they consult.
 func TestBetaCheckRaisesTheStableCeiling(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	requirePublishedPlatform(t)
 	store := serveUpdateFixture(t, "v0.5.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
@@ -328,7 +321,6 @@ func TestBetaCheckRaisesTheStableCeiling(t *testing.T) {
 
 func TestUpdateCommandSurface(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := app.rootCmd()
 	cmd := subcommand(t, root, "update")
 	if cmd.Annotations[jsonAnnotation] == "" {

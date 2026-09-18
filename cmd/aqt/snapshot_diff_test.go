@@ -76,7 +76,6 @@ func TestDiffTreesIgnoresControlDir(t *testing.T) {
 // after the snapshot was taken, decrypting both sides on the client.
 func TestSnapshotDiffAgainstLive(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -122,7 +121,6 @@ func TestSnapshotDiffAgainstLive(t *testing.T) {
 // Diffing two snapshots reports the delta between the versions they captured.
 func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {

@@ -51,7 +51,6 @@ func TestMultiCallArgsDispatchesOnExactName(t *testing.T) {
 // compatibility promise, not just an internal detail.
 func TestMultiCallArgsReachTheHelperSubcommand(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := app.rootCmd()
 	args, _ := multiCallArgs([]string{helperLinkName(), "origin", "aqt::notes"})
 	cmd, flags, err := root.Find(args)
@@ -78,7 +77,6 @@ func TestHelperArgumentsReachTheHelperVerbatim(t *testing.T) {
 
 func TestGitSetupCreatesLinkAndIsIdempotent(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	dir := t.TempDir()
 	exe, err := os.Executable()
 	if err != nil {
@@ -101,7 +99,6 @@ func TestGitSetupCreatesLinkAndIsIdempotent(t *testing.T) {
 // under the same name; without --yes and without a terminal, that must not happen.
 func TestGitSetupReplacesAnExistingHelperOnlyWithConsent(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	dir := t.TempDir()
 	link := filepath.Join(dir, helperLinkName())
 	if err := os.WriteFile(link, []byte("old standalone helper"), 0o755); err != nil {

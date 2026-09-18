@@ -17,7 +17,6 @@ import (
 // new-and-deleted pair.
 func TestStatusLocalRename(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
@@ -39,7 +38,6 @@ func TestStatusLocalRename(t *testing.T) {
 // into one `renamed old -> new` line instead of the upload+delete-remote pair.
 func TestSyncDryRunLocalRename(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
@@ -62,7 +60,6 @@ func TestSyncDryRunLocalRename(t *testing.T) {
 // line, with no per-file upload/delete lines and no directory action lines.
 func TestSyncDryRunDirRename(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
@@ -93,7 +90,6 @@ func TestSyncDryRunDirRename(t *testing.T) {
 // after the snapshot is reported as a rename pair, not as an add plus a remove.
 func TestSnapshotDiffRename(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -160,7 +156,6 @@ func TestDiffIncomingRename(t *testing.T) {
 // the server clean.
 func TestSyncRenameThenClean(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)

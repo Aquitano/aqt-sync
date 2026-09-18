@@ -48,7 +48,6 @@ func (app *application) withFlags(t *testing.T, asJSON, quiet bool) {
 // update notice.
 func TestBackgroundUpdateSuppression(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := app.rootCmd()
 	cases := []struct {
 		name     string
@@ -86,7 +85,6 @@ func TestBackgroundUpdateSuppression(t *testing.T) {
 // daemon invocation as `aqt agent` is.
 func TestBackgroundUpdateSuppressionCoversSubcommands(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	withTerminal(t, true)
 	app.withFlags(t, false, false)
 
@@ -102,7 +100,6 @@ func TestBackgroundUpdateSuppressionCoversSubcommands(t *testing.T) {
 // never asked for it.
 func TestBackgroundUpdateDoesNothingUnderTheDefaultPolicy(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	withUpdateStore(t)
 	withTerminal(t, true)
 	app.withFlags(t, false, false)
@@ -148,7 +145,6 @@ func withArtifactSource(t *testing.T, fn artifactSourceFunc) {
 // with the stale check.
 func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	store := withUpdateStore(t)
 	withTerminal(t, true)
 	app.withFlags(t, false, false)
@@ -180,7 +176,6 @@ func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
 
 func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	requirePublishedPlatform(t)
 	store := withUpdateStore(t)
 	withTerminal(t, true)
@@ -235,7 +230,6 @@ func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 // not a reason to fetch metadata after every command.
 func TestBackgroundDeferralDoesNotCheckWhileAnAgentRuns(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	store := withUpdateStore(t)
 	withTerminal(t, true)
 	app.withFlags(t, false, false)
@@ -293,7 +287,6 @@ func liveOtherPID(t *testing.T) int {
 
 func TestUpdatePolicyCommandRoundTrips(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	store := withUpdateStore(t)
 
 	for _, want := range []update.Policy{update.PolicyNotify, update.PolicyAuto, update.PolicyOff} {
@@ -315,7 +308,6 @@ func TestUpdatePolicyCommandRoundTrips(t *testing.T) {
 
 func TestUpdatePolicyCommandRejectsAnUnknownMode(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	withUpdateStore(t)
 
 	root := app.rootCmd()
@@ -327,7 +319,6 @@ func TestUpdatePolicyCommandRejectsAnUnknownMode(t *testing.T) {
 
 func TestUpdatePolicyCommandShowsTheCurrentMode(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	store := withUpdateStore(t)
 	if err := store.SetPolicy(update.PolicyNotify); err != nil {
 		t.Fatal(err)

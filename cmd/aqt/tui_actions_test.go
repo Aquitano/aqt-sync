@@ -41,7 +41,6 @@ func menuCommand(t *testing.T, menu *tuiMenu, want string) tea.Cmd {
 // promises. A menu-only entry is an action the shortcut silently dropped.
 func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	for _, panel := range []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources} {
 		m.setFocus(panel)
@@ -64,7 +63,6 @@ func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
 // a panel: no tracked folder, and an empty snapshot or resource list.
 func TestTUIHasActionsMatchesPanelActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	panels := []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources}
 	for _, root := range []string{"/tmp/vault", ""} {
 		for _, empty := range []bool{false, true} {
@@ -87,7 +85,6 @@ func TestTUIHasActionsMatchesPanelActions(t *testing.T) {
 
 func TestTUIIssue92SingleKeyActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 
 	m.setFocus(tuiPanelFiles)
@@ -125,7 +122,6 @@ func TestTUIIssue92SingleKeyActions(t *testing.T) {
 
 func TestTUIIssue92ResourceActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 	res := *m.selectedResource()
@@ -175,7 +171,6 @@ func TestTUIIssue92ResourceActions(t *testing.T) {
 
 func TestTUIIssue92SnapshotActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelSnapshots)
 	snap := *m.selectedSnapshot()
@@ -205,7 +200,6 @@ func TestTUIIssue92SnapshotActions(t *testing.T) {
 
 func TestTUIIssue92AccountMenu(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelStatus)
 	if got := menuKeys(&tuiMenu{options: m.statusActions()}); got != "u,i,c,h,o,U,d" {
@@ -251,7 +245,6 @@ func TestTUIIssue92AccountMenu(t *testing.T) {
 
 func TestTUISharePasswordPreservesWhitespaceAndResultPersists(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	res := *m.selectedResource()
 	opened := menuCommand(t, m.shareDialog(res).(*tuiMenu), "p")().(tuiOpenDialogMsg)

@@ -48,7 +48,6 @@ func TestRequireTreeFolder(t *testing.T) {
 // --reconcile opts in.
 func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -77,7 +76,6 @@ func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 // must be reported before any format refusal.
 func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -117,7 +115,6 @@ func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 // config left by the removed pack-and-seal format; it is now just an unknown field.
 func TestSyncRefusesUnparsableConfig(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

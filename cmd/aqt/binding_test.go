@@ -19,7 +19,6 @@ import (
 // A tracked folder records its owning profile and account fingerprint at init.
 func TestInitRecordsIdentityBinding(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -38,7 +37,6 @@ func TestInitRecordsIdentityBinding(t *testing.T) {
 
 func TestBindingRejectsConflictingProfile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -52,7 +50,6 @@ func TestBindingRejectsConflictingProfile(t *testing.T) {
 
 func TestBindingRejectsConflictingServer(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -68,7 +65,6 @@ func TestBindingRejectsConflictingServer(t *testing.T) {
 // profile must not adopt it — the folder is refused until it is re-tracked.
 func TestBindingRefusesStateWithoutOwner(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -110,7 +106,6 @@ func TestBindingRefusesStateWithoutOwner(t *testing.T) {
 // old account owns. The owner handle is what identifies the account.
 func TestBindingRefusesAccountMismatch(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -135,7 +130,6 @@ func TestBindingRefusesAccountMismatch(t *testing.T) {
 // so the folder must keep syncing — and catch its fingerprint up.
 func TestBindingToleratesRootKeyRotation(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -165,7 +159,6 @@ func TestBindingToleratesRootKeyRotation(t *testing.T) {
 // restored $HOME re-logged in as --profile work must not lock the folder out.
 func TestBindingAcceptsRenamedProfileForSameAccount(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -191,7 +184,6 @@ func TestBindingAcceptsRenamedProfileForSameAccount(t *testing.T) {
 // state write-back itself is asserted.
 func TestBindingFollowsProfileServerMove(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
@@ -214,7 +206,6 @@ func TestBindingFollowsProfileServerMove(t *testing.T) {
 // failed init has no side effects at all.
 func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 
@@ -251,7 +242,6 @@ func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 // An unwritable destination fails init before anything is created on the server.
 func TestInitPermissionFailureCreatesNoRemote(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if !supportsPOSIXPermissions {
 		t.Skip("POSIX directory write permissions are not enforced on Windows")
 	}

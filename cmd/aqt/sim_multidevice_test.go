@@ -40,7 +40,6 @@ import (
 // orderings no hand-written case enumerates.
 func TestMultiDeviceSim(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("skips the multi-device sync simulation under -short")
 	}

@@ -14,7 +14,6 @@ import (
 // Global output flags are inherited by commands; --version/-v prints the build version.
 func TestGlobalFlagWiring(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := app.rootCmd()
 
 	for _, name := range []string{"server", "profile", "json", "quiet"} {
@@ -50,7 +49,6 @@ func TestGlobalFlagWiring(t *testing.T) {
 
 func TestStandardizedCLIForms(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	assertOutFlag := func(name string, cmd *cobra.Command) {
 		t.Helper()
 		out := cmd.Flags().Lookup("out")
@@ -98,7 +96,6 @@ func subcommand(t *testing.T, root *cobra.Command, name string) *cobra.Command {
 // Pushing a directory must explain the folder workflow before attempting to read it.
 func TestPushDirectoryPointsAtInitSync(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	dir := t.TempDir()
 	err := app.runPush(dir, pushOptions{})
 	if err == nil || !strings.Contains(err.Error(), "is a directory") {
@@ -114,7 +111,6 @@ func TestPushDirectoryPointsAtInitSync(t *testing.T) {
 // Backticks in flag descriptions control Cobra's value-type display.
 func TestPushHelpRendersNameFlagType(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	usage := app.pushCmd().Flags().FlagUsages()
 	if !strings.Contains(usage, "--name string") {
 		t.Errorf("--name does not render as a string flag:\n%s", usage)

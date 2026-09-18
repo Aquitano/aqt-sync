@@ -17,7 +17,6 @@ import (
 // propagates, and removing an empty directory propagates as a removal.
 func TestSyncEmptyDirsAndModes(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -73,7 +72,6 @@ func TestSyncEmptyDirsAndModes(t *testing.T) {
 // is required to take local.
 func TestSyncDirModeConflictSurfaces(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits are not meaningful on Windows")
 	}
@@ -122,7 +120,6 @@ func TestSyncDirModeConflictSurfaces(t *testing.T) {
 // node (its child was renamed) is uploaded, so the pack count grows by at most one.
 func TestSyncSubtreeDedupOnMove(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

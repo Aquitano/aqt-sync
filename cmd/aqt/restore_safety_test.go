@@ -23,7 +23,6 @@ func writeConflictsCopyConfig(t *testing.T, root string) {
 // propagation sync pins conflicts=block instead (issue #183).
 func TestInPlaceRestoreWithConflictsCopyConfig(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
@@ -52,7 +51,6 @@ func TestInPlaceRestoreWithConflictsCopyConfig(t *testing.T) {
 // internal reconcile the same way (copy contradicts --reconcile); it pins block too.
 func TestAdoptWithConflictsCopyConfig(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -76,7 +74,6 @@ func TestAdoptWithConflictsCopyConfig(t *testing.T) {
 // carnage as local deletions and pushing them fleet-wide.
 func TestSyncRefusesAfterInterruptedRestoreSwap(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)

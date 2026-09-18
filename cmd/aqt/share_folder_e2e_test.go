@@ -82,7 +82,6 @@ func (app *application) ownerTreeRootID(t *testing.T, id string) string {
 // pulls single entries through both subpath link forms.
 func TestShareFolderLinkCloneAndSubpathPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
@@ -137,7 +136,6 @@ func TestShareFolderLinkCloneAndSubpathPull(t *testing.T) {
 // fragment cannot substitute for.
 func TestPrivateRotatesFolderLink(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
@@ -193,7 +191,6 @@ func TestPrivateRotatesFolderLink(t *testing.T) {
 // the password and refuses without it.
 func TestGatedFolderShareLinkClone(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	const password = "hunter2 correct horse"
 	id, origin := pushSharedFolder(t, h)
@@ -220,7 +217,6 @@ func TestGatedFolderShareLinkClone(t *testing.T) {
 // requests consume one read, and the next fetch is gone.
 func TestFolderLinkBurnCountsCloneAsOneRead(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
@@ -247,7 +243,6 @@ func TestFolderLinkBurnCountsCloneAsOneRead(t *testing.T) {
 // an object the shared folder does not reference (pack-neighbor isolation).
 func TestFolderLinkIsReadOnly(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id, _ := pushSharedFolder(t, h)
 	app.shareFolder(t, id, "", linkPolicy{})
@@ -317,7 +312,6 @@ func TestSplitRefPathShareURLForms(t *testing.T) {
 // resource, so `--expire` deleted the folder every device syncs against.
 func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
@@ -384,7 +378,6 @@ func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
 // The proxy here strips onExpiry from the visibility response to imitate that server.
 func TestShareExpireDisarmsPolicyWhenTheServerDropsOnExpiry(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/visibility") {
 			rec := httptest.NewRecorder()

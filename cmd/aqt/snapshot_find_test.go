@@ -59,7 +59,6 @@ func TestFilterSnapshots(t *testing.T) {
 // `list`: the resource name and the optional label both come back in the clear.
 func TestSnapshotFindIndex(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {

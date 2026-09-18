@@ -83,7 +83,6 @@ func readIgnore(t *testing.T, dir string) string {
 // CLI and has no terminal to answer a prompt on.
 func TestInitGitFlags(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	cmd := app.initCmd()
 	if cmd.Flags().Lookup("git") == nil || cmd.Flags().Lookup("no-git") == nil {
 		t.Fatal("init is missing --git/--no-git")

@@ -14,7 +14,6 @@ import (
 // it stops reading as forever-pending (issue #183).
 func TestBothSidesDeletedSyncsClean(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -49,7 +48,6 @@ func TestBothSidesDeletedSyncsClean(t *testing.T) {
 // the scanner ignores .aqt-tmp-* and the sync leaves it local-only.
 func TestCrashLeftoverTmpFileNotPushed(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

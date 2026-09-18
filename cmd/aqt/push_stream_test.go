@@ -21,7 +21,6 @@ import (
 // through the two-phase pull.
 func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	src := filepath.Join(t.TempDir(), "huge.bin")
@@ -96,7 +95,6 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 // took the packed path and round-trips byte-for-byte through pull and cat.
 func TestStreamingSingleFilePushPull(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	src := filepath.Join(t.TempDir(), "big.bin")

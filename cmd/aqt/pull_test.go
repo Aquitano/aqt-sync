@@ -42,7 +42,6 @@ func TestSafeOutputName(t *testing.T) {
 // attacker-controlled metadata cannot escape the working directory.
 func TestWriteOutputConfinesToCWD(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	tmp := t.TempDir()
 	oldCWD, err := os.Getwd()
 	if err != nil {

@@ -10,7 +10,6 @@ import (
 
 func TestUsageE2E(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := filepath.Join(t.TempDir(), "tree")
 	writeTree(t, dir, "notes.txt", "usage e2e file one")

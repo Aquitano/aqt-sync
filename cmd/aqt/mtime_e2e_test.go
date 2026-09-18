@@ -16,7 +16,6 @@ import (
 // later `aqt status` and TUI refresh re-reads and re-hashes the whole tree, forever.
 func TestPulledTreeStatFastPaths(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

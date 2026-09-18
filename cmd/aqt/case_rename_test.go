@@ -138,7 +138,6 @@ func TestRenameCaseOnlyToleratesMissingSource(t *testing.T) {
 // content survives, and the replica has nothing new to push afterwards.
 func TestSyncAppliesCaseOnlyRenameOnFoldingFS(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	t.Setenv("AQT_TEST_CASE_INSENSITIVE", "1")
 	h := app.newE2E(t)
 	dir := t.TempDir()

@@ -86,7 +86,6 @@ func (app *application) asProfile(name string, fn func()) {
 // round-trip per resource just to be skipped.
 func TestShareLsFetchesGrantsOnlyWhereTheyExist(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var grantGets atomic.Int64
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/grants") {
@@ -190,7 +189,6 @@ func (app *application) pushSecretFile(t *testing.T, name, content string) strin
 // list, pull as the grantee, strict read-only, then revoke with key rotation.
 func TestGrantFileShareAndRevoke(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	const content = "grant me this"
 	id := app.pushSecretFile(t, "granted.txt", content)
@@ -271,7 +269,6 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 // resource, and revoking one grantee rotates the key while re-wrapping the rest.
 func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
@@ -364,7 +361,6 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 // real account's.
 func TestAccountKeysDecoy(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	grantSignup(t, h, "real@example.com", "real", "real horse battery staple")
 	cl, _, err := app.authedClient()
@@ -467,7 +463,6 @@ func TestAccountKeysDecoy(t *testing.T) {
 // and stopped — so forward secrecy stayed broken with no way back.
 func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var failRotation atomic.Bool
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if failRotation.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" {
@@ -528,7 +523,6 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 // way out, and the mismatch error has to say so.
 func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	const (
 		email   = "dave@example.com"
@@ -584,7 +578,6 @@ func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 // injects the revoked grantee back into every grant listing to force the issue.
 func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var (
 		revoked         atomic.Value // string: the handle a hostile server keeps listing
 		recording       atomic.Bool  // gate CreateGrant recording to the revoke, past the setup shares

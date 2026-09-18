@@ -54,7 +54,6 @@ func isolateConfigEnv(t *testing.T, base string) {
 
 func TestAccountLifecycleCommandsAreExplicit(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := app.rootCmd()
 	for _, name := range []string{"signup", "login", "lock", "logout"} {
 		cmd, _, err := root.Find([]string{name})

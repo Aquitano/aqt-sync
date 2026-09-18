@@ -74,7 +74,6 @@ func (app *application) testModel(t *testing.T) *tuiModel {
 
 func TestTUIPanelNavigation(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	if m.focus != tuiPanelFiles {
 		t.Fatalf("initial focus = %v, want files", m.focus)
@@ -96,7 +95,6 @@ func TestTUIPanelNavigation(t *testing.T) {
 
 func TestTUIListSkipsHeadersAndKeepsSelection(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelFiles)
 	l := &m.panels[tuiPanelFiles].list
@@ -126,7 +124,6 @@ func TestTUIListSkipsHeadersAndKeepsSelection(t *testing.T) {
 
 func TestTUIListFilter(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 	l := &m.panels[tuiPanelResources].list
@@ -146,7 +143,6 @@ func TestTUIListFilter(t *testing.T) {
 
 func TestTUIResourceActionsOpenDialogs(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 
@@ -191,7 +187,6 @@ func TestTUIResourceActionsOpenDialogs(t *testing.T) {
 
 func TestChildArgsCarryServerAndProfile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if got := app.childArgs([]string{"sync", "/v"}); len(got) != 2 {
 		t.Fatalf("no overrides expected, got %v", got)
 	}
@@ -232,7 +227,6 @@ func TestTUIBoxGeometry(t *testing.T) {
 
 func TestTUIViewSmoke(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	for _, id := range []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources} {
 		m.setFocus(id)
@@ -264,7 +258,6 @@ func TestTUIViewSmoke(t *testing.T) {
 
 func TestTUIBusyGuardsActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelFiles)
 
@@ -299,7 +292,6 @@ func TestTUIBusyGuardsActions(t *testing.T) {
 // comparison left standing after a sync would report differences that sync resolved.
 func TestTUICompareSectionRetiresOnRescan(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.Update(tuiStartCompareMsg{}) // the returned command is not run: no network here
 	if !m.comparing {
@@ -349,7 +341,6 @@ func filesPanelHas(m *tuiModel, want string) bool {
 // backwards through it must not walk past the end (regression: index panic).
 func TestTUIHeadersOnlyListNoPanic(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.local = changeSet{}
 	m.conflicts = nil
@@ -426,7 +417,6 @@ func TestTUIListClickTo(t *testing.T) {
 
 func TestTUIMouseFocusAndSelect(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t) // 100x30 window
 	m.setFocus(tuiPanelResources)
 
@@ -455,7 +445,6 @@ func TestTUIMouseFocusAndSelect(t *testing.T) {
 
 func TestTUIMouseWheelMovesPanelUnderCursor(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelResources) // r1 selected
 	// Wheel down over the resources panel advances its cursor without the main
@@ -469,7 +458,6 @@ func TestTUIMouseWheelMovesPanelUnderCursor(t *testing.T) {
 
 func TestTUIToastExpirySeq(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	cmd := m.toast("first")
 	if _, ok := cmd().(tuiToastExpiredMsg); !ok {
@@ -490,7 +478,6 @@ func TestTUIToastExpirySeq(t *testing.T) {
 
 func TestTUICancelConfirmFlow(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 
 	// ctrl+x is inert unless an action is running.
@@ -524,7 +511,6 @@ func TestTUICancelConfirmFlow(t *testing.T) {
 // can hit an unrelated process once the pid is reused.
 func TestTUIQuitConfirmDoesNotCapturePid(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.execBusy = true
 	m.execTitle = "aqt snapshot restore --in-place"
@@ -556,7 +542,6 @@ func TestTUIQuitConfirmDoesNotCapturePid(t *testing.T) {
 // unlock view; it must re-enter it instead of failing every action until quit.
 func TestTUIExitThreeReturnsToUnlock(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.execBusy = true
 	m.execTitle = "aqt sync"
@@ -579,7 +564,6 @@ func TestTUIExitThreeReturnsToUnlock(t *testing.T) {
 
 func TestTUIAccordionHeights(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t) // 100x30
 
 	sum := func() int {
@@ -627,7 +611,6 @@ func TestTUIAccordionHeights(t *testing.T) {
 
 func TestTUIAccordionSmallTerminalFloor(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 60, Height: 16}) // the documented minimum
 
@@ -649,7 +632,6 @@ func TestTUIAccordionSmallTerminalFloor(t *testing.T) {
 
 func TestTUITitleScrollIndicator(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	// Overflow the resources panel so its box cannot show every row at once.
 	var many []lsRow
@@ -683,7 +665,6 @@ func TestTUITitleScrollIndicator(t *testing.T) {
 
 func TestTUIPageKeysMoveByHalfPage(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	var many []lsRow
 	for i := range 50 {
@@ -724,7 +705,6 @@ func TestTUIRedactSecrets(t *testing.T) {
 
 func TestTUIStatusVerdict(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 
 	// Conflicts outrank pending local changes.
@@ -799,7 +779,6 @@ func TestTUIStatusVerdict(t *testing.T) {
 
 func TestTUIBottomBarGating(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	// Account mode: the files panel has no tracked folder, so no sync action and
 	// no actions menu should be advertised.
 	ctx := &tuiCtx{app: app,
@@ -826,7 +805,6 @@ func TestTUIBottomBarGating(t *testing.T) {
 
 func TestTUIBreadcrumbTitle(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	m.setFocus(tuiPanelFiles)
 	title := m.detailTitle()
@@ -848,7 +826,6 @@ func TestTUIBreadcrumbTitle(t *testing.T) {
 
 func TestTUILogFollowPauseResume(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 	for i := range 100 {
 		m.appendLog(fmt.Sprintf("line %d", i))
@@ -900,7 +877,6 @@ func TestTUIConflictOriginalAndDetail(t *testing.T) {
 
 func TestTUISpaceMenuActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	m := app.testModel(t)
 
 	// A private file offers copy/share/delete but not make-private.

@@ -23,7 +23,6 @@ import (
 
 func TestGitRemotePushAndClone(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -135,7 +134,6 @@ func TestGitRemotePushAndClone(t *testing.T) {
 
 func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -180,7 +178,6 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 
 func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -219,7 +216,6 @@ func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 
 func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -334,7 +330,6 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 
 func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -401,7 +396,6 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 
 func TestGitRemoteConcurrentPushRace(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -485,7 +479,6 @@ func TestGitRemoteConcurrentPushRace(t *testing.T) {
 
 func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -669,7 +662,6 @@ func gitMustFail(t *testing.T, dir string, args ...string) string {
 // full copy of the repository forever. Successive compactions must converge on one.
 func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}

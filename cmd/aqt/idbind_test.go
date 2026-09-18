@@ -24,7 +24,6 @@ import (
 // bind would leave content nothing can open — assert the stored form per create path.
 func TestCreatesSealIDBound(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	inline := filepath.Join(t.TempDir(), "note.txt")
@@ -83,7 +82,6 @@ func TestCreatesSealIDBound(t *testing.T) {
 // share link a public push has already issued with it.
 func TestBindSurvivesLostResponse(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var dropped atomic.Bool
 	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		// The create is a POST; the PUT that follows is the id-binding write. Let it
@@ -142,7 +140,6 @@ func TestBindSurvivesLostResponse(t *testing.T) {
 // is sealed unbound, so it opens for nobody and would only strand an orphan.
 func TestBindFailureDeletesUnboundResource(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var refused atomic.Bool
 	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && refused.CompareAndSwap(false, true) {

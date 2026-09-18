@@ -60,7 +60,6 @@ func TestDiffIncomingClean(t *testing.T) {
 // "up to date" once it syncs, and (with --offline) skip the server entirely.
 func TestStatusIncomingE2E(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	origin := t.TempDir()
@@ -154,7 +153,6 @@ func equalStrings(a, b []string) bool {
 // kind must reach both the human view and the JSON contract.
 func TestStatusReportsEveryTrackedKind(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)

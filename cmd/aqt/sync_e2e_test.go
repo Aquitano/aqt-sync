@@ -40,7 +40,6 @@ import (
 // --force.
 func TestSyncE2E(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	// One machine inits and pushes a tree with a small file, a nested file, and a
@@ -109,7 +108,6 @@ func TestSyncE2E(t *testing.T) {
 // other replica pulls it, with no conflict re-triggered.
 func TestSyncConflictCopyBothModified(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -160,7 +158,6 @@ func TestSyncConflictCopyBothModified(t *testing.T) {
 // committed first, forcing reconcileWithRetry to re-plan the same conflict.
 func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var armed, injected atomic.Bool
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" &&
@@ -214,7 +211,6 @@ func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
 // primary is dropped (local delete wins), so it disappears from the other replica too.
 func TestSyncConflictCopyLocalDeleteRemoteModify(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -253,7 +249,6 @@ func TestSyncConflictCopyLocalDeleteRemoteModify(t *testing.T) {
 // pushed, resurrecting the file on the other replica.
 func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -288,7 +283,6 @@ func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
 // plans.
 func TestSyncConflictCopyValidation(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	dir := t.TempDir()
@@ -305,7 +299,6 @@ func TestSyncConflictCopyValidation(t *testing.T) {
 
 func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -355,7 +348,6 @@ func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
 // the merge could not resolve.
 func TestSyncConflictMergeBudgetFallsBackToCopy(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	original := maxMergedBytesHeld
 	t.Cleanup(func() { maxMergedBytesHeld = original })
 
@@ -414,7 +406,6 @@ func TestSyncConflictMergeBudgetFallsBackToCopy(t *testing.T) {
 
 func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var armed, blocked atomic.Bool
 	putStarted := make(chan struct{})
 	releasePUT := make(chan struct{})
@@ -463,7 +454,6 @@ func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
 
 func TestSyncConflictMergeMissingBaseChunkFallsBackToCopy(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -556,7 +546,6 @@ func globConflicts(t *testing.T, root string) []string {
 // format); a clone must fail with client.ErrUpgradeRequired before any decrypt runs.
 func TestMixedVersionUpgradeRequired(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := filepath.Join(t.TempDir(), "origin")
 
@@ -593,7 +582,6 @@ func TestMixedVersionUpgradeRequired(t *testing.T) {
 // looks like.
 func TestLsNamesTheCapabilityGap(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id := app.pushSecretFile(t, "future.txt", "written by a newer device")
 	if err := h.store.SetResourceMinClientForTest(id, api.ClientCapability+1); err != nil {
@@ -632,7 +620,6 @@ func TestLsNamesTheCapabilityGap(t *testing.T) {
 // the chunked content byte-for-byte from the packs.
 func TestSyncDedupHoldsOnResync(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -665,7 +652,6 @@ func TestSyncDedupHoldsOnResync(t *testing.T) {
 // --reconcile must surface one-sided differences as conflicts.
 func TestSyncRefusesMissingBase(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -690,7 +676,6 @@ func TestSyncRefusesMissingBase(t *testing.T) {
 // member files so a single index covers everything.
 func TestLsAndFindDecryptNames(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	// A single-file push.
@@ -771,7 +756,6 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 // abort on "descends through a symlink" and leave the folder stuck.
 func TestSyncSymlinkBecomesDir(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -1120,7 +1104,6 @@ func bigContent() string {
 // reconstruct every byte, which fails if any dispatched pack was lost or a wait skipped.
 func TestSyncLargeMultiPackRoundTrip(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if testing.Short() {
 		t.Skip("skips the multi-pack upload test under -short")
 	}

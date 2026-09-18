@@ -190,7 +190,6 @@ func TestWatcherDefersWhileGitBusy(t *testing.T) {
 // lock, then go through once the lock clears.
 func TestWatchGuardGatesRealSync(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	root := t.TempDir()
 	h.init(root)
@@ -408,7 +407,6 @@ func TestWaitGitIdle(t *testing.T) {
 // gitGuard disabled in .aqtconfig lets --once sync even with a lock present.
 func TestWatchOnceGuardOffSyncsDespiteLock(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	root := t.TempDir()
 	h.init(root)

@@ -23,7 +23,6 @@ import (
 // unroutable address and fail with a connection error instead of a cancellation.
 func TestNewUploaderObservesRootCancel(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	app.ctx = ctx
 

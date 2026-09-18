@@ -18,7 +18,6 @@ import (
 
 func TestGitRemoteHelperCapabilitiesAndOptions(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	input := strings.NewReader("capabilities\noption verbosity 2\noption progress true\noption object-format true\noption unknown value\n")
 	var output bytes.Buffer
 	h := &remoteHelper{app: app,

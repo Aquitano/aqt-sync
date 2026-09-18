@@ -52,7 +52,6 @@ func TestParseRefExtractsOrigin(t *testing.T) {
 
 func TestLinkServerPrecedence(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	prof := &identity.Profile{Server: "https://me.example.com"}
 	cases := []struct {
 		name       string
@@ -92,7 +91,6 @@ func TestLinkServerPrecedence(t *testing.T) {
 // erroring proves it was attached.
 func TestNewLinkClientWithholdsTokenFromForeignHost(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	old := app.server
 	app.server = ""
 	defer func() { app.server = old }()

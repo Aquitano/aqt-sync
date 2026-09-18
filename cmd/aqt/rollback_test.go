@@ -89,7 +89,6 @@ func copyRegularFile(src, dst string) error {
 // as a conflict instead of a silent delete, and --force resolves it local-wins.
 func TestSyncRefusesServerRollback(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -130,7 +129,6 @@ func TestSyncRefusesServerRollback(t *testing.T) {
 // than synced with the guard silently off.
 func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

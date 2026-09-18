@@ -23,7 +23,6 @@ import (
 // forge output that looks like aqt's own (a fake ref, a fake fingerprint MATCH).
 func TestIncomingShareNameIsRenderedInert(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id := app.pushSecretFile(t, "innocent.txt", "payload")
 	const hostile = "safe\x1b[2K\rforged\naqt://deadbeef  MATCH"
@@ -61,7 +60,6 @@ func TestIncomingShareNameIsRenderedInert(t *testing.T) {
 // of the same control bytes a grantor would use.
 func TestHostileServerCannotForgeShareRows(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	const hostile = "safe\x1b[2K\rforged\naqt://deadbeef  MATCH"
 	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		listing := r.Method == http.MethodGet && (r.URL.Path == "/v1/shares" || r.URL.Path == "/v1/share-blocks")
@@ -120,7 +118,6 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 // an unknown sender rather than presented as an identity.
 func TestIncomingShareNamesItsSender(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id := app.pushSecretFile(t, "shared.txt", "hello")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
@@ -177,7 +174,6 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 // share, then block the account so it cannot immediately re-append the row.
 func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	first := app.pushSecretFile(t, "first.txt", "one")
 	second := app.pushSecretFile(t, "second.txt", "two")
@@ -282,7 +278,6 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 // handle, so a third account cannot use it to strip somebody else's access.
 func TestShareRemovalIsGranteeScoped(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	id := app.pushSecretFile(t, "shared.txt", "hello")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
@@ -338,7 +333,6 @@ func TestShareRemovalIsGranteeScoped(t *testing.T) {
 // channel must fail closed when the server presents anything else.
 func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 
@@ -413,7 +407,6 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 // reported a grantee's routine root-key rotation as the server swapping keys.
 func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 

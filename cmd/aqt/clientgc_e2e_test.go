@@ -36,7 +36,6 @@ func (h *e2eHarness) usageObjects() int64 {
 // reclaims exactly the unreachable chunks — what survives still clones intact.
 func TestClientGCSyncAndPrune(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)

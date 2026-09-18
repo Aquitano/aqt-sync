@@ -54,7 +54,6 @@ func subpathFixture(t *testing.T, h *e2eHarness) (src, id string) {
 
 func TestPullSubpathSingleFile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
 
@@ -83,7 +82,6 @@ func TestPullSubpathSingleFile(t *testing.T) {
 
 func TestPullSubpathDirectory(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
 
@@ -111,7 +109,6 @@ func TestPullSubpathDirectory(t *testing.T) {
 
 func TestPullFolderWithoutSubpathIsGuided(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
 	err := app.runPull("aqt://"+id, "", "", true, false)
@@ -122,7 +119,6 @@ func TestPullFolderWithoutSubpathIsGuided(t *testing.T) {
 
 func TestLsFolderSubpath(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
 	cl, prof, err := app.authedClient()

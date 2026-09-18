@@ -26,7 +26,6 @@ import (
 // the base, and conflicting, where both moved and the trees disagree.
 func TestCompareWorkingTreeToRemote(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -125,7 +124,6 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 // themselves.
 func TestCompareRemoteReportsDirsModesAndTypes(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	if runtime.GOOS == "windows" {
 		t.Skip("permission bits and symlinks are not faithfully tracked on Windows")
 	}
@@ -165,7 +163,6 @@ func TestCompareRemoteReportsDirsModesAndTypes(t *testing.T) {
 // sides still named rather than an empty change list a caller would read as "clean".
 func TestCompareRemoteJSONReportsCompleteness(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -230,7 +227,6 @@ func TestCompareRemoteJSONReportsCompleteness(t *testing.T) {
 // sync decides to do.
 func TestCompareRemoteIsReadOnly(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -261,7 +257,6 @@ func TestCompareRemoteIsReadOnly(t *testing.T) {
 
 func TestCompareRemoteUnreachableServer(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	var down atomic.Bool
 	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if down.Load() && strings.HasPrefix(r.URL.Path, "/v1/resources/") {
@@ -293,7 +288,6 @@ func TestCompareRemoteUnreachableServer(t *testing.T) {
 // under the sides it actually compared.
 func TestNameStatusCoversEveryDiffMode(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
@@ -344,7 +338,6 @@ func TestNameStatusCoversEveryDiffMode(t *testing.T) {
 // fast-path `status` relies on, but the two trees still differ.
 func TestCompareRemoteSeesStatPreservingEdit(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

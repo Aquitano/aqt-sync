@@ -26,7 +26,6 @@ func requireCaseSensitiveFS(t *testing.T) {
 // both names. The push is where the trap is armed, so the push is what refuses.
 func TestSyncRefusesCaseCollidingPush(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	requireCaseSensitiveFS(t)
 	h := app.newE2E(t)
 	dir := t.TempDir()
@@ -65,7 +64,6 @@ func TestDownloadsRefuseCaseTwinsOnFoldingFS(t *testing.T) {
 // see them.
 func TestSymlinksDegradeWithoutSupport(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)

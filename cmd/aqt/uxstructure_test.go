@@ -21,7 +21,6 @@ import (
 // prose a script would try to parse.
 func TestJSONGateErrorsOnUnsupported(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	root := app.rootCmd()
 	root.SetArgs([]string{"cat", "someid", "--json"})
 	err := root.Execute()
@@ -44,7 +43,6 @@ func TestJSONGateErrorsOnUnsupported(t *testing.T) {
 // must say so instead of accepting a flag that changes nothing.
 func TestQuietAndProgressGatesErrorOnUnsupported(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	// Both flags live on package globals that cobra sets during parsing; a rejected
 	// run leaves them set for whatever runs next.
 	previousQuiet, previousProgress := app.quiet, app.progress
@@ -91,7 +89,6 @@ func TestQuietAndProgressGatesErrorOnUnsupported(t *testing.T) {
 // without the doc moving too is the drift this contract keeps having.
 func TestQuietAndProgressCommandSets(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	// `update policy` inherits the update output flags.
 	app.assertAnnotated(t, quietAnnotation, []string{
 		"aqt checkpoint", "aqt git setup", "aqt init", "aqt push", "aqt restore",
@@ -123,7 +120,6 @@ func (app *application) assertAnnotated(t *testing.T, annotation string, want []
 
 func TestJSONGateRejectsRootWithoutPath(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	previous := app.json
 	app.json = false
 	defer func() { app.json = previous }()
@@ -145,7 +141,6 @@ func TestJSONGateRejectsRootWithoutPath(t *testing.T) {
 // touching the server.
 func TestDestructiveConfirmRequiredNonTTY(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	cases := [][]string{
 		{"rm", "someid"},
 		{"devices", "rm", "somedevice"},
@@ -167,7 +162,6 @@ func TestDestructiveConfirmRequiredNonTTY(t *testing.T) {
 // link, unshare takes it back off the list. Exercised over the real router.
 func TestShareLsAndUnshare(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	fpath := filepath.Join(t.TempDir(), "note.txt")
@@ -219,7 +213,6 @@ func TestShareLsAndUnshare(t *testing.T) {
 // share ls surfaces the server-enforced lifecycle policy on a link.
 func TestShareLsShowsLinkPolicy(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	fpath := filepath.Join(t.TempDir(), "note.txt")
@@ -256,7 +249,6 @@ func TestShareLsShowsLinkPolicy(t *testing.T) {
 // status --json and sync's JSON summary are machine-parseable.
 func TestStatusAndSyncJSON(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -309,7 +301,6 @@ func TestStatusAndSyncJSON(t *testing.T) {
 // else, and a sync that had no trouble prints nothing at all.
 func TestQuietInitAndSyncOutput(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 	dir := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(dir, 0o755); err != nil {

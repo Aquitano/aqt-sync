@@ -18,7 +18,6 @@ import (
 // a no-op.
 func TestAdoptReusesLocalFiles(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	origin := t.TempDir()
@@ -60,7 +59,6 @@ func TestAdoptReusesLocalFiles(t *testing.T) {
 // later plain sync works.
 func TestAdoptDivergenceConflicts(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	origin := t.TempDir()
@@ -107,7 +105,6 @@ func TestAdoptDivergenceConflicts(t *testing.T) {
 // .aqtconfig does not parse.
 func TestAdoptGuards(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	h := app.newE2E(t)
 
 	origin := t.TempDir()

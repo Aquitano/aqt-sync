@@ -70,7 +70,6 @@ func TestAccountDeleteConfirmationRequiresTypedEmail(t *testing.T) {
 // that cannot be undone is never sent on the strength of a typo.
 func TestAccountDeleteProofRejectsWrongPassphrase(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
 	cl := &fakeAccountClient{}
@@ -88,7 +87,6 @@ func TestAccountDeleteProofRejectsWrongPassphrase(t *testing.T) {
 // incorrect one sends the caller hunting for a typo instead of the missing input.
 func TestAccountDeleteProofRejectsEmptyPassphrase(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	prof := accountProfile(t, "owner@example.com", "correct horse battery staple")
 
 	withStdin(t, "")
@@ -100,7 +98,6 @@ func TestAccountDeleteProofRejectsEmptyPassphrase(t *testing.T) {
 
 func TestAccountDeleteProofDerivesTheAuthVerifier(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
 
@@ -123,7 +120,6 @@ func TestAccountDeleteProofDerivesTheAuthVerifier(t *testing.T) {
 // make a leaked token sufficient to erase the account.
 func TestAccountDeleteYesStillRequiresThePassphrase(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
 
@@ -209,7 +205,6 @@ func TestAccountDeleteReceiptSurvivesAFailedLocalCleanup(t *testing.T) {
 // the command must say so rather than block or delete unconfirmed.
 func TestAccountDeleteRefusesUnconfirmableRun(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	withStdin(t, "")
 	err := app.runAccountDelete(false, false)
 	if err == nil {
@@ -224,7 +219,6 @@ func TestAccountDeleteRefusesUnconfirmableRun(t *testing.T) {
 // leaving no token with which to revoke it.
 func TestLoginRefusesToOverwriteAnotherAccountsProfile(t *testing.T) {
 	app := &application{ctx: context.Background()}
-
 	app.newE2E(t)
 
 	prof, err := identity.Load(identity.DefaultProfile)
