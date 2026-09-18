@@ -38,15 +38,15 @@ const progressInterval = 100 * time.Millisecond
 
 // progressActive reports whether a --progress bar would actually draw: the flag is set
 // and stderr is a terminal.
-func progressActive() bool {
-	return flagProgress && term.IsTerminal(int(os.Stderr.Fd()))
+func (app *application) progressActive() bool {
+	return app.progress && term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 // newProgressBar starts a bar labeled label. A positive total renders a percentage
 // bar with bytes remaining; total <= 0 means "no bar" (there is nothing to size, or
 // progress is off / stderr is not a terminal), returning a nil no-op bar.
-func newProgressBar(label string, total int64) *progressBar {
-	if total <= 0 || !progressActive() {
+func (app *application) newProgressBar(label string, total int64) *progressBar {
+	if total <= 0 || !app.progressActive() {
 		return nil
 	}
 	p := &progressBar{label: label, start: time.Now(), stop: make(chan struct{})}
@@ -61,8 +61,8 @@ func newProgressBar(label string, total int64) *progressBar {
 // it discovers what it will send only by walking the tree, and that walk is the
 // upload. The bar stays silent until the first byte lands, so a sync with nothing to
 // upload draws nothing at all.
-func newUnsizedBar(label string) *progressBar {
-	if !progressActive() {
+func (app *application) newUnsizedBar(label string) *progressBar {
+	if !app.progressActive() {
 		return nil
 	}
 	p := &progressBar{label: label, unsized: true, start: time.Now(), stop: make(chan struct{})}

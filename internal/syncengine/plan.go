@@ -21,88 +21,86 @@ type Action struct {
 	Kind ActionKind
 }
 
-// DirAction is a planned change to a tracked directory (mode update, empty-dir create,
-// or removal). It is kept separate from the file/symlink Action stream so the hardened
-// file apply path is untouched; directories are applied in a dedicated pass after files.
-type DirAction struct {
-	Path string
-	Kind ActionKind
+// Plan reconciles local and remote against the last-synced base. A path changed
+// on both sides is a Conflict unless the two sides have converged.
+func Plan(local, base, remote Manifest) []Action {
+	return plan(local.ByPath(), base.ByPath(), remote.ByPath(), entryDiffers)
 }
 
-// Plan computes a three-way reconciliation of local and remote against base (the
-// last manifest synced from this machine). A path changed on both sides is a
-// Conflict and is never auto-resolved — the caller decides (e.g. --force).
-func Plan(local, base, remote Manifest) []Action {
-	lp, bp, rp := local.byPath(), base.byPath(), remote.byPath()
+// PlanDirs reconciles directory existence and modes separately from file content.
+func PlanDirs(local, base, remote Manifest) []Action {
+	return plan(local.DirsByPath(), base.DirsByPath(), remote.DirsByPath(), dirDiffers)
+}
 
+func plan[T any](local, base, remote map[string]T, differs func(T, T) bool) []Action {
 	var actions []Action
-	for _, p := range unionPaths(lp, bp, rp) {
-		l, lok := lp[p]
-		b, bok := bp[p]
-		r, rok := rp[p]
-
-		localChanged := changed(l, lok, b, bok)
-		remoteChanged := changed(r, rok, b, bok)
-
+	for _, path := range unionPaths(local, base, remote) {
+		l, lok := local[path]
+		b, bok := base[path]
+		r, rok := remote[path]
+		localChanged := changed(l, lok, b, bok, differs)
+		remoteChanged := changed(r, rok, b, bok, differs)
+		var kind ActionKind
 		switch {
 		case !localChanged && !remoteChanged:
-			// already in sync
+			continue
 		case localChanged && !remoteChanged:
+			kind = DeleteRemote
 			if lok {
-				actions = append(actions, Action{p, Upload})
-			} else {
-				actions = append(actions, Action{p, DeleteRemote})
+				kind = Upload
 			}
 		case remoteChanged && !localChanged:
+			kind = DeleteLocal
 			if rok {
-				actions = append(actions, Action{p, Download})
-			} else {
-				actions = append(actions, Action{p, DeleteLocal})
+				kind = Download
 			}
-		default: // both changed
-			// Deleted on both sides is agreement, not conflict: there is exactly one
-			// possible outcome and both sides already reached it. Reporting it as a
-			// Conflict wedged every sync with exit 4 after a crash in the PUT->saveBase
-			// window, when the push had landed but the base still recorded the path.
-			if !lok && !rok {
-				break
+		default:
+			// Matching entries or a deletion on both sides need no action. In particular,
+			// replaying a committed deletion after a crash must not create a conflict.
+			if !changed(l, lok, r, rok, differs) {
+				continue
 			}
-			// Mode is part of the comparison: hash-identical entries with divergent
-			// modes have not converged (entryDiffers counts a mode edit as a change,
-			// and PlanDirs compares its whole attribute set the same way).
-			if lok && rok && !entryDiffers(l, r) {
-				break // converged to the same content independently; nothing to do
-			}
-			actions = append(actions, Action{p, Conflict})
+			kind = Conflict
 		}
+		actions = append(actions, Action{path, kind})
 	}
 	return actions
 }
 
-// PlanReconcile reconciles local against remote with no trusted base (e.g.
-// base.json is missing or corrupt). Without a base a one-sided difference is
-// ambiguous — it could be an add or a delete — so every difference is reported as
-// a Conflict for the caller to resolve (review, or --force = local wins) rather
-// than silently treated as an add, which would resurrect deletions. Paths that
-// already match on both sides need no action.
+// PlanReconcile has no trusted base, so every difference is a Conflict. A one-sided
+// path could be either an addition or a deletion; choosing would risk resurrecting
+// a deleted file or discarding an added one.
 func PlanReconcile(local, remote Manifest) []Action {
-	lp, rp := local.byPath(), remote.byPath()
+	return planReconcile(local.ByPath(), remote.ByPath(), entryDiffers)
+}
 
+// PlanDirsReconcile is the directory counterpart of PlanReconcile.
+func PlanDirsReconcile(local, remote Manifest) []Action {
+	return planReconcile(local.DirsByPath(), remote.DirsByPath(), dirDiffers)
+}
+
+func planReconcile[T any](local, remote map[string]T, differs func(T, T) bool) []Action {
 	var actions []Action
-	for _, p := range unionPaths(lp, rp) {
-		l, lok := lp[p]
-		r, rok := rp[p]
-		if lok && rok && !entryDiffers(l, r) {
-			continue // identical on both sides; nothing to reconcile
+	for _, path := range unionPaths(local, remote) {
+		l, lok := local[path]
+		r, rok := remote[path]
+		if changed(l, lok, r, rok, differs) {
+			actions = append(actions, Action{path, Conflict})
 		}
-		actions = append(actions, Action{p, Conflict})
 	}
 	return actions
 }
 
-// unionPaths returns every path present in any of the given manifests-by-path maps,
-// sorted. The planners walk it instead of a map, so their output comes out ordered
-// by path without a second sort and does not depend on map iteration order.
+func changed[T any](cur T, curOK bool, base T, baseOK bool, differs func(T, T) bool) bool {
+	if curOK != baseOK {
+		return true
+	}
+	return curOK && differs(cur, base)
+}
+
+func dirDiffers(a, b DirEntry) bool { return a.Mode != b.Mode }
+
+// unionPaths gives planners a stable traversal order.
 func unionPaths[E any](sets ...map[string]E) []string {
 	seen := map[string]struct{}{}
 	for _, set := range sets {
@@ -116,86 +114,4 @@ func unionPaths[E any](sets ...map[string]E) []string {
 	}
 	sort.Strings(paths)
 	return paths
-}
-
-// changed reports whether an entry differs from its base (added, removed,
-// content-changed, or mode-changed), deferring to entryDiffers so the planner and
-// Diff share one definition of a changed entry.
-func changed(cur Entry, curOK bool, base Entry, baseOK bool) bool {
-	if curOK != baseOK {
-		return true
-	}
-	if !curOK {
-		return false
-	}
-	return entryDiffers(base, cur)
-}
-
-// PlanDirs is the directory counterpart of Plan: a three-way reconcile of tracked
-// directories keyed by path, where the only synced attribute is the mode (a
-// directory has no content). It lets empty directories and directory permission
-// changes propagate alongside files. A directory present in base but gone on both
-// sides converged (like a file deleted on both sides) and needs no action.
-func PlanDirs(local, base, remote Manifest) []DirAction {
-	lp, bp, rp := local.dirsByPath(), base.dirsByPath(), remote.dirsByPath()
-
-	var actions []DirAction
-	for _, p := range unionPaths(lp, bp, rp) {
-		l, lok := lp[p]
-		b, bok := bp[p]
-		r, rok := rp[p]
-		localChanged := dirEntryChanged(l, lok, b, bok)
-		remoteChanged := dirEntryChanged(r, rok, b, bok)
-		switch {
-		case !localChanged && !remoteChanged:
-		case localChanged && !remoteChanged:
-			if lok {
-				actions = append(actions, DirAction{p, Upload})
-			} else {
-				actions = append(actions, DirAction{p, DeleteRemote})
-			}
-		case remoteChanged && !localChanged:
-			if rok {
-				actions = append(actions, DirAction{p, Download})
-			} else {
-				actions = append(actions, DirAction{p, DeleteLocal})
-			}
-		default:
-			if !lok && !rok {
-				break // deleted on both sides independently; converged (see Plan)
-			}
-			if lok && rok && l.Mode == r.Mode {
-				break
-			}
-			actions = append(actions, DirAction{p, Conflict})
-		}
-	}
-	return actions
-}
-
-// PlanDirsReconcile reconciles directories with no trusted base: every difference
-// becomes a Conflict, mirroring PlanReconcile for files.
-func PlanDirsReconcile(local, remote Manifest) []DirAction {
-	lp, rp := local.dirsByPath(), remote.dirsByPath()
-
-	var actions []DirAction
-	for _, p := range unionPaths(lp, rp) {
-		l, lok := lp[p]
-		r, rok := rp[p]
-		if lok && rok && l.Mode == r.Mode {
-			continue
-		}
-		actions = append(actions, DirAction{p, Conflict})
-	}
-	return actions
-}
-
-func dirEntryChanged(cur DirEntry, curOK bool, base DirEntry, baseOK bool) bool {
-	if curOK != baseOK {
-		return true
-	}
-	if !curOK {
-		return false
-	}
-	return cur.Mode != base.Mode
 }

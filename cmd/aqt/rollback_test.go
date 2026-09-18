@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -87,7 +88,9 @@ func copyRegularFile(src, dst string) error {
 // --accept-rollback reconciles from scratch, so the one-sided difference surfaces
 // as a conflict instead of a silent delete, and --force resolves it local-wins.
 func TestSyncRefusesServerRollback(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "v1")
@@ -99,14 +102,14 @@ func TestSyncRefusesServerRollback(t *testing.T) {
 
 	h.restoreServer(backup)
 
-	if err := runSync(origin, syncOptions{}); !errors.Is(err, errRollback) {
+	if err := app.runSync(origin, syncOptions{}); !errors.Is(err, errRollback) {
 		t.Fatalf("sync against a rolled-back server = %v, want errRollback", err)
 	}
 	if got := readTree(t, origin, "newer.txt"); got != "written after the backup" {
 		t.Fatalf("refused sync still touched local files: %q", got)
 	}
 
-	if err := runSync(origin, syncOptions{acceptRollback: true}); !errors.Is(err, errConflictsRemain) {
+	if err := app.runSync(origin, syncOptions{acceptRollback: true}); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("accepted rollback = %v, want errConflictsRemain", err)
 	}
 	if got := readTree(t, origin, "newer.txt"); got != "written after the backup" {
@@ -126,7 +129,9 @@ func TestSyncRefusesServerRollback(t *testing.T) {
 // State carrying no version pin cannot detect a rollback, so it is refused rather
 // than synced with the guard silently off.
 func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "v1")
@@ -141,7 +146,7 @@ func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runSync(origin, syncOptions{})
+	err = app.runSync(origin, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "records no synced server version") {
 		t.Fatalf("sync of unpinned state = %v, want a refusal", err)
 	}
@@ -152,7 +157,7 @@ func TestRollbackGuardRefusesUnpinnedState(t *testing.T) {
 	if err := folderstate.SaveState(origin, st); err != nil {
 		t.Fatal(err)
 	}
-	err = runSync(origin, syncOptions{})
+	err = app.runSync(origin, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "records no synced server version") {
 		t.Fatalf("sync of a negative pin = %v, want a refusal", err)
 	}

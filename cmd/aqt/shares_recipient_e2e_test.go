@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -21,20 +22,22 @@ import (
 // lands in the recipient's terminal: an escape sequence there can erase the line and
 // forge output that looks like aqt's own (a fake ref, a fake fingerprint MATCH).
 func TestIncomingShareNameIsRenderedInert(t *testing.T) {
-	h := newE2E(t)
-	id := pushSecretFile(t, "innocent.txt", "payload")
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
+	id := app.pushSecretFile(t, "innocent.txt", "payload")
 	const hostile = "safe\x1b[2K\rforged\naqt://deadbeef  MATCH"
-	if err := runRename(id, hostile); err != nil {
+	if err := app.runRename(id, hostile); err != nil {
 		t.Fatalf("rename: %v", err)
 	}
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
-	if err := runShareWith(id, "bob@example.com"); err != nil {
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share --with: %v", err)
 	}
 
-	asProfile("bob", func() {
+	app.asProfile("bob", func() {
 		out := captureStdout(t, func() {
-			if err := sharesCmd().RunE(nil, nil); err != nil {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
 				t.Fatalf("shares: %v", err)
 			}
 		})
@@ -57,8 +60,10 @@ func TestIncomingShareNameIsRenderedInert(t *testing.T) {
 // than the accounts it hosts. The proxy appends a row whose id and handle are made
 // of the same control bytes a grantor would use.
 func TestHostileServerCannotForgeShareRows(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	const hostile = "safe\x1b[2K\rforged\naqt://deadbeef  MATCH"
-	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		listing := r.Method == http.MethodGet && (r.URL.Path == "/v1/shares" || r.URL.Path == "/v1/share-blocks")
 		if !listing {
 			pass(w, r)
@@ -85,8 +90,8 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{"shares", func() error { return sharesCmd().RunE(nil, nil) }},
-		{"shares blocked", func() error { return sharesBlockedCmd().RunE(nil, nil) }},
+		{"shares", func() error { return app.sharesCmd().RunE(nil, nil) }},
+		{"shares blocked", func() error { return app.sharesBlockedCmd().RunE(nil, nil) }},
 	} {
 		out := captureStdout(t, func() {
 			if err := tc.run(); err != nil {
@@ -114,16 +119,18 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 // contact shows that contact's email and fingerprint, and an unpinned one is called
 // an unknown sender rather than presented as an identity.
 func TestIncomingShareNamesItsSender(t *testing.T) {
-	h := newE2E(t)
-	id := pushSecretFile(t, "shared.txt", "hello")
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
+	id := app.pushSecretFile(t, "shared.txt", "hello")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
-	if err := runShareWith(id, "bob@example.com"); err != nil {
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share --with: %v", err)
 	}
 
-	asProfile("bob", func() {
+	app.asProfile("bob", func() {
 		out := captureStdout(t, func() {
-			if err := sharesCmd().RunE(nil, nil); err != nil {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
 				t.Fatalf("shares: %v", err)
 			}
 		})
@@ -132,7 +139,7 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 		}
 
 		// Pin the sender the way a recipient would once they know who it is.
-		cl, prof, err := authedClient()
+		cl, prof, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -153,7 +160,7 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 		}
 
 		out = captureStdout(t, func() {
-			if err := sharesCmd().RunE(nil, nil); err != nil {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
 				t.Fatalf("shares: %v", err)
 			}
 		})
@@ -169,22 +176,24 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 // TestGranteeRemovesAndBlocksAShare is the recipient-side acceptance test: decline a
 // share, then block the account so it cannot immediately re-append the row.
 func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
-	h := newE2E(t)
-	first := pushSecretFile(t, "first.txt", "one")
-	second := pushSecretFile(t, "second.txt", "two")
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
+	first := app.pushSecretFile(t, "first.txt", "one")
+	second := app.pushSecretFile(t, "second.txt", "two")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 	for _, id := range []string{first, second} {
-		if err := runShareWith(id, "bob@example.com"); err != nil {
+		if err := app.runShareWith(id, "bob@example.com"); err != nil {
 			t.Fatalf("share --with %s: %v", id, err)
 		}
 	}
 
-	asProfile("bob", func() {
+	app.asProfile("bob", func() {
 		// A plain removal drops only the named row and leaves the sender able to re-share.
-		if err := runSharesRemove("aqt://"+first, false); err != nil {
+		if err := app.runSharesRemove("aqt://"+first, false); err != nil {
 			t.Fatalf("shares rm: %v", err)
 		}
-		cl, _, err := authedClient()
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -196,21 +205,21 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 			t.Fatalf("after rm, want only %s left, got %+v", second, shares)
 		}
 		// Removing what is no longer there says so instead of reporting success.
-		if err := runSharesRemove("aqt://"+first, false); err == nil {
+		if err := app.runSharesRemove("aqt://"+first, false); err == nil {
 			t.Fatal("second rm of the same share succeeded")
 		}
 	})
 
 	// The owner can re-grant: a removal is not a block.
-	if err := runShareWith(first, "bob@example.com"); err != nil {
+	if err := app.runShareWith(first, "bob@example.com"); err != nil {
 		t.Fatalf("re-share after plain rm: %v", err)
 	}
 
-	asProfile("bob", func() {
-		if err := runSharesRemove("aqt://"+first, true); err != nil {
+	app.asProfile("bob", func() {
+		if err := app.runSharesRemove("aqt://"+first, true); err != nil {
 			t.Fatalf("shares rm --block: %v", err)
 		}
-		cl, prof, err := authedClient()
+		cl, prof, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -220,7 +229,7 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 			t.Fatalf("pin the sender: %v", err)
 		}
 		listed := captureStdout(t, func() {
-			if err := sharesBlockedCmd().RunE(nil, nil); err != nil {
+			if err := app.sharesBlockedCmd().RunE(nil, nil); err != nil {
 				t.Fatalf("shares blocked: %v", err)
 			}
 		})
@@ -246,7 +255,7 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 
 	// A block is a definitive refusal, so the sender is told who declined rather than
 	// left with a lost-outcome error suggesting a retry.
-	err := runShareWith(first, "bob@example.com")
+	err := app.runShareWith(first, "bob@example.com")
 	if !errors.Is(err, client.ErrSenderBlocked) {
 		t.Fatalf("re-grant to a blocked account = %v, want client.ErrSenderBlocked", err)
 	}
@@ -254,9 +263,9 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 		t.Fatalf("error = %q, want it to name the recipient", err)
 	}
 
-	asProfile("bob", func() {
+	app.asProfile("bob", func() {
 		out := captureStdout(t, func() {
-			if err := sharesUnblockCmd().RunE(nil, []string{"e2e@example.com"}); err != nil {
+			if err := app.sharesUnblockCmd().RunE(nil, []string{"e2e@example.com"}); err != nil {
 				t.Fatalf("shares unblock: %v", err)
 			}
 		})
@@ -264,7 +273,7 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 			t.Fatalf("unblock output: %q", out)
 		}
 	})
-	if err := runShareWith(first, "bob@example.com"); err != nil {
+	if err := app.runShareWith(first, "bob@example.com"); err != nil {
 		t.Fatalf("share after unblock: %v", err)
 	}
 }
@@ -272,16 +281,18 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 // TestShareRemovalIsGranteeScoped: the delete predicate is the caller's own grantee
 // handle, so a third account cannot use it to strip somebody else's access.
 func TestShareRemovalIsGranteeScoped(t *testing.T) {
-	h := newE2E(t)
-	id := pushSecretFile(t, "shared.txt", "hello")
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
+	id := app.pushSecretFile(t, "shared.txt", "hello")
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 	grantSignup(t, h, "mallory@example.com", "mallory", "mallory horse battery staple")
-	if err := runShareWith(id, "bob@example.com"); err != nil {
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share --with bob: %v", err)
 	}
 
-	asProfile("mallory", func() {
-		cl, _, err := authedClient()
+	app.asProfile("mallory", func() {
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -293,8 +304,8 @@ func TestShareRemovalIsGranteeScoped(t *testing.T) {
 		}
 	})
 
-	asProfile("bob", func() {
-		cl, _, err := authedClient()
+	app.asProfile("bob", func() {
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -307,8 +318,8 @@ func TestShareRemovalIsGranteeScoped(t *testing.T) {
 		}
 	})
 	// And no block was recorded against the owner by that attempt.
-	asProfile("mallory", func() {
-		cl, _, err := authedClient()
+	app.asProfile("mallory", func() {
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -326,10 +337,12 @@ func TestShareRemovalIsGranteeScoped(t *testing.T) {
 // mitigation: a pin made against a fingerprint the contact read out over another
 // channel must fail closed when the server presents anything else.
 func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +351,7 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pin := contactsPinCmd()
+	pin := app.contactsPinCmd()
 	if err := pin.Flags().Set("fingerprint", "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); err != nil {
 		t.Fatal(err)
 	}
@@ -354,7 +367,7 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 	}
 
 	// The real fingerprint pins, with or without the SHA256: prefix.
-	pin = contactsPinCmd()
+	pin = app.contactsPinCmd()
 	if err := pin.Flags().Set("fingerprint", strings.TrimPrefix(crypto.KeyFingerprint(keys.PublicKey), "SHA256:")); err != nil {
 		t.Fatal(err)
 	}
@@ -371,10 +384,10 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 
 	// Re-pinning is a no-op, and --json says so in the same shape rather than prose a
 	// script would fail to parse.
-	flagJSON = true
-	defer func() { flagJSON = false }()
+	app.json = true
+	defer func() { app.json = false }()
 	out := captureStdout(t, func() {
-		repin := contactsPinCmd()
+		repin := app.contactsPinCmd()
 		if err := repin.RunE(repin, []string{"bob@example.com"}); err != nil {
 			t.Fatalf("re-pin: %v", err)
 		}
@@ -386,11 +399,11 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 	if doc["alreadyPinned"] != true || doc["fingerprint"] != crypto.KeyFingerprint(keys.PublicKey) {
 		t.Fatalf("re-pin --json = %v", doc)
 	}
-	flagJSON = false
+	app.json = false
 
 	// With the contact pinned before any grant, sharing must not re-pin or complain.
-	id := pushSecretFile(t, "for-bob.txt", "hello")
-	if err := runShareWith(id, "bob@example.com"); err != nil {
+	id := app.pushSecretFile(t, "for-bob.txt", "hello")
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share to a pre-pinned contact: %v", err)
 	}
 }
@@ -399,10 +412,12 @@ func TestContactsPinRefusesAWrongFingerprint(t *testing.T) {
 // its own diagnosis. Routing it through lookupGrantee made this branch dead code and
 // reported a grantee's routine root-key rotation as the server swapping keys.
 func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -416,8 +431,8 @@ func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 
 	// Bob rotates his account root key, which republishes his enc key under the new
 	// root. Bob owns nothing and holds no grants, so the rotation carries no re-wraps.
-	asProfile("bob", func() {
-		bobClient, bobProf, err := authedClient()
+	app.asProfile("bob", func() {
+		bobClient, bobProf, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}

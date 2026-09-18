@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,7 +22,9 @@ func writeConflictsCopyConfig(t *testing.T, root string) {
 // config's copy mode contradicts — a flag conflict the user never caused. The
 // propagation sync pins conflicts=block instead (issue #183).
 func TestInPlaceRestoreWithConflictsCopyConfig(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -30,12 +33,12 @@ func TestInPlaceRestoreWithConflictsCopyConfig(t *testing.T) {
 	writeConflictsCopyConfig(t, src)
 	writeTree(t, src, "a.txt", "original")
 	h.sync(src)
-	runCmd(t, checkpointCmd(), "pin", src)
+	runCmd(t, app.checkpointCmd(), "pin", src)
 
 	writeTree(t, src, "a.txt", "changed")
 	h.sync(src)
 
-	runCmd(t, restoreCmd(), "pin", src, "--in-place", "-y")
+	runCmd(t, app.restoreCmd(), "pin", src, "--in-place", "-y")
 	if c := readTree(t, src, "a.txt"); c != "original" {
 		t.Fatalf("a.txt = %q after restore", c)
 	}
@@ -48,7 +51,9 @@ func TestInPlaceRestoreWithConflictsCopyConfig(t *testing.T) {
 // Adopting a clone whose synced .aqtconfig selects conflicts=copy used to wedge the
 // internal reconcile the same way (copy contradicts --reconcile); it pins block too.
 func TestAdoptWithConflictsCopyConfig(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeConflictsCopyConfig(t, origin)
@@ -58,7 +63,7 @@ func TestAdoptWithConflictsCopyConfig(t *testing.T) {
 
 	adoptee := t.TempDir()
 	copyTreeExclAqt(t, origin, adoptee)
-	if err := runClone(id, adoptee, true, ""); err != nil {
+	if err := app.runClone(id, adoptee, true, ""); err != nil {
 		t.Fatalf("adopt with conflicts=copy config: %v", err)
 	}
 	if got := h.folderID(adoptee); got != id {
@@ -70,7 +75,9 @@ func TestAdoptWithConflictsCopyConfig(t *testing.T) {
 // must make the next sync refuse with recovery guidance instead of scanning the
 // carnage as local deletions and pushing them fleet-wide.
 func TestSyncRefusesAfterInterruptedRestoreSwap(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
 	writeTree(t, src, "a.txt", "x")
@@ -79,7 +86,7 @@ func TestSyncRefusesAfterInterruptedRestoreSwap(t *testing.T) {
 	if err := writeMarker(src, restoreMarkerFile, interruptedRestore{SnapshotID: "snapXYZ"}); err != nil {
 		t.Fatal(err)
 	}
-	err := runSync(src, syncOptions{})
+	err := app.runSync(src, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "restore") || !strings.Contains(err.Error(), "snapXYZ") {
 		t.Fatalf("sync with restore marker: %v", err)
 	}

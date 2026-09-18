@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"os"
@@ -146,8 +147,10 @@ func TestMaterializeStaged(t *testing.T) {
 // An interrupted clone (transfer dies mid-download) must leave no destination
 // directory at all, not a partial tree.
 func TestCloneInterruptedLeavesNoDestination(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	var failPacks atomic.Bool
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if failPacks.Load() && strings.Contains(r.URL.Path, "/packs") {
 			http.Error(w, "injected transfer failure", http.StatusInternalServerError)
 			return
@@ -162,7 +165,7 @@ func TestCloneInterruptedLeavesNoDestination(t *testing.T) {
 
 	dest := filepath.Join(t.TempDir(), "copy")
 	failPacks.Store(true)
-	if err := runClone(id, dest, false, ""); err == nil {
+	if err := app.runClone(id, dest, false, ""); err == nil {
 		t.Fatal("clone with failing transfers succeeded")
 	}
 	if _, err := os.Stat(dest); !errors.Is(err, os.ErrNotExist) {

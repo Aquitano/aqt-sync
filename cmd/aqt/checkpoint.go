@@ -18,7 +18,7 @@ import (
 
 // checkpointCmd creates a named, anchored snapshot: sugar for `snapshot create`
 // that seals the name as the label and pins the result against retention.
-func checkpointCmd() *cobra.Command {
+func (app *application) checkpointCmd() *cobra.Command {
 	var id string
 	cmd := &cobra.Command{
 		Use:   "checkpoint <name> [dir]",
@@ -33,44 +33,14 @@ func checkpointCmd() *cobra.Command {
 			if name == "" {
 				return errors.New("checkpoint name must not be empty")
 			}
-			if id == "" {
-				if err := bindTrackedDir(checkpointDir(args)); err != nil {
-					return err
-				}
-			}
-			cl, prof, err := authedClient()
+			info, err := app.createSnapshot(dirArg(args[1:]), id, name, true)
 			if err != nil {
 				return err
 			}
-			resourceID, err := resolveResourceID(checkpointDir(args), id)
-			if err != nil {
-				return err
-			}
-			sealed, err := sealSnapshotLabel(cl, prof, resourceID, name)
-			if err != nil {
-				return err
-			}
-			info, err := cl.CreateSnapshot(resourceID, sealed, true)
-			if errors.Is(err, client.ErrNotFound) {
-				return fmt.Errorf("resource %s not found (or not yours)", resourceID)
-			}
-			if err != nil {
-				return err
-			}
-			// Fail closed: a server that ignored the anchor field returns an unanchored
-			// (prunable) snapshot, which would be a checkpoint in name only. Drop it
-			// best-effort so no half-checkpoint lingers, and report the misbehavior.
-			if !info.Anchored {
-				if delErr := cl.DeleteSnapshot(info.ID); delErr != nil {
-					return fmt.Errorf("server did not anchor the checkpoint, "+
-						"and the unanchored snapshot %s could not be cleaned up (%v); prune it manually and report this server bug", info.ID, delErr)
-				}
-				return errors.New("server did not anchor the checkpoint; nothing was kept — this is a server bug, report it")
-			}
-			if flagJSON {
+			if app.json {
 				return printJSON(info)
 			}
-			if flagQuiet {
+			if app.quiet {
 				fmt.Println(info.ID)
 				return nil
 			}
@@ -84,21 +54,12 @@ func checkpointCmd() *cobra.Command {
 	return cmd
 }
 
-// checkpointDir returns the optional [dir] argument that follows the name, defaulting
-// to the current directory.
-func checkpointDir(args []string) string {
-	if len(args) == 2 {
-		return args[1]
-	}
-	return "."
-}
-
 // restoreCmd resolves a checkpoint by its sealed name (or any snapshot by id) and
 // restores it — side-by-side by default, since a restore that overwrites the live
 // tree must be the explicit choice (--in-place), never the default. It replaces the
 // old `snapshot restore`, whose opposite default made the two restores the most
 // dangerous surprise in the CLI.
-func restoreCmd() *cobra.Command {
+func (app *application) restoreCmd() *cobra.Command {
 	var (
 		id      string
 		out     string
@@ -124,20 +85,20 @@ func restoreCmd() *cobra.Command {
 				dir = args[1]
 			}
 			if id == "" {
-				if err := bindTrackedDir(dir); err != nil {
+				if err := app.bindTrackedDir(dir); err != nil {
 					return err
 				}
 			}
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			snap, err := resolveRestoreTarget(cl, prof, args[0], dir, id)
+			snap, err := app.resolveRestoreTarget(cl, prof, args[0], dir, id)
 			if err != nil {
 				return err
 			}
 			if inPlace {
-				return restoreInPlace(cl, prof, snap, dir, yes)
+				return app.restoreInPlace(cl, prof, snap, dir, yes)
 			}
 			dest := out
 			if dest == "" {
@@ -147,11 +108,11 @@ func restoreCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			meta, err := reconstructSnapshot(cl, prof, snap, abs, force)
+			meta, err := app.reconstructSnapshot(cl, prof, snap, abs, force)
 			if err != nil {
 				return err
 			}
-			if flagJSON {
+			if app.json {
 				return printJSON(map[string]any{
 					"snapshotId": snap.Snapshot.ID, "name": meta.Name,
 					"version": snap.Snapshot.Version, "out": abs,
@@ -159,7 +120,7 @@ func restoreCmd() *cobra.Command {
 			}
 			// The restored directory is what a script does something with next, so it is
 			// the one line -q keeps; --in-place has no such path and prints nothing.
-			if flagQuiet {
+			if app.quiet {
 				fmt.Println(abs)
 				return nil
 			}
@@ -182,10 +143,10 @@ func restoreCmd() *cobra.Command {
 // against the tracked folder's decrypted checkpoint names first, then falls back to
 // treating it as a snapshot id. A name that matches several snapshots errors with the
 // candidates rather than guessing.
-func resolveRestoreTarget(cl *client.Client, prof *identity.Profile, token, dir, id string) (api.GetSnapshotResponse, error) {
+func (app *application) resolveRestoreTarget(cl *client.Client, prof *identity.Profile, token, dir, id string) (api.GetSnapshotResponse, error) {
 	resourceID, resErr := resolveResourceID(dir, id)
 	if resErr == nil {
-		matchedID, err := matchCheckpointLabel(cl, prof, resourceID, token)
+		matchedID, err := app.matchCheckpointLabel(cl, prof, resourceID, token)
 		if err != nil {
 			return api.GetSnapshotResponse{}, err
 		}
@@ -211,12 +172,12 @@ func resolveRestoreTarget(cl *client.Client, prof *identity.Profile, token, dir,
 // label equals name, or "" when none matches (the caller then tries the token as an
 // id). When several match, an anchored one wins; if that is still ambiguous it errors
 // with the candidate ids and timestamps.
-func matchCheckpointLabel(cl *client.Client, prof *identity.Profile, resourceID, name string) (string, error) {
+func (app *application) matchCheckpointLabel(cl *client.Client, prof *identity.Profile, resourceID, name string) (string, error) {
 	snaps, err := cl.ListSnapshots(resourceID)
 	if err != nil {
 		return "", err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return "", err
 	}

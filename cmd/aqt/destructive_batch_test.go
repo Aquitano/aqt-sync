@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"reflect"
@@ -27,12 +28,12 @@ func (f *fakeSnapshotPruner) DeleteSnapshot(id string) error {
 }
 
 func TestSnapshotPruneDryRunExplicitIDsNeverDeletes(t *testing.T) {
-	previous := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = previous }()
+	app := &application{ctx: context.Background()}
+
+	app.json = true
 
 	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{{ID: "one"}}}
-	if err := runSnapshotPrune(cl, nil, []string{"one"}, "", "", 0, "", true, true); err != nil {
+	if err := app.runSnapshotPrune(cl, nil, []string{"one"}, "", "", 0, "", true, true); err != nil {
 		t.Fatalf("dry run: %v", err)
 	}
 	if len(cl.deleted) != 0 {
@@ -41,15 +42,15 @@ func TestSnapshotPruneDryRunExplicitIDsNeverDeletes(t *testing.T) {
 }
 
 func TestSnapshotPrunePreflightsLateBlocker(t *testing.T) {
-	previous := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = previous }()
+	app := &application{ctx: context.Background()}
+
+	app.json = true
 
 	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{
 		{ID: "deletable"},
 		{ID: "anchored", Anchored: true},
 	}}
-	err := runSnapshotPrune(cl, nil, []string{"deletable", "anchored"}, "", "", 0, "", false, true)
+	err := app.runSnapshotPrune(cl, nil, []string{"deletable", "anchored"}, "", "", 0, "", false, true)
 	if err == nil {
 		t.Fatal("prune with anchored snapshot succeeded")
 	}
@@ -59,12 +60,12 @@ func TestSnapshotPrunePreflightsLateBlocker(t *testing.T) {
 }
 
 func TestSnapshotPruneDeduplicatesExplicitIDs(t *testing.T) {
-	previous := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = previous }()
+	app := &application{ctx: context.Background()}
+
+	app.json = true
 
 	cl := &fakeSnapshotPruner{snapshots: []api.SnapshotInfo{{ID: "one"}}}
-	if err := runSnapshotPrune(cl, nil, []string{"one", "one"}, "", "", 0, "", false, true); err != nil {
+	if err := app.runSnapshotPrune(cl, nil, []string{"one", "one"}, "", "", 0, "", false, true); err != nil {
 		t.Fatalf("prune duplicate ids: %v", err)
 	}
 	if want := []string{"one"}; !reflect.DeepEqual(cl.deleted, want) {
@@ -86,9 +87,9 @@ func (f *fakeDeviceRemover) DeleteDevice(id string) error {
 }
 
 func TestDeviceBatchRevokesCurrentDeviceLastAndClearsOnLostResponse(t *testing.T) {
-	previous := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = previous }()
+	app := &application{ctx: context.Background()}
+
+	app.json = true
 
 	lost := errors.New("response lost")
 	cl := &fakeDeviceRemover{
@@ -96,7 +97,7 @@ func TestDeviceBatchRevokesCurrentDeviceLastAndClearsOnLostResponse(t *testing.T
 		fail:    map[string]error{"self": lost},
 	}
 	cleared := 0
-	err := runDevicesRemoveWithClient(cl, "self", []string{"self", "other"}, func() error {
+	err := app.runDevicesRemoveWithClient(cl, "self", []string{"self", "other"}, func() error {
 		cleared++
 		return nil
 	})
@@ -112,9 +113,9 @@ func TestDeviceBatchRevokesCurrentDeviceLastAndClearsOnLostResponse(t *testing.T
 }
 
 func TestDeviceBatchStopsAfterMidBatchFailure(t *testing.T) {
-	previous := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = previous }()
+	app := &application{ctx: context.Background()}
+
+	app.json = true
 
 	boom := errors.New("network down")
 	cl := &fakeDeviceRemover{
@@ -123,7 +124,7 @@ func TestDeviceBatchStopsAfterMidBatchFailure(t *testing.T) {
 	}
 	var err error
 	out := captureStdout(t, func() {
-		err = runDevicesRemoveWithClient(cl, "", []string{"one", "two", "three"}, func() error { return nil })
+		err = app.runDevicesRemoveWithClient(cl, "", []string{"one", "two", "three"}, func() error { return nil })
 	})
 	if !errors.Is(err, boom) {
 		t.Fatalf("error = %v, want network failure", err)
@@ -145,12 +146,12 @@ func TestDeviceBatchStopsAfterMidBatchFailure(t *testing.T) {
 }
 
 func TestDeviceBatchDeduplicatesIDs(t *testing.T) {
-	previous := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = previous }()
+	app := &application{ctx: context.Background()}
+
+	app.json = true
 
 	cl := &fakeDeviceRemover{devices: []api.Device{{ID: "one"}}}
-	if err := runDevicesRemoveWithClient(cl, "", []string{"one", "one"}, func() error { return nil }); err != nil {
+	if err := app.runDevicesRemoveWithClient(cl, "", []string{"one", "one"}, func() error { return nil }); err != nil {
 		t.Fatalf("remove duplicate ids: %v", err)
 	}
 	if want := []string{"one"}; !reflect.DeepEqual(cl.deleted, want) {

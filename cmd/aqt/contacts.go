@@ -124,7 +124,7 @@ func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (ide
 // --fingerprint is the mitigation proper: the pin only lands if the server presents
 // the key the contact read out to you over a separate channel. Without it the command
 // still pins deliberately, but it can only show you the fingerprint and ask.
-func contactsPinCmd() *cobra.Command {
+func (app *application) contactsPinCmd() *cobra.Command {
 	var (
 		fingerprint string
 		yes         bool
@@ -134,7 +134,7 @@ func contactsPinCmd() *cobra.Command {
 		Short: "Pin an account's keys before sharing with it, ideally against a fingerprint you were given",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
@@ -169,7 +169,7 @@ func contactsPinCmd() *cobra.Command {
 			if pin, ok := pins[email]; ok {
 				if pin.Handle == keys.Handle && bytes.Equal(pin.PublicKey, keys.PublicKey) &&
 					bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
-					if flagJSON {
+					if app.json {
 						return pinned(true)
 					}
 					fmt.Printf("%s is already pinned to these keys (%s)\n", email, identityFP)
@@ -197,7 +197,7 @@ func contactsPinCmd() *cobra.Command {
 			if err := identity.SaveContacts(prof.Name, pins); err != nil {
 				return err
 			}
-			if flagJSON {
+			if app.json {
 				return pinned(false)
 			}
 			fmt.Printf("pinned %s (%s)\n", email, identityFP)
@@ -221,12 +221,12 @@ func fingerprintMatches(supplied, computed string) bool {
 	return trim(supplied) == trim(computed)
 }
 
-func contactsCmd() *cobra.Command {
+func (app *application) contactsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "contacts",
 		Short: "List accounts pinned for sharing",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prof, err := loadProfile()
+			prof, err := app.loadProfile()
 			if err != nil {
 				return err
 			}
@@ -239,7 +239,7 @@ func contactsCmd() *cobra.Command {
 				emails = append(emails, e)
 			}
 			sort.Strings(emails)
-			if flagJSON {
+			if app.json {
 				type contactRow struct {
 					Email       string `json:"email"`
 					Fingerprint string `json:"fingerprint"`
@@ -275,7 +275,7 @@ func contactsCmd() *cobra.Command {
 		Short:   "Drop an account's pinned keys, so the next share re-pins whatever the server serves",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			prof, err := loadProfile()
+			prof, err := app.loadProfile()
 			if err != nil {
 				return err
 			}
@@ -296,13 +296,13 @@ func contactsCmd() *cobra.Command {
 			return nil
 		},
 	})
-	cmd.AddCommand(contactsPinCmd())
+	cmd.AddCommand(app.contactsPinCmd())
 	cmd.AddCommand(&cobra.Command{
 		Use:   "verify <email>",
 		Short: "Print pinned and server-reported key fingerprints for out-of-band comparison",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}

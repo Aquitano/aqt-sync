@@ -20,7 +20,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-func pruneCmd() *cobra.Command {
+func (app *application) pruneCmd() *cobra.Command {
 	var dryRun bool
 	cmd := &cobra.Command{
 		Use:   "prune",
@@ -34,7 +34,7 @@ The whole account must be readable: if any resource or snapshot cannot be
 decoded, nothing is deleted.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runPrune(dryRun, flagJSON)
+			return app.runPrune(dryRun, app.json)
 		},
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "report what would be deleted without deleting")
@@ -54,12 +54,12 @@ type pruneReport struct {
 	DryRun        bool  `json:"dryRun,omitempty"`
 }
 
-func runPrune(dryRun, asJSON bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runPrune(dryRun, asJSON bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}

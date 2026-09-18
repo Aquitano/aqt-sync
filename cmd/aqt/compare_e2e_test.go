@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -24,7 +25,9 @@ import (
 // made the same edit independently and the trees agree even though both are ahead of
 // the base, and conflicting, where both moved and the trees disagree.
 func TestCompareWorkingTreeToRemote(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "alpha\n")
@@ -35,7 +38,7 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 	h.clone(h.folderID(origin), replica)
 
 	// Clean: the clone matches the remote it came from.
-	out := mustCompare(t, replica, nil)
+	out := app.mustCompare(t, replica, nil)
 	if !strings.Contains(out, "no differences") {
 		t.Fatalf("fresh clone is not reported clean:\n%s", out)
 	}
@@ -45,7 +48,7 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 
 	// Local-only: the working tree moved, the remote did not.
 	writeTree(t, replica, "a.txt", "alpha local\n")
-	out = mustCompare(t, replica, nil)
+	out = app.mustCompare(t, replica, nil)
 	if !strings.Contains(out, "M  a.txt") {
 		t.Fatalf("local-only edit not reported:\n%s", out)
 	}
@@ -56,7 +59,7 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 	writeTree(t, origin, "notes/todo.txt", "buy milk and eggs\n")
 	writeTree(t, origin, "remote-only.txt", "server side\n")
 	h.sync(origin)
-	out = mustCompare(t, replica, nil)
+	out = app.mustCompare(t, replica, nil)
 	if !strings.Contains(out, "M  notes/todo.txt") {
 		t.Fatalf("remote-only edit not reported:\n%s", out)
 	}
@@ -71,12 +74,12 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 	// because the two states genuinely agree.
 	writeTree(t, replica, "notes/todo.txt", "buy milk and eggs\n")
 	writeTree(t, replica, "remote-only.txt", "server side\n")
-	out = mustCompare(t, replica, nil)
+	out = app.mustCompare(t, replica, nil)
 	if !strings.Contains(out, "no differences") {
 		t.Fatalf("converged trees not reported identical:\n%s", out)
 	}
 	// The same state, through the base, is two pending changes on each side.
-	if st := captureStdout(t, func() { mustStatus(t, replica) }); !strings.Contains(st, "incoming") {
+	if st := captureStdout(t, func() { app.mustStatus(t, replica) }); !strings.Contains(st, "incoming") {
 		t.Fatalf("expected status to still see base-relative work:\n%s", st)
 	}
 
@@ -84,7 +87,7 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 	writeTree(t, origin, "a.txt", "alpha from origin\n")
 	h.sync(origin)
 	writeTree(t, replica, "a.txt", "alpha from replica\n")
-	out = mustCompare(t, replica, nil)
+	out = app.mustCompare(t, replica, nil)
 	if !strings.Contains(out, "M  a.txt") {
 		t.Fatalf("conflicting edit not reported:\n%s", out)
 	}
@@ -92,7 +95,7 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 	// Path filters narrow the comparison without changing its classification: the
 	// matching path keeps its mark, the one outside the filter disappears.
 	writeTree(t, replica, "notes/todo.txt", "buy milk, eggs and bread\n")
-	out = mustCompare(t, replica, []string{"notes"})
+	out = app.mustCompare(t, replica, []string{"notes"})
 	if !strings.Contains(out, "M  notes/todo.txt") {
 		t.Fatalf("path filter dropped a matching path:\n%s", out)
 	}
@@ -107,7 +110,7 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 		filepath.Join(replica, "notes", "renamed.txt")); err != nil {
 		t.Fatal(err)
 	}
-	out = mustCompare(t, replica, nil)
+	out = app.mustCompare(t, replica, nil)
 	if !strings.Contains(out, "R  notes/todo.txt -> notes/renamed.txt") {
 		t.Fatalf("move not coalesced into a rename:\n%s", out)
 	}
@@ -121,10 +124,12 @@ func TestCompareWorkingTreeToRemote(t *testing.T) {
 // directory, a permission-only edit, and a file-to-symlink switch each surface as
 // themselves.
 func TestCompareRemoteReportsDirsModesAndTypes(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	if runtime.GOOS == "windows" {
 		t.Skip("permission bits and symlinks are not faithfully tracked on Windows")
 	}
-	h := newE2E(t)
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "script.sh", "echo hi\n")
@@ -147,7 +152,7 @@ func TestCompareRemoteReportsDirsModesAndTypes(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out := mustCompare(t, replica, nil)
+	out := app.mustCompare(t, replica, nil)
 	for _, want := range []string{"P  script.sh", "A  fresh-dir/", "T  keep/file.txt"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("comparison missing %q:\n%s", want, out)
@@ -159,14 +164,16 @@ func TestCompareRemoteReportsDirsModesAndTypes(t *testing.T) {
 // complete comparison says so, and a locked session reports a stable reason with both
 // sides still named rather than an empty change list a caller would read as "clean".
 func TestCompareRemoteJSONReportsCompleteness(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "alpha\n")
 	h.sync(origin)
 	writeTree(t, origin, "a.txt", "alpha edited\n")
 
-	got := mustCompareJSON(t, origin)
+	got := app.mustCompareJSON(t, origin)
 	if !got.Complete || got.Reason != "" {
 		t.Fatalf("unlocked comparison reported incomplete: %+v", got)
 	}
@@ -190,7 +197,7 @@ func TestCompareRemoteJSONReportsCompleteness(t *testing.T) {
 		}
 	}()
 
-	locked := mustCompareJSON(t, origin)
+	locked := app.mustCompareJSON(t, origin)
 	if locked.Complete {
 		t.Fatalf("locked session reported a complete comparison: %+v", locked)
 	}
@@ -208,7 +215,7 @@ func TestCompareRemoteJSONReportsCompleteness(t *testing.T) {
 	// The human rendering must not print an empty list that reads as "no differences".
 	var err error
 	text := captureStdout(t, func() {
-		err = runDiff(origin, nil, diffOptions{against: diffAgainstRemote, nameStatus: true})
+		err = app.runDiff(origin, nil, diffOptions{against: diffAgainstRemote, nameStatus: true})
 	})
 	if err != nil {
 		t.Fatalf("locked comparison errored instead of reporting itself: %v", err)
@@ -222,7 +229,9 @@ func TestCompareRemoteJSONReportsCompleteness(t *testing.T) {
 // never move the folder's synced state, or it would silently change what the next
 // sync decides to do.
 func TestCompareRemoteIsReadOnly(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "alpha\n")
@@ -236,8 +245,8 @@ func TestCompareRemoteIsReadOnly(t *testing.T) {
 	writeTree(t, replica, "local.txt", "mine\n")
 
 	before := controlSnapshot(t, replica)
-	mustCompare(t, replica, nil)
-	mustCompareJSON(t, replica)
+	app.mustCompare(t, replica, nil)
+	app.mustCompareJSON(t, replica)
 	if after := controlSnapshot(t, replica); after != before {
 		t.Fatalf("comparison mutated .aqt control state:\nbefore: %s\nafter:  %s", before, after)
 	}
@@ -251,8 +260,10 @@ func TestCompareRemoteIsReadOnly(t *testing.T) {
 }
 
 func TestCompareRemoteUnreachableServer(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	var down atomic.Bool
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if down.Load() && strings.HasPrefix(r.URL.Path, "/v1/resources/") {
 			w.WriteHeader(http.StatusBadGateway)
 			return
@@ -267,7 +278,7 @@ func TestCompareRemoteUnreachableServer(t *testing.T) {
 
 	var err error
 	out := captureStdout(t, func() {
-		err = runDiff(origin, nil, diffOptions{against: diffAgainstRemote, nameStatus: true})
+		err = app.runDiff(origin, nil, diffOptions{against: diffAgainstRemote, nameStatus: true})
 	})
 	if err == nil {
 		t.Fatalf("unreachable server did not fail the comparison:\n%s", out)
@@ -281,12 +292,14 @@ func TestCompareRemoteUnreachableServer(t *testing.T) {
 // feature of one mode: each side pairing `aqt diff` supports reports classified paths
 // under the sides it actually compared.
 func TestNameStatusCoversEveryDiffMode(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "alpha\n")
 	h.sync(origin)
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +318,7 @@ func TestNameStatusCoversEveryDiffMode(t *testing.T) {
 		t.Helper()
 		opts.nameStatus = true
 		var err error
-		out := captureStdout(t, func() { err = runDiff(replica, nil, opts) })
+		out := captureStdout(t, func() { err = app.runDiff(replica, nil, opts) })
 		if err != nil {
 			t.Fatalf("diff %+v: %v", opts, err)
 		}
@@ -330,7 +343,9 @@ func TestNameStatusCoversEveryDiffMode(t *testing.T) {
 // take: an edit that keeps a file's size, mode, and mtime is invisible to the stat
 // fast-path `status` relies on, but the two trees still differ.
 func TestCompareRemoteSeesStatPreservingEdit(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "alpha\n")
@@ -348,7 +363,7 @@ func TestCompareRemoteSeesStatPreservingEdit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if out := mustCompare(t, origin, nil); !strings.Contains(out, "M  a.txt") {
+	if out := app.mustCompare(t, origin, nil); !strings.Contains(out, "M  a.txt") {
 		t.Fatalf("stat-preserving edit went unnoticed:\n%s", out)
 	}
 }
@@ -398,11 +413,11 @@ func TestComparisonFilterKeepsRenamesAndRebuildsBuckets(t *testing.T) {
 
 // --- helpers ---
 
-func mustCompare(t *testing.T, dir string, paths []string) string {
+func (app *application) mustCompare(t *testing.T, dir string, paths []string) string {
 	t.Helper()
 	var err error
 	out := captureStdout(t, func() {
-		err = runDiff(dir, paths, diffOptions{against: diffAgainstRemote, nameStatus: true})
+		err = app.runDiff(dir, paths, diffOptions{against: diffAgainstRemote, nameStatus: true})
 	})
 	if err != nil {
 		t.Fatalf("compare %s: %v", dir, err)
@@ -410,15 +425,15 @@ func mustCompare(t *testing.T, dir string, paths []string) string {
 	return out
 }
 
-func mustCompareJSON(t *testing.T, dir string) comparison {
+func (app *application) mustCompareJSON(t *testing.T, dir string) comparison {
 	t.Helper()
-	prev := flagJSON
-	flagJSON = true
-	defer func() { flagJSON = prev }()
+	prev := app.json
+	app.json = true
+	defer func() { app.json = prev }()
 
 	var err error
 	out := captureStdout(t, func() {
-		err = runDiff(dir, nil, diffOptions{against: diffAgainstRemote})
+		err = app.runDiff(dir, nil, diffOptions{against: diffAgainstRemote})
 	})
 	if err != nil {
 		t.Fatalf("compare --json %s: %v", dir, err)

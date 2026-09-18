@@ -5,13 +5,14 @@ package server
 import (
 	"errors"
 	"fmt"
-	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 func TestPackStoreRoundTripAndGC(t *testing.T) {

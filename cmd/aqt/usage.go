@@ -12,19 +12,19 @@ import (
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 )
 
-func usageCmd() *cobra.Command {
+func (app *application) usageCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "usage",
 		Short: "Show your account's storage usage on the server",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return runUsage(flagJSON) },
+		RunE:  func(cmd *cobra.Command, args []string) error { return app.runUsage(app.json) },
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func runUsage(asJSON bool) error {
-	cl, _, err := authedClient()
+func (app *application) runUsage(asJSON bool) error {
+	cl, _, err := app.authedClient()
 	if err != nil {
 		return err
 	}

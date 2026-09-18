@@ -20,7 +20,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-func shareCmd() *cobra.Command {
+func (app *application) shareCmd() *cobra.Command {
 	var (
 		pw       passwordFlags
 		noClip   bool
@@ -49,9 +49,9 @@ func shareCmd() *cobra.Command {
 				if policy.requested() || password != "" {
 					return errors.New("link flags (--password/--expire/--max-reads/--burn) do not apply to account grants")
 				}
-				return runShareWith(args[0], with)
+				return app.runShareWith(args[0], with)
 			}
-			return runShare(args[0], password, noClip, policy)
+			return app.runShare(args[0], password, noClip, policy)
 		},
 	}
 	pw.bind(cmd, "password-gate the share link")
@@ -60,7 +60,7 @@ func shareCmd() *cobra.Command {
 	cmd.Flags().Int64Var(&maxReads, "max-reads", 0, "expire the link after this many downloads")
 	cmd.Flags().BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
 	cmd.Flags().StringVar(&with, "with", "", "grant read-only access to a specific account by email (no public link)")
-	cmd.AddCommand(shareLsCmd())
+	cmd.AddCommand(app.shareLsCmd())
 	markJSONSupported(cmd)
 	markQuietSupported(cmd)
 	return cmd
@@ -68,7 +68,7 @@ func shareCmd() *cobra.Command {
 
 // shareLsCmd answers "who has access?": every public link and outgoing grant, per
 // resource, with the lifecycle policy the server reports for the link.
-func shareLsCmd() *cobra.Command {
+func (app *application) shareLsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ls [<id>]",
 		Short: "List outgoing access: public links and account grants, per resource",
@@ -78,7 +78,7 @@ func shareLsCmd() *cobra.Command {
 			if len(args) == 1 {
 				ref = args[0]
 			}
-			return runShareList(ref)
+			return app.runShareList(ref)
 		},
 	}
 	markJSONSupported(cmd)
@@ -95,8 +95,8 @@ type shareListRow struct {
 	Grantees []string `json:"grantees,omitempty"`
 }
 
-func runShareList(ref string) error {
-	cl, prof, err := authedClient()
+func (app *application) runShareList(ref string) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
@@ -117,7 +117,7 @@ func runShareList(ref string) error {
 		}
 		items = filtered
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -166,7 +166,7 @@ func runShareList(ref string) error {
 		}
 		rows = append(rows, row)
 	}
-	if flagJSON {
+	if app.json {
 		if rows == nil {
 			rows = []shareListRow{}
 		}
@@ -207,7 +207,7 @@ func linkPolicySummary(it api.ResourceListItem) string {
 	return strings.Join(parts, ", ")
 }
 
-func unshareCmd() *cobra.Command {
+func (app *application) unshareCmd() *cobra.Command {
 	var (
 		with string
 		yes  bool
@@ -226,11 +226,11 @@ func unshareCmd() *cobra.Command {
 			}
 			// Resolve before confirming, so the prompt names the resource the key
 			// rotation will actually hit rather than echoing the raw argument.
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			mk, err := unlockMaster(prof)
+			mk, err := app.unlockMaster(prof)
 			if err != nil {
 				return err
 			}
@@ -253,12 +253,12 @@ func unshareCmd() *cobra.Command {
 				if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to %s? [y/N] ", with, label), yes); err != nil {
 					return err
 				}
-				return runShareRevoke(id, with)
+				return app.runShareRevoke(id, with)
 			}
 			if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", label), yes); err != nil {
 				return err
 			}
-			return runPrivate(id)
+			return app.runPrivate(id)
 		},
 	}
 	cmd.Flags().StringVar(&with, "with", "", "revoke this account's grant (by email) instead of the public link")
@@ -291,22 +291,19 @@ func checkShareableFolder(meta api.Metadata) error {
 	if meta.Kind != api.KindFolder {
 		return nil
 	}
-	if !meta.Tree {
-		return errors.New("this folder uses an unsupported legacy format; re-create it with a current client")
-	}
-	return nil
+	return requireTreeFolder(meta)
 }
 
 // runShareWith grants one account read-only access: the resource's content key is
 // HPKE-wrapped to the grantee's published enc key, bound to (resource, owner,
 // grantee), and stored server-side as an opaque blob. Visibility is untouched —
 // a grant is not a link.
-func runShareWith(idArg, email string) error {
-	cl, prof, err := authedClient()
+func (app *application) runShareWith(idArg, email string) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	id, err := app.resolveOwnedResourceIDWithProfile(cl, prof, idArg)
 	if err != nil {
 		return err
 	}
@@ -318,7 +315,7 @@ func runShareWith(idArg, email string) error {
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource; only resources you own can be granted")
 	}
-	keys, err := openResourceKeys(prof, res)
+	keys, err := app.openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -349,10 +346,10 @@ func runShareWith(idArg, email string) error {
 		}
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"id": id, "granted": email})
 	}
-	if flagQuiet {
+	if app.quiet {
 		fmt.Printf("aqt://%s\n", id)
 		return nil
 	}
@@ -373,12 +370,12 @@ func runShareWith(idArg, email string) error {
 // first and then failing to delete leaves the revoked account listed as a grantee holding
 // a stale wrap, and the next rotation's re-wrap hands it the new key. Together, they
 // either both land or neither does, and a failure is a clean no-op the user can re-run.
-func runShareRevoke(idArg, email string) error {
-	cl, prof, err := authedClient()
+func (app *application) runShareRevoke(idArg, email string) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	id, err := app.resolveOwnedResourceIDWithProfile(cl, prof, idArg)
 	if err != nil {
 		return err
 	}
@@ -425,7 +422,7 @@ func runShareRevoke(idArg, email string) error {
 		if err := revoke(); err != nil {
 			return err
 		}
-		if flagJSON {
+		if app.json {
 			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": false})
 		}
 		fmt.Printf("removed %s's grant on aqt://%s, but did NOT remove their access: the resource is public\n", email, id)
@@ -436,13 +433,13 @@ func runShareRevoke(idArg, email string) error {
 		if err := revoke(); err != nil {
 			return err
 		}
-		if flagJSON {
+		if app.json {
 			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false})
 		}
 		fmt.Printf("revoked %s from aqt://%s (no owner key; content key not rotated)\n", email, id)
 		return nil
 	}
-	keys, err := openResourceKeys(prof, res)
+	keys, err := app.openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -454,7 +451,7 @@ func runShareRevoke(idArg, email string) error {
 		if visErr := revokeWithoutRotation(cl, id, res.Version, handle); visErr != nil {
 			return fmt.Errorf("revoking %s failed: %w", email, visErr)
 		}
-		if flagJSON {
+		if app.json {
 			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": true})
 		}
 		fmt.Printf("revoked %s from aqt://%s\n", email, id)
@@ -477,19 +474,19 @@ func runShareRevoke(idArg, email string) error {
 	// and keeps listing it would otherwise get us to hand it a wrap of the NEW key,
 	// undoing the revocation the rotation just enforced.
 	rewrapGrants(cl, prof, id, newCK, handle)
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"id": id, "revoked": email, "rotated": true})
 	}
 	fmt.Printf("revoked %s from aqt://%s and rotated the content key\n", email, id)
 	return nil
 }
 
-func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
-	cl, prof, err := authedClient()
+func (app *application) runShare(idArg, password string, noClip bool, policy linkPolicy) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	id, err := app.resolveOwnedResourceIDWithProfile(cl, prof, idArg)
 	if err != nil {
 		return err
 	}
@@ -504,7 +501,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		return errors.New("no owner key stored for this resource (it was pushed --public); use the share link from that push")
 	}
 	// Opening the keys sanity-checks the unwrapped key before flipping visibility.
-	keys, err := openResourceKeys(prof, res)
+	keys, err := app.openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -560,7 +557,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 		return err
 	}
 
-	if flagJSON {
+	if app.json {
 		out := map[string]any{"id": id, "url": ref, "visibility": string(api.Public)}
 		if policy.expireSeconds > 0 {
 			out["expireSeconds"] = policy.expireSeconds
@@ -573,7 +570,7 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	fmt.Println(ref)
 	// -q leaves the link as the only output, the way push's quiet path does: no
 	// clipboard detour, no lifecycle note.
-	if flagQuiet {
+	if app.quiet {
 		return nil
 	}
 	if !noClip && copyToClipboard(ref) {
@@ -588,12 +585,12 @@ func runShare(idArg, password string, noClip bool, policy linkPolicy) error {
 	return nil
 }
 
-func runPrivate(idArg string) error {
-	cl, prof, err := authedClient()
+func (app *application) runPrivate(idArg string) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	id, err := resolveOwnedResourceIDWithProfile(cl, prof, idArg)
+	id, err := app.resolveOwnedResourceIDWithProfile(cl, prof, idArg)
 	if err != nil {
 		return err
 	}
@@ -605,7 +602,7 @@ func runPrivate(idArg string) error {
 	if res.WrappedKey == nil {
 		return errors.New("no owner key stored for this resource; cannot rotate it")
 	}
-	keys, err := openResourceKeys(prof, res)
+	keys, err := app.openResourceKeys(prof, res)
 	if err != nil {
 		return err
 	}
@@ -619,7 +616,7 @@ func runPrivate(idArg string) error {
 		if visErr := revokeWithoutRotation(cl, id, res.Version, ""); visErr != nil {
 			return visErr
 		}
-		if flagJSON {
+		if app.json {
 			return printJSON(map[string]any{"id": id, "ref": "aqt://" + id, "rotated": false})
 		}
 		fmt.Println("aqt://" + id)
@@ -634,7 +631,7 @@ func runPrivate(idArg string) error {
 	defer newCK.Wipe()
 	rewrapGrants(cl, prof, id, newCK, "")
 
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"id": id, "ref": "aqt://" + id, "rotated": true})
 	}
 	fmt.Println("aqt://" + id)
@@ -702,14 +699,14 @@ func (k *resourceKeys) close() {
 // differs per command, and for a revoke it is not an error at all.
 //
 // Both keys are wiped if any step fails, so a caller only ever receives keys it owns.
-func openResourceKeys(prof *identity.Profile, res api.GetResourceResponse) (_ *resourceKeys, err error) {
+func (app *application) openResourceKeys(prof *identity.Profile, res api.GetResourceResponse) (_ *resourceKeys, err error) {
 	k := &resourceKeys{}
 	defer func() {
 		if err != nil {
 			k.close()
 		}
 	}()
-	if k.mk, err = unlockMaster(prof); err != nil {
+	if k.mk, err = app.unlockMaster(prof); err != nil {
 		return nil, err
 	}
 	owned, err := openOwnedResource(res, k.mk)

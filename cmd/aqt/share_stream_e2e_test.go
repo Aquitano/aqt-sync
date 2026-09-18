@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"errors"
 	mrand "math/rand"
@@ -20,23 +21,23 @@ import (
 
 // pushQuiet pushes path with opts while the global quiet flag is set, so stdout holds
 // only the ref. The flag is restored before returning.
-func pushQuiet(path string, opts pushOptions) error {
-	orig := flagQuiet
-	flagQuiet = true
-	defer func() { flagQuiet = orig }()
-	return runPush(path, opts)
+func (app *application) pushQuiet(path string, opts pushOptions) error {
+	orig := app.quiet
+	app.quiet = true
+	defer func() { app.quiet = orig }()
+	return app.runPush(path, opts)
 }
 
 // pushStreamedFile writes data to a temp file, pushes it, and returns the resource id
 // and the ref printed to stdout.
-func pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, printed string) {
+func (app *application) pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, printed string) {
 	t.Helper()
 	src := filepath.Join(t.TempDir(), "data.bin")
 	if err := os.WriteFile(src, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
 	printed = strings.TrimSpace(captureStdout(t, func() {
-		if err := pushQuiet(src, opts); err != nil {
+		if err := app.pushQuiet(src, opts); err != nil {
 			t.Fatalf("push: %v", err)
 		}
 	}))
@@ -49,13 +50,13 @@ func pushStreamedFile(t *testing.T, data []byte, opts pushOptions) (id string, p
 
 // pushRandomStreamedFile writes size random bytes, pushes them, and returns the
 // resource id, the plaintext, and the ref printed to stdout.
-func pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string, data []byte, printed string) {
+func (app *application) pushRandomStreamedFile(t *testing.T, size int, opts pushOptions) (id string, data []byte, printed string) {
 	t.Helper()
 	data = make([]byte, size)
 	if _, err := rand.Read(data); err != nil {
 		t.Fatal(err)
 	}
-	id, printed = pushStreamedFile(t, data, opts)
+	id, printed = app.pushStreamedFile(t, data, opts)
 	return id, data, printed
 }
 
@@ -100,12 +101,12 @@ func restoreEnv(t *testing.T, key, val string, had bool) {
 }
 
 // pullFresh pulls ref as a fresh link holder (no credentials) and returns the bytes.
-func pullFresh(t *testing.T, ref, password string) []byte {
+func (app *application) pullFresh(t *testing.T, ref, password string) []byte {
 	t.Helper()
 	var got []byte
 	withFreshEnv(t, func() {
 		out := filepath.Join(t.TempDir(), "out.bin")
-		if err := runPull(ref, out, password, false, false); err != nil {
+		if err := app.runPull(ref, out, password, false, false); err != nil {
 			t.Fatalf("link pull: %v", err)
 		}
 		b, err := os.ReadFile(out)
@@ -119,9 +120,9 @@ func pullFresh(t *testing.T, ref, password string) []byte {
 
 // ownerFileRoot opens a streamed resource's root as the owner (authed client, cached
 // session), so a test can assert on its structure or pull real object ids.
-func ownerFileRoot(t *testing.T, id string) syncengine.FileRoot {
+func (app *application) ownerFileRoot(t *testing.T, id string) syncengine.FileRoot {
 	t.Helper()
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,12 +149,14 @@ func ownerFileRoot(t *testing.T, id string) syncengine.FileRoot {
 // private file, and a machine with no account credentials pulls it byte-for-byte from
 // the share link alone.
 func TestShareStreamedLinkPull(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
 
-	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
+	app.newE2E(t)
+
+	id, data, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, "", true, linkPolicy{}); err != nil {
+		if err := app.runShare(id, "", true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
@@ -161,7 +164,7 @@ func TestShareStreamedLinkPull(t *testing.T) {
 		t.Fatalf("share link %q missing public key fragment", link)
 	}
 
-	if got := pullFresh(t, link, ""); !bytes.Equal(got, data) {
+	if got := app.pullFresh(t, link, ""); !bytes.Equal(got, data) {
 		t.Fatal("link pull content mismatch")
 	}
 }
@@ -170,7 +173,9 @@ func TestShareStreamedLinkPull(t *testing.T) {
 // that its chunk list is stored as sealed segments must resolve those segments through
 // the public endpoint too, before the content objects.
 func TestShareStreamedIndirectLinkPull(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
 
 	// A chunk list goes indirect strictly above chunkListInlineMax (128) records.
 	// Content-defined chunking of a 40 MiB file averages ~160 chunks but is a random
@@ -181,21 +186,21 @@ func TestShareStreamedIndirectLinkPull(t *testing.T) {
 	if _, err := mrand.New(mrand.NewSource(0x5eaf00d)).Read(data); err != nil {
 		t.Fatal(err)
 	}
-	id, _ := pushStreamedFile(t, data, pushOptions{noClip: true})
+	id, _ := app.pushStreamedFile(t, data, pushOptions{noClip: true})
 
 	// The stored root must be indirect, else the test does not exercise segment reads.
-	root := ownerFileRoot(t, id)
+	root := app.ownerFileRoot(t, id)
 	if !root.Indirect() {
 		t.Fatalf("expected an indirect chunk list for a 48 MiB file, got %d inline chunks", len(root.Chunks))
 	}
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, "", true, linkPolicy{}); err != nil {
+		if err := app.runShare(id, "", true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
 
-	if got := pullFresh(t, link, ""); !bytes.Equal(got, data) {
+	if got := app.pullFresh(t, link, ""); !bytes.Equal(got, data) {
 		t.Fatal("indirect link pull content mismatch")
 	}
 }
@@ -204,13 +209,15 @@ func TestShareStreamedIndirectLinkPull(t *testing.T) {
 // longer pulls and its objects are no longer public, while the owner still pulls the
 // file byte-for-byte (the rotation preserved ChunkRefs and re-sealed the root).
 func TestPrivateRotatesStreamedLink(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
 
-	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
+	h := app.newE2E(t)
+
+	id, data, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 
 	// Grab a real content-object id (referenced by the resource) for the public-read
 	// assertion after rotation.
-	objID := ownerFileRoot(t, id).ChunkIDs()[0]
+	objID := app.ownerFileRoot(t, id).ChunkIDs()[0]
 
 	cl, err := client.New(h.url, "")
 	if err != nil {
@@ -218,15 +225,15 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 	}
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, "", true, linkPolicy{}); err != nil {
+		if err := app.runShare(id, "", true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
-	if got := pullFresh(t, link, ""); !bytes.Equal(got, data) {
+	if got := app.pullFresh(t, link, ""); !bytes.Equal(got, data) {
 		t.Fatal("pre-rotation link pull content mismatch")
 	}
 
-	if err := runPrivate(id); err != nil {
+	if err := app.runPrivate(id); err != nil {
 		t.Fatalf("private: %v", err)
 	}
 
@@ -234,7 +241,7 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 	// 404s and the public object read is refused.
 	withFreshEnv(t, func() {
 		out := filepath.Join(t.TempDir(), "dead.bin")
-		if err := runPull(link, out, "", false, false); err == nil {
+		if err := app.runPull(link, out, "", false, false); err == nil {
 			t.Fatal("old link still pulled after rotation")
 		}
 	})
@@ -245,7 +252,7 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 	// The owner still pulls it, proving the rotation kept the objects alive and the
 	// re-sealed root opens under the new key.
 	out := filepath.Join(t.TempDir(), "owner.bin")
-	if err := runPull(id, out, "", false, false); err != nil {
+	if err := app.runPull(id, out, "", false, false); err != nil {
 		t.Fatalf("owner pull after rotation: %v", err)
 	}
 	got, err := os.ReadFile(out)
@@ -260,14 +267,16 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 // TestPublicStreamedPushLinkPull covers `aqt push --public` on a large file: it streams
 // (rather than sealing in memory) and the printed URL pulls from a fresh env.
 func TestPublicStreamedPushLinkPull(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
 
-	_, data, printed := pushRandomStreamedFile(t, 9<<20, pushOptions{public: true, noClip: true})
+	app.newE2E(t)
+
+	_, data, printed := app.pushRandomStreamedFile(t, 9<<20, pushOptions{public: true, noClip: true})
 	if !strings.Contains(printed, "#k.") {
 		t.Fatalf("public push output %q missing key fragment", printed)
 	}
 
-	if got := pullFresh(t, printed, ""); !bytes.Equal(got, data) {
+	if got := app.pullFresh(t, printed, ""); !bytes.Equal(got, data) {
 		t.Fatal("public streamed push link pull mismatch")
 	}
 }
@@ -275,13 +284,15 @@ func TestPublicStreamedPushLinkPull(t *testing.T) {
 // TestGatedStreamedShareLinkPull covers a password-gated share of a streamed file: the
 // link carries a gated fragment and pulls only with the password.
 func TestGatedStreamedShareLinkPull(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
 
 	const password = "hunter2 correct horse"
-	id, data, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
+	id, data, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
 
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, password, true, linkPolicy{}); err != nil {
+		if err := app.runShare(id, password, true, linkPolicy{}); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
@@ -289,7 +300,7 @@ func TestGatedStreamedShareLinkPull(t *testing.T) {
 		t.Fatalf("gated share link %q missing gated fragment", link)
 	}
 
-	if got := pullFresh(t, link, password); !bytes.Equal(got, data) {
+	if got := app.pullFresh(t, link, password); !bytes.Equal(got, data) {
 		t.Fatal("gated link pull content mismatch")
 	}
 }

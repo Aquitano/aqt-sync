@@ -11,8 +11,33 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/folderstate"
+	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
+
+func TestWatchSelectsFolderProfileBeforeUnlocking(t *testing.T) {
+	owner := &application{ctx: context.Background()}
+	h := owner.newE2E(t)
+	grantSignup(t, h, "work@example.com", "work", "a work passphrase")
+	work := &application{ctx: context.Background(), profile: "work"}
+	dir := t.TempDir()
+	if err := work.runInit(dir, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := identity.ClearSession(identity.DefaultProfile); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Exit the watch loop immediately after its startup checks.
+	watch := &application{ctx: ctx}
+	if err := watch.runWatch(dir, watchOptions{}); err != nil {
+		t.Fatalf("watch could not use the folder's unlocked profile: %v", err)
+	}
+	if watch.profile != "work" {
+		t.Fatalf("watch profile = %q, want work", watch.profile)
+	}
+}
 
 // fakeWatcher wires a watcher to test-controlled state: sig is the current tree
 // fingerprint, busy is the git-guard answer, and syncs counts committed syncs.
@@ -164,7 +189,9 @@ func TestWatcherDefersWhileGitBusy(t *testing.T) {
 // against the live server: a push must be held back while a sub-repo holds a git
 // lock, then go through once the lock clears.
 func TestWatchGuardGatesRealSync(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	root := t.TempDir()
 	h.init(root)
 	writeTree(t, root, "secret.env", "API_KEY=1")
@@ -178,12 +205,12 @@ func TestWatchGuardGatesRealSync(t *testing.T) {
 		root:    root,
 		scan:    func() (string, error) { return scanSignature(root) },
 		gitBusy: func() (bool, string, error) { return gitBusy(root) },
-		sync:    func() error { f.syncs++; return runSync(root, syncOptions{}) },
+		sync:    func() error { f.syncs++; return app.runSync(root, syncOptions{}) },
 		logf:    func(string, ...any) {},
 	}
 	tracked := func(path string) bool {
 		t.Helper()
-		base, err := folderstate.LoadBase(root, flagProfile)
+		base, err := folderstate.LoadBase(root, app.profile)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -380,16 +407,18 @@ func TestWaitGitIdle(t *testing.T) {
 
 // gitGuard disabled in .aqtconfig lets --once sync even with a lock present.
 func TestWatchOnceGuardOffSyncsDespiteLock(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	root := t.TempDir()
 	h.init(root)
 	writeTree(t, root, "secret.env", "API_KEY=1")
 	mkGitDir(t, root, "index.lock")
 
-	if err := runWatchOnce(root, 10*time.Millisecond, false); err != nil {
+	if err := app.runWatchOnce(root, 10*time.Millisecond, false); err != nil {
 		t.Fatalf("runWatchOnce(guard off): %v", err)
 	}
-	base, err := folderstate.LoadBase(root, flagProfile)
+	base, err := folderstate.LoadBase(root, app.profile)
 	if err != nil {
 		t.Fatal(err)
 	}

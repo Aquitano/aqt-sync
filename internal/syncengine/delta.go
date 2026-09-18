@@ -35,7 +35,7 @@ func (c Change) IsDir() bool { return c.Type == ChildDir }
 // directory that differs, plus delete+add pairs coalesced into renames.
 //
 // It is the one definition of "changed" the tracked-folder commands share — status,
-// both sync adapters' local-change gates, and snapshot diff — so a directory-only or
+// sync's local-change gates, and snapshot diff — so a directory-only or
 // mode-only edit cannot be visible to one caller and invisible to another. The
 // three-way planners (Plan, PlanDirs) stay separate because they answer a different
 // question, but they compare entries through the same rules (see entryDiffers).
@@ -52,9 +52,6 @@ func Diff(old, cur Manifest) Delta {
 	d.coalesceRenames(old, cur)
 	return d
 }
-
-// Empty reports whether the two manifests describe the same tree.
-func (d Delta) Empty() bool { return len(d.Changes) == 0 && len(d.Renamed) == 0 }
 
 // Paths returns the sorted paths of the changes matching any of kinds.
 func (d Delta) Paths(kinds ...ChangeKind) []string {

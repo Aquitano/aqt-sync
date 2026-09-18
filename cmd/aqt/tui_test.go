@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -43,9 +44,9 @@ func key(s string) tea.KeyMsg {
 
 // testModel returns an unlocked model with canned panel data and a laid-out
 // window, ready for key routing without any network or filesystem.
-func testModel(t *testing.T) *tuiModel {
+func (app *application) testModel(t *testing.T) *tuiModel {
 	t.Helper()
-	ctx := &tuiCtx{
+	ctx := &tuiCtx{app: app,
 		prof:     &identity.Profile{Name: "t", Email: "t@example.com", Server: "http://localhost:8080"},
 		unlocked: true,
 		root:     "/tmp/vault",
@@ -72,7 +73,9 @@ func testModel(t *testing.T) *tuiModel {
 }
 
 func TestTUIPanelNavigation(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	if m.focus != tuiPanelFiles {
 		t.Fatalf("initial focus = %v, want files", m.focus)
 	}
@@ -92,7 +95,9 @@ func TestTUIPanelNavigation(t *testing.T) {
 }
 
 func TestTUIListSkipsHeadersAndKeepsSelection(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.setFocus(tuiPanelFiles)
 	l := &m.panels[tuiPanelFiles].list
 	cur := l.current()
@@ -120,7 +125,9 @@ func TestTUIListSkipsHeadersAndKeepsSelection(t *testing.T) {
 }
 
 func TestTUIListFilter(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 	l := &m.panels[tuiPanelResources].list
 	l.setFilter("deploy")
@@ -138,7 +145,9 @@ func TestTUIListFilter(t *testing.T) {
 }
 
 func TestTUIResourceActionsOpenDialogs(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 
 	// r1 (private): share opens the menu, p is a no-op with a note.
@@ -180,23 +189,14 @@ func TestTUIResourceActionsOpenDialogs(t *testing.T) {
 	m.handleKey(key("esc"))
 }
 
-func TestTUISnapshotAnchorArgs(t *testing.T) {
-	// Anchoring and unanchoring are separate verbs.
-	if got := tuiExecArgs([]string{"snapshot", "unanchor", "s1"}); strings.Join(got, " ") != "snapshot unanchor s1" {
-		t.Fatalf("unexpected args %v", got)
-	}
-}
+func TestChildArgsCarryServerAndProfile(t *testing.T) {
+	app := &application{ctx: context.Background()}
 
-func TestTUIExecArgsCarryGlobalFlags(t *testing.T) {
-	oldServer, oldProfile := flagServer, flagProfile
-	defer func() { flagServer, flagProfile = oldServer, oldProfile }()
-
-	flagServer, flagProfile = "", ""
-	if got := tuiExecArgs([]string{"sync", "/v"}); len(got) != 2 {
+	if got := app.childArgs([]string{"sync", "/v"}); len(got) != 2 {
 		t.Fatalf("no overrides expected, got %v", got)
 	}
-	flagServer, flagProfile = "http://s:1", "work"
-	got := tuiExecArgs([]string{"sync", "/v"})
+	app.server, app.profile = "http://s:1", "work"
+	got := app.childArgs([]string{"sync", "/v"})
 	want := "sync /v --server http://s:1 --profile work"
 	if strings.Join(got, " ") != want {
 		t.Fatalf("args = %v, want %q", got, want)
@@ -231,7 +231,9 @@ func TestTUIBoxGeometry(t *testing.T) {
 }
 
 func TestTUIViewSmoke(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	for _, id := range []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources} {
 		m.setFocus(id)
 		out := m.View()
@@ -261,7 +263,9 @@ func TestTUIViewSmoke(t *testing.T) {
 }
 
 func TestTUIBusyGuardsActions(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.setFocus(tuiPanelFiles)
 
 	// The action key resolves to a request message; the busy guard lives in
@@ -294,7 +298,9 @@ func TestTUIBusyGuardsActions(t *testing.T) {
 // as its own section and must not outlive a rescan of the sections beside it: a
 // comparison left standing after a sync would report differences that sync resolved.
 func TestTUICompareSectionRetiresOnRescan(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.Update(tuiStartCompareMsg{}) // the returned command is not run: no network here
 	if !m.comparing {
 		t.Fatal("start message did not mark a comparison in flight")
@@ -342,7 +348,9 @@ func filesPanelHas(m *tuiModel, want string) bool {
 // A clean tracked folder renders a headers-only files list; moving the cursor
 // backwards through it must not walk past the end (regression: index panic).
 func TestTUIHeadersOnlyListNoPanic(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.local = changeSet{}
 	m.conflicts = nil
 	m.rebuildFilesPanel()
@@ -417,7 +425,9 @@ func TestTUIListClickTo(t *testing.T) {
 }
 
 func TestTUIMouseFocusAndSelect(t *testing.T) {
-	m := testModel(t) // 100x30 window
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t) // 100x30 window
 	m.setFocus(tuiPanelResources)
 
 	// Positions come from panelRanges so the test tracks the accordion layout.
@@ -444,7 +454,9 @@ func TestTUIMouseFocusAndSelect(t *testing.T) {
 }
 
 func TestTUIMouseWheelMovesPanelUnderCursor(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.setFocus(tuiPanelResources) // r1 selected
 	// Wheel down over the resources panel advances its cursor without the main
 	// viewport stealing the event.
@@ -456,7 +468,9 @@ func TestTUIMouseWheelMovesPanelUnderCursor(t *testing.T) {
 }
 
 func TestTUIToastExpirySeq(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	cmd := m.toast("first")
 	if _, ok := cmd().(tuiToastExpiredMsg); !ok {
 		t.Fatal("toast must schedule an expiry tick")
@@ -475,7 +489,9 @@ func TestTUIToastExpirySeq(t *testing.T) {
 }
 
 func TestTUICancelConfirmFlow(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 
 	// ctrl+x is inert unless an action is running.
 	m.handleKey(key("ctrl+x"))
@@ -507,7 +523,9 @@ func TestTUICancelConfirmFlow(t *testing.T) {
 // finish (and be reaped) while the dialog sits open, and signalling a reaped pid
 // can hit an unrelated process once the pid is reused.
 func TestTUIQuitConfirmDoesNotCapturePid(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.execBusy = true
 	m.execTitle = "aqt snapshot restore --in-place"
 
@@ -537,7 +555,9 @@ func TestTUIQuitConfirmDoesNotCapturePid(t *testing.T) {
 // A session that expires mid-session makes every action exit 3. The TUI has an
 // unlock view; it must re-enter it instead of failing every action until quit.
 func TestTUIExitThreeReturnsToUnlock(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.execBusy = true
 	m.execTitle = "aqt sync"
 
@@ -550,7 +570,7 @@ func TestTUIExitThreeReturnsToUnlock(t *testing.T) {
 	}
 
 	// Any other failure keeps the session: a conflict is not an auth problem.
-	m = testModel(t)
+	m = app.testModel(t)
 	m.Update(tuiExecDoneMsg{title: "aqt sync", exit: 4})
 	if !m.ctx.unlocked {
 		t.Fatal("exit 4 dropped the unlocked session")
@@ -558,7 +578,9 @@ func TestTUIExitThreeReturnsToUnlock(t *testing.T) {
 }
 
 func TestTUIAccordionHeights(t *testing.T) {
-	m := testModel(t) // 100x30
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t) // 100x30
 
 	sum := func() int {
 		h := m.panelHeights()
@@ -604,7 +626,9 @@ func TestTUIAccordionHeights(t *testing.T) {
 }
 
 func TestTUIAccordionSmallTerminalFloor(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.Update(tea.WindowSizeMsg{Width: 60, Height: 16}) // the documented minimum
 
 	h := m.panelHeights()
@@ -624,7 +648,9 @@ func TestTUIAccordionSmallTerminalFloor(t *testing.T) {
 }
 
 func TestTUITitleScrollIndicator(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	// Overflow the resources panel so its box cannot show every row at once.
 	var many []lsRow
 	for i := range 50 {
@@ -656,7 +682,9 @@ func TestTUITitleScrollIndicator(t *testing.T) {
 }
 
 func TestTUIPageKeysMoveByHalfPage(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	var many []lsRow
 	for i := range 50 {
 		many = append(many, lsRow{ID: fmt.Sprintf("r%d", i), Name: fmt.Sprintf("file%02d", i), Kind: "file", Visibility: "private", Version: 1})
@@ -695,7 +723,9 @@ func TestTUIRedactSecrets(t *testing.T) {
 }
 
 func TestTUIStatusVerdict(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 
 	// Conflicts outrank pending local changes.
 	m.local = testChanges([]string{"a"}, nil)
@@ -768,9 +798,11 @@ func TestTUIStatusVerdict(t *testing.T) {
 }
 
 func TestTUIBottomBarGating(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	// Account mode: the files panel has no tracked folder, so no sync action and
 	// no actions menu should be advertised.
-	ctx := &tuiCtx{
+	ctx := &tuiCtx{app: app,
 		prof:     &identity.Profile{Name: "t", Email: "t@example.com", Server: "http://localhost:8080"},
 		unlocked: true,
 		exe:      "/bin/aqt-test",
@@ -787,13 +819,15 @@ func TestTUIBottomBarGating(t *testing.T) {
 	}
 
 	// Inside a tracked folder the sync hint returns.
-	if fm := testModel(t); !strings.Contains(fm.bottomBar(), "sync") {
+	if fm := app.testModel(t); !strings.Contains(fm.bottomBar(), "sync") {
 		t.Fatal("folder-mode files bar should advertise sync")
 	}
 }
 
 func TestTUIBreadcrumbTitle(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	m.setFocus(tuiPanelFiles)
 	title := m.detailTitle()
 	for _, want := range []string{"Details", "Files", "new.txt"} {
@@ -813,7 +847,9 @@ func TestTUIBreadcrumbTitle(t *testing.T) {
 }
 
 func TestTUILogFollowPauseResume(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 	for i := range 100 {
 		m.appendLog(fmt.Sprintf("line %d", i))
 	}
@@ -863,7 +899,9 @@ func TestTUIConflictOriginalAndDetail(t *testing.T) {
 }
 
 func TestTUISpaceMenuActions(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+
+	m := app.testModel(t)
 
 	// A private file offers copy/share/delete but not make-private.
 	m.setFocus(tuiPanelResources)

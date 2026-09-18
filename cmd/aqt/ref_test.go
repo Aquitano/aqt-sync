@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -50,6 +51,8 @@ func TestParseRefExtractsOrigin(t *testing.T) {
 }
 
 func TestLinkServerPrecedence(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	prof := &identity.Profile{Server: "https://me.example.com"}
 	cases := []struct {
 		name       string
@@ -68,11 +71,11 @@ func TestLinkServerPrecedence(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			old := flagServer
-			flagServer = tc.flagServer
-			defer func() { flagServer = old }()
+			old := app.server
+			app.server = tc.flagServer
+			defer func() { app.server = old }()
 
-			server, own := linkServer(tc.origin, tc.prof)
+			server, own := app.linkServer(tc.origin, tc.prof)
 			if server != tc.wantServer {
 				t.Errorf("server = %q, want %q", server, tc.wantServer)
 			}
@@ -88,19 +91,32 @@ func TestLinkServerPrecedence(t *testing.T) {
 // origin succeeding proves the token was withheld, and the own-server case
 // erroring proves it was attached.
 func TestNewLinkClientWithholdsTokenFromForeignHost(t *testing.T) {
-	old := flagServer
-	flagServer = ""
-	defer func() { flagServer = old }()
+	app := &application{ctx: context.Background()}
+
+	old := app.server
+	app.server = ""
+	defer func() { app.server = old }()
 
 	prof := &identity.Profile{Server: "https://me.example.com", Token: "secret"}
 
-	if _, err := newLinkClient("http://attacker.example.com", prof); err != nil {
+	if _, err := app.newLinkClient("http://attacker.example.com", prof); err != nil {
 		t.Fatalf("foreign http origin should drop the token and build cleanly, got %v", err)
 	}
 
 	own := &identity.Profile{Server: "http://me.example.com", Token: "secret"}
-	_, err := newLinkClient("http://me.example.com", own)
+	_, err := app.newLinkClient("http://me.example.com", own)
 	if !errors.Is(err, client.ErrInsecureScheme) {
 		t.Fatalf("own-server http origin should attach the token and trip the scheme guard, got %v", err)
+	}
+}
+
+// The CLI prints aqt:// refs, so a --id flag must accept one instead of sending it
+// to the server as a literal resource id.
+func TestResolveResourceIDAcceptsPrintedRefs(t *testing.T) {
+	for _, in := range []string{"abc123", "aqt://abc123", "https://aqt.example.com/x/abc123"} {
+		got, err := resolveResourceID(".", in)
+		if err != nil || got != "abc123" {
+			t.Errorf("resolveResourceID(%q) = %q, %v; want abc123", in, got, err)
+		}
 	}
 }

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -32,7 +33,7 @@ func TestDiffIncoming(t *testing.T) {
 		{Path: "fresh.txt", Hash: "h5", Mode: 0o644},
 	}}
 
-	got := diffIncoming(base, remote)
+	got := newChangeSet(syncengine.Diff(base, remote))
 	if want := []string{"fresh.txt"}; !equalStrings(got.added, want) {
 		t.Errorf("added = %v, want %v", got.added, want)
 	}
@@ -49,7 +50,7 @@ func TestDiffIncoming(t *testing.T) {
 
 func TestDiffIncomingClean(t *testing.T) {
 	m := syncengine.Manifest{Entries: []syncengine.Entry{{Path: "a", Hash: "h", Mode: 0o644}}}
-	if got := diffIncoming(m, m); got.total() != 0 {
+	if got := newChangeSet(syncengine.Diff(m, m)); got.total() != 0 {
 		t.Errorf("identical manifests reported %d incoming changes, want 0", got.total())
 	}
 }
@@ -58,7 +59,9 @@ func TestDiffIncomingClean(t *testing.T) {
 // machine's `status` must see the files a first machine pushed after the clone, report
 // "up to date" once it syncs, and (with --offline) skip the server entirely.
 func TestStatusIncomingE2E(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 
 	origin := t.TempDir()
 	h.init(origin)
@@ -71,7 +74,7 @@ func TestStatusIncomingE2E(t *testing.T) {
 	h.clone(id, replica)
 
 	// The replica has nothing pending yet: clean locally and level with the server.
-	if out := captureStdout(t, func() { mustStatus(t, replica) }); !strings.Contains(out, "up to date with the server") {
+	if out := captureStdout(t, func() { app.mustStatus(t, replica) }); !strings.Contains(out, "up to date with the server") {
 		t.Fatalf("fresh clone status did not report up to date:\n%s", out)
 	}
 
@@ -81,7 +84,7 @@ func TestStatusIncomingE2E(t *testing.T) {
 	removeTree(t, origin, "old.txt")
 	h.sync(origin)
 
-	out := captureStdout(t, func() { mustStatus(t, replica) })
+	out := captureStdout(t, func() { app.mustStatus(t, replica) })
 	for _, want := range []string{
 		"incoming: 3 to pull (1 new, 1 modified, 1 deleted)",
 		"new       new.txt",
@@ -94,7 +97,7 @@ func TestStatusIncomingE2E(t *testing.T) {
 	}
 
 	// --offline reports only the (clean) local half, never touching the server.
-	if off := captureStdout(t, func() { mustStatusOpts(t, replica, statusOptions{offline: true}) }); strings.Contains(off, "incoming") {
+	if off := captureStdout(t, func() { app.mustStatusOpts(t, replica, statusOptions{offline: true}) }); strings.Contains(off, "incoming") {
 		t.Errorf("--offline status reported incoming changes:\n%s", off)
 	}
 
@@ -108,7 +111,7 @@ func TestStatusIncomingE2E(t *testing.T) {
 	if err := identity.ClearSession(identity.DefaultProfile); err != nil {
 		t.Fatalf("clear session: %v", err)
 	}
-	if out := captureStdout(t, func() { mustStatus(t, replica) }); !strings.Contains(out, "the server is ahead by 1 version(s)") {
+	if out := captureStdout(t, func() { app.mustStatus(t, replica) }); !strings.Contains(out, "the server is ahead by 1 version(s)") {
 		t.Errorf("locked status did not fall back to the version delta:\n%s", out)
 	}
 	if err := identity.SaveSession(identity.DefaultProfile, mk, time.Hour); err != nil {
@@ -117,19 +120,19 @@ func TestStatusIncomingE2E(t *testing.T) {
 
 	// After syncing, the replica is level again and status says so.
 	h.sync(replica)
-	if out := captureStdout(t, func() { mustStatus(t, replica) }); !strings.Contains(out, "up to date with the server") {
+	if out := captureStdout(t, func() { app.mustStatus(t, replica) }); !strings.Contains(out, "up to date with the server") {
 		t.Fatalf("post-sync status did not report up to date:\n%s", out)
 	}
 }
 
-func mustStatus(t *testing.T, dir string) {
+func (app *application) mustStatus(t *testing.T, dir string) {
 	t.Helper()
-	mustStatusOpts(t, dir, statusOptions{})
+	app.mustStatusOpts(t, dir, statusOptions{})
 }
 
-func mustStatusOpts(t *testing.T, dir string, opts statusOptions) {
+func (app *application) mustStatusOpts(t *testing.T, dir string, opts statusOptions) {
 	t.Helper()
-	if err := runStatus(dir, opts); err != nil {
+	if err := app.runStatus(dir, opts); err != nil {
 		t.Fatalf("status %s: %v", dir, err)
 	}
 }
@@ -150,7 +153,9 @@ func equalStrings(a, b []string) bool {
 // used to drop: a tracked directory (added and mode-edited) and a path that switched
 // kind must reach both the human view and the JSON contract.
 func TestStatusReportsEveryTrackedKind(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "notes/todo.txt", "buy milk")
@@ -169,7 +174,7 @@ func TestStatusReportsEveryTrackedKind(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		if err := runStatus(dir, statusOptions{offline: true}); err != nil {
+		if err := app.runStatus(dir, statusOptions{offline: true}); err != nil {
 			t.Fatalf("status: %v", err)
 		}
 	})
@@ -184,9 +189,9 @@ func TestStatusReportsEveryTrackedKind(t *testing.T) {
 		t.Errorf("status output missing the directory mode edit:\n%s", out)
 	}
 
-	withJSON(t, func() {
+	app.withJSON(t, func() {
 		out := captureStdout(t, func() {
-			if err := runStatus(dir, statusOptions{offline: true}); err != nil {
+			if err := app.runStatus(dir, statusOptions{offline: true}); err != nil {
 				t.Fatalf("status --json: %v", err)
 			}
 		})

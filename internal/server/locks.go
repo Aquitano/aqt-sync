@@ -58,10 +58,3 @@ func (k *keyedMutex) lock(key string) (release func()) {
 		k.mu.Unlock()
 	}
 }
-
-// size reports how many keys are currently held or contended (test-only).
-func (k *keyedMutex) size() int {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return len(k.locks)
-}

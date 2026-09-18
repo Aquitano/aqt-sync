@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -12,7 +13,9 @@ import (
 // must apply cleanly (no exit-4 conflict wedge) and drop the path from its base so
 // it stops reading as forever-pending (issue #183).
 func TestBothSidesDeletedSyncsClean(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "doomed.txt", "x")
@@ -27,7 +30,7 @@ func TestBothSidesDeletedSyncsClean(t *testing.T) {
 	removeTree(t, replica, "doomed.txt")
 
 	// Pre-fix this returned errConflictsRemain (exit 4) forever.
-	if err := runSync(replica, syncOptions{}); err != nil {
+	if err := app.runSync(replica, syncOptions{}); err != nil {
 		t.Fatalf("both-sides delete conflicted: %v", err)
 	}
 	assertAbsent(t, replica, "doomed.txt")
@@ -45,7 +48,9 @@ func TestBothSidesDeletedSyncsClean(t *testing.T) {
 // A crash leftover from an interrupted materialize must not be pushed as content:
 // the scanner ignores .aqt-tmp-* and the sync leaves it local-only.
 func TestCrashLeftoverTmpFileNotPushed(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "x")

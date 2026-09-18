@@ -16,29 +16,29 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-func renameCmd() *cobra.Command {
+func (app *application) renameCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "mv <name-or-id|tracked-path> <new-name>",
 		Aliases: []string{"rename"},
 		Short:   "Rename a resource without re-uploading its content",
 		Args:    cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRename(args[0], args[1])
+			return app.runRename(args[0], args[1])
 		},
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func runRename(ref, newName string) error {
+func (app *application) runRename(ref, newName string) error {
 	if strings.TrimSpace(newName) == "" {
 		return errors.New("new name must not be empty")
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -84,7 +84,7 @@ func runRename(ref, newName string) error {
 	if err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"id": id, "oldName": oldName, "name": newName, "version": resp.Version})
 	}
 	fmt.Printf("renamed %s to %q\n", id, newName)

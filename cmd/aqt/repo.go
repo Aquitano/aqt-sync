@@ -20,20 +20,20 @@ import (
 	"github.com/aquitano/aqt-sync/internal/gitremote"
 )
 
-func repoCmd() *cobra.Command {
+func (app *application) repoCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "repo", Short: "Manage encrypted Git remotes", Args: cobra.NoArgs}
-	cmd.AddCommand(repoCreateCmd(), repoListCmd(), repoInfoCmd(), repoGCCmd(), repoRestoreCmd(), repoRemoveCmd())
+	cmd.AddCommand(app.repoCreateCmd(), app.repoListCmd(), app.repoInfoCmd(), app.repoGCCmd(), app.repoRestoreCmd(), app.repoRemoveCmd())
 	return cmd
 }
 
-func repoRestoreCmd() *cobra.Command {
+func (app *application) repoRestoreCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "restore <snapshot-id>",
 		Short: "Restore an encrypted Git remote from a pre-compaction snapshot",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoRestore(args[0], yes, flagJSON)
+			return app.runRepoRestore(args[0], yes, app.json)
 		},
 	}
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
@@ -41,20 +41,20 @@ func repoRestoreCmd() *cobra.Command {
 	return cmd
 }
 
-func repoGCCmd() *cobra.Command {
+func (app *application) repoGCCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "gc <name-or-id>",
 		Short: "Compact an encrypted Git remote into one full bundle",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoGC(args[0], flagJSON)
+			return app.runRepoGC(args[0], app.json)
 		},
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func repoRemoveCmd() *cobra.Command {
+func (app *application) repoRemoveCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:     "rm <name-or-id>",
@@ -62,21 +62,21 @@ func repoRemoveCmd() *cobra.Command {
 		Short:   "Delete an encrypted Git remote",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoRemove(args[0], yes)
+			return app.runRepoRemove(args[0], yes)
 		},
 	}
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	return cmd
 }
 
-func repoCreateCmd() *cobra.Command {
+func (app *application) repoCreateCmd() *cobra.Command {
 	compactAt := gitremote.DefaultCompactAt
 	cmd := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create an empty encrypted Git remote",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoCreate(args[0], compactAt)
+			return app.runRepoCreate(args[0], compactAt)
 		},
 	}
 	cmd.Flags().IntVar(&compactAt, "compact-at", gitremote.DefaultCompactAt, "compact the bundle chain at this many bundles")
@@ -116,45 +116,45 @@ func gitRemoteItems(items []api.ResourceListItem) []api.ResourceListItem {
 	return remotes
 }
 
-func repoListCmd() *cobra.Command {
+func (app *application) repoListCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:     "ls",
 		Aliases: []string{"list"},
 		Short:   "List encrypted Git remotes",
 		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoList(flagJSON)
+			return app.runRepoList(app.json)
 		},
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func repoInfoCmd() *cobra.Command {
+func (app *application) repoInfoCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "info <name-or-id>",
 		Short: "Show refs and bundle-chain state for an encrypted Git remote",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRepoInfo(args[0], flagJSON)
+			return app.runRepoInfo(args[0], app.json)
 		},
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func runRepoCreate(name string, compactAt int) error {
+func (app *application) runRepoCreate(name string, compactAt int) error {
 	if name == "" {
 		return errors.New("repository name cannot be empty")
 	}
 	if compactAt < 1 {
 		return errors.New("--compact-at must be at least 1")
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -208,7 +208,7 @@ func runRepoCreate(name string, compactAt int) error {
 		return err
 	}
 	url := "aqt::" + name
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"id": resp.ID, "name": name, "url": url, "compactAt": compactAt})
 	}
 	fmt.Println(url)
@@ -261,12 +261,12 @@ func loadRepoRows(cl *client.Client, mk crypto.MasterKey) ([]repoRow, map[string
 	return rows, byID, nil
 }
 
-func runRepoList(asJSON bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runRepoList(asJSON bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -292,12 +292,12 @@ func runRepoList(asJSON bool) error {
 	return printTable(os.Stdout, []string{"NAME", "BUNDLES", "SIZE", "VERSION", "ID"}, cells)
 }
 
-func runRepoInfo(ref string, asJSON bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runRepoInfo(ref string, asJSON bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -369,19 +369,19 @@ func selectRepoRow(rows []repoRow, ref string) (repoRow, error) {
 	return matches[0], nil
 }
 
-func runRepoGC(ref string, asJSON bool) error {
+func (app *application) runRepoGC(ref string, asJSON bool) error {
 	// Unlike the helper protocol, this is an interactive CLI command: unlock once
 	// here if needed, which also populates the cache h.openRemote requires.
-	_, prof, err := authedClient()
+	_, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
 	defer mk.Wipe()
-	h := &remoteHelper{
+	h := &remoteHelper{app: app,
 		remoteName: "origin",
 		rawURL:     ref,
 		errOut:     os.Stderr,
@@ -404,12 +404,12 @@ func runRepoGC(ref string, asJSON bool) error {
 	return nil
 }
 
-func runRepoRestore(snapshotID string, assumeYes, asJSON bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runRepoRestore(snapshotID string, assumeYes, asJSON bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -470,12 +470,12 @@ func runRepoRestore(snapshotID string, assumeYes, asJSON bool) error {
 	return nil
 }
 
-func runRepoRemove(ref string, assumeYes bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runRepoRemove(ref string, assumeYes bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -488,7 +488,7 @@ func runRepoRemove(ref string, assumeYes bool) error {
 	if err != nil {
 		return err
 	}
-	if err := runRemove([]string{row.ID}, false, assumeYes); err != nil {
+	if err := app.runRemove([]string{row.ID}, false, assumeYes); err != nil {
 		return err
 	}
 	if _, err = cl.GC(); err != nil {

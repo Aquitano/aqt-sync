@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -18,28 +19,30 @@ import (
 // still there, and nothing named the way out. untrack is that way out, and both dead
 // ends now point at it.
 func TestUntrackRecoversAFolderWhoseResourceIsGone(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "keep.txt", "data")
 	h.sync(dir)
 
-	if err := runRemove([]string{dir}, false, true); err != nil {
+	if err := app.runRemove([]string{dir}, false, true); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 
-	err := runSync(dir, syncOptions{})
+	err := app.runSync(dir, syncOptions{})
 	if err == nil {
 		t.Fatal("sync succeeded against a deleted resource")
 	}
 	if !strings.Contains(err.Error(), "aqt untrack") {
 		t.Fatalf("sync error does not name the recovery: %v", err)
 	}
-	if err := runInit(dir, nil); err == nil || !strings.Contains(err.Error(), "aqt untrack") {
+	if err := app.runInit(dir, nil); err == nil || !strings.Contains(err.Error(), "aqt untrack") {
 		t.Fatalf("init over a tracked folder does not name the recovery: %v", err)
 	}
 
-	if err := runUntrack(dir, false, true); err != nil {
+	if err := app.runUntrack(dir, false, true); err != nil {
 		t.Fatalf("untrack: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, syncengine.ControlDir)); !errors.Is(err, os.ErrNotExist) {
@@ -58,7 +61,9 @@ func TestUntrackRecoversAFolderWhoseResourceIsGone(t *testing.T) {
 // only for the length of each sync — so untrack would slip between two of them and
 // leave the daemon failing in the background against a folder that no longer exists.
 func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "keep.txt", "data")
@@ -71,7 +76,7 @@ func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := runUntrack(dir, false, true)
+	err := app.runUntrack(dir, false, true)
 	if err == nil {
 		t.Fatal("untrack removed .aqt out from under a running watch agent")
 	}
@@ -86,7 +91,7 @@ func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
 	if err := os.Remove(pidFile); err != nil {
 		t.Fatal(err)
 	}
-	if err := runUntrack(dir, false, true); err != nil {
+	if err := app.runUntrack(dir, false, true); err != nil {
 		t.Fatalf("untrack after the agent stopped: %v", err)
 	}
 }
@@ -94,14 +99,16 @@ func TestUntrackRefusesWhileAWatchAgentRuns(t *testing.T) {
 // Plain untrack is local-only: the server-side resource stays, and can still be
 // cloned elsewhere. --delete-remote is the opt-in that also removes it.
 func TestUntrackRemoteChoice(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 
 	kept := t.TempDir()
 	h.init(kept)
 	writeTree(t, kept, "keep.txt", "data")
 	h.sync(kept)
 	keptID := h.folderID(kept)
-	if err := runUntrack(kept, false, true); err != nil {
+	if err := app.runUntrack(kept, false, true); err != nil {
 		t.Fatalf("untrack: %v", err)
 	}
 	if !h.resourceExists(keptID) {
@@ -113,7 +120,7 @@ func TestUntrackRemoteChoice(t *testing.T) {
 	writeTree(t, gone, "bye.txt", "data")
 	h.sync(gone)
 	goneID := h.folderID(gone)
-	if err := runUntrack(gone, true, true); err != nil {
+	if err := app.runUntrack(gone, true, true); err != nil {
 		t.Fatalf("untrack --delete-remote: %v", err)
 	}
 	if h.resourceExists(goneID) {

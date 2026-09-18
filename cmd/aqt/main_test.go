@@ -3,9 +3,14 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,7 +53,9 @@ func isolateConfigEnv(t *testing.T, base string) {
 }
 
 func TestAccountLifecycleCommandsAreExplicit(t *testing.T) {
-	root := rootCmd()
+	app := &application{ctx: context.Background()}
+
+	root := app.rootCmd()
 	for _, name := range []string{"signup", "login", "lock", "logout"} {
 		cmd, _, err := root.Find([]string{name})
 		if err != nil || cmd == root || cmd.Name() != name {
@@ -93,5 +100,41 @@ func TestSessionTTLRoundTripsExplicitZero(t *testing.T) {
 		if got, want := sessionTTL(prof), time.Duration(secs)*time.Second; got != want {
 			t.Errorf("sessionTTL after a round-trip of %ds = %v, want %v", secs, got, want)
 		}
+	}
+}
+
+func TestCommandInvocationsKeepTheirOwnFlags(t *testing.T) {
+	first := &application{ctx: context.Background()}
+	h := first.newE2E(t)
+	second := &application{ctx: context.Background()}
+	firstCmd, secondCmd := first.rootCmd(), second.rootCmd()
+
+	const override = "http://127.0.0.1:12345"
+	firstOut := captureStdout(t, func() {
+		runCmd(t, firstCmd, "whoami", "--json", "--server", override)
+	})
+	var account map[string]string
+	if err := json.Unmarshal([]byte(firstOut), &account); err != nil || account["server"] != override {
+		t.Fatalf("first command = %q, err = %v", firstOut, err)
+	}
+	secondOut := captureStdout(t, func() { runCmd(t, secondCmd, "whoami") })
+	if json.Valid([]byte(secondOut)) || !strings.Contains(secondOut, h.url) {
+		t.Fatalf("second command did not use its own output mode and server: %q", secondOut)
+	}
+}
+
+// A local file error satisfies net.Error via its Timeout method; it must exit 1
+// (generic), not 5 (retryable network), or cron retries a permanent failure forever.
+func TestExitCodeLocalFileErrorIsNotNetwork(t *testing.T) {
+	_, err := os.Open(filepath.Join(t.TempDir(), "missing"))
+	var pathErr *fs.PathError
+	if !errors.As(err, &pathErr) {
+		t.Fatalf("test setup: %T is not a PathError", err)
+	}
+	if got := exitCode(err); got != 1 {
+		t.Errorf("exitCode(missing-file error) = %d, want 1", got)
+	}
+	if got := exitCode(fmt.Errorf("push: %w", err)); got != 1 {
+		t.Errorf("exitCode(wrapped missing-file error) = %d, want 1", got)
 	}
 }

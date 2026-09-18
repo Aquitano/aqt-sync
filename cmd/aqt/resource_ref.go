@@ -57,8 +57,8 @@ func resolveOwnedResourceIDFromItems(items []api.ResourceListItem, mk crypto.Mas
 	}
 }
 
-func resolveOwnedResourceIDWithProfile(cl *client.Client, prof *identity.Profile, ref string) (string, error) {
-	mk, err := unlockMaster(prof)
+func (app *application) resolveOwnedResourceIDWithProfile(cl *client.Client, prof *identity.Profile, ref string) (string, error) {
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return "", err
 	}

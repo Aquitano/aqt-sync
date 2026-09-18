@@ -5,10 +5,7 @@ the contracts a script depends on and the behavior `--help` cannot express.
 
 ## Invocation
 
-`aqt <command> [args] [flags]`. Bare `aqt <path>` is sugar for `aqt push <path>` when
-the argument contains a path separator; a bare word that names an existing file asks
-for confirmation first, and errors as an unknown command without a terminal, so a
-typo'd subcommand never uploads a file.
+`aqt <command> [args] [flags]`. Upload a file with `aqt push <path>`.
 
 `--server <url>` (default `http://localhost:8080`), `--profile <name>`, and
 `-h/--help` apply to every command. `-v/--version` is registered on the root command
@@ -25,7 +22,7 @@ accepting it and behaving identically:
   `sync`, drops the per-file lines and the summary. Errors, and the conflict list a
   blocked sync exits `4` with, still print; so does `sync --dry-run`'s plan, which is
   the output that run was asked for.
-- `--progress`: `pull`, `sync`, `clone`, `watch`, `agent start`, and `restore`, and
+- `--progress`: `pull`, `sync`, `clone`, `watch`, and `restore`, and
   only on a terminal. Those are the commands that transfer enough at once to draw a
   bar — `pull` for a subtree (`aqt://<id>/<dir>`), `restore` for the re-sync
   `--in-place` ends with. A download knows its size from the manifest and shows a

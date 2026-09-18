@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/folderstate"
@@ -14,7 +15,9 @@ import (
 // so unless clone and pull record the mtime each file actually landed with, every
 // later `aqt status` and TUI refresh re-reads and re-hashes the whole tree, forever.
 func TestPulledTreeStatFastPaths(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "notes/todo.txt", "buy milk")
@@ -24,25 +27,25 @@ func TestPulledTreeStatFastPaths(t *testing.T) {
 
 	replica := t.TempDir()
 	h.clone(id, replica)
-	assertScanReadsNothing(t, replica)
+	app.assertScanReadsNothing(t, replica)
 
 	// The same has to hold for files a sync pulls, not just a clone's initial write.
 	writeTree(t, origin, "notes/todo.txt", "buy milk and eggs")
 	writeTree(t, origin, "later.txt", "new file")
 	h.sync(origin)
 	h.sync(replica)
-	assertScanReadsNothing(t, replica)
+	app.assertScanReadsNothing(t, replica)
 }
 
 // assertScanReadsNothing rescans root against its recorded base with every hash
 // replaced by a sentinel: any file the scan opens comes back with its real hash
 // instead, which names exactly the entries that failed the stat fast-path.
-func assertScanReadsNothing(t *testing.T, root string) {
+func (app *application) assertScanReadsNothing(t *testing.T, root string) {
 	t.Helper()
-	if err := bindTrackedRoot(root); err != nil {
+	if err := app.bindTrackedRoot(root); err != nil {
 		t.Fatal(err)
 	}
-	base, err := folderstate.LoadBase(root, flagProfile)
+	base, err := folderstate.LoadBase(root, app.profile)
 	if err != nil {
 		t.Fatal(err)
 	}

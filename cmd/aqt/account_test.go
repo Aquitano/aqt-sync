@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"strings"
 	"testing"
@@ -68,12 +69,14 @@ func TestAccountDeleteConfirmationRequiresTypedEmail(t *testing.T) {
 // A mistyped passphrase must fail against the local wrapped root, so the request
 // that cannot be undone is never sent on the strength of a typo.
 func TestAccountDeleteProofRejectsWrongPassphrase(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
 	cl := &fakeAccountClient{}
 
 	withStdin(t, "not the passphrase\n")
-	if _, err := accountDeleteProof(prof, true, cl); err == nil {
+	if _, err := app.accountDeleteProof(prof, true, cl); err == nil {
 		t.Fatal("a wrong passphrase produced a proof")
 	}
 	if cl.deletes != 0 {
@@ -84,21 +87,25 @@ func TestAccountDeleteProofRejectsWrongPassphrase(t *testing.T) {
 // A piped run with nothing on stdin supplied no passphrase; reporting it as an
 // incorrect one sends the caller hunting for a typo instead of the missing input.
 func TestAccountDeleteProofRejectsEmptyPassphrase(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	prof := accountProfile(t, "owner@example.com", "correct horse battery staple")
 
 	withStdin(t, "")
-	_, err := accountDeleteProof(prof, true, &fakeAccountClient{})
+	_, err := app.accountDeleteProof(prof, true, &fakeAccountClient{})
 	if err == nil || !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("empty passphrase err = %v, want a missing-passphrase error", err)
 	}
 }
 
 func TestAccountDeleteProofDerivesTheAuthVerifier(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
 
 	withStdin(t, email+"\n"+pass+"\n")
-	got, err := accountDeleteProof(prof, false, &fakeAccountClient{})
+	got, err := app.accountDeleteProof(prof, false, &fakeAccountClient{})
 	if err != nil {
 		t.Fatalf("proof: %v", err)
 	}
@@ -115,11 +122,13 @@ func TestAccountDeleteProofDerivesTheAuthVerifier(t *testing.T) {
 // --yes exists for scripts, but it must not also skip the passphrase: that would
 // make a leaked token sufficient to erase the account.
 func TestAccountDeleteYesStillRequiresThePassphrase(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	const email, pass = "owner@example.com", "correct horse battery staple"
 	prof := accountProfile(t, email, pass)
 
 	withStdin(t, pass+"\n")
-	got, err := accountDeleteProof(prof, true, &fakeAccountClient{})
+	got, err := app.accountDeleteProof(prof, true, &fakeAccountClient{})
 	if err != nil {
 		t.Fatalf("proof: %v", err)
 	}
@@ -199,12 +208,43 @@ func TestAccountDeleteReceiptSurvivesAFailedLocalCleanup(t *testing.T) {
 // Without a terminal and without --yes there is no way to answer the prompt, so
 // the command must say so rather than block or delete unconfirmed.
 func TestAccountDeleteRefusesUnconfirmableRun(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	withStdin(t, "")
-	err := runAccountDelete(false, false)
+	err := app.runAccountDelete(false, false)
 	if err == nil {
 		t.Fatal("a non-interactive run without --yes was allowed to proceed")
 	}
 	if !errors.Is(err, cliutil.ErrNotConfirmable) {
 		t.Fatalf("error = %v, want the not-confirmable refusal", err)
+	}
+}
+
+// Replacing a profile's credentials would orphan its existing server session,
+// leaving no token with which to revoke it.
+func TestLoginRefusesToOverwriteAnotherAccountsProfile(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
+
+	prof, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := prof.Token
+
+	err = app.runLogin("someone-else@example.com", 0)
+	if err == nil {
+		t.Fatal("login as a different account over an existing profile succeeded")
+	}
+	if !strings.Contains(err.Error(), "already logged in") {
+		t.Fatalf("login error = %v, want it to name the occupied profile", err)
+	}
+	after, err := identity.Load(identity.DefaultProfile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Token != original {
+		t.Fatal("the existing profile's token was overwritten anyway")
 	}
 }

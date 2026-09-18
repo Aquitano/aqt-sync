@@ -7,8 +7,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -198,20 +196,6 @@ func TestCheckRedirectAllowsOnlyGitHubsAssetHop(t *testing.T) {
 		}
 		if !tc.allow && err == nil {
 			t.Errorf("%s -> %s: allowed, want refused", tc.from, tc.to)
-		}
-	}
-}
-
-// The workflow publishes the assets these constants name. If either side is renamed
-// alone, every client's update check 404s against a release that looks fine.
-func TestReleaseWorkflowPublishesTheAssetNamesClientsFetch(t *testing.T) {
-	wf, err := os.ReadFile(filepath.Join("..", "..", ".github", "workflows", "release.yml"))
-	if err != nil {
-		t.Skipf("release workflow not readable: %v", err)
-	}
-	for _, name := range []string{ManifestAssetName, SignatureAssetName} {
-		if !strings.Contains(string(wf), name) {
-			t.Errorf("release.yml never mentions %q, so no release publishes it", name)
 		}
 	}
 }

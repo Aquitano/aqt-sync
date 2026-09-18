@@ -219,6 +219,8 @@ func (m *tuiModel) busy() bool {
 }
 
 func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	app := m.ctx.app
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		first := m.w == 0
@@ -367,7 +369,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Done without ever reporting Started, and a zero execStart would render
 		// the elapsed time as seconds-since-the-epoch.
 		m.execStart = time.Now()
-		return m, tuiExecCmd(m.ctx.exe, msg.sub, msg.stdin)
+		return m, app.tuiExecCmd(m.ctx.exe, msg.sub, msg.stdin)
 
 	case tuiExecStartedMsg:
 		m.execCh = msg.ch
@@ -868,7 +870,6 @@ func (m *tuiModel) snapshotsActions() []tuiMenuOption {
 		tuiMenuOption{key: "d", label: "diff against live tree", cmd: tuiStartDiff(snap.ID)},
 		tuiMenuOption{key: "a", label: anchorLabel, cmd: m.anchorCmd(*snap)},
 		tuiMenuOption{key: "o", label: "restore side-by-side…", dialog: snapshotRestoreOutDialog(*snap)},
-		tuiMenuOption{key: "e", label: "export plaintext…", dialog: snapshotExportDialog(*snap)},
 		tuiMenuOption{key: "k", label: "retention prune…", dialog: snapshotRetentionDialog(*snap)},
 		tuiMenuOption{key: "f", label: "list with time/limit filters…", dialog: snapshotListFiltersDialog(*snap)},
 	)

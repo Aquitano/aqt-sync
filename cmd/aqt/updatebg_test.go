@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -37,18 +36,20 @@ func withTerminal(t *testing.T, yes bool) {
 	t.Cleanup(func() { onATerminal = orig })
 }
 
-func withFlags(t *testing.T, asJSON, quiet bool) {
+func (app *application) withFlags(t *testing.T, asJSON, quiet bool) {
 	t.Helper()
-	origJSON, origQuiet := flagJSON, flagQuiet
-	flagJSON, flagQuiet = asJSON, quiet
-	t.Cleanup(func() { flagJSON, flagQuiet = origJSON, origQuiet })
+	origJSON, origQuiet := app.json, app.quiet
+	app.json, app.quiet = asJSON, quiet
+	t.Cleanup(func() { app.json, app.quiet = origJSON, origQuiet })
 }
 
 // A background check must only ever run for an interactive person. Everything
 // else is a script, a pipe, or a daemon consuming output that never asked for an
 // update notice.
 func TestBackgroundUpdateSuppression(t *testing.T) {
-	root := rootCmd()
+	app := &application{ctx: context.Background()}
+
+	root := app.rootCmd()
 	cases := []struct {
 		name     string
 		command  string
@@ -71,10 +72,10 @@ func TestBackgroundUpdateSuppression(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			withTerminal(t, tc.terminal)
-			withFlags(t, tc.asJSON, tc.quiet)
+			app.withFlags(t, tc.asJSON, tc.quiet)
 
 			cmd := subcommand(t, root, tc.command)
-			if got := backgroundUpdateAllowed(cmd); got != tc.want {
+			if got := app.backgroundUpdateAllowed(cmd); got != tc.want {
 				t.Fatalf("backgroundUpdateAllowed = %v, want %v", got, tc.want)
 			}
 		})
@@ -84,12 +85,14 @@ func TestBackgroundUpdateSuppression(t *testing.T) {
 // Subcommands inherit their parent's suppression: `aqt agent start` is as much a
 // daemon invocation as `aqt agent` is.
 func TestBackgroundUpdateSuppressionCoversSubcommands(t *testing.T) {
-	withTerminal(t, true)
-	withFlags(t, false, false)
+	app := &application{ctx: context.Background()}
 
-	agent := subcommand(t, rootCmd(), "agent")
+	withTerminal(t, true)
+	app.withFlags(t, false, false)
+
+	agent := subcommand(t, app.rootCmd(), "agent")
 	for _, name := range []string{"start", "status", "stop", "logs"} {
-		if sub := subcommand(t, agent, name); backgroundUpdateAllowed(sub) {
+		if sub := subcommand(t, agent, name); app.backgroundUpdateAllowed(sub) {
 			t.Errorf("`aqt agent %s` allows a background check", name)
 		}
 	}
@@ -98,9 +101,11 @@ func TestBackgroundUpdateSuppressionCoversSubcommands(t *testing.T) {
 // The default is off, so installing aqt adds no network traffic to commands that
 // never asked for it.
 func TestBackgroundUpdateDoesNothingUnderTheDefaultPolicy(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	withUpdateStore(t)
 	withTerminal(t, true)
-	withFlags(t, false, false)
+	app.withFlags(t, false, false)
 	// A base URL that cannot be reached: if the policy were consulted wrongly and a
 	// check ran, it would have to touch this and take the full timeout.
 	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
@@ -109,7 +114,7 @@ func TestBackgroundUpdateDoesNothingUnderTheDefaultPolicy(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		maybeBackgroundUpdate(subcommand(t, rootCmd(), "status"))
+		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
 	}()
 	select {
 	case <-done:
@@ -119,10 +124,10 @@ func TestBackgroundUpdateDoesNothingUnderTheDefaultPolicy(t *testing.T) {
 }
 
 // artifactSourceFunc adapts a function to update.ArtifactSource.
-type artifactSourceFunc func(ctx context.Context, version string, a update.Artifact, w io.Writer) error
+type artifactSourceFunc func(ctx context.Context, a update.Artifact, w io.Writer) error
 
-func (f artifactSourceFunc) FetchArtifact(ctx context.Context, version string, a update.Artifact, w io.Writer) error {
-	return f(ctx, version, a, w)
+func (f artifactSourceFunc) FetchArtifact(ctx context.Context, a update.Artifact, w io.Writer) error {
+	return f(ctx, a, w)
 }
 
 // withArtifactSource serves the release archive from the test instead of GitHub.
@@ -131,28 +136,6 @@ func withArtifactSource(t *testing.T, fn artifactSourceFunc) {
 	orig := updateArtifactSource
 	updateArtifactSource = func() update.ArtifactSource { return fn }
 	t.Cleanup(func() { updateArtifactSource = orig })
-}
-
-// captureStderr redirects os.Stderr for the duration of fn, which is where every
-// background update notice is written.
-func captureStderr(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stderr
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stderr = w
-	done := make(chan string, 1)
-	go func() {
-		var b bytes.Buffer
-		_, _ = io.Copy(&b, r)
-		done <- b.String()
-	}()
-	fn()
-	_ = w.Close()
-	os.Stderr = orig
-	return <-done
 }
 
 // The check is budgeted for a few kilobytes of metadata. An automatic install
@@ -164,9 +147,11 @@ func captureStderr(t *testing.T, fn func()) string {
 // 5-second network check after every command, forever. The deferral must die
 // with the stale check.
 func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	store := withUpdateStore(t)
 	withTerminal(t, true)
-	withFlags(t, false, false)
+	app.withFlags(t, false, false)
 	serveUpdateManifest(t, "v9.9.8")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
@@ -178,7 +163,7 @@ func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
 	}
 
 	captureStderr(t, func() {
-		maybeBackgroundUpdate(subcommand(t, rootCmd(), "status"))
+		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
 	})
 
 	got, err := store.Load()
@@ -194,10 +179,12 @@ func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
 }
 
 func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	requirePublishedPlatform(t)
 	store := withUpdateStore(t)
 	withTerminal(t, true)
-	withFlags(t, false, false)
+	app.withFlags(t, false, false)
 	serveUpdateManifest(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
 	if err := store.SetPolicy(update.PolicyAuto); err != nil {
@@ -205,7 +192,7 @@ func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 	}
 
 	var budget time.Duration
-	withArtifactSource(t, func(ctx context.Context, _ string, _ update.Artifact, _ io.Writer) error {
+	withArtifactSource(t, func(ctx context.Context, _ update.Artifact, _ io.Writer) error {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			t.Error("the automatic install runs unbounded")
@@ -215,7 +202,7 @@ func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 	})
 
 	out := captureStderr(t, func() {
-		maybeBackgroundUpdate(subcommand(t, rootCmd(), "status"))
+		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
 	})
 
 	if budget == 0 {
@@ -247,9 +234,11 @@ func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
 // first idle moment. Idle is decided locally: an agent still holding the binary is
 // not a reason to fetch metadata after every command.
 func TestBackgroundDeferralDoesNotCheckWhileAnAgentRuns(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	store := withUpdateStore(t)
 	withTerminal(t, true)
-	withFlags(t, false, false)
+	app.withFlags(t, false, false)
 	// Unreachable: reaching for it at all is the failure this test is about.
 	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
 	withBuild(t, "v0.3.0", update.KindRelease)
@@ -274,7 +263,7 @@ func TestBackgroundDeferralDoesNotCheckWhileAnAgentRuns(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		maybeBackgroundUpdate(subcommand(t, rootCmd(), "status"))
+		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
 	}()
 	select {
 	case <-done:
@@ -303,11 +292,13 @@ func liveOtherPID(t *testing.T) int {
 }
 
 func TestUpdatePolicyCommandRoundTrips(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	store := withUpdateStore(t)
 
 	for _, want := range []update.Policy{update.PolicyNotify, update.PolicyAuto, update.PolicyOff} {
 		out := captureStdout(t, func() {
-			runCmd(t, rootCmd(), "update", "policy", string(want))
+			runCmd(t, app.rootCmd(), "update", "policy", string(want))
 		})
 		if !strings.Contains(out, string(want)) {
 			t.Fatalf("output does not confirm the policy:\n%s", out)
@@ -323,9 +314,11 @@ func TestUpdatePolicyCommandRoundTrips(t *testing.T) {
 }
 
 func TestUpdatePolicyCommandRejectsAnUnknownMode(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	withUpdateStore(t)
 
-	root := rootCmd()
+	root := app.rootCmd()
 	root.SetArgs([]string{"update", "policy", "aggressive"})
 	if err := root.Execute(); err == nil {
 		t.Fatal("an unknown policy was accepted")
@@ -333,13 +326,15 @@ func TestUpdatePolicyCommandRejectsAnUnknownMode(t *testing.T) {
 }
 
 func TestUpdatePolicyCommandShowsTheCurrentMode(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	store := withUpdateStore(t)
 	if err := store.SetPolicy(update.PolicyNotify); err != nil {
 		t.Fatal(err)
 	}
 
 	out := captureStdout(t, func() {
-		runCmd(t, rootCmd(), "update", "policy")
+		runCmd(t, app.rootCmd(), "update", "policy")
 	})
 	if strings.TrimSpace(out) != string(update.PolicyNotify) {
 		t.Fatalf("output = %q, want %q", strings.TrimSpace(out), update.PolicyNotify)

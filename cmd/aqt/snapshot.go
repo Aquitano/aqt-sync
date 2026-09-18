@@ -29,7 +29,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-func snapshotCmd() *cobra.Command {
+func (app *application) snapshotCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "snapshot",
 		Short: "Create, browse, and restore point-in-time snapshots",
@@ -37,13 +37,13 @@ func snapshotCmd() *cobra.Command {
 			"pinned server-side so a later sync (or a mistaken delete) cannot reclaim them. " +
 			"They are account-global: any of your devices can browse and restore them.",
 	}
-	cmd.AddCommand(snapshotCreateCmd(), snapshotListCmd(), snapshotFindCmd(), snapshotDiffCmd(), snapshotExportCmd(), snapshotPruneCmd(), snapshotAnchorCmd(), snapshotUnanchorCmd(), snapshotAutoCmd())
+	cmd.AddCommand(app.snapshotCreateCmd(), app.snapshotListCmd(), app.snapshotFindCmd(), app.snapshotDiffCmd(), app.snapshotPruneCmd(), app.snapshotAnchorCmd(), app.snapshotUnanchorCmd(), app.snapshotAutoCmd())
 	return cmd
 }
 
 // --- anchor ---
 
-func snapshotAnchorCmd() *cobra.Command {
+func (app *application) snapshotAnchorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "anchor <snapshot-id>",
 		Short: "Protect a snapshot from retention",
@@ -52,28 +52,28 @@ func snapshotAnchorCmd() *cobra.Command {
 			"refused until the snapshot is unanchored. `aqt checkpoint` anchors as it creates.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, _, err := authedClient()
+			cl, _, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			return setSnapshotAnchor(cl, args[0], true)
+			return app.setSnapshotAnchor(cl, args[0], true)
 		},
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func snapshotUnanchorCmd() *cobra.Command {
+func (app *application) snapshotUnanchorCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unanchor <snapshot-id>",
 		Short: "Make an anchored snapshot eligible for retention again",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, _, err := authedClient()
+			cl, _, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			return setSnapshotAnchor(cl, args[0], false)
+			return app.setSnapshotAnchor(cl, args[0], false)
 		},
 	}
 	markJSONSupported(cmd)
@@ -84,7 +84,7 @@ func snapshotUnanchorCmd() *cobra.Command {
 // echoes the state that was asked for. A server that ignored the anchor field echoes
 // the old state, so a mismatch is treated as a hard error rather than a silently
 // unprotected (or still-protected) snapshot.
-func setSnapshotAnchor(cl *client.Client, id string, want bool) error {
+func (app *application) setSnapshotAnchor(cl *client.Client, id string, want bool) error {
 	info, err := cl.SetSnapshotAnchor(id, want)
 	if errors.Is(err, client.ErrNotFound) {
 		return fmt.Errorf("snapshot %s not found (or not yours)", id)
@@ -95,7 +95,7 @@ func setSnapshotAnchor(cl *client.Client, id string, want bool) error {
 	if info.Anchored != want {
 		return fmt.Errorf("server did not apply the anchor change to %s; this is a server bug, report it", id)
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"id": info.ID, "anchored": info.Anchored})
 	}
 	if want {
@@ -108,7 +108,7 @@ func setSnapshotAnchor(cl *client.Client, id string, want bool) error {
 
 // --- create ---
 
-func snapshotCreateCmd() *cobra.Command {
+func (app *application) snapshotCreateCmd() *cobra.Command {
 	var (
 		id    string
 		label string
@@ -128,42 +128,18 @@ func snapshotCreateCmd() *cobra.Command {
 			if len(args) > 0 {
 				dir = args[0]
 			}
-			if id == "" {
-				if err := bindTrackedDir(dir); err != nil {
-					return err
-				}
-			}
-			cl, prof, err := authedClient()
+			info, err := app.createSnapshot(dir, id, label, false)
 			if err != nil {
 				return err
 			}
-			resourceID, err := resolveResourceID(dir, id)
-			if err != nil {
-				return err
-			}
-			// A label is sealed under the resource content key here, so the server stores
-			// only ciphertext; this needs the key, so it is the one path that unlocks.
-			var sealed *crypto.SealedBlob
-			if label != "" {
-				if sealed, err = sealSnapshotLabel(cl, prof, resourceID, label); err != nil {
-					return err
-				}
-			}
-			info, err := cl.CreateSnapshot(resourceID, sealed, false)
-			if errors.Is(err, client.ErrNotFound) {
-				return fmt.Errorf("resource %s not found (or not yours)", resourceID)
-			}
-			if err != nil {
-				return err
-			}
-			if flagJSON {
+			if app.json {
 				return printJSON(info)
 			}
-			if flagQuiet {
+			if app.quiet {
 				fmt.Println(info.ID)
 				return nil
 			}
-			fmt.Printf("snapshot %s of %s (version %d)\n", info.ID, resourceID, info.Version)
+			fmt.Printf("snapshot %s of %s (version %d)\n", info.ID, info.ResourceID, info.Version)
 			return nil
 		},
 	}
@@ -178,7 +154,7 @@ func snapshotCreateCmd() *cobra.Command {
 // the server stores it as opaque ciphertext that a later browse decrypts the same
 // way it decrypts the name. It fetches the resource to recover its wrapped key, then
 // unwraps it with the master key.
-func sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, label string) (*crypto.SealedBlob, error) {
+func (app *application) sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, label string) (*crypto.SealedBlob, error) {
 	res, err := cl.GetResource(resourceID)
 	if errors.Is(err, client.ErrNotFound) {
 		return nil, fmt.Errorf("resource %s not found (or not yours)", resourceID)
@@ -189,7 +165,7 @@ func sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, la
 	if res.WrappedKey == nil {
 		return nil, errors.New("cannot label this snapshot: the resource is public (no owner key to seal under)")
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return nil, err
 	}
@@ -208,7 +184,7 @@ func sealSnapshotLabel(cl *client.Client, prof *identity.Profile, resourceID, la
 
 // --- list ---
 
-func snapshotListCmd() *cobra.Command {
+func (app *application) snapshotListCmd() *cobra.Command {
 	var (
 		id     string
 		limit  int
@@ -222,11 +198,11 @@ func snapshotListCmd() *cobra.Command {
 		Args:    cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if id == "" && len(args) > 0 {
-				if err := bindTrackedDir(args[0]); err != nil {
+				if err := app.bindTrackedDir(args[0]); err != nil {
 					return err
 				}
 			}
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
@@ -243,12 +219,12 @@ func snapshotListCmd() *cobra.Command {
 				return err
 			}
 			snaps = filterSnapshots(snaps, limit, since, before, time.Now())
-			mk, err := unlockMaster(prof)
+			mk, err := app.unlockMaster(prof)
 			if err != nil {
 				return err
 			}
 			defer mk.Wipe()
-			if flagJSON {
+			if app.json {
 				return printJSON(snapshotRows(snaps, mk))
 			}
 			if len(snaps) == 0 {
@@ -378,7 +354,7 @@ func snapshotNameLabel(s api.SnapshotInfo, mk crypto.MasterKey) (name, label str
 
 // --- find (fzf search) ---
 
-func snapshotFindCmd() *cobra.Command {
+func (app *application) snapshotFindCmd() *cobra.Command {
 	var (
 		id    string
 		noFzf bool
@@ -391,7 +367,7 @@ func snapshotFindCmd() *cobra.Command {
 			"Without a terminal or fzf, the index is printed as a table instead.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSnapshotFind(strings.Join(args, " "), id, flagJSON, noFzf)
+			return app.runSnapshotFind(strings.Join(args, " "), id, app.json, noFzf)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope to this resource id instead of all snapshots")
@@ -400,8 +376,8 @@ func snapshotFindCmd() *cobra.Command {
 	return cmd
 }
 
-func runSnapshotFind(query, resourceID string, asJSON, noFzf bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runSnapshotFind(query, resourceID string, asJSON, noFzf bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
@@ -409,7 +385,7 @@ func runSnapshotFind(query, resourceID string, asJSON, noFzf bool) error {
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -490,7 +466,7 @@ func snapshotFzfSelect(fzfPath, query string, rows []snapshotRow) error {
 // every device. It reconstructs the snapshot into a staging dir first, so a failed
 // reconstruction never leaves the live folder half-overwritten, then swaps it in and
 // runs a normal sync (force: an explicit rollback wins any divergence).
-func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnapshotResponse, dir string, assumeYes bool) error {
+func (app *application) restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnapshotResponse, dir string, assumeYes bool) error {
 	root, err := trackedRoot(dir)
 	if err != nil {
 		return err
@@ -513,7 +489,7 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 		return err
 	}
 	defer func() { _ = os.RemoveAll(staging) }()
-	meta, err := reconstructSnapshot(cl, prof, snap, staging, false)
+	meta, err := app.reconstructSnapshot(cl, prof, snap, staging, false)
 	if err != nil {
 		return err
 	}
@@ -543,13 +519,13 @@ func restoreInPlace(cl *client.Client, prof *identity.Profile, snap api.GetSnaps
 	if err := clearMarker(root, restoreMarkerFile); err != nil {
 		return err
 	}
-	if !flagJSON && !flagQuiet {
+	if !app.json && !app.quiet {
 		fmt.Fprintln(os.Stderr, "rolled back; syncing to propagate...")
 	}
 	// conflicts is pinned to block: the restored tree's own .aqtconfig may select
 	// copy or merge, which contradict --force — a wedge the user never caused, hit
 	// only after the tree was already swapped.
-	return runSync(root, syncOptions{force: true, conflicts: "block"})
+	return app.runSync(root, syncOptions{force: true, conflicts: "block"})
 }
 
 // swapTree replaces root's contents (everything but the .aqt control dir) with
@@ -617,61 +593,9 @@ func swapTree(root, staging string) error {
 
 // --- export ---
 
-func snapshotExportCmd() *cobra.Command {
-	var (
-		out   string
-		force bool
-	)
-	cmd := &cobra.Command{
-		Use:   "export <snapshot-id>",
-		Short: "Decrypt a snapshot to a plaintext tree for offsite backup",
-		Long: "Reconstructs a snapshot and writes it as plaintext to --out. Decryption happens " +
-			"entirely on this machine; the server never sees a key. The output is NOT encrypted, " +
-			"so it leaves aqt's zero-knowledge boundary: store it somewhere you trust.",
-		Args: cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if out == "" {
-				return errors.New("--out <dir> is required")
-			}
-			cl, prof, err := authedClient()
-			if err != nil {
-				return err
-			}
-			snap, err := cl.GetSnapshot(args[0])
-			if errors.Is(err, client.ErrNotFound) {
-				return fmt.Errorf("snapshot %s not found (or not yours)", args[0])
-			}
-			if err != nil {
-				return err
-			}
-			abs, err := filepath.Abs(out)
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(os.Stderr, "warning: writing DECRYPTED plaintext to %s (outside aqt's encryption)\n", abs)
-			meta, err := reconstructSnapshot(cl, prof, snap, abs, force)
-			if err != nil {
-				return err
-			}
-			if flagJSON {
-				return printJSON(map[string]any{
-					"snapshotId": snap.Snapshot.ID, "name": meta.Name,
-					"version": snap.Snapshot.Version, "to": abs,
-				})
-			}
-			fmt.Printf("exported %q (version %d) to %s\n", meta.Name, snap.Snapshot.Version, abs)
-			return nil
-		},
-	}
-	cmd.Flags().StringVarP(&out, "out", "o", "", "write the decrypted plaintext tree here (required)")
-	cmd.Flags().BoolVar(&force, "force", false, "overwrite an existing file at the destination")
-	markJSONSupported(cmd)
-	return cmd
-}
-
 // --- diff ---
 
-func snapshotDiffCmd() *cobra.Command {
+func (app *application) snapshotDiffCmd() *cobra.Command {
 	var against string
 	cmd := &cobra.Command{
 		Use:   "diff <snapshot-id>",
@@ -684,11 +608,11 @@ func snapshotDiffCmd() *cobra.Command {
 			"snapshot instead. Added (+), removed (-), and modified (~) files are listed.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			return runSnapshotDiff(cl, prof, args[0], against)
+			return app.runSnapshotDiff(cl, prof, args[0], against)
 		},
 	}
 	cmd.Flags().StringVar(&against, "against", "", "compare against this second snapshot instead of the live resource")
@@ -696,17 +620,17 @@ func snapshotDiffCmd() *cobra.Command {
 	return cmd
 }
 
-func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
-	mk, err := unlockMaster(prof)
+func (app *application) runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against string) error {
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
 	defer mk.Wipe()
-	result, err := computeSnapshotDiff(cl, mk, leftID, against)
+	result, err := app.computeSnapshotDiff(cl, mk, leftID, against)
 	if err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(result)
 	}
 	printSnapshotDiff(result)
@@ -715,7 +639,7 @@ func runSnapshotDiff(cl *client.Client, prof *identity.Profile, leftID, against 
 
 // computeSnapshotDiff needs the already-unlocked master key: it must never
 // prompt, because the TUI calls it from inside a raw-mode terminal session.
-func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against string) (comparison, error) {
+func (app *application) computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against string) (comparison, error) {
 	var zero comparison
 	left, err := cl.GetSnapshot(leftID)
 	if errors.Is(err, client.ErrNotFound) {
@@ -755,7 +679,7 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 		rightVer = r.Version
 	}
 
-	diff, err := diffResources(cl, mk, snapshotAsResource(left), rightRes, leftID, rightLabel)
+	diff, err := app.diffResources(cl, mk, snapshotAsResource(left), rightRes, leftID, rightLabel)
 	if err != nil {
 		return zero, err
 	}
@@ -774,7 +698,7 @@ func computeSnapshotDiff(cl *client.Client, mk crypto.MasterKey, leftID, against
 // pair) still materializes both sides to temp dirs; that fallback scans each side
 // back into a manifest so both routes report the same classification rather than the
 // old regular-files-only comparison.
-func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.Delta, error) {
+func (app *application) diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetResourceResponse, leftID, rightLabel string) (syncengine.Delta, error) {
 	var zero syncengine.Delta
 	leftRoot, leftOK, err := treeRootOf(left, mk)
 	if err != nil {
@@ -800,10 +724,10 @@ func diffResources(cl *client.Client, mk crypto.MasterKey, left, right api.GetRe
 		return zero, err
 	}
 	defer func() { _ = os.RemoveAll(rightDir) }()
-	if err := materializeWithMaster(cl, mk, left, leftDir); err != nil {
+	if err := app.materializeWithMaster(cl, mk, left, leftDir); err != nil {
 		return zero, fmt.Errorf("reconstruct snapshot %s: %w", leftID, err)
 	}
-	if err := materializeWithMaster(cl, mk, right, rightDir); err != nil {
+	if err := app.materializeWithMaster(cl, mk, right, rightDir); err != nil {
 		return zero, fmt.Errorf("reconstruct %s: %w", rightLabel, err)
 	}
 	return diffTrees(leftDir, rightDir)
@@ -884,7 +808,7 @@ func nonNil(s []string) []string {
 
 // --- prune ---
 
-func snapshotPruneCmd() *cobra.Command {
+func (app *application) snapshotPruneCmd() *cobra.Command {
 	var (
 		id       string
 		dir      string
@@ -910,15 +834,15 @@ func snapshotPruneCmd() *cobra.Command {
 				return errors.New("specify snapshot ids, or use --keep-last/--before")
 			}
 			if id == "" && dir != "" {
-				if err := bindTrackedDir(dir); err != nil {
+				if err := app.bindTrackedDir(dir); err != nil {
 					return err
 				}
 			}
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			return runSnapshotPrune(cl, prof, args, id, dir, keepLast, before, dryRun, yes)
+			return app.runSnapshotPrune(cl, prof, args, id, dir, keepLast, before, dryRun, yes)
 		},
 	}
 	cmd.Flags().StringVar(&id, "id", "", "scope a retention prune to this resource id")
@@ -936,7 +860,7 @@ type snapshotPruneClient interface {
 	DeleteSnapshot(string) error
 }
 
-func runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit []string, id, dir string, keepLast int, before string, dryRun, yes bool) error {
+func (app *application) runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit []string, id, dir string, keepLast int, before string, dryRun, yes bool) error {
 	cutoff, err := parseSnapshotBefore(before)
 	if err != nil {
 		return err
@@ -957,10 +881,10 @@ func runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit [
 		targets = selectSnapshotsToPrune(snaps, keepLast, cutoff, time.Now())
 	}
 	if len(targets) == 0 {
-		if !flagJSON {
+		if !app.json {
 			fmt.Fprintln(os.Stderr, "nothing to prune")
 		}
-		return finishDestructiveBatch(destructiveBatchReport{Complete: true, DryRun: dryRun, Results: []destructiveBatchResult{}}, "pruned", nil)
+		return app.finishDestructiveBatch(destructiveBatchReport{Complete: true, DryRun: dryRun, Results: []destructiveBatchResult{}}, "pruned", nil)
 	}
 
 	results := newBatchResults(targets)
@@ -980,14 +904,14 @@ func runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit [
 	}
 	if len(failures) > 0 {
 		err = failBatchPreflight(results, failures)
-		return finishDestructiveBatch(destructiveBatchReport{Results: results}, "prune", err)
+		return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "prune", err)
 	}
 
 	if dryRun {
-		if flagJSON {
-			return finishDestructiveBatch(destructiveBatchReport{Complete: true, DryRun: true, Results: results}, "prune", nil)
+		if app.json {
+			return app.finishDestructiveBatch(destructiveBatchReport{Complete: true, DryRun: true, Results: results}, "prune", nil)
 		}
-		return reportPruneTargets(snaps, targets, prof)
+		return app.reportPruneTargets(snaps, targets, prof)
 	}
 	if err := confirmDestructive(fmt.Sprintf("Permanently delete %d snapshot(s)? [y/N] ", len(targets)), yes); err != nil {
 		return err
@@ -999,11 +923,11 @@ func runSnapshotPrune(cl snapshotPruneClient, prof *identity.Profile, explicit [
 				deleteErr = fmt.Errorf("snapshot %s not found (or not yours)", target)
 			}
 			err = markBatchFailure(results, i, deleteErr)
-			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "prune", err)
+			return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "prune", err)
 		}
 		results[i].Status = batchSucceeded
 	}
-	return finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "pruned", nil)
+	return app.finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "pruned", nil)
 }
 
 func parseSnapshotBefore(s string) (time.Duration, error) {
@@ -1059,8 +983,8 @@ func selectSnapshotsToPrune(snaps []api.SnapshotInfo, keepLast int, before time.
 
 // reportPruneTargets prints the snapshots a retention prune selected, for --dry-run
 // or --json inspection, decrypting names locally like `snapshot list`.
-func reportPruneTargets(snaps []api.SnapshotInfo, targets []string, prof *identity.Profile) error {
-	mk, err := unlockMaster(prof)
+func (app *application) reportPruneTargets(snaps []api.SnapshotInfo, targets []string, prof *identity.Profile) error {
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -1075,7 +999,7 @@ func reportPruneTargets(snaps []api.SnapshotInfo, targets []string, prof *identi
 			rows = append(rows, r)
 		}
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(rows)
 	}
 	fmt.Fprintf(os.Stderr, "would prune %d snapshot(s):\n", len(rows))
@@ -1084,7 +1008,7 @@ func reportPruneTargets(snaps []api.SnapshotInfo, targets []string, prof *identi
 
 // --- auto (scheduled opt-out) ---
 
-func snapshotAutoCmd() *cobra.Command {
+func (app *application) snapshotAutoCmd() *cobra.Command {
 	var (
 		id  string
 		on  bool
@@ -1101,17 +1025,17 @@ func snapshotAutoCmd() *cobra.Command {
 				return errors.New("--on and --off are mutually exclusive")
 			}
 			if id == "" && len(args) > 0 {
-				if err := bindTrackedDir(args[0]); err != nil {
+				if err := app.bindTrackedDir(args[0]); err != nil {
 					return err
 				}
 			}
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
 			// No target and no toggle intent: report coverage rather than change it.
 			if len(args) == 0 && id == "" && !on && !off {
-				return printAutoStatus(cl, prof)
+				return app.printAutoStatus(cl, prof)
 			}
 			resourceID, err := resolveResourceID(dirArg(args), id)
 			if err != nil {
@@ -1123,7 +1047,7 @@ func snapshotAutoCmd() *cobra.Command {
 			} else if err != nil {
 				return err
 			}
-			if flagJSON {
+			if app.json {
 				return printJSON(map[string]any{"id": resourceID, "autoSnapshot": enabled})
 			}
 			state := "enabled"
@@ -1152,12 +1076,12 @@ type autoRow struct {
 
 // printAutoStatus lists every resource and whether the scheduled job covers it,
 // decrypting names locally the same way `ls`/`find` do.
-func printAutoStatus(cl *client.Client, prof *identity.Profile) error {
+func (app *application) printAutoStatus(cl *client.Client, prof *identity.Profile) error {
 	items, err := cl.ListResources()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -1170,7 +1094,7 @@ func printAutoStatus(cl *client.Client, prof *identity.Profile) error {
 		}
 		rows = append(rows, autoRow{ID: it.ID, Name: name, Auto: it.AutoSnapshot, Version: it.Version})
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(rows)
 	}
 	if len(rows) == 0 {
@@ -1194,12 +1118,12 @@ func printAutoStatus(cl *client.Client, prof *identity.Profile) error {
 // destDir, reusing the same paths as clone/pull: a folder is untarred or streamed
 // from its objects, a single file is written by its name. It returns the decrypted
 // metadata. The server only ever returned ciphertext and the wrapped key.
-func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.GetSnapshotResponse, destDir string, force bool) (api.Metadata, error) {
+func (app *application) reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.GetSnapshotResponse, destDir string, force bool) (api.Metadata, error) {
 	info := snap.Snapshot
 	if info.WrappedKey == nil {
 		return api.Metadata{}, errors.New("snapshot has no owner key (the resource was public); cannot restore")
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return api.Metadata{}, err
 	}
@@ -1209,7 +1133,7 @@ func reconstructSnapshot(cl *client.Client, prof *identity.Profile, snap api.Get
 		return api.Metadata{}, fmt.Errorf("unwrap snapshot key: %w", err)
 	}
 	defer ck.Wipe()
-	return materializeResource(cl, snapshotAsResource(snap), ck, destDir, force)
+	return app.materializeResource(cl, snapshotAsResource(snap), ck, destDir, force)
 }
 
 // snapshotAsResource adapts a fetched snapshot to the resource shape the materialize
@@ -1229,14 +1153,14 @@ func snapshotAsResource(snap api.GetSnapshotResponse) api.GetResourceResponse {
 // materializeResource decrypts a resource's sealed root under the content key ck and
 // writes its plaintext tree under destDir: a folder is untarred or streamed from its
 // objects, a single file is written by its name. The caller owns ck's lifetime.
-func materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string, force bool) (api.Metadata, error) {
+func (app *application) materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string, force bool) (api.Metadata, error) {
 	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
 		return api.Metadata{}, err
 	}
 	if meta.Kind == api.KindFolder {
 		return meta, materializeStaged(destDir, func(staging string) error {
-			_, err := materializeClone(cl, staging, res, ck)
+			_, err := app.materializeClone(cl, staging, res, ck)
 			return err
 		})
 	}
@@ -1287,7 +1211,7 @@ func materializeResource(cl *client.Client, res api.GetResourceResponse, ck cryp
 // materializeWithMaster unwraps res's content key under the master key, then writes
 // its plaintext tree under destDir. Used by diff, which materializes both sides under
 // one unlocked master key.
-func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetResourceResponse, destDir string) error {
+func (app *application) materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetResourceResponse, destDir string) error {
 	if res.WrappedKey == nil {
 		return errors.New("resource has no owner key (public); cannot decrypt")
 	}
@@ -1296,7 +1220,7 @@ func materializeWithMaster(cl *client.Client, mk crypto.MasterKey, res api.GetRe
 		return fmt.Errorf("unwrap key: %w", err)
 	}
 	defer ck.Wipe()
-	_, err = materializeResource(cl, res, ck, destDir, false) // diff always lands in a fresh temp dir
+	_, err = app.materializeResource(cl, res, ck, destDir, false) // diff always lands in a fresh temp dir
 	return err
 }
 
@@ -1321,4 +1245,46 @@ func resolveResourceID(dir, id string) (string, error) {
 		return "", fmt.Errorf("%s has no synced resource yet; run `aqt sync` first", root)
 	}
 	return st.ID, nil
+}
+
+func (app *application) createSnapshot(dir, id, label string, anchor bool) (api.SnapshotInfo, error) {
+	if id == "" {
+		if err := app.bindTrackedDir(dir); err != nil {
+			return api.SnapshotInfo{}, err
+		}
+	}
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	resourceID, err := resolveResourceID(dir, id)
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	var sealed *crypto.SealedBlob
+	if label != "" {
+		sealed, err = app.sealSnapshotLabel(cl, prof, resourceID, label)
+		if err != nil {
+			return api.SnapshotInfo{}, err
+		}
+	}
+	info, err := cl.CreateSnapshot(resourceID, sealed, anchor)
+	if errors.Is(err, client.ErrNotFound) {
+		return api.SnapshotInfo{}, fmt.Errorf("resource %s not found (or not yours)", resourceID)
+	}
+	if err != nil {
+		return api.SnapshotInfo{}, err
+	}
+	// Fail closed: a server that ignored the anchor field returns an unanchored
+	// (prunable) snapshot, which would be a checkpoint in name only. Drop it
+	// best-effort so no half-checkpoint lingers, and report the misbehavior.
+	if anchor && !info.Anchored {
+		if delErr := cl.DeleteSnapshot(info.ID); delErr != nil {
+			return api.SnapshotInfo{}, fmt.Errorf("server did not anchor the checkpoint, "+
+				"and the unanchored snapshot %s could not be cleaned up (%v); prune it manually and report this server bug", info.ID, delErr)
+		}
+		return api.SnapshotInfo{}, errors.New("server did not anchor the checkpoint; nothing was kept — this is a server bug, report it")
+	}
+
+	return info, nil
 }

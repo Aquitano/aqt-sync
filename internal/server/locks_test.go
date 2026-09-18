@@ -76,3 +76,10 @@ func TestKeyedMutexPrunesReleasedKeys(t *testing.T) {
 		t.Fatalf("after release: map holds %d entries, want 0", n)
 	}
 }
+
+// size reports how many keys are currently held or contended (test-only).
+func (k *keyedMutex) size() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return len(k.locks)
+}

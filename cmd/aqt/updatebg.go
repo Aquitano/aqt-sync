@@ -35,8 +35,8 @@ var backgroundSilent = map[string]bool{
 // maybeBackgroundUpdate runs after a command that succeeded. It is entirely
 // advisory: every failure path returns without a word, because a user who ran
 // `aqt sync` asked about their files and not about this.
-func maybeBackgroundUpdate(cmd *cobra.Command) {
-	if !backgroundUpdateAllowed(cmd) {
+func (app *application) maybeBackgroundUpdate(cmd *cobra.Command) {
+	if !app.backgroundUpdateAllowed(cmd) {
 		return
 	}
 	store, err := updateStore()
@@ -57,7 +57,7 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 		}
 	}
 
-	ctx, cancel := context.WithTimeout(rootCtx, update.BackgroundTimeout)
+	ctx, cancel := context.WithTimeout(app.ctx, update.BackgroundTimeout)
 	defer cancel()
 
 	res, checkErr := update.Check(ctx, update.Options{
@@ -94,7 +94,7 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 	}
 
 	if st.Policy == update.PolicyAuto {
-		if applyInBackground(store, &st, res) {
+		if app.applyInBackground(store, &st, res) {
 			return
 		}
 	}
@@ -105,7 +105,7 @@ func maybeBackgroundUpdate(cmd *cobra.Command) {
 // applyInBackground installs a release under the auto policy. It reports whether
 // it handled the situation, so the caller falls back to a plain notice when this
 // declines.
-func applyInBackground(store update.Store, st *update.State, res update.Result) bool {
+func (app *application) applyInBackground(store update.Store, st *update.State, res update.Result) bool {
 	in, err := update.DetectInstall(update.Build{Version: version, Kind: buildKind})
 	if err != nil || !in.Replaceable() || res.Artifact == nil {
 		return false // notify instead: nothing here is ours to replace
@@ -125,7 +125,7 @@ func applyInBackground(store update.Store, st *update.State, res update.Result) 
 		return true
 	}
 
-	ctx, cancel := context.WithTimeout(rootCtx, backgroundApplyTimeout)
+	ctx, cancel := context.WithTimeout(app.ctx, backgroundApplyTimeout)
 	defer cancel()
 
 	applied, err := applyUpdate(ctx, in, res)
@@ -199,8 +199,8 @@ var onATerminal = func() bool {
 // like a person at a terminal. Machine-readable output, quiet mode, a pipe, and a
 // detached agent all mean something is consuming this output that did not ask for
 // an update notice.
-func backgroundUpdateAllowed(cmd *cobra.Command) bool {
-	if flagJSON || flagQuiet {
+func (app *application) backgroundUpdateAllowed(cmd *cobra.Command) bool {
+	if app.json || app.quiet {
 		return false
 	}
 	if !onATerminal() {

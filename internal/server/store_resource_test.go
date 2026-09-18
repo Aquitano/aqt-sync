@@ -6,12 +6,14 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
-	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // TestResourceMinClientStoredVerbatim covers migration 9's column: a declared
@@ -639,5 +641,85 @@ func TestPutResourceWithSweptRefsFailsNamed(t *testing.T) {
 	}
 	if missing, err := s.MissingChunks(owner, liveIDs); err != nil || len(missing) != 0 {
 		t.Fatalf("live refs after failed update: missing=%v err=%v, want the old roots intact", missing, err)
+	}
+}
+
+// A row whose blob file is missing is an internal inconsistency, not a 404: the
+// read path retries once (covering the update-unlink race) and then surfaces a
+// distinct error for a resource whose row exists.
+func TestMissingBlobIsNotA404(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	owner := h.store.mustAccount(t, "staleblob@example.com")
+	rid := h.store.rootResource(t, owner, nil)
+
+	res, err := h.store.GetResource(rid, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(h.store.blobPath(rid, res.Blob.Nonce)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = h.store.GetResource(rid, owner)
+	if err == nil {
+		t.Fatal("read of a blobless row succeeded")
+	}
+	if errors.Is(err, ErrNotFound) {
+		t.Fatalf("blobless row surfaced as 404: %v", err)
+	}
+}
+
+// Cobra parses a leading dash as a flag cluster, so an id starting with one is
+// unaddressable as a bare CLI positional. Both generators fold it identically, which
+// is what keeps a deterministic decoy handle indistinguishable from a minted id.
+func TestMintedIDsNeverStartWithADash(t *testing.T) {
+	t.Parallel()
+	for range 20_000 {
+		if id := newID(8); id[0] == '-' {
+			t.Fatalf("newID produced %q", id)
+		}
+	}
+	// The decoy generator must fold the same way, or a leading character would
+	// distinguish a decoy from a real handle and reintroduce an existence oracle.
+	if got := newIDFrom([]byte{0xfb, 0xff, 0xff}); got[0] == '-' {
+		t.Fatalf("newIDFrom produced %q", got)
+	}
+}
+
+// TestListResourcesReportsGrantCount covers the per-row grant count the list
+// echoes so `share ls` can skip grant fetches: zero for an ungranted resource
+// (present, not nil — absent means an older server), the live count for a
+// granted one, and the count shrinking on revocation.
+func TestListResourcesReportsGrantCount(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "grantcount@example.com")
+	plain := s.rootResource(t, owner, nil)
+	shared := s.rootResource(t, owner, nil)
+	for _, grantee := range []string{"g1", "g2"} {
+		if err := s.PutGrant(owner, shared, grantee, []byte("wrap"), nil); err != nil {
+			t.Fatalf("put grant %s: %v", grantee, err)
+		}
+	}
+
+	counts := func() map[string]int {
+		items, _, err := s.ListResources(owner, pageParams{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := map[string]int{}
+		for _, it := range items {
+			got[it.ID] = it.GrantCount
+		}
+		return got
+	}
+	if got := counts(); got[plain] != 0 || got[shared] != 2 {
+		t.Fatalf("counts = %v, want %s=0 %s=2", got, plain, shared)
+	}
+	if err := s.DeleteGrant(owner, shared, "g1"); err != nil {
+		t.Fatalf("delete grant: %v", err)
+	}
+	if got := counts(); got[shared] != 1 {
+		t.Fatalf("count after revoke = %d, want 1", got[shared])
 	}
 }

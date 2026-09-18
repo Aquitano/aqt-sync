@@ -23,7 +23,7 @@ type fakeArtifactSource struct {
 	err  error
 }
 
-func (f fakeArtifactSource) FetchArtifact(_ context.Context, _ string, _ Artifact, w io.Writer) error {
+func (f fakeArtifactSource) FetchArtifact(_ context.Context, _ Artifact, w io.Writer) error {
 	if f.err != nil {
 		return f.err
 	}

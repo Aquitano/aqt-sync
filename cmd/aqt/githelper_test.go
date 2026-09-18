@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,7 +50,9 @@ func TestMultiCallArgsDispatchesOnExactName(t *testing.T) {
 // standalone git-remote-aqt from an older release execs, so its shape is a
 // compatibility promise, not just an internal detail.
 func TestMultiCallArgsReachTheHelperSubcommand(t *testing.T) {
-	root := rootCmd()
+	app := &application{ctx: context.Background()}
+
+	root := app.rootCmd()
 	args, _ := multiCallArgs([]string{helperLinkName(), "origin", "aqt::notes"})
 	cmd, flags, err := root.Find(args)
 	if err != nil {
@@ -74,6 +77,8 @@ func TestHelperArgumentsReachTheHelperVerbatim(t *testing.T) {
 }
 
 func TestGitSetupCreatesLinkAndIsIdempotent(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	dir := t.TempDir()
 	exe, err := os.Executable()
 	if err != nil {
@@ -81,13 +86,13 @@ func TestGitSetupCreatesLinkAndIsIdempotent(t *testing.T) {
 	}
 	link := filepath.Join(dir, helperLinkName())
 
-	if err := runGitSetup(dir, false); err != nil {
+	if err := app.runGitSetup(dir, false); err != nil {
 		t.Fatalf("git setup: %v", err)
 	}
 	if !samePath(link, exe) {
 		t.Fatalf("%s does not resolve to the running binary", link)
 	}
-	if err := runGitSetup(dir, false); err != nil {
+	if err := app.runGitSetup(dir, false); err != nil {
 		t.Errorf("second git setup: %v", err)
 	}
 }
@@ -95,20 +100,22 @@ func TestGitSetupCreatesLinkAndIsIdempotent(t *testing.T) {
 // Upgrading from the standalone helper means replacing a real binary that sits
 // under the same name; without --yes and without a terminal, that must not happen.
 func TestGitSetupReplacesAnExistingHelperOnlyWithConsent(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	dir := t.TempDir()
 	link := filepath.Join(dir, helperLinkName())
 	if err := os.WriteFile(link, []byte("old standalone helper"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := runGitSetup(dir, false); err == nil {
+	if err := app.runGitSetup(dir, false); err == nil {
 		t.Error("git setup replaced an existing helper without confirmation")
 	}
 	if data, err := os.ReadFile(link); err != nil || string(data) != "old standalone helper" {
 		t.Fatalf("existing helper was modified: %q, %v", data, err)
 	}
 
-	if err := runGitSetup(dir, true); err != nil {
+	if err := app.runGitSetup(dir, true); err != nil {
 		t.Fatalf("git setup -y: %v", err)
 	}
 	exe, err := os.Executable()

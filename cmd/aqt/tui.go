@@ -16,7 +16,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-func tuiCmd() *cobra.Command {
+func (app *application) tuiCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "tui [dir]",
 		Short: "Interactive terminal UI for sync, snapshots, and shares",
@@ -33,22 +33,22 @@ func tuiCmd() *cobra.Command {
 			if len(args) == 1 {
 				dir = args[0]
 			}
-			return runTUI(dir, len(args) == 1)
+			return app.runTUI(dir, len(args) == 1)
 		},
 	}
 }
 
 // explicitDir reports whether the user named the directory themselves: then a
 // non-tracked path is an error, not a silent fall-back to account-wide mode.
-func runTUI(dir string, explicitDir bool) error {
+func (app *application) runTUI(dir string, explicitDir bool) error {
 	if !term.IsTerminal(int(os.Stdout.Fd())) {
 		return errors.New("the TUI needs a terminal")
 	}
-	prof, err := loadProfile()
+	prof, err := app.loadProfile()
 	if err != nil {
 		return fmt.Errorf("%w — run `aqt login` first", err)
 	}
-	cl, err := newBoundClient(prof.Server, prof.Token)
+	cl, err := app.newBoundClient(prof.Server, prof.Token)
 	if err != nil {
 		return err
 	}
@@ -56,7 +56,7 @@ func runTUI(dir string, explicitDir bool) error {
 	if err != nil {
 		return err
 	}
-	ctx := &tuiCtx{prof: prof, cl: cl, exe: exe}
+	ctx := &tuiCtx{app: app, prof: prof, cl: cl, exe: exe}
 	if mk, ok := identity.LoadSession(prof.Name); ok {
 		ctx.mk = mk
 		ctx.unlocked = true

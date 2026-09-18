@@ -90,8 +90,7 @@ aqt share secret.env --expire 24h
 aqt ls -l
 ```
 
-Most commands accept a unique name, an id, or a tracked path. `aqt <path>` alone is
-shorthand for `aqt push <path>`.
+Most commands accept a unique name, an id, or a tracked path.
 
 Track a folder and sync it two-way:
 
@@ -116,10 +115,11 @@ git push -u origin main
 
 - `aqt tui` opens a lazygit-style dashboard for the tracked folder you are in. Every
   action runs the matching `aqt` command and streams its output into a log pane.
-- `aqt snapshot list|diff|export|prune` manages folder snapshots. `aqt checkpoint
+- `aqt snapshot list|diff|prune` manages folder snapshots. `aqt checkpoint
   <name>` takes one that retention never prunes, and `aqt restore <name>` brings it back.
-- `aqt watch` keeps a tracked folder in sync from file events, in the foreground or as a
-  background agent (`aqt agent start`).
+  Use `aqt restore <name-or-id> --out <dir>` to write a plaintext copy elsewhere.
+- `aqt watch` keeps a tracked folder in sync from file events in the foreground.
+  `aqt agent start` runs it in the background.
 - `aqt share <id> --with <email>` grants read-only access to another account. Verify
   their fingerprint out-of-band with `aqt contacts verify <email>`.
 - `aqt update` installs a newer release after verifying its signed manifest.

@@ -89,7 +89,7 @@ func TestTakeInlinesSmallAndChunksLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	byPath := m.byPath()
+	byPath := m.ByPath()
 	small, ok := byPath["small.txt"]
 	if !ok || small.Inline == nil || len(small.Chunks) != 0 {
 		t.Fatalf("small file should be inline, got %+v", small)

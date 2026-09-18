@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -49,7 +50,7 @@ func TestDiffTreesIdentical(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Empty() {
+	if len(d.Changes) != 0 || len(d.Renamed) != 0 {
 		t.Fatalf("identical trees diffed non-empty: %+v", d.Changes)
 	}
 }
@@ -66,7 +67,7 @@ func TestDiffTreesIgnoresControlDir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Empty() {
+	if len(d.Changes) != 0 || len(d.Renamed) != 0 {
 		t.Fatalf("control dir leaked into diff: %+v", d.Changes)
 	}
 }
@@ -74,7 +75,9 @@ func TestDiffTreesIgnoresControlDir(t *testing.T) {
 // A snapshot diffed against the live resource reports exactly the files that changed
 // after the snapshot was taken, decrypting both sides on the client.
 func TestSnapshotDiffAgainstLive(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -84,7 +87,7 @@ func TestSnapshotDiffAgainstLive(t *testing.T) {
 	writeTree(t, src, "sub/b.txt", "original B")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,12 +102,12 @@ func TestSnapshotDiffAgainstLive(t *testing.T) {
 	writeTree(t, src, "c.txt", "new C")
 	h.sync(src)
 
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mk.Wipe()
-	got, err := computeSnapshotDiff(cl, mk, snap.ID, "")
+	got, err := app.computeSnapshotDiff(cl, mk, snap.ID, "")
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}
@@ -118,7 +121,9 @@ func TestSnapshotDiffAgainstLive(t *testing.T) {
 
 // Diffing two snapshots reports the delta between the versions they captured.
 func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -127,7 +132,7 @@ func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
 	writeTree(t, src, "a.txt", "v1")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,12 +149,12 @@ func TestSnapshotDiffSnapshotToSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mk.Wipe()
-	got, err := computeSnapshotDiff(cl, mk, first.ID, second.ID)
+	got, err := app.computeSnapshotDiff(cl, mk, first.ID, second.ID)
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}

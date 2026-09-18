@@ -43,7 +43,7 @@ type lsOptions struct {
 	reverse    bool
 }
 
-func lsCmd() *cobra.Command {
+func (app *application) lsCmd() *cobra.Command {
 	opts := lsOptions{sortBy: "name"}
 	cmd := &cobra.Command{
 		Use:   "ls [folder-name-or-ref[/path]]",
@@ -58,20 +58,20 @@ func lsCmd() *cobra.Command {
 			if len(args) > 0 && opts != (lsOptions{sortBy: "name"}) {
 				return errors.New("resource list flags cannot be used when listing inside a folder")
 			}
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
-			mk, err := unlockMaster(prof)
+			mk, err := app.unlockMaster(prof)
 			if err != nil {
 				return err
 			}
 			defer mk.Wipe()
 
 			if len(args) > 0 {
-				return runLsFolder(cl, mk, args[0])
+				return app.runLsFolder(cl, mk, args[0])
 			}
-			return listResources(cl, mk, opts)
+			return app.listResources(cl, mk, opts)
 		},
 	}
 	f := cmd.Flags()
@@ -85,7 +85,7 @@ func lsCmd() *cobra.Command {
 	return cmd
 }
 
-func listResources(cl *client.Client, mk crypto.MasterKey, opts lsOptions) error {
+func (app *application) listResources(cl *client.Client, mk crypto.MasterKey, opts lsOptions) error {
 	rows, err := collectResources(cl, mk)
 	if err != nil {
 		return err
@@ -94,7 +94,7 @@ func listResources(cl *client.Client, mk crypto.MasterKey, opts lsOptions) error
 	if err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(rows)
 	}
 	if len(rows) == 0 {

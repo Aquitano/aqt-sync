@@ -8,11 +8,12 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"testing"
+	"time"
+
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/cryptotest"
-	"testing"
-	"time"
 )
 
 // forceGC sweeps ignoring the age guard (cutoff in the future), so a test does

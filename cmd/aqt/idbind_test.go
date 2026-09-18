@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -22,7 +23,9 @@ import (
 // re-seals both bound to it. Reads open bound-only, so a create path that skipped the
 // bind would leave content nothing can open — assert the stored form per create path.
 func TestCreatesSealIDBound(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 
 	inline := filepath.Join(t.TempDir(), "note.txt")
 	body := []byte("inline body")
@@ -30,7 +33,7 @@ func TestCreatesSealIDBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	printed := strings.TrimSpace(captureStdout(t, func() {
-		if err := pushQuiet(inline, pushOptions{}); err != nil {
+		if err := app.pushQuiet(inline, pushOptions{}); err != nil {
 			t.Fatalf("push: %v", err)
 		}
 	}))
@@ -39,12 +42,12 @@ func TestCreatesSealIDBound(t *testing.T) {
 		t.Fatalf("could not parse id from push output %q", printed)
 	}
 
-	streamID, _, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{})
+	streamID, _, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{})
 
 	dir := t.TempDir()
 	h.init(dir)
 
-	if err := runRepoCreate("bound", 64); err != nil {
+	if err := app.runRepoCreate("bound", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 
@@ -56,14 +59,14 @@ func TestCreatesSealIDBound(t *testing.T) {
 		{"inline push", inlineID, crypto.AADBlob},
 		{"streamed push", streamID, crypto.AADBlob},
 		{"folder init", h.folderID(dir), crypto.AADTreeRoot},
-		{"git remote create", gitRemoteIDForTest(t, "bound"), crypto.AADGitRefsRoot},
+		{"git remote create", app.gitRemoteIDForTest(t, "bound"), crypto.AADGitRefsRoot},
 	} {
-		assertSealedIDBound(t, tc.what, tc.id, tc.role)
+		app.assertSealedIDBound(t, tc.what, tc.id, tc.role)
 	}
 
 	// A create followed by a read, end to end on the bound-only path.
 	out := filepath.Join(t.TempDir(), "note.txt")
-	if err := runPull(inlineID, out, "", false, false); err != nil {
+	if err := app.runPull(inlineID, out, "", false, false); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	got, err := os.ReadFile(out)
@@ -79,8 +82,10 @@ func TestCreatesSealIDBound(t *testing.T) {
 // a failed write: the resource is bound and readable, and deleting it would take the
 // share link a public push has already issued with it.
 func TestBindSurvivesLostResponse(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	var dropped atomic.Bool
-	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		// The create is a POST; the PUT that follows is the id-binding write. Let it
 		// reach the server, then throw its answer away as a dropped connection would.
 		if r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && dropped.CompareAndSwap(false, true) {
@@ -107,7 +112,7 @@ func TestBindSurvivesLostResponse(t *testing.T) {
 		t.Fatal(err)
 	}
 	printed := strings.TrimSpace(captureStdout(t, func() {
-		if err := pushQuiet(src, pushOptions{public: true}); err != nil {
+		if err := app.pushQuiet(src, pushOptions{public: true}); err != nil {
 			t.Fatalf("push: %v", err)
 		}
 	}))
@@ -118,10 +123,10 @@ func TestBindSurvivesLostResponse(t *testing.T) {
 	if id == "" || fragment == "" {
 		t.Fatalf("public push printed no usable share link: %q", printed)
 	}
-	assertSealedIDBound(t, "inline push whose bind response was lost", id, crypto.AADBlob)
+	app.assertSealedIDBound(t, "inline push whose bind response was lost", id, crypto.AADBlob)
 
 	out := filepath.Join(t.TempDir(), "note.txt")
-	if err := runPull(id, out, "", false, false); err != nil {
+	if err := app.runPull(id, out, "", false, false); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	got, err := os.ReadFile(out)
@@ -136,8 +141,10 @@ func TestBindSurvivesLostResponse(t *testing.T) {
 // A bind that definitively fails still takes the first version with it: that version
 // is sealed unbound, so it opens for nobody and would only strand an orphan.
 func TestBindFailureDeletesUnboundResource(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	var refused atomic.Bool
-	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && refused.CompareAndSwap(false, true) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
@@ -151,14 +158,14 @@ func TestBindFailureDeletesUnboundResource(t *testing.T) {
 	if err := os.WriteFile(src, []byte("never becomes readable"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := pushQuiet(src, pushOptions{})
+	err := app.pushQuiet(src, pushOptions{})
 	if err == nil {
 		t.Fatal("push must fail when the id-binding write cannot land")
 	}
 	if !strings.Contains(err.Error(), "bind resource") {
 		t.Fatalf("error does not name the failed bind: %v", err)
 	}
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,9 +180,9 @@ func TestBindFailureDeletesUnboundResource(t *testing.T) {
 
 // assertSealedIDBound fails unless the resource's body and metadata open under the
 // id-bound (v2) AAD and no longer open under the unbound (v1) role tag.
-func assertSealedIDBound(t *testing.T, what, id string, role []byte) {
+func (app *application) assertSealedIDBound(t *testing.T, what, id string, role []byte) {
 	t.Helper()
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,9 +215,9 @@ func assertSealedIDBound(t *testing.T, what, id string, role []byte) {
 	}
 }
 
-func gitRemoteIDForTest(t *testing.T, name string) string {
+func (app *application) gitRemoteIDForTest(t *testing.T, name string) string {
 	t.Helper()
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}

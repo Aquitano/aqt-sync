@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"os"
 	"path/filepath"
@@ -19,7 +20,9 @@ import (
 // store the list indirectly (as sealed segments) and still round-trip byte-for-byte
 // through the two-phase pull.
 func TestStreamingIndirectChunkListPushPull(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
 
 	src := filepath.Join(t.TempDir(), "huge.bin")
 	// 64 MiB is ~256 chunks at the large profile's 256K average, comfortably past
@@ -33,11 +36,11 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 	if err := os.WriteFile(src, data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushQuiet(src, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(src, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +80,7 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "out.bin")
-	if err := runPull(id, out, "", false, false); err != nil {
+	if err := app.runPull(id, out, "", false, false); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	got, err := os.ReadFile(out)
@@ -92,7 +95,9 @@ func TestStreamingIndirectChunkListPushPull(t *testing.T) {
 // TestStreamingSingleFilePushPull pushes a file above the threshold and checks it
 // took the packed path and round-trips byte-for-byte through pull and cat.
 func TestStreamingSingleFilePushPull(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 
 	src := filepath.Join(t.TempDir(), "big.bin")
 	data := make([]byte, 9<<20) // above streamThreshold
@@ -103,14 +108,14 @@ func TestStreamingSingleFilePushPull(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := pushQuiet(src, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(src, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	if h.countPacks() == 0 {
 		t.Fatal("streaming push uploaded no packs")
 	}
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +144,7 @@ func TestStreamingSingleFilePushPull(t *testing.T) {
 	}
 
 	out := filepath.Join(t.TempDir(), "out.bin")
-	if err := runPull(id, out, "", false, false); err != nil {
+	if err := app.runPull(id, out, "", false, false); err != nil {
 		t.Fatalf("pull: %v", err)
 	}
 	got, err := os.ReadFile(out)
@@ -151,7 +156,7 @@ func TestStreamingSingleFilePushPull(t *testing.T) {
 	}
 
 	captured := captureStdout(t, func() {
-		if err := runPull(id, "", "", true, false); err != nil {
+		if err := app.runPull(id, "", "", true, false); err != nil {
 			t.Fatalf("cat: %v", err)
 		}
 	})

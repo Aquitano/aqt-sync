@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -16,7 +17,9 @@ import (
 // healing pass the emptied directory vanished locally and the next sync pushed
 // that as a fleet-wide directory delete (issue #175).
 func TestPullEmptyingTrackedDirKeepsIt(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "docs/only.txt", "content")

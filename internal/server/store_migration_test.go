@@ -5,12 +5,13 @@ package server
 import (
 	"database/sql"
 	"fmt"
-	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // countBlobs returns the number of blob files anywhere under dir. Blobs fan out by

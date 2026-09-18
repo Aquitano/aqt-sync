@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,7 +16,9 @@ import (
 // disk since the last sync is reported as one `renamed old -> new` line, not as a
 // new-and-deleted pair.
 func TestStatusLocalRename(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
 	writeTree(t, src, "a.txt", "content")
@@ -23,7 +26,7 @@ func TestStatusLocalRename(t *testing.T) {
 
 	renameOnDisk(t, src, "a.txt", "b.txt")
 
-	out := captureStdout(t, func() { mustStatusOpts(t, src, statusOptions{offline: true}) })
+	out := captureStdout(t, func() { app.mustStatusOpts(t, src, statusOptions{offline: true}) })
 	if !strings.Contains(out, "renamed") || !strings.Contains(out, "a.txt -> b.txt") {
 		t.Fatalf("status did not report the rename:\n%s", out)
 	}
@@ -35,7 +38,9 @@ func TestStatusLocalRename(t *testing.T) {
 // TestSyncDryRunLocalRename covers the dry-run plan: a local file rename coalesces
 // into one `renamed old -> new` line instead of the upload+delete-remote pair.
 func TestSyncDryRunLocalRename(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
 	writeTree(t, src, "a.txt", "content")
@@ -56,7 +61,9 @@ func TestSyncDryRunLocalRename(t *testing.T) {
 // two files plus a nested subdir collapses to a single `renamed olddir/ -> newdir/`
 // line, with no per-file upload/delete lines and no directory action lines.
 func TestSyncDryRunDirRename(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
 	writeTree(t, src, "d/a.txt", "one")
@@ -85,7 +92,9 @@ func TestSyncDryRunDirRename(t *testing.T) {
 // TestSnapshotDiffRename covers the content-addressed snapshot diff: a file renamed
 // after the snapshot is reported as a rename pair, not as an add plus a remove.
 func TestSnapshotDiffRename(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -95,7 +104,7 @@ func TestSnapshotDiffRename(t *testing.T) {
 	writeTree(t, src, "keep.txt", "stays")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,12 +116,12 @@ func TestSnapshotDiffRename(t *testing.T) {
 	renameOnDisk(t, src, "a.txt", "b.txt")
 	h.sync(src)
 
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer mk.Wipe()
-	got, err := computeSnapshotDiff(cl, mk, snap.ID, "")
+	got, err := app.computeSnapshotDiff(cl, mk, snap.ID, "")
 	if err != nil {
 		t.Fatalf("diff: %v", err)
 	}
@@ -134,7 +143,7 @@ func TestDiffIncomingRename(t *testing.T) {
 		{Path: "b.txt", Hash: "H", Mode: 0o644},
 	}}
 
-	got := diffIncoming(base, remote)
+	got := newChangeSet(syncengine.Diff(base, remote))
 	if len(got.renamed) != 1 || got.renamed[0].From != "a.txt" || got.renamed[0].To != "b.txt" {
 		t.Fatalf("renamed = %v, want [a.txt -> b.txt]", got.renamed)
 	}
@@ -150,7 +159,9 @@ func TestDiffIncomingRename(t *testing.T) {
 // break the apply path: a real sync after a rename leaves both the local tree and
 // the server clean.
 func TestSyncRenameThenClean(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	src := t.TempDir()
 	h.init(src)
 	writeTree(t, src, "a.txt", "content")
@@ -159,7 +170,7 @@ func TestSyncRenameThenClean(t *testing.T) {
 	renameOnDisk(t, src, "a.txt", "b.txt")
 	h.sync(src)
 
-	out := captureStdout(t, func() { mustStatus(t, src) })
+	out := captureStdout(t, func() { app.mustStatus(t, src) })
 	if !strings.Contains(out, "clean (no local changes since last sync)") {
 		t.Errorf("post-rename sync left local changes:\n%s", out)
 	}

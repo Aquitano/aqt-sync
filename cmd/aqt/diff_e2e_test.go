@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -16,7 +17,9 @@ import (
 )
 
 func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "notes/a.txt", "one\ntwo\nthree\n")
@@ -30,7 +33,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.sync(origin)
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,7 +54,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 
 	var runErr error
 	localOut := captureStdout(t, func() {
-		runErr = runDiff(replica, []string{"notes"}, diffOptions{})
+		runErr = app.runDiff(replica, []string{"notes"}, diffOptions{})
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -65,7 +68,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 		t.Fatalf("path filter leaked skip.txt:\n%s", localOut)
 	}
 	chunkedOut := captureStdout(t, func() {
-		runErr = runDiff(replica, []string{"chunked.txt"}, diffOptions{})
+		runErr = app.runDiff(replica, []string{"chunked.txt"}, diffOptions{})
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -75,7 +78,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 	}
 
 	binaryOut := captureStdout(t, func() {
-		runErr = runDiff(replica, []string{"blob.bin"}, diffOptions{})
+		runErr = app.runDiff(replica, []string{"blob.bin"}, diffOptions{})
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -87,7 +90,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 	writeTree(t, origin, "notes/a.txt", "ONE\ntwo\nthree\n")
 	h.sync(origin)
 	remoteOut := captureStdout(t, func() {
-		runErr = runDiff(replica, nil, diffOptions{remote: true})
+		runErr = app.runDiff(replica, nil, diffOptions{remote: true})
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -100,7 +103,7 @@ func TestDiffLocalRemoteSnapshotAndBinary(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshotOut := captureStdout(t, func() {
-		runErr = runDiff(replica, []string{"notes/a.txt"}, diffOptions{against: snapshot.ID})
+		runErr = app.runDiff(replica, []string{"notes/a.txt"}, diffOptions{against: snapshot.ID})
 	})
 	if runErr != nil {
 		t.Fatal(runErr)
@@ -147,9 +150,11 @@ func (w *countingWriter) Write(b []byte) (int, error) {
 // arbitrarily larger than the answer, and the reconstruction lands in the shared temp
 // directory in plaintext.
 func TestDiffAgainstSnapshotPathLevelSkipsContent(t *testing.T) {
+	app := &application{ctx: context.Background()}
+
 	var counting atomic.Bool
 	var served atomic.Int64
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if counting.Load() {
 			pass(&countingWriter{ResponseWriter: w, n: &served}, r)
 			return
@@ -172,7 +177,7 @@ func TestDiffAgainstSnapshotPathLevelSkipsContent(t *testing.T) {
 	writeTree(t, origin, "notes.txt", "one\n")
 	h.sync(origin)
 
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +192,7 @@ func TestDiffAgainstSnapshotPathLevelSkipsContent(t *testing.T) {
 	counting.Store(true)
 	var runErr error
 	out := captureStdout(t, func() {
-		runErr = runDiff(origin, nil, diffOptions{against: snapshot.ID, nameStatus: true})
+		runErr = app.runDiff(origin, nil, diffOptions{against: snapshot.ID, nameStatus: true})
 	})
 	counting.Store(false)
 	if runErr != nil {

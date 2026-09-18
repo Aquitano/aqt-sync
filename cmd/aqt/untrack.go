@@ -19,7 +19,7 @@ import (
 // pointing at nothing: every sync fails with "not found on the server" and `aqt init`
 // refuses the directory because .aqt exists. Without this the only recovery is
 // `rm -rf .aqt`, which nothing tells the user about.
-func untrackCmd() *cobra.Command {
+func (app *application) untrackCmd() *cobra.Command {
 	var (
 		deleteRemote bool
 		keepRemote   bool
@@ -37,7 +37,7 @@ func untrackCmd() *cobra.Command {
 			if deleteRemote && keepRemote {
 				return errors.New("--delete-remote and --keep-remote contradict each other; pass one")
 			}
-			return runUntrack(dirArg(args), deleteRemote, yes)
+			return app.runUntrack(dirArg(args), deleteRemote, yes)
 		},
 	}
 	cmd.Flags().BoolVar(&deleteRemote, "delete-remote", false, "also delete the server-side resource")
@@ -46,7 +46,7 @@ func untrackCmd() *cobra.Command {
 	return cmd
 }
 
-func runUntrack(dir string, deleteRemote, assumeYes bool) error {
+func (app *application) runUntrack(dir string, deleteRemote, assumeYes bool) error {
 	root, err := trackedRoot(dir)
 	if err != nil {
 		return err
@@ -87,7 +87,7 @@ func runUntrack(dir string, deleteRemote, assumeYes bool) error {
 			return fmt.Errorf("read folder state: %w (cannot delete the remote resource without it; "+
 				"re-run without --delete-remote to stop tracking locally)", stateErr)
 		}
-		if err := runRemove([]string{root}, false, true); err != nil {
+		if err := app.runRemove([]string{root}, false, true); err != nil {
 			return fmt.Errorf("%w\n%s is still tracked; if the resource is already gone, "+
 				"re-run `aqt untrack` without --delete-remote", err, root)
 		}

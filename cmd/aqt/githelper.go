@@ -59,13 +59,13 @@ func helperLinkName() string {
 	return helperName
 }
 
-func gitCmd() *cobra.Command {
+func (app *application) gitCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "git", Short: "Wire Git up to aqt:: remotes", Args: cobra.NoArgs}
-	cmd.AddCommand(gitSetupCmd())
+	cmd.AddCommand(app.gitSetupCmd())
 	return cmd
 }
 
-func gitSetupCmd() *cobra.Command {
+func (app *application) gitSetupCmd() *cobra.Command {
 	var dir string
 	var yes bool
 	cmd := &cobra.Command{
@@ -82,7 +82,7 @@ Re-running this is safe; it reports a link that is already correct and changes
 nothing.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runGitSetup(dir, yes)
+			return app.runGitSetup(dir, yes)
 		},
 	}
 	cmd.Flags().StringVar(&dir, "dir", "", "directory to create the link in (default: beside this binary)")
@@ -101,7 +101,7 @@ type gitSetupReport struct {
 	Created bool   `json:"created"`
 }
 
-func runGitSetup(dir string, assumeYes bool) error {
+func (app *application) runGitSetup(dir string, assumeYes bool) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return fmt.Errorf("locating the running executable: %w", err)
@@ -118,7 +118,7 @@ func runGitSetup(dir string, assumeYes bool) error {
 	report := gitSetupReport{Link: link, Target: exe}
 
 	if samePath(link, exe) {
-		if !flagJSON {
+		if !app.json {
 			fmt.Printf("%s already points at this binary\n", link)
 		}
 	} else {
@@ -138,9 +138,9 @@ func runGitSetup(dir string, assumeYes bool) error {
 			return fmt.Errorf("creating %s: %w", link, err)
 		}
 		report.Method, report.Created = method, true
-		if !flagJSON {
+		if !app.json {
 			fmt.Printf("installed %s (%s)\n", link, method)
-			if method != "symlink" && !flagQuiet {
+			if method != "symlink" && !app.quiet {
 				fmt.Printf("note: a %s does not follow `aqt update`; re-run `aqt git setup` after upgrading\n", method)
 			}
 		}
@@ -150,7 +150,7 @@ func runGitSetup(dir string, assumeYes bool) error {
 	// warning is worth emitting even when the link was already correct or the caller
 	// asked for JSON; it goes to stderr and leaves the report intact.
 	warnHelperUnreachable(link)
-	if flagJSON {
+	if app.json {
 		return printJSON(report)
 	}
 	return nil

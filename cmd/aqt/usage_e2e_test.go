@@ -3,19 +3,22 @@
 package main
 
 import (
+	"context"
 	"path/filepath"
 	"testing"
 )
 
 func TestUsageE2E(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	dir := filepath.Join(t.TempDir(), "tree")
 	writeTree(t, dir, "notes.txt", "usage e2e file one")
 	writeTree(t, dir, "sub/b.txt", "usage e2e file two")
 	h.init(dir)
 	h.sync(dir)
 
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatalf("authed client: %v", err)
 	}
@@ -30,10 +33,10 @@ func TestUsageE2E(t *testing.T) {
 		t.Fatalf("usage = %+v, want 1 resource and 1 device", u)
 	}
 
-	if err := runUsage(true); err != nil {
+	if err := app.runUsage(true); err != nil {
 		t.Fatalf("runUsage json: %v", err)
 	}
-	if err := runUsage(false); err != nil {
+	if err := app.runUsage(false); err != nil {
 		t.Fatalf("runUsage table: %v", err)
 	}
 }

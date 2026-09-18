@@ -120,7 +120,7 @@ func TestDiffTreeRootsIdenticalRootsFetchNothing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !d.Empty() {
+	if len(d.Changes) != 0 || len(d.Renamed) != 0 {
 		t.Fatalf("identical roots diffed non-empty: %+v", d)
 	}
 	if len(f.requested) != 0 {

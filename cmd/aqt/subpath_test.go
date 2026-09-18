@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,11 +53,13 @@ func subpathFixture(t *testing.T, h *e2eHarness) (src, id string) {
 }
 
 func TestPullSubpathSingleFile(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
 
 	dest := filepath.Join(t.TempDir(), "out.txt")
-	if err := runPull("aqt://"+id+"/docs/notes.txt", dest, "", false, false); err != nil {
+	if err := app.runPull("aqt://"+id+"/docs/notes.txt", dest, "", false, false); err != nil {
 		t.Fatalf("pull subpath: %v", err)
 	}
 	if got, err := os.ReadFile(dest); err != nil || string(got) != "hello subpath" {
@@ -65,25 +68,27 @@ func TestPullSubpathSingleFile(t *testing.T) {
 
 	// A chunked file streams from its packs the same way.
 	destBig := filepath.Join(t.TempDir(), "big.bin")
-	if err := runPull("aqt://"+id+"/big.bin", destBig, "", false, false); err != nil {
+	if err := app.runPull("aqt://"+id+"/big.bin", destBig, "", false, false); err != nil {
 		t.Fatalf("pull chunked subpath: %v", err)
 	}
 	if got, err := os.ReadFile(destBig); err != nil || string(got) != strings.Repeat("chunky data ", 20000) {
 		t.Fatalf("chunked pull corrupt (len %d, err %v)", len(got), err)
 	}
 
-	if err := runPull("aqt://"+id+"/docs/missing.txt", filepath.Join(t.TempDir(), "x"), "", false, false); err == nil ||
+	if err := app.runPull("aqt://"+id+"/docs/missing.txt", filepath.Join(t.TempDir(), "x"), "", false, false); err == nil ||
 		!strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing subpath err = %v, want path-not-found", err)
 	}
 }
 
 func TestPullSubpathDirectory(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
 
 	dest := filepath.Join(t.TempDir(), "docs-copy")
-	if err := runPull("aqt://"+id+"/docs", dest, "", false, false); err != nil {
+	if err := app.runPull("aqt://"+id+"/docs", dest, "", false, false); err != nil {
 		t.Fatalf("pull subtree: %v", err)
 	}
 	if got := readTree(t, dest, "notes.txt"); got != "hello subpath" {
@@ -98,29 +103,33 @@ func TestPullSubpathDirectory(t *testing.T) {
 	}
 
 	// cat of a directory is refused with guidance rather than dumping bytes.
-	if err := runPull("aqt://"+id+"/docs", "", "", true, false); err == nil ||
+	if err := app.runPull("aqt://"+id+"/docs", "", "", true, false); err == nil ||
 		!strings.Contains(err.Error(), "is a directory") {
 		t.Fatalf("cat of a directory err = %v, want refusal", err)
 	}
 }
 
 func TestPullFolderWithoutSubpathIsGuided(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
-	err := runPull("aqt://"+id, "", "", true, false)
+	err := app.runPull("aqt://"+id, "", "", true, false)
 	if err == nil || !strings.Contains(err.Error(), "is a folder") {
 		t.Fatalf("pull of a folder err = %v, want folder guidance", err)
 	}
 }
 
 func TestLsFolderSubpath(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	_, id := subpathFixture(t, h)
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}

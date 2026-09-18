@@ -3,9 +3,8 @@
 package main
 
 import (
-	"bytes"
+	"context"
 	"errors"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +18,9 @@ import (
 // info shows decrypted metadata, cat decrypts to stdout byte-for-byte, and rm
 // deletes the resource so a later fetch 404s.
 func TestInfoCatRm(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
 
 	fdir := t.TempDir()
 	fpath := filepath.Join(fdir, "secret.env")
@@ -27,11 +28,11 @@ func TestInfoCatRm(t *testing.T) {
 	if err := os.WriteFile(fpath, content, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +55,7 @@ func TestInfoCatRm(t *testing.T) {
 	}
 
 	out := captureStdout(t, func() {
-		if err := runInfo(id, "", false); err != nil {
+		if err := app.runInfo(id, "", false); err != nil {
 			t.Fatalf("info: %v", err)
 		}
 	})
@@ -63,7 +64,7 @@ func TestInfoCatRm(t *testing.T) {
 	}
 
 	out = captureStdout(t, func() {
-		if err := runPull(id, "", "", true, false); err != nil {
+		if err := app.runPull(id, "", "", true, false); err != nil {
 			t.Fatalf("cat: %v", err)
 		}
 	})
@@ -71,14 +72,14 @@ func TestInfoCatRm(t *testing.T) {
 		t.Errorf("cat output = %q, want %q", out, content)
 	}
 
-	if err := runRemove([]string{id}, false, true); err != nil {
+	if err := app.runRemove([]string{id}, false, true); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	if _, err := cl.GetResource(id); !errors.Is(err, client.ErrNotFound) {
 		t.Errorf("after rm, GetResource err = %v, want ErrNotFound", err)
 	}
 	// A second rm of the same id reports it gone rather than succeeding silently.
-	if err := runRemove([]string{id}, false, true); err == nil || !strings.Contains(err.Error(), "not found") {
+	if err := app.runRemove([]string{id}, false, true); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Errorf("rm of deleted id err = %v, want a not-found error", err)
 	}
 }
@@ -87,8 +88,10 @@ func TestInfoCatRm(t *testing.T) {
 // pinning its ciphertext (still fetchable), while --with-snapshots cascades the delete
 // so nothing keeps the data alive.
 func TestRmSnapshotSemantics(t *testing.T) {
-	newE2E(t)
-	cl, prof, err := authedClient()
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +106,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := pushQuiet(p, pushOptions{noClip: true}); err != nil {
+		if err := app.pushQuiet(p, pushOptions{noClip: true}); err != nil {
 			t.Fatalf("push %s: %v", name, err)
 		}
 		rows, err := collectResources(cl, mk)
@@ -124,7 +127,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 	if _, err := cl.CreateSnapshot(kept, nil, false); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if err := runRemove([]string{kept}, false, true); err != nil {
+	if err := app.runRemove([]string{kept}, false, true); err != nil {
 		t.Fatalf("rm: %v", err)
 	}
 	if snaps, err := cl.ListSnapshots(kept); err != nil || len(snaps) != 1 {
@@ -136,7 +139,7 @@ func TestRmSnapshotSemantics(t *testing.T) {
 	if _, err := cl.CreateSnapshot(cascade, nil, false); err != nil {
 		t.Fatalf("snapshot: %v", err)
 	}
-	if err := runRemove([]string{cascade}, true, true); err != nil {
+	if err := app.runRemove([]string{cascade}, true, true); err != nil {
 		t.Fatalf("rm --with-snapshots: %v", err)
 	}
 	if snaps, err := cl.ListSnapshots(cascade); err != nil || len(snaps) != 0 {
@@ -144,64 +147,44 @@ func TestRmSnapshotSemantics(t *testing.T) {
 	}
 }
 
-// captureStdout redirects os.Stdout for the duration of fn and returns what it
-// wrote, so a test can assert on the human-facing output of cat/info.
-func captureStdout(t *testing.T, fn func()) string {
-	t.Helper()
-	orig := os.Stdout
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	os.Stdout = w
-	done := make(chan string, 1)
-	go func() {
-		var b bytes.Buffer
-		_, _ = io.Copy(&b, r)
-		done <- b.String()
-	}()
-	fn()
-	_ = w.Close()
-	os.Stdout = orig
-	return <-done
-}
-
 // TestEverydayResourceRefsAndRename covers issue #90's common loop end to end:
 // rename by name, inspect/share/delete by the renamed name, and retain content.
 func TestEverydayResourceRefsAndRename(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
 	path := filepath.Join(t.TempDir(), "original.txt")
 	const body = "metadata-only rename keeps these bytes"
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushQuiet(path, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(path, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
-	if err := runShare("original.txt", "", true, linkPolicy{maxReads: 3, onExpiry: "retire"}); err != nil {
+	if err := app.runShare("original.txt", "", true, linkPolicy{maxReads: 3, onExpiry: "retire"}); err != nil {
 		t.Fatalf("share by name: %v", err)
 	}
-	if err := runRename("original.txt", "renamed.txt"); err != nil {
+	if err := app.runRename("original.txt", "renamed.txt"); err != nil {
 		t.Fatalf("rename by name: %v", err)
 	}
 	out := captureStdout(t, func() {
-		if err := runInfo("renamed.txt", "", false); err != nil {
+		if err := app.runInfo("renamed.txt", "", false); err != nil {
 			t.Fatalf("info by name: %v", err)
 		}
 	})
 	if !strings.Contains(out, "renamed.txt") {
 		t.Fatalf("info did not resolve renamed name: %q", out)
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := resolveOwnedResourceIDWithProfile(cl, prof, "renamed.txt")
+	id, err := app.resolveOwnedResourceIDWithProfile(cl, prof, "renamed.txt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	out = captureStdout(t, func() {
-		if err := runPull(id, "", "", true, false); err != nil {
+		if err := app.runPull(id, "", "", true, false); err != nil {
 			t.Fatalf("cat renamed resource: %v", err)
 		}
 	})
@@ -209,14 +192,14 @@ func TestEverydayResourceRefsAndRename(t *testing.T) {
 		t.Fatalf("renamed content = %q, want %q", out, body)
 	}
 	out = captureStdout(t, func() {
-		if err := runInfo("renamed.txt", "", false); err != nil {
+		if err := app.runInfo("renamed.txt", "", false); err != nil {
 			t.Fatalf("info lifecycle: %v", err)
 		}
 	})
 	if !strings.Contains(out, "0/3") || !strings.Contains(out, "3 remaining") {
 		t.Fatalf("info omitted read lifecycle: %q", out)
 	}
-	if err := runRemove([]string{"renamed.txt"}, false, true); err != nil {
+	if err := app.runRemove([]string{"renamed.txt"}, false, true); err != nil {
 		t.Fatalf("rm by name: %v", err)
 	}
 }
@@ -225,12 +208,14 @@ func TestEverydayResourceRefsAndRename(t *testing.T) {
 // its resource id, while a path inside it is refused instead of silently
 // widening to the whole folder resource.
 func TestResolveTrackedResourcePath(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	root := t.TempDir()
 	h.init(root)
 	nested := filepath.Join(root, "not-yet-created", "file.txt")
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -257,17 +242,19 @@ func TestResolveTrackedResourcePath(t *testing.T) {
 // TestFriendlyNameMustBeUnique prevents an arbitrary same-name resource from
 // being selected for a destructive or sharing command.
 func TestFriendlyNameMustBeUnique(t *testing.T) {
-	newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	app.newE2E(t)
 	for _, body := range []string{"one", "two"} {
 		path := filepath.Join(t.TempDir(), "source.txt")
 		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		if err := pushQuiet(path, pushOptions{name: "duplicate", noClip: true}); err != nil {
+		if err := app.pushQuiet(path, pushOptions{name: "duplicate", noClip: true}); err != nil {
 			t.Fatalf("push duplicate: %v", err)
 		}
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -283,18 +270,20 @@ func TestFriendlyNameMustBeUnique(t *testing.T) {
 // The NAME column `aqt ls` prints is an argument too: pull, cat, clone, and the
 // folder form of ls resolve it, so a script never has to look an id up first.
 func TestPullCatCloneLsResolveNames(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 
 	const body = "API_KEY=xyz"
 	path := filepath.Join(t.TempDir(), "secret.env")
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushQuiet(path, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(path, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	out := captureStdout(t, func() {
-		if err := runPull("secret.env", "", "", true, false); err != nil {
+		if err := app.runPull("secret.env", "", "", true, false); err != nil {
 			t.Fatalf("cat by name: %v", err)
 		}
 	})
@@ -311,7 +300,7 @@ func TestPullCatCloneLsResolveNames(t *testing.T) {
 	writeTree(t, dir, "notes.md", "hello")
 	h.sync(dir)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +317,7 @@ func TestPullCatCloneLsResolveNames(t *testing.T) {
 	}
 
 	dest := filepath.Join(t.TempDir(), "copy")
-	if err := runClone("vault", dest, false, ""); err != nil {
+	if err := app.runClone("vault", dest, false, ""); err != nil {
 		t.Fatalf("clone by name: %v", err)
 	}
 	if got := readTree(t, dest, "notes.md"); got != "hello" {
@@ -337,7 +326,7 @@ func TestPullCatCloneLsResolveNames(t *testing.T) {
 
 	// A name that matches nothing names the argument forms it accepts, instead of
 	// implying the resource exists and belongs to someone else.
-	err = runPull("no-such-resource", "", "", true, false)
+	err = app.runPull("no-such-resource", "", "", true, false)
 	if err == nil || !strings.Contains(err.Error(), "unique name") {
 		t.Errorf("pull of an unknown name err = %v, want the accepted-forms message", err)
 	}

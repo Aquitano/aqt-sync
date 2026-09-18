@@ -15,7 +15,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-func infoCmd() *cobra.Command {
+func (app *application) infoCmd() *cobra.Command {
 	var pw passwordFlags
 	cmd := &cobra.Command{
 		Use:   "info <name-or-id|tracked-path|url>",
@@ -30,7 +30,7 @@ func infoCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runInfo(args[0], password, flagJSON)
+			return app.runInfo(args[0], password, app.json)
 		},
 	}
 	pw.bind(cmd, "password for a gated link")
@@ -53,11 +53,11 @@ type infoRow struct {
 	ReadsRemaining *int64 `json:"readsRemaining,omitempty"`
 }
 
-func runInfo(ref, password string, asJSON bool) error {
+func (app *application) runInfo(ref, password string, asJSON bool) error {
 	id, fragment, origin := parseRef(ref)
 
-	prof := loadProfileOptional()
-	cl, err := newLinkClient(origin, prof)
+	prof := app.loadProfileOptional()
+	cl, err := app.newLinkClient(origin, prof)
 	if err != nil {
 		return err
 	}
@@ -66,7 +66,7 @@ func runInfo(ref, password string, asJSON bool) error {
 	// prompt for the passphrase again whenever session caching is unavailable.
 	var master *crypto.MasterKey
 	if origin == "" && fragment == "" && prof != nil {
-		mk, err := unlockMaster(prof)
+		mk, err := app.unlockMaster(prof)
 		if err != nil {
 			return err
 		}
@@ -86,7 +86,7 @@ func runInfo(ref, password string, asJSON bool) error {
 		return err
 	}
 
-	ck, err := contentKeyWithMaster(res, fragment, password, prof, master)
+	ck, err := app.contentKeyWithMaster(res, fragment, password, prof, master)
 	if err != nil {
 		return err
 	}

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,8 +17,10 @@ import (
 // usageObjects reports the account's stored-object count, for asserting what a
 // prune reclaimed.
 func (h *e2eHarness) usageObjects() int64 {
+	app := h.app
+
 	h.t.Helper()
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		h.t.Fatalf("authed client: %v", err)
 	}
@@ -32,7 +35,9 @@ func (h *e2eHarness) usageObjects() int64 {
 // stay empty while the object store grows), and after a delete an aged prune
 // reclaims exactly the unreachable chunks — what survives still clones intact.
 func TestClientGCSyncAndPrune(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -67,7 +72,7 @@ func TestClientGCSyncAndPrune(t *testing.T) {
 	if err := h.store.BackdatePacksForTest(st.Account, 2*time.Hour); err != nil {
 		t.Fatalf("backdate packs: %v", err)
 	}
-	if err := runPrune(false, false); err != nil {
+	if err := app.runPrune(false, false); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if after := h.usageObjects(); after >= objectsBefore {
