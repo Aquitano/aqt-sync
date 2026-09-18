@@ -69,7 +69,7 @@ func TestCaptureOutputRestoresAfterAbort(t *testing.T) {
 			if os.Stdout != orig {
 				t.Fatal("stdout was not restored")
 			}
-			if _, err := pipe.Write([]byte("closed")); !errors.Is(err, os.ErrClosed) {
+			if _, err := pipe.WriteString("closed"); !errors.Is(err, os.ErrClosed) {
 				t.Fatalf("write to closed capture pipe: %v", err)
 			}
 			if got := captureStdout(t, func() { fmt.Print("next output") }); got != "next output" {
