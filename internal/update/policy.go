@@ -24,9 +24,6 @@ const (
 	// PolicyNotify checks at most once a day and prints one line when a newer
 	// release exists. It never installs anything.
 	PolicyNotify Policy = "notify"
-	// PolicyAuto additionally installs a stable release once it is safe to replace
-	// the binary.
-	PolicyAuto Policy = "auto"
 )
 
 // CheckInterval is the floor between background checks. It is deliberately long:
@@ -38,16 +35,16 @@ const CheckInterval = 24 * time.Hour
 // already got their answer from.
 const BackgroundTimeout = 5 * time.Second
 
-// ErrBadPolicy means a policy name is not one of the three.
+// ErrBadPolicy means a policy name is not off or notify.
 var ErrBadPolicy = errors.New("unknown update policy")
 
 // ParsePolicy validates a policy name.
 func ParsePolicy(s string) (Policy, error) {
 	switch p := Policy(s); p {
-	case PolicyOff, PolicyNotify, PolicyAuto:
+	case PolicyOff, PolicyNotify:
 		return p, nil
 	default:
-		return "", fmt.Errorf("%w %q: want off, notify, or auto", ErrBadPolicy, s)
+		return "", fmt.Errorf("%w %q: want off or notify", ErrBadPolicy, s)
 	}
 }
 
@@ -62,10 +59,6 @@ type State struct {
 	// NotifiedVersion is the version the user was last shown a notice for, so a
 	// release the user has already been told about stays quiet.
 	NotifiedVersion string `json:"notifiedVersion,omitempty"`
-	// DeferredVersion is an auto-mode install that was postponed because a watch
-	// agent was using the binary. It is what lets the next idle invocation finish
-	// the job instead of waiting another full interval.
-	DeferredVersion string `json:"deferredVersion,omitempty"`
 	// HighestSeen records, per requested channel, the highest release version that
 	// ever passed full manifest authentication on this machine. Checks pass it to
 	// Options.Floor, so a replayed older — but genuinely signed — manifest cannot
@@ -177,6 +170,10 @@ func (s Store) Load() (State, error) {
 		// safe reading is the default one, and the next Save rewrites it.
 		return State{Policy: PolicyOff}, nil
 	}
+	// Preserve notification opt-in for installations that previously used auto.
+	if st.Policy == "auto" {
+		st.Policy = PolicyNotify
+	}
 	if _, err := ParsePolicy(string(st.Policy)); err != nil {
 		st.Policy = PolicyOff
 	}
@@ -203,11 +200,6 @@ func (s Store) SetPolicy(p Policy) error {
 		return err
 	}
 	st.Policy = p
-	// A policy change is an explicit statement about what should happen next, so
-	// drop a deferral decided under the old one.
-	if p != PolicyAuto {
-		st.DeferredVersion = ""
-	}
 	return s.Save(st)
 }
 

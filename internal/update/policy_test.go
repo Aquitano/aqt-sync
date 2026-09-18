@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -29,7 +30,7 @@ func TestPolicyDefaultsToOff(t *testing.T) {
 
 func TestPolicyRoundTrips(t *testing.T) {
 	s := testStore(t)
-	for _, p := range []Policy{PolicyNotify, PolicyAuto, PolicyOff} {
+	for _, p := range []Policy{PolicyNotify, PolicyOff} {
 		if err := s.SetPolicy(p); err != nil {
 			t.Fatalf("SetPolicy(%s): %v", p, err)
 		}
@@ -75,20 +76,24 @@ func TestPolicyFallsBackWhenTheStateFileIsUnusable(t *testing.T) {
 	}
 }
 
-func TestPolicyChangeClearsADeferredInstall(t *testing.T) {
+func TestPreviousAutoPolicyKeepsNotificationsAndCeiling(t *testing.T) {
 	s := testStore(t)
-	if err := s.Save(State{Policy: PolicyAuto, DeferredVersion: "v9.9.9"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.SetPolicy(PolicyNotify); err != nil {
+	if err := os.WriteFile(s.path(), []byte(`{"policy":"auto","deferredVersion":"v9.9.9","highestSeen":{"stable":"v1.2.3"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	st, err := s.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.DeferredVersion != "" {
-		t.Fatalf("a deferral decided under auto survived the switch to notify: %q", st.DeferredVersion)
+	if st.Policy != PolicyNotify || st.Ceiling(ChannelStable) != "v1.2.3" {
+		t.Fatalf("migrated state = %+v", st)
+	}
+	if err := s.Save(st); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := s.Load()
+	if err != nil || reloaded.Policy != PolicyNotify || reloaded.Ceiling(ChannelStable) != "v1.2.3" {
+		t.Fatalf("saved state = %+v, err = %v", reloaded, err)
 	}
 }
 
@@ -159,7 +164,7 @@ func TestCeilingFailsOpenOnCorruptedState(t *testing.T) {
 // ceiling write: the Store helpers skip the save when the load fails, so the
 // user's real policy and records survive the blip.
 func TestStoreCeilingWriteSkipsAnUnreadableFile(t *testing.T) {
-	if !runtimeIsPOSIX() {
+	if runtime.GOOS == "windows" {
 		t.Skip("chmod-based unreadable file needs POSIX")
 	}
 	if os.Geteuid() == 0 {
@@ -167,7 +172,7 @@ func TestStoreCeilingWriteSkipsAnUnreadableFile(t *testing.T) {
 	}
 	s := testStore(t)
 	path := filepath.Join(s.Dir, stateFileName)
-	if err := os.WriteFile(path, []byte(`{"policy":"auto"}`+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"policy":"notify"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(path, 0); err != nil {
@@ -189,7 +194,7 @@ func TestStoreCeilingWriteSkipsAnUnreadableFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Policy != PolicyAuto {
+	if st.Policy != PolicyNotify {
 		t.Fatalf("policy = %q; the unreadable file was clobbered with defaults", st.Policy)
 	}
 	if st.Ceiling(ChannelStable) != "" {
@@ -247,7 +252,7 @@ func TestSaveIsAtomicAndPrivate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if runtimeIsPOSIX() && fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Fatalf("mode = %o, want 600", fi.Mode().Perm())
 	}
 	// A rename-based write leaves no temporaries next to the file it replaced.

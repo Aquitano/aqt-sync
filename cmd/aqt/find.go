@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -222,27 +221,7 @@ func fzfSelect(fzfPath, query string, entries []findEntry) error {
 	if query != "" {
 		args = append(args, "--query", query)
 	}
-	cmd := exec.Command(fzfPath, args...)
-	cmd.Stdin = strings.NewReader(input.String())
-	cmd.Stderr = os.Stderr
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		var ee *exec.ExitError
-		// fzf exits 130 when interrupted (Esc/Ctrl-C) and 1 when nothing matched;
-		// both mean "no selection", not a failure.
-		if errors.As(err, &ee) && (ee.ExitCode() == 130 || ee.ExitCode() == 1) {
-			return nil
-		}
-		return fmt.Errorf("fzf: %w", err)
-	}
-	line := strings.TrimRight(out.String(), "\n")
-	if line == "" {
-		return nil
-	}
-	fields := strings.Split(line, "\t")
-	fmt.Println(fields[len(fields)-1])
-	return nil
+	return runFzf(fzfPath, input.String(), args)
 }
 
 // findSize renders an entry's size, dashing folder resources (no tracked size).

@@ -175,7 +175,7 @@ func grantReadErr(err error) error {
 func verifyFrame(id string, frame []byte) error {
 	sum := sha256.Sum256(frame)
 	if hex.EncodeToString(sum[:]) != id {
-		return fmt.Errorf("public object %s failed its content-address check (truncated or corrupt frame)", id)
+		return fmt.Errorf("object %s failed its content-address check (truncated or corrupt frame)", id)
 	}
 	return nil
 }
@@ -186,42 +186,23 @@ func verifyFrame(id string, frame []byte) error {
 // its content address before use, so the shared on-disk node cache is exactly as
 // trustworthy here as on the authed path.
 func newPublicBatchFetcher(fetch sliceFetch) func([]string) (map[string][]byte, error) {
-	cache := map[string][]byte{}
-	disk := openNodeCache()
-	return func(ids []string) (map[string][]byte, error) {
-		var missing []string
-		for _, id := range ids {
-			if _, ok := cache[id]; ok {
-				continue
-			}
-			if ct, ok := disk.get(id); ok {
-				cache[id] = ct
-				continue
-			}
-			missing = append(missing, id)
-		}
-		for start := 0; start < len(missing); start += publicBatchIDs {
-			batch := missing[start:min(start+publicBatchIDs, len(missing))]
+	return cachedMetadataFetcher(nil, func(ids []string) (map[string][]byte, error) {
+		out := make(map[string][]byte, len(ids))
+		for start := 0; start < len(ids); start += publicBatchIDs {
+			batch := ids[start:min(start+publicBatchIDs, len(ids))]
 			frames, err := fetch(batch)
 			if err != nil {
 				return nil, err
 			}
-			for i, frame := range frames {
-				if err := verifyFrame(batch[i], frame); err != nil {
-					return nil, err
-				}
-				cache[batch[i]] = frame
-				disk.put(batch[i], frame)
+			if len(frames) != len(batch) {
+				return nil, fmt.Errorf("metadata read returned %d objects, want %d", len(frames), len(batch))
 			}
-		}
-		out := make(map[string][]byte, len(ids))
-		for _, id := range ids {
-			if ct, ok := cache[id]; ok {
-				out[id] = ct
+			for i, ct := range frames {
+				out[batch[i]] = ct
 			}
 		}
 		return out, nil
-	}
+	})
 }
 
 // newPublicEntrySource serves file-content objects for a set of folder entries to the
@@ -240,18 +221,4 @@ func newPublicEntrySource(fetch sliceFetch, entries []syncengine.Entry, cache *p
 		defer mu.Unlock()
 		return src.get(id)
 	}
-}
-
-// runPublicDownloads is runDownloads for the exact-slice transports (share link or
-// grant): entries are materialized in chunk-bounded batches so the object index
-// stays O(batch) rather than O(tree) — the same bound the authed pack path applies —
-// while one shared LRU carries fetched objects across batches.
-func runPublicDownloads(fetch sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) error {
-	cache := packio.NewCache(packio.DefaultCacheBytes)
-	for _, batch := range batchByChunks(entries, locateBatchChunks) {
-		if _, err := runDownloadsFrom(newPublicEntrySource(fetch, batch, cache), root, batch, prog); err != nil {
-			return err
-		}
-	}
-	return nil
 }

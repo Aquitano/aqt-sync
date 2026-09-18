@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -95,5 +96,61 @@ func TestSymlinksDegradeWithoutSupport(t *testing.T) {
 	}
 	if got := readTree(t, other, "b.txt"); got != "from replica" {
 		t.Fatalf("replica's edit did not propagate: %q", got)
+	}
+}
+
+// Shared clones and subtree pulls must check directory names across the whole
+// manifest, including empty directories that never enter a file download batch.
+func TestFolderDownloadsRefuseCaseCollidingDirectories(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	app.newE2E(t)
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := app.unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	ck, err := crypto.GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Wipe()
+	conv := crypto.DeriveConvergenceKey(mk)
+	defer conv.Wipe()
+	// Build a remote tree directly, independent of the test machine's filesystem.
+	m := syncengine.Manifest{Version: syncengine.TreeManifestVersion, Dirs: []syncengine.DirEntry{
+		{Path: "parent", Mode: 0o755}, {Path: "parent/A", Mode: 0o755}, {Path: "parent/a", Mode: 0o755},
+	}}
+	res, err := app.createFolder(cl, conv, m, ck, mk, "case-twins")
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := app.shareFolder(t, res.ID, "", linkPolicy{})
+	t.Setenv("AQT_TEST_CASE_INSENSITIVE", "1")
+	for _, tc := range []struct {
+		name, ref string
+		subtree   bool
+	}{
+		{"owner clone", res.ID, false}, {"shared clone", link, false},
+		{"owner subtree", "aqt://" + res.ID + "/parent", true}, {"shared subtree", link + "/parent", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dest := filepath.Join(t.TempDir(), "download")
+			var err error
+			if tc.subtree {
+				err = app.runPull(tc.ref, dest, "", false, false)
+			} else {
+				err = app.runClone(tc.ref, dest, false, "")
+			}
+			if err == nil || !strings.Contains(err.Error(), "case-colliding") {
+				t.Fatalf("download: %v", err)
+			}
+			if _, err := os.Lstat(dest); !os.IsNotExist(err) {
+				t.Fatalf("failed download left a destination: %v", err)
+			}
+		})
 	}
 }

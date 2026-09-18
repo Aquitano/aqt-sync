@@ -9,10 +9,12 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"runtime"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/update"
 )
@@ -338,5 +340,62 @@ func TestUpdateCommandSurface(t *testing.T) {
 	// present itself as an installable release.
 	if buildKind == update.KindRelease {
 		t.Error("buildKind defaults to release; a source build would offer to update itself")
+	}
+}
+
+// An agent that was killed rather than stopped cleanly must not appear in
+// restart notices. On Windows, stopping an agent terminates it outright.
+func TestLiveWatchAgentsReapsADeadAgent(t *testing.T) {
+	store := withUpdateStore(t)
+	if err := store.RegisterAgent(t.TempDir(), 0x7FFFFFF0, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if agents := liveWatchAgents(store); len(agents) != 0 {
+		t.Fatalf("a dead agent still needs a restart: %+v", agents)
+	}
+	recorded, err := store.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 0 {
+		t.Fatalf("the dead entry survived on disk: %+v", recorded)
+	}
+}
+
+// A stale entry whose pid was recycled into this very process must not make the
+// update report itself: the process running the check is by definition not a
+// watch agent, since agents never reach this path.
+func TestLiveWatchAgentsIgnoresTheCurrentProcess(t *testing.T) {
+	store := withUpdateStore(t)
+	if err := store.RegisterAgent(t.TempDir(), os.Getpid(), time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	if agents := liveWatchAgents(store); len(agents) != 0 {
+		t.Fatalf("the checking process counted itself as an agent: %+v", agents)
+	}
+}
+
+func TestWatchAgentRegistrationRoundTrips(t *testing.T) {
+	store := withUpdateStore(t)
+	root := t.TempDir()
+
+	registerWatchAgent(root)
+	agents, err := store.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 1 {
+		t.Fatalf("agents after registering = %+v", agents)
+	}
+
+	unregisterWatchAgent(root)
+	agents, err = store.Agents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(agents) != 0 {
+		t.Fatalf("agents after unregistering = %+v", agents)
 	}
 }

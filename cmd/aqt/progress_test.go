@@ -161,7 +161,7 @@ func TestRunDownloadsCountsProgress(t *testing.T) {
 
 	prog := &progressBar{}
 	prog.total.Store(42)
-	if _, err := runDownloads(cl, t.TempDir(), entries, prog); err != nil {
+	if _, err := runDownloads(cl, nil, t.TempDir(), entries, prog); err != nil {
 		t.Fatalf("runDownloads: %v", err)
 	}
 	if got := prog.done.Load(); got != 42 {

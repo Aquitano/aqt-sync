@@ -4,11 +4,6 @@ package main
 
 import (
 	"context"
-	"errors"
-	"io"
-	"os"
-	"os/exec"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -16,7 +11,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/update"
 )
 
-// withUpdateStore points the policy and agent registry at a temporary directory,
+// withUpdateStore points the update policy at a temporary directory,
 // so no test reads or writes the real user config.
 func withUpdateStore(t *testing.T) update.Store {
 	t.Helper()
@@ -120,176 +115,11 @@ func TestBackgroundUpdateDoesNothingUnderTheDefaultPolicy(t *testing.T) {
 	}
 }
 
-// artifactSourceFunc adapts a function to update.ArtifactSource.
-type artifactSourceFunc func(ctx context.Context, a update.Artifact, w io.Writer) error
-
-func (f artifactSourceFunc) FetchArtifact(ctx context.Context, a update.Artifact, w io.Writer) error {
-	return f(ctx, a, w)
-}
-
-// withArtifactSource serves the release archive from the test instead of GitHub.
-func withArtifactSource(t *testing.T, fn artifactSourceFunc) {
-	t.Helper()
-	orig := updateArtifactSource
-	updateArtifactSource = func() update.ArtifactSource { return fn }
-	t.Cleanup(func() { updateArtifactSource = orig })
-}
-
-// The check is budgeted for a few kilobytes of metadata. An automatic install
-// downloads tens of megabytes, so deriving its context from the check's would
-// leave it whatever remains of five seconds — on an ordinary connection, never
-// enough, and the update would fail the same way every day forever.
-// A pending deferral bypasses the daily interval, and a stale origin fails the
-// check deterministically — the combination would silently re-run a doomed
-// 5-second network check after every command, forever. The deferral must die
-// with the stale check.
-func TestBackgroundStaleManifestClearsADeferral(t *testing.T) {
-	app := &application{ctx: context.Background()}
-	store := withUpdateStore(t)
-	withTerminal(t, true)
-	app.withFlags(t, false, false)
-	serveUpdateManifest(t, "v9.9.8")
-	withBuild(t, "v0.3.0", update.KindRelease)
-
-	st := update.State{Policy: update.PolicyAuto, DeferredVersion: "v9.9.9"}
-	st.RaiseCeiling(update.ChannelStable, "v9.9.9")
-	st.MarkChecked(time.Now()) // not due: only the deferral lets this check run
-	if err := store.Save(st); err != nil {
-		t.Fatal(err)
-	}
-
-	captureStderr(t, func() {
-		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
-	})
-
-	got, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.DeferredVersion != "" {
-		t.Fatalf("deferral survived a stale origin: %q", got.DeferredVersion)
-	}
-	if got.Ceiling(update.ChannelStable) != "v9.9.9" {
-		t.Fatalf("ceiling moved on a failed check: %q", got.Ceiling(update.ChannelStable))
-	}
-}
-
-func TestBackgroundAutoInstallDoesNotInheritTheCheckBudget(t *testing.T) {
-	app := &application{ctx: context.Background()}
-	requirePublishedPlatform(t)
-	store := withUpdateStore(t)
-	withTerminal(t, true)
-	app.withFlags(t, false, false)
-	serveUpdateManifest(t, "v9.9.9")
-	withBuild(t, "v0.3.0", update.KindRelease)
-	if err := store.SetPolicy(update.PolicyAuto); err != nil {
-		t.Fatal(err)
-	}
-
-	var budget time.Duration
-	withArtifactSource(t, func(ctx context.Context, _ update.Artifact, _ io.Writer) error {
-		deadline, ok := ctx.Deadline()
-		if !ok {
-			t.Error("the automatic install runs unbounded")
-		}
-		budget = time.Until(deadline)
-		return errors.New("no archive in this test")
-	})
-
-	out := captureStderr(t, func() {
-		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
-	})
-
-	if budget == 0 {
-		t.Fatal("the install never reached the artifact source")
-	}
-	if budget <= update.BackgroundTimeout {
-		t.Fatalf("the install had %v, the check budget is %v", budget, update.BackgroundTimeout)
-	}
-	// The install failed for the test's own reason, which is the path being asserted
-	// on: it must name the release and the command that finishes the job.
-	if !strings.Contains(out, "automatic update to v9.9.9 failed") || !strings.Contains(out, "aqt update") {
-		t.Fatalf("the failure notice does not say what to do:\n%s", out)
-	}
-	st, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// A failure is not a deferral: keeping one would retry the whole download on
-	// every subsequent command instead of at the next interval.
-	if st.DeferredVersion != "" {
-		t.Fatalf("a failed install left a deferral for %q", st.DeferredVersion)
-	}
-	if st.LastCheckAt == "" {
-		t.Fatal("the check was not stamped, so the next command would check again")
-	}
-}
-
-// While a deferral is pending the interval is bypassed so the install lands at the
-// first idle moment. Idle is decided locally: an agent still holding the binary is
-// not a reason to fetch metadata after every command.
-func TestBackgroundDeferralDoesNotCheckWhileAnAgentRuns(t *testing.T) {
-	app := &application{ctx: context.Background()}
-	store := withUpdateStore(t)
-	withTerminal(t, true)
-	app.withFlags(t, false, false)
-	// Unreachable: reaching for it at all is the failure this test is about.
-	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
-	withBuild(t, "v0.3.0", update.KindRelease)
-
-	if err := store.SetPolicy(update.PolicyAuto); err != nil {
-		t.Fatal(err)
-	}
-	st, err := store.Load()
-	if err != nil {
-		t.Fatal(err)
-	}
-	st.MarkChecked(time.Now())
-	st.DeferredVersion = "v9.9.9"
-	if err := store.Save(st); err != nil {
-		t.Fatal(err)
-	}
-	// A pid that is certainly running and is not this process, so the deferral holds.
-	if err := store.RegisterAgent(t.TempDir(), liveOtherPID(t), time.Now()); err != nil {
-		t.Fatal(err)
-	}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
-	}()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("a pending deferral checked the network while an agent was running")
-	}
-}
-
-// liveOtherPID starts a process that outlives the test, so a registry entry for it
-// reads as a running agent.
-func liveOtherPID(t *testing.T) int {
-	t.Helper()
-	name, args := "sleep", []string{"30"}
-	if runtime.GOOS == "windows" {
-		name, args = "cmd", []string{"/c", "timeout", "/t", "30", "/nobreak"}
-	}
-	cmd := exec.Command(name, args...)
-	if err := cmd.Start(); err != nil {
-		t.Skipf("cannot start a helper process: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = cmd.Process.Kill()
-		_, _ = cmd.Process.Wait()
-	})
-	return cmd.Process.Pid
-}
-
 func TestUpdatePolicyCommandRoundTrips(t *testing.T) {
 	app := &application{ctx: context.Background()}
 	store := withUpdateStore(t)
 
-	for _, want := range []update.Policy{update.PolicyNotify, update.PolicyAuto, update.PolicyOff} {
+	for _, want := range []update.Policy{update.PolicyNotify, update.PolicyOff} {
 		out := captureStdout(t, func() {
 			runCmd(t, app.rootCmd(), "update", "policy", string(want))
 		})
@@ -332,60 +162,49 @@ func TestUpdatePolicyCommandShowsTheCurrentMode(t *testing.T) {
 	}
 }
 
-// An agent that was killed rather than stopped cleanly never unregisters. It must
-// not defer automatic updates forever, which matters most on Windows, where
-// stopping an agent terminates it outright.
-func TestLiveWatchAgentsReapsADeadAgent(t *testing.T) {
-	store := withUpdateStore(t)
-	if err := store.RegisterAgent(t.TempDir(), 0x7FFFFFF0, time.Now()); err != nil {
+func TestBackgroundNotificationsRespectIntervalAndVersion(t *testing.T) {
+	requirePublishedPlatform(t)
+	app := &application{ctx: context.Background()}
+	store := serveUpdateFixture(t, "v9.9.9")
+	withTerminal(t, true)
+	withBuild(t, "v0.3.0", update.KindRelease)
+	if err := store.SetPolicy(update.PolicyNotify); err != nil {
 		t.Fatal(err)
 	}
-
-	if agents := liveWatchAgents(store); len(agents) != 0 {
-		t.Fatalf("a dead agent still defers updates: %+v", agents)
+	command := subcommand(t, app.rootCmd(), "status")
+	out := captureStderr(t, func() { app.maybeBackgroundUpdate(command) })
+	if !strings.Contains(out, "v9.9.9 is available") || !strings.Contains(out, "aqt update") {
+		t.Fatalf("notification: %q", out)
 	}
-	recorded, err := store.Agents()
+	st, err := store.Load()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(recorded) != 0 {
-		t.Fatalf("the dead entry survived on disk: %+v", recorded)
+	if st.NotifiedVersion != "v9.9.9" || st.LastCheckAt == "" || st.Ceiling(update.ChannelStable) != "v9.9.9" {
+		t.Fatalf("state after notification: %+v", st)
 	}
-}
-
-// A stale entry whose pid was recycled into this very process must not make the
-// update defer on itself: the process running the check is by definition not a
-// watch agent, since agents never reach this path.
-func TestLiveWatchAgentsIgnoresTheCurrentProcess(t *testing.T) {
-	store := withUpdateStore(t)
-	if err := store.RegisterAgent(t.TempDir(), os.Getpid(), time.Now()); err != nil {
+	// A recent check must stay untouched, even though this command runs later.
+	st.MarkChecked(time.Now().Add(-time.Hour))
+	if err := store.Save(st); err != nil {
 		t.Fatal(err)
 	}
-
-	if agents := liveWatchAgents(store); len(agents) != 0 {
-		t.Fatalf("the checking process counted itself as an agent: %+v", agents)
+	if out := captureStderr(t, func() { app.maybeBackgroundUpdate(command) }); out != "" {
+		t.Fatalf("repeated notice: %q", out)
 	}
-}
-
-func TestWatchAgentRegistrationRoundTrips(t *testing.T) {
-	store := withUpdateStore(t)
-	root := t.TempDir()
-
-	registerWatchAgent(root)
-	agents, err := store.Agents()
-	if err != nil {
+	recent, err := store.Load()
+	if err != nil || recent.LastCheckAt != st.LastCheckAt {
+		t.Fatalf("checked before interval elapsed: %+v, %v", recent, err)
+	}
+	// A due check records fresh metadata without repeating the same version notice.
+	st.MarkChecked(time.Now().Add(-2 * update.CheckInterval))
+	if err := store.Save(st); err != nil {
 		t.Fatal(err)
 	}
-	if len(agents) != 1 {
-		t.Fatalf("agents after registering = %+v", agents)
+	if out := captureStderr(t, func() { app.maybeBackgroundUpdate(command) }); out != "" {
+		t.Fatalf("same release notified twice: %q", out)
 	}
-
-	unregisterWatchAgent(root)
-	agents, err = store.Agents()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(agents) != 0 {
-		t.Fatalf("agents after unregistering = %+v", agents)
+	checked, err := store.Load()
+	if err != nil || checked.LastCheckAt == st.LastCheckAt {
+		t.Fatalf("due check did not run: %+v, %v", checked, err)
 	}
 }

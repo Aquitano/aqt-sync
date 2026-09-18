@@ -7,9 +7,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
@@ -38,10 +38,14 @@ func TestSafeOutputName(t *testing.T) {
 	}
 }
 
-// TestWriteOutputConfinesToCWD verifies that a default destination derived from
-// attacker-controlled metadata cannot escape the working directory.
-func TestWriteOutputConfinesToCWD(t *testing.T) {
+// A default destination derived from attacker-controlled metadata must stay in CWD.
+func TestPullConfinesDefaultDestinationToCWD(t *testing.T) {
 	app := &application{ctx: context.Background()}
+	app.newE2E(t)
+	source := filepath.Join(t.TempDir(), "source.txt")
+	if err := os.WriteFile(source, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	tmp := t.TempDir()
 	oldCWD, err := os.Getwd()
 	if err != nil {
@@ -61,8 +65,13 @@ func TestWriteOutputConfinesToCWD(t *testing.T) {
 
 	names := []string{"../../evil", "/etc/passwd", "sub/dir/file", "report.txt"}
 	for _, name := range names {
-		if err := app.writeOutput([]byte("x"), "", api.Metadata{Name: name}, false, false); err != nil {
-			t.Fatalf("writeOutput(%q): %v", name, err)
+		ref := strings.TrimSpace(captureStdout(t, func() {
+			if err := app.runPush(source, pushOptions{name: name, noClip: true}); err != nil {
+				t.Fatal(err)
+			}
+		}))
+		if err := app.runPull(ref, "", "", false, false); err != nil {
+			t.Fatalf("pull(%q): %v", name, err)
 		}
 		base := filepath.Base(name)
 		written := filepath.Join(tmp, base)

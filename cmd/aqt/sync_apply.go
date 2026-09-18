@@ -304,7 +304,7 @@ func (app *application) materializeConflictCopies(c applyCtx, actions []syncengi
 	cpProg := app.newProgressBar("writing conflict copies", entriesBytes(entries))
 	// A conflict copy lands at a fresh untracked path, so it has no base entry to
 	// stamp an mtime on; the next scan picks it up as a local add.
-	_, cpErr := runDownloads(c.cl, c.root, entries, cpProg)
+	_, cpErr := runDownloads(c.cl, nil, c.root, entries, cpProg)
 	cpProg.finish(cpErr == nil)
 	if cpErr != nil {
 		return cpErr
@@ -419,7 +419,7 @@ func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, 
 		}
 	}
 	dlProg := app.newProgressBar("downloading", entriesBytes(w.downloads))
-	dlMTimes, dlErr := runDownloads(c.cl, c.root, w.downloads, dlProg)
+	dlMTimes, dlErr := runDownloads(c.cl, nil, c.root, w.downloads, dlProg)
 	dlProg.finish(dlErr == nil)
 	if dlErr != nil {
 		return w, dlErr

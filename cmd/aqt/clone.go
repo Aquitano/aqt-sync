@@ -216,15 +216,7 @@ func (app *application) cloneReadOnly(fetch sliceFetch, res api.GetResourceRespo
 		return fmt.Errorf("decrypt manifest: %w", err)
 	}
 	if err := materializeStaged(abs, func(staging string) error {
-		prog := app.newProgressBar("downloading", entriesBytes(manifest.Entries))
-		// No base is recorded for a read-only share, so its mtimes have nothing to stamp.
-		// Batched: the object index stays O(batch), not O(tree).
-		dlErr := runPublicDownloads(fetch, staging, manifest.Entries, prog)
-		prog.finish(dlErr == nil)
-		if dlErr != nil {
-			return dlErr
-		}
-		return syncengine.MaterializeDirs(staging, manifest.Dirs)
+		return app.materializeManifest(nil, fetch, staging, &manifest)
 	}); err != nil {
 		return err
 	}
@@ -289,34 +281,8 @@ func (app *application) materializeClone(cl *client.Client, abs string, res api.
 	if err != nil {
 		return syncengine.Manifest{}, fmt.Errorf("decrypt manifest: %w", err)
 	}
-	if syncengine.CaseInsensitiveDir(abs) {
-		if err := refuseCaseCollisions(manifest.Entries, manifest.Dirs); err != nil {
-			return syncengine.Manifest{}, err
-		}
-	}
-	dlProg := app.newProgressBar("downloading", entriesBytes(manifest.Entries))
-	mtimes, dlErr := runDownloads(cl, abs, manifest.Entries, dlProg)
-	dlProg.finish(dlErr == nil)
-	if dlErr != nil {
-		return syncengine.Manifest{}, dlErr
-	}
-	if err := syncengine.MaterializeDirs(abs, manifest.Dirs); err != nil {
-		return syncengine.Manifest{}, err
-	}
-	// Without this the fresh clone's base has no mtimes at all, so every later
-	// `aqt status` and TUI refresh re-reads and re-hashes the whole tree.
-	stampEntryMTimes(manifest.Entries, mtimes)
-	return manifest, nil
-}
-
-// stampEntryMTimes is stampMTimes over a manifest's entry slice, for the clone paths
-// that record the remote manifest itself as the new base.
-func stampEntryMTimes(entries []syncengine.Entry, mtimes map[string]int64) {
-	for i := range entries {
-		if mtime, ok := mtimes[entries[i].Path]; ok {
-			entries[i].MTime = mtime
-		}
-	}
+	err = app.materializeManifest(cl, nil, abs, &manifest)
+	return manifest, err
 }
 
 // materializeStaged fills dest by letting fn write into a staging directory that

@@ -86,7 +86,7 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 	entries := []syncengine.Entry{
 		{Path: "f.bin", Mode: 0o644, Size: 100, Hash: "h", Chunks: []crypto.Chunk{{ID: "a", Key: make([]byte, crypto.KeySize), Len: 100}}},
 	}
-	if _, err := runDownloads(cl, t.TempDir(), entries, nil); err == nil {
+	if _, err := runDownloads(cl, nil, t.TempDir(), entries, nil); err == nil {
 		t.Fatal("runDownloads must fail when a pack fetch errors")
 	}
 }
@@ -139,31 +139,35 @@ func TestBatchByChunks(t *testing.T) {
 // levels. The shared packio.Source must serve the second level's node from the span the
 // first level already fetched: exactly one pack GET across both calls.
 func TestBatchNodeFetcherSharesPackAcrossLevels(t *testing.T) {
+	t.Setenv("AQT_NO_NODE_CACHE", "1")
+	a := cacheID([]byte(strings.Repeat("A", 100)))
+	b := cacheID([]byte(strings.Repeat("B", 100)))
+	c := cacheID([]byte(strings.Repeat("C", 100)))
 	pack := []byte(strings.Repeat("A", 100) + strings.Repeat("B", 100) + strings.Repeat("C", 100))
 	f := &fakePackServer{
 		packs: map[string][]byte{"p1": pack},
 		locs: map[string]api.ObjectLocation{
-			"a": {ID: "a", PackID: "p1", Off: 0, Len: 100},
-			"b": {ID: "b", PackID: "p1", Off: 100, Len: 100},
-			"c": {ID: "c", PackID: "p1", Off: 200, Len: 100},
+			a: {ID: a, PackID: "p1", Off: 0, Len: 100},
+			b: {ID: b, PackID: "p1", Off: 100, Len: 100},
+			c: {ID: c, PackID: "p1", Off: 200, Len: 100},
 		},
 		getHits: map[string]*int32{"p1": new(int32)},
 	}
 	cl := newFakePackClient(t, f)
 
 	fetch := newBatchNodeFetcher(cl, nil)
-	level1, err := fetch([]string{"a", "c"})
+	level1, err := fetch([]string{a, c})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(level1["a"][:1]) != "A" || string(level1["c"][:1]) != "C" {
+	if string(level1[a][:1]) != "A" || string(level1[c][:1]) != "C" {
 		t.Fatal("level 1 nodes came back wrong")
 	}
-	level2, err := fetch([]string{"b"})
+	level2, err := fetch([]string{b})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(level2["b"][:1]) != "B" {
+	if string(level2[b][:1]) != "B" {
 		t.Fatal("level 2 node came back wrong")
 	}
 	if n := atomic.LoadInt32(f.getHits["p1"]); n != 1 {
