@@ -35,6 +35,12 @@ jobs:
           cache: true
       - name: Build
         run: go build ./...
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Test share page
+        run: node --test tests/share-page.test.mjs
       - name: Vet
         run: go vet ./...
       # `go test ./...` covers internal/update, so the check-only update path is

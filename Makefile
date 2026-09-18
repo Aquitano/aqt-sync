@@ -1,4 +1,4 @@
-.PHONY: build build-server test test-short test-race vet lint fmt fuzz restore-drill docker clean
+.PHONY: build build-server test test-web test-short test-race vet lint fmt fuzz restore-drill docker clean
 
 # Build the CLI and server into ./bin. aqt is a multi-call binary: Git reaches its
 # remote helper through a link named git-remote-aqt, which is what `aqt git setup`
@@ -13,6 +13,9 @@ build-server:
 
 test:
 	go test ./...
+
+test-web:
+	node --test tests/share-page.test.mjs
 
 test-short:
 	go test -short ./...
@@ -38,6 +41,7 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzPackRoundTrip$$' -fuzztime=10s ./internal/server
 	go test -run='^$$' -fuzz='^FuzzParseRef$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzSplitRefPath$$' -fuzztime=10s ./cmd/aqt
+	go test -run='^$$' -fuzz='^FuzzIgnoreRuleClassification$$' -fuzztime=10s ./internal/syncengine
 	go test -run='^$$' -fuzz='^FuzzDecodeBase$$' -fuzztime=10s ./internal/folderstate
 	go test -run='^$$' -fuzz='^FuzzMergeModeEditScripts$$' -fuzztime=10s ./cmd/aqt
 	go test -run='^$$' -fuzz='^FuzzChangesReconstructsTarget$$' -fuzztime=10s ./internal/syncengine/merge
