@@ -5,6 +5,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path"
 	"path/filepath"
@@ -14,8 +15,6 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
-	"github.com/aquitano/aqt-sync/internal/fsatomic"
-	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -142,42 +141,22 @@ func (app *application) pullSubpath(cl *client.Client, id string, res api.GetRes
 	if err != nil {
 		return err
 	}
-	var get func(string) ([]byte, error)
-	if slices != nil {
-		get = newPublicEntrySource(slices, []syncengine.Entry{e}, packio.NewCache(packio.DefaultCacheBytes))
-	} else {
-		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{e}))
-		if err != nil {
-			return err
-		}
-		get = src.Get
+	get, err := chunkSource(cl, slices, e.Chunks)
+	if err != nil {
+		return err
 	}
-	if toStdout {
-		return syncengine.WriteEntry(os.Stdout, e, get)
-	}
+
 	dest := out
 	if dest == "" {
 		dest = safeOutputName(child.Name)
-	}
-	if !force {
-		if _, err := os.Stat(dest); err == nil {
-			return fmt.Errorf("%s already exists (use --force to overwrite)", dest)
-		}
 	}
 	perm := os.FileMode(child.Mode).Perm()
 	if perm == 0 {
 		perm = 0o600
 	}
-	if err := fsatomic.WriteStream(dest, perm, func(f *os.File) error {
-		return syncengine.WriteEntry(f, e, get)
-	}); err != nil {
-		return err
-	}
-	if app.json {
-		return printJSON(map[string]any{"path": dest, "bytes": e.Size})
-	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, e.Size)
-	return nil
+	return app.writeOutput(fileContent{size: e.Size, write: func(w io.Writer) error {
+		return syncengine.WriteEntry(w, e, get)
+	}}, dest, perm, toStdout, force)
 }
 
 // pullSubtree materializes one directory subtree into a fresh destination: the
@@ -197,33 +176,12 @@ func (app *application) pullSubtree(cl *client.Client, version int, child syncen
 	if err != nil {
 		return err
 	}
-	var get func(string) ([]byte, error)
-	if slices == nil {
-		src, err := packio.NewSource(cl, distinctChunkIDs(m.Entries))
-		if err != nil {
-			return err
-		}
-		get = src.Get
-	}
 	if err := materializeStaged(abs, func(staging string) error {
-		prog := app.newProgressBar("downloading", entriesBytes(m.Entries))
-		// A subpath pull writes into a plain directory, not a tracked folder, so there
-		// is no base manifest for its mtimes to feed.
-		var dlErr error
-		if slices != nil {
-			// Batched: the object index stays O(batch), not O(subtree).
-			dlErr = runPublicDownloads(slices, staging, m.Entries, prog)
-		} else {
-			_, dlErr = runDownloadsFrom(get, staging, m.Entries, prog)
-		}
-		prog.finish(dlErr == nil)
-		if dlErr != nil {
-			return dlErr
-		}
-		return syncengine.MaterializeDirs(staging, m.Dirs)
+		return app.materializeManifest(cl, slices, staging, &m)
 	}); err != nil {
 		return err
 	}
+
 	if app.json {
 		return printJSON(map[string]any{"path": abs, "files": len(m.Entries)})
 	}

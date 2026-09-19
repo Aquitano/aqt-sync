@@ -3,7 +3,6 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,9 +22,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/folderstate"
-	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
-	"github.com/aquitano/aqt-sync/internal/packio"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -414,8 +411,7 @@ func (app *application) runSnapshotFind(query, resourceID string, asJSON, noFzf 
 // snapshotFzfSelect feeds the snapshot index to fzf and prints the chosen snapshot
 // id. The id is the last, hidden column (--with-nth shows the rest) so it survives
 // the round trip without cluttering the view. Cancelling fzf exits quietly. This
-// mirrors find.go's fzfSelect; it is kept self-contained rather than refactoring the
-// sibling command for one shared exec.
+// uses the same selection runner as resource search.
 func snapshotFzfSelect(fzfPath, query string, rows []snapshotRow) error {
 	var input strings.Builder
 	for _, r := range rows {
@@ -437,27 +433,7 @@ func snapshotFzfSelect(fzfPath, query string, rows []snapshotRow) error {
 	if query != "" {
 		args = append(args, "--query", query)
 	}
-	cmd := exec.Command(fzfPath, args...)
-	cmd.Stdin = strings.NewReader(input.String())
-	cmd.Stderr = os.Stderr
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		var ee *exec.ExitError
-		// fzf exits 130 when interrupted (Esc/Ctrl-C) and 1 when nothing matched; both
-		// mean "no selection", not a failure.
-		if errors.As(err, &ee) && (ee.ExitCode() == 130 || ee.ExitCode() == 1) {
-			return nil
-		}
-		return fmt.Errorf("fzf: %w", err)
-	}
-	line := strings.TrimRight(out.String(), "\n")
-	if line == "" {
-		return nil
-	}
-	fields := strings.Split(line, "\t")
-	fmt.Println(fields[len(fields)-1])
-	return nil
+	return runFzf(fzfPath, input.String(), args)
 }
 
 // --- restore (in place; the `restore` command owns the surface) ---
@@ -1151,8 +1127,8 @@ func snapshotAsResource(snap api.GetSnapshotResponse) api.GetResourceResponse {
 }
 
 // materializeResource decrypts a resource's sealed root under the content key ck and
-// writes its plaintext tree under destDir: a folder is untarred or streamed from its
-// objects, a single file is written by its name. The caller owns ck's lifetime.
+// writes its plaintext under destDir. A folder is streamed from its objects; a
+// single file is written by its name. The caller owns ck's lifetime.
 func (app *application) materializeResource(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, destDir string, force bool) (api.Metadata, error) {
 	meta, err := decodeMeta(res.EncryptedMeta, ck, res.ID)
 	if err != nil {
@@ -1172,40 +1148,11 @@ func (app *application) materializeResource(cl *client.Client, res api.GetResour
 		return meta, err
 	}
 	dest := filepath.Join(destDir, safeOutputName(meta.Name))
-	if !force {
-		if _, err := os.Stat(dest); err == nil {
-			return meta, fmt.Errorf("%s already exists (use --force to overwrite)", dest)
-		}
-	}
-	if meta.Streamed {
-		root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
-		if err != nil {
-			return meta, fmt.Errorf("decrypt file root: %w", err)
-		}
-		chunks := root.Chunks
-		if root.Indirect() {
-			segSrc, err := packio.NewSource(cl, root.ChunkIDs())
-			if err != nil {
-				return meta, err
-			}
-			chunks, err = root.Resolve(segSrc.Get)
-			if err != nil {
-				return meta, err
-			}
-		}
-		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
-		if err != nil {
-			return meta, err
-		}
-		return meta, fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
-			return syncengine.WriteFileRoot(f, chunks, src.Get)
-		})
-	}
-	plain, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, res.ID)
+	content, err := openFileContent(cl, res, ck, meta, nil)
 	if err != nil {
-		return meta, fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
+		return meta, err
 	}
-	return meta, fsatomic.WriteFile(dest, plain, 0o600)
+	return meta, content.writeFile(dest, 0o600, force)
 }
 
 // materializeWithMaster unwraps res's content key under the master key, then writes

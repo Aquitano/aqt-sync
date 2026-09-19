@@ -77,45 +77,21 @@ func openRemoteTreeReusingBase(cl *client.Client, blob crypto.SealedBlob, ck cry
 // packio.Source.Get as client.ErrNotFound so a manifest read can retry against the
 // current version.
 func newBatchNodeFetcher(cl *client.Client, seed map[string][]byte) func([]string) (map[string][]byte, error) {
-	cache := make(map[string][]byte, len(seed))
-	for id, ct := range seed {
-		cache[id] = ct
-	}
 	src := packio.NewEmptySource(cl)
-	disk := openNodeCache()
-	return func(ids []string) (map[string][]byte, error) {
-		var missing []string
-		for _, id := range ids {
-			if _, ok := cache[id]; ok {
-				continue
-			}
-			if ct, ok := disk.get(id); ok {
-				cache[id] = ct
-				continue
-			}
-			missing = append(missing, id)
-		}
-		if len(missing) > 0 {
-			if err := src.Locate(missing); err != nil {
-				return nil, err
-			}
-			for _, id := range missing {
-				b, err := src.Get(id)
-				if err != nil {
-					return nil, err
-				}
-				cache[id] = b
-				disk.put(id, b)
-			}
+	return cachedMetadataFetcher(seed, func(ids []string) (map[string][]byte, error) {
+		if err := src.Locate(ids); err != nil {
+			return nil, err
 		}
 		out := make(map[string][]byte, len(ids))
 		for _, id := range ids {
-			if ct, ok := cache[id]; ok {
-				out[id] = ct
+			ct, err := src.Get(id)
+			if err != nil {
+				return nil, err
 			}
+			out[id] = ct
 		}
 		return out, nil
-	}
+	})
 }
 
 // createFolder registers a new folder resource. The create seals unbound — the id

@@ -20,8 +20,7 @@ const (
 
 	// maxAgents bounds the registry. A user with more tracked folders than this
 	// running at once is not a case worth growing an unbounded file for; the oldest
-	// entries are dropped and the worst outcome is an auto-update that does not
-	// defer for an agent it never recorded.
+	// entries are dropped, so a restart notice may omit an unrecorded agent.
 	maxAgents = 64
 
 	// lockStale is how long a registry lock may exist before it is assumed
@@ -62,8 +61,8 @@ func (s Store) Agents() ([]Agent, error) {
 // the file. alive is supplied by the caller because probing a pid is
 // platform-specific and already implemented where the agents are managed.
 //
-// Reaping on read is what keeps a crashed agent from deferring auto updates
-// forever: nothing else is guaranteed to run after a process dies.
+// Reaping on read avoids restart notices for crashed agents: nothing else is
+// guaranteed to run after a process dies.
 func (s Store) LiveAgents(alive func(pid int) bool) ([]Agent, error) {
 	recorded, err := s.Agents()
 	if err != nil || len(recorded) == 0 {
@@ -89,7 +88,7 @@ func (s Store) LiveAgents(alive func(pid int) bool) ([]Agent, error) {
 // entries are removed, rather than writing back the set that was probed: an agent
 // that registered while the pids were being probed would otherwise be erased, and
 // since an agent registers once at startup it would stay invisible for its whole
-// life — letting an automatic update replace the binary under a live watch.
+// life, omitting it from update restart notices.
 func (s Store) reap(dead map[string]bool) error {
 	agents, err := s.Agents()
 	if err != nil {

@@ -4,12 +4,9 @@ package update
 
 import (
 	"path/filepath"
-	"runtime"
 	"testing"
 	"time"
 )
-
-func runtimeIsPOSIX() bool { return runtime.GOOS != "windows" }
 
 func allAlive(int) bool  { return true }
 func noneAlive(int) bool { return false }
@@ -95,8 +92,8 @@ func TestRegistryReplacesTheEntryForARoot(t *testing.T) {
 }
 
 // An agent that was killed rather than shut down cleanly never gets to
-// unregister. Reaping on read is what keeps it from deferring updates forever —
-// which matters most on Windows, where stopping an agent terminates it outright.
+// unregister. Reaping on read avoids restart notices for dead agents, including
+// on Windows, where stopping an agent terminates it outright.
 func TestRegistryReapsDeadAgentsOnRead(t *testing.T) {
 	s := testStore(t)
 	if err := s.RegisterAgent(filepath.Join(t.TempDir(), "crashed"), 999, time.Now()); err != nil {

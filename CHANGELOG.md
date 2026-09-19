@@ -6,6 +6,9 @@ All notable changes to this project are documented in this file.
 
 ### Breaking Changes
 
+- Update policies are now `off` and `notify`. Existing `auto` settings become
+  `notify`; installation requires an explicit `aqt update`. Running folder agents
+  are still tracked, and explicit installs remind you to restart them.
 - Bare-path uploads now require `aqt push <path>` instead of `aqt <path>`.
 - `snapshot export` is removed. Use `aqt restore <snapshot-id> --out <path>`.
   The TUI uses the same restore action.
@@ -15,6 +18,8 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- Shared folder clones and subtree pulls now reject case-colliding directory
+  names before writing, including empty directories outside file download batches.
 - The backup restore drill now waits for server shutdown before copying its data
   and stops its server on exit. Subshells previously discarded the process IDs.
 - Watchers select the tracked folder's profile before unlocking the session, so
@@ -32,6 +37,9 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- Folder downloads share batching, validation, and materialization. File pulls and
+  snapshot restores share decoding and atomic writes. Owner and shared metadata
+  reads use one verified cache, and both search commands use one fzf runner.
 - CLI flags and cancellation belong to each command invocation instead of global
   variables. Snapshot creation and checkpoints share one implementation, as do
   folder validation and server/profile forwarding to child commands.

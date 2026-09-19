@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -16,10 +15,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
-	"github.com/aquitano/aqt-sync/internal/fsatomic"
 	"github.com/aquitano/aqt-sync/internal/identity"
-	"github.com/aquitano/aqt-sync/internal/packio"
-	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
 func (app *application) pullCmd() *cobra.Command {
@@ -138,78 +134,14 @@ func (app *application) runPull(ref, out, password string, toStdout, force bool)
 		return fmt.Errorf("%s is a folder: `aqt clone aqt://%s` materializes it, `aqt ls aqt://%s` lists it, "+
 			"and aqt://%s/<path> pulls a single entry", name, id, id, id)
 	}
-	if meta.Streamed {
-		// A share link has no account token for the authed pack-locate path, and a
-		// grantee has a token but no pack access; both read exact object slices.
-		return app.pullStream(cl, res, ck, out, meta, remoteFetch(cl, res, fragment), toStdout, force)
-	}
-
-	plaintext, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, id)
-	if err != nil {
-		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
-	}
-	return app.writeOutput(plaintext, out, meta, toStdout, force)
-}
-
-// pullStream reconstructs a streamed file from its objects, writing chunks to the
-// destination as they are fetched so the whole file is never held in memory.
-func (app *application) pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, slices sliceFetch, toStdout, force bool) error {
-	root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
-	if err != nil {
-		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
-	}
-	// A large file stores its chunk list indirectly as sealed segments; locate and
-	// open those first (they sit behind their own locate) to recover the content
-	// chunk records, then locate the content objects themselves. A link holder reads
-	// both through the unauthenticated public object endpoint; the owner uses the
-	// authed pack-locate path.
-	get := func(chunks []crypto.Chunk) (func(id string) ([]byte, error), error) {
-		if slices != nil {
-			return newPublicChunkSource(slices, chunks, packio.NewCache(packio.DefaultCacheBytes)).get, nil
-		}
-		src, err := packio.NewSource(cl, distinctChunkIDs([]syncengine.Entry{{Chunks: chunks}}))
-		if err != nil {
-			return nil, err
-		}
-		return src.Get, nil
-	}
-	chunks := root.Chunks
-	if root.Indirect() {
-		segFetch, err := get(root.ChunkList)
-		if err != nil {
-			return err
-		}
-		chunks, err = root.Resolve(segFetch)
-		if err != nil {
-			return err
-		}
-	}
-	fetch, err := get(chunks)
+	content, err := openFileContent(cl, res, ck, meta, remoteFetch(cl, res, fragment))
 	if err != nil {
 		return err
 	}
-	if toStdout {
-		return syncengine.WriteFileRoot(os.Stdout, chunks, fetch)
+	if out == "" {
+		out = safeOutputName(meta.Name)
 	}
-	dest := out
-	if dest == "" {
-		dest = safeOutputName(meta.Name)
-	}
-	if !force {
-		if _, err := os.Stat(dest); err == nil {
-			return fmt.Errorf("%s already exists (use --force to overwrite)", dest)
-		}
-	}
-	if err := fsatomic.WriteStream(dest, 0o600, func(f *os.File) error {
-		return syncengine.WriteFileRoot(f, chunks, fetch)
-	}); err != nil {
-		return err
-	}
-	if app.json {
-		return printJSON(map[string]any{"path": dest, "bytes": root.Size})
-	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, root.Size)
-	return nil
+	return app.writeOutput(content, out, 0o600, toStdout, force)
 }
 
 // contentKey recovers the content key either from the share fragment (public/
@@ -290,29 +222,6 @@ func safeOutputName(name string) string {
 		return "aqt-download"
 	}
 	return base
-}
-
-func (app *application) writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, force bool) error {
-	if toStdout {
-		_, err := os.Stdout.Write(plaintext)
-		return err
-	}
-	if out == "" {
-		out = safeOutputName(meta.Name)
-	}
-	if !force {
-		if _, err := os.Stat(out); err == nil {
-			return fmt.Errorf("%s already exists (use --force to overwrite)", out)
-		}
-	}
-	if err := fsatomic.WriteFile(out, plaintext, 0o600); err != nil {
-		return err
-	}
-	if app.json {
-		return printJSON(map[string]any{"path": out, "bytes": len(plaintext)})
-	}
-	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", out, len(plaintext))
-	return nil
 }
 
 // parseRef extracts the resource id, optional fragment, and origin (scheme://host)

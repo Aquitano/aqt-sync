@@ -108,3 +108,37 @@ func TestNodeCacheDisabledByEnv(t *testing.T) {
 		t.Fatal("AQT_NO_NODE_CACHE=1 did not disable the cache")
 	}
 }
+
+func TestMetadataFetcherRejectsCorruptionWithoutCachingIt(t *testing.T) {
+	t.Setenv("AQT_NODE_CACHE_DIR", t.TempDir())
+	ct := []byte("valid metadata ciphertext")
+	id := cacheID(ct)
+	calls := 0
+	fetch := cachedMetadataFetcher(nil, func(ids []string) (map[string][]byte, error) {
+		calls++
+		if calls == 1 {
+			return map[string][]byte{id: []byte("corrupt")}, nil
+		}
+		return map[string][]byte{id: ct}, nil
+	})
+	if _, err := fetch([]string{id}); err == nil {
+		t.Fatal("corrupt metadata accepted")
+	}
+	for range 2 {
+		got, err := fetch([]string{id})
+		if err != nil || !bytes.Equal(got[id], ct) {
+			t.Fatalf("retry = %q, %v", got[id], err)
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("fetched %d times; want one failed fetch and one cached success", calls)
+	}
+	// The public transport uses the same verified disk cache on the next walk.
+	got, err := newPublicBatchFetcher(func([]string) ([][]byte, error) {
+		t.Fatal("cached metadata caused a public read")
+		return nil, nil
+	})([]string{id})
+	if err != nil || !bytes.Equal(got[id], ct) {
+		t.Fatalf("cached public read = %q, %v", got[id], err)
+	}
+}

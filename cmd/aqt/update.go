@@ -204,7 +204,42 @@ func (app *application) runUpdate(opts updateOptions) error {
 	if link, stale := staleHelperLink(in); stale && !app.quiet {
 		fmt.Printf("%s still points at the previous binary; run `aqt git setup` to relink it\n", link)
 	}
+	if !app.quiet && storeErr == nil {
+		if agents := liveWatchAgents(store); len(agents) > 0 {
+			fmt.Printf("restart %d running folder agent(s) to use the new version (`aqt agent stop` then `aqt agent start` in each folder)\n", len(agents))
+		}
+	}
 	return nil
+}
+
+// registerWatchAgent records this process in the global agent registry. Failures
+// are ignored: the registry supplies update restart notices, and a watcher that
+// cannot be recorded must still watch.
+func registerWatchAgent(root string) {
+	store, err := updateStore()
+	if err != nil {
+		return
+	}
+	_ = store.RegisterAgent(root, os.Getpid(), time.Now())
+}
+
+func unregisterWatchAgent(root string) {
+	store, err := updateStore()
+	if err != nil {
+		return
+	}
+	_ = store.UnregisterAgent(root)
+}
+
+// liveWatchAgents returns the registered agents still running, reaping the rest.
+func liveWatchAgents(store update.Store) []update.Agent {
+	agents, err := store.LiveAgents(func(pid int) bool {
+		return pid != os.Getpid() && processAlive(pid)
+	})
+	if err != nil {
+		return nil
+	}
+	return agents
 }
 
 // applyUpdate performs the replacement described by an already-verified result.
@@ -228,7 +263,7 @@ func applyUpdate(ctx context.Context, in update.Install, res update.Result) (upd
 func (app *application) printCheckResult(res update.Result) {
 	switch res.Status {
 	case update.StatusUnsupported:
-		fmt.Printf("aqt %s is a development build; automatic updates cover published releases only.\n", res.CurrentVersion)
+		fmt.Printf("aqt %s is a development build; self-updates cover published releases only.\n", res.CurrentVersion)
 		if !app.quiet {
 			fmt.Printf("Install a release from https://github.com/%s/releases, or keep building from source with `make build`.\n", update.DefaultRepo)
 		}
@@ -267,13 +302,12 @@ var updateArtifactSource = func() update.ArtifactSource {
 
 func (app *application) updatePolicyCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "policy [off|notify|auto]",
+		Use:   "policy [off|notify]",
 		Short: "Show or set what ordinary commands do about updates",
 		Long: `Show or set what ordinary commands do about updates.
 
   off     never check outside an explicit ` + "`aqt update`" + ` (the default)
   notify  check at most once a day and print one line when a release is available
-  auto    additionally install a stable release once nothing is using the binary
 
 Background checks run only after a command that succeeded on a terminal. They are
 skipped for --json, --quiet, scripts, and watch agents, and a failed check never

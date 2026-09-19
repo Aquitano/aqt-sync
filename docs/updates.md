@@ -215,11 +215,10 @@ background network traffic to commands that were never pointed at the network.
 ```
 aqt update policy            # show the current mode
 aqt update policy notify     # check daily, print one line when a release exists
-aqt update policy auto       # additionally install stable releases
 aqt update policy off        # the default
 ```
 
-Under `notify` and `auto`, a check runs **after** a command that succeeded, and only
+Under `notify`, a check runs **after** a command that succeeded, and only
 when all of these hold:
 
 - the policy is not `off`;
@@ -233,40 +232,13 @@ The check is bounded to five seconds and its result never changes the exit statu
 output of the command that triggered it. A notice is printed once per version rather
 than on every check.
 
-An automatic install is bounded separately, to two minutes: it moves tens of
-megabytes rather than a few kilobytes of metadata, so the check's budget would leave
-it failing on any ordinary connection. One that fails says so and points at `aqt
-update`, and still does not change the exit status of the command that triggered it.
+Updates install only when you run `aqt update`. A saved `auto` policy from an
+older version is treated as `notify`, preserving release notifications without
+installing anything.
 
-`auto` additionally installs, and only when every one of these holds — otherwise it
-falls back to a notice:
-
-- the installation is standalone (see above);
-- the release is on the **stable** channel. A prerelease is something a user opts into
-  per invocation with `--prerelease`, never something a policy decides for them;
-- it is newer than the running build. A published version that is older is refused as
-  a rollback, not offered — and one below the recorded freshness ceiling (see
-  "Replayed manifests" above) is refused as a replay;
-- there is a build for this OS and architecture;
-- no registered watch agent is running.
-
-### Watch agents
-
-Replacing the binary under a running watch agent is safe on these filesystems, but
-the agent would keep executing the old code with no way to know. So `auto` defers
-instead, and says which agents are in the way.
-
-Each agent records its root and pid in a global registry (`agents.json`, beside the
-policy), because the per-folder `.aqt/agent.pid` is only visible from inside that
-folder — and the point is for an update started anywhere to see agents everywhere.
-Entries are removed on clean shutdown and reaped on read when the process is gone,
-which is what keeps a killed agent from deferring updates forever. That matters most
-on Windows, where stopping an agent terminates it rather than letting it clean up.
-
-Stop the agents (`aqt agent stop` in each folder) and run `aqt update`, or wait: the
-deferred install is retried at the next idle invocation rather than after another
-full day. Retrying is free while the agents are still running — the registry answers
-that locally, without fetching metadata again.
+Folder watchers and the global agent registry remain enabled. After an explicit
+install, the updater checks for live agents and reminds you to restart them to use
+the new binary. It removes stale registry entries for agents that have exited.
 
 ## Manifest
 
@@ -450,7 +422,7 @@ account identifier, no profile, and no telemetry: it downloads two small files, 
 an install downloads one archive.
 
 Under the default `off` policy nothing runs on its own — the only network traffic is
-from an explicit `aqt update`. Turning on `notify` or `auto` adds at most one check
+from an explicit `aqt update`. Turning on `notify` adds at most one check
 per 24 hours, under the conditions listed above. Nothing is reported back: the
 request is an ordinary asset download, and what the client decides afterwards stays
 local.

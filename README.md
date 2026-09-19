@@ -123,7 +123,8 @@ git push -u origin main
 - `aqt share <id> --with <email>` grants read-only access to another account. Verify
   their fingerprint out-of-band with `aqt contacts verify <email>`.
 - `aqt update` installs a newer release after verifying its signed manifest.
-  `aqt update policy notify` prints one line a day when one is available.
+  `aqt update policy notify` enables daily release checks and notices; installation
+  stays explicit.
 - `aqt account delete` erases the account and every byte under it. There is no undo,
   because the server holds no keys.
 

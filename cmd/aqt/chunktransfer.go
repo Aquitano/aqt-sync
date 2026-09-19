@@ -64,16 +64,18 @@ const locateBatchChunks = 50_000
 // Files are materialized by a bounded worker pool; the first error wins and is
 // returned, matching the upload pipeline's aggregation. The returned map gives each
 // written file's resulting mtime, keyed by path, for the caller's base manifest.
-func runDownloads(cl *client.Client, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
+func runDownloads(cl *client.Client, slices sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
 	src := packio.NewEmptySource(cl)
+	cache := packio.NewCache(packio.DefaultCacheBytes)
 	mtimes := make(map[string]int64, len(entries))
 	for _, batch := range batchByChunks(entries, locateBatchChunks) {
-		// locate must not run while workers are calling get, which holds because each
-		// batch's downloads finish before the next batch is located.
-		if err := src.Locate(distinctChunkIDs(batch)); err != nil {
+		get := src.Get
+		if slices != nil {
+			get = newPublicEntrySource(slices, batch, cache)
+		} else if err := src.Locate(distinctChunkIDs(batch)); err != nil {
 			return nil, err
 		}
-		batchMTimes, err := runDownloadsFrom(src.Get, root, batch, prog)
+		batchMTimes, err := runDownloadsFrom(get, root, batch, prog)
 		if err != nil {
 			return nil, err
 		}
