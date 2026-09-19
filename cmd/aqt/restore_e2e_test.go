@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"io/fs"
@@ -37,6 +38,7 @@ import (
 // real data" guarantee is checked on every CI run, not just when someone remembers
 // to run the shell drill.
 func TestFullBackupRestoreDrill(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("skips the full backup/restore drill under -short")
 	}
@@ -61,10 +63,10 @@ func TestFullBackupRestoreDrill(t *testing.T) {
 	writeTree(t, origin, ".aqtignore", "!.git/\nnode_modules/\n")
 	hasSymlink := buildRealisticTree(t, origin)
 
-	if err := runInit(origin, nil); err != nil {
+	if err := app.runInit(origin, nil); err != nil {
 		t.Fatalf("init: %v", err)
 	}
-	if err := runSync(origin, syncOptions{}); err != nil {
+	if err := app.runSync(origin, syncOptions{}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 	folderID := folderIDOf(t, origin)
@@ -96,7 +98,7 @@ func TestFullBackupRestoreDrill(t *testing.T) {
 	reattach(t, srvB.URL, email, pass)
 
 	replica := t.TempDir()
-	if err := runClone(folderID, replica, false, ""); err != nil {
+	if err := app.runClone(folderID, replica, false, ""); err != nil {
 		t.Fatalf("clone onto clean machine: %v", err)
 	}
 

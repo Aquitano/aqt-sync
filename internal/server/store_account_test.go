@@ -4,10 +4,12 @@ package server
 
 import (
 	"errors"
-	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
+	"net/http"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // A reclaimed tombstone holds no ciphertext, so it must stop counting toward
@@ -148,5 +150,50 @@ func TestDeleteShareIsGranteeScoped(t *testing.T) {
 	blocks, _, err := s.ListShareBlocks(stranger, pageParams{})
 	if err != nil || len(blocks) != 0 {
 		t.Fatalf("ListShareBlocks = (%+v, %v), want no block recorded", blocks, err)
+	}
+}
+
+// DeleteGrant's failing Exec used to return without rolling back. The writer handle
+// is a single connection, so the abandoned transaction held it forever and every
+// later write on the server — for any account — blocked indefinitely.
+func TestDeleteGrantRollsBackOnExecFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("txleak@example.com", "a passphrase here")
+	grantee, _ := h.signup("txleak-g@example.com", "a passphrase here")
+	granteeOwner, _ := h.store.OwnerByToken(grantee)
+	owner, _ := h.store.OwnerByToken(token)
+
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d", code)
+	}
+	if err := h.store.PutGrant(owner, res.ID, granteeOwner, []byte("wrap"), nil, 0); err != nil {
+		t.Fatalf("put grant: %v", err)
+	}
+	// Make the DELETE inside the transaction fail the way SQLITE_BUSY or an I/O
+	// error would.
+	if _, err := h.store.db.Exec(
+		`CREATE TRIGGER audit_txleak BEFORE DELETE ON grants BEGIN SELECT RAISE(ABORT, 'boom'); END`,
+	); err != nil {
+		t.Fatalf("trigger: %v", err)
+	}
+	if err := h.store.DeleteGrant(owner, res.ID, granteeOwner); err == nil {
+		t.Fatal("DeleteGrant unexpectedly succeeded")
+	}
+	if _, err := h.store.db.Exec(`DROP TRIGGER audit_txleak`); err != nil {
+		t.Fatalf("the writer connection is still held: %v", err)
+	}
+
+	// The writer must still be usable.
+	done := make(chan error, 1)
+	go func() { done <- h.store.PutGrant(owner, res.ID, granteeOwner, []byte("wrap2"), nil, 0) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("write after the rolled-back delete: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the next store write blocked: the transaction leaked its connection")
 	}
 }

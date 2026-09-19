@@ -36,9 +36,9 @@ type diffOptions struct {
 // pathLevel reports whether to render classified paths rather than a unified text
 // diff. --json implies it: a line diff has no JSON form, so the structured output is
 // always the path-level comparison.
-func (o diffOptions) pathLevel() bool { return o.nameStatus || flagJSON }
+func (o diffOptions) pathLevel(asJSON bool) bool { return o.nameStatus || asJSON }
 
-func diffCmd() *cobra.Command {
+func (app *application) diffCmd() *cobra.Command {
 	var opts diffOptions
 	cmd := &cobra.Command{
 		Use:   "diff [path...] [dir]",
@@ -58,7 +58,7 @@ func diffCmd() *cobra.Command {
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dir, paths := diffInvocation(args)
-			return runDiff(dir, paths, opts)
+			return app.runDiff(dir, paths, opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.remote, "remote", false, "diff incoming remote changes against the last-synced base")
@@ -84,7 +84,7 @@ func diffInvocation(args []string) (dir string, paths []string) {
 	return dir, paths
 }
 
-func runDiff(dir string, paths []string, opts diffOptions) error {
+func (app *application) runDiff(dir string, paths []string, opts diffOptions) error {
 	if opts.remote && opts.against != "" {
 		return errors.New("--remote and --against are mutually exclusive")
 	}
@@ -92,19 +92,19 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	if err != nil {
 		return err
 	}
-	if err := bindTrackedRoot(root); err != nil {
+	if err := app.bindTrackedRoot(root); err != nil {
 		return err
 	}
 	filters, err := normalizeDiffPaths(root, dir, paths)
 	if err != nil {
 		return err
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
 	if opts.against == diffAgainstRemote {
-		return runDiffRemote(cl, prof, root, filters, opts)
+		return app.runDiffRemote(cl, prof, root, filters, opts)
 	}
 
 	var base, local syncengine.Manifest
@@ -112,7 +112,7 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 		local, err = syncengine.Scan(root)
 	} else {
 		var exists bool
-		base, exists, err = folderstate.LoadBaseForSync(root, flagProfile)
+		base, exists, err = folderstate.LoadBaseForSync(root, app.profile)
 		if err == nil && !exists {
 			return errSyncNoBase
 		}
@@ -125,14 +125,14 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 	}
 	warnSkipped(local.Skipped)
 
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
 	defer mk.Wipe()
 
 	if opts.against != "" {
-		return diffAgainstSnapshot(cl, mk, root, local, filters, opts.against, opts)
+		return app.diffAgainstSnapshot(cl, mk, root, local, filters, opts.against, opts)
 	}
 	baseSide := diffSide{Label: "last-synced base", Version: base.Version}
 	if opts.remote {
@@ -144,11 +144,11 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 		if err != nil {
 			return err
 		}
-		return renderDiff(opts, filters, base, remote,
+		return app.renderDiff(opts, filters, base, remote,
 			baseSide, diffSide{Label: "remote", Version: res.Version},
 			manifestEntryReader(cl), manifestEntryReader(cl))
 	}
-	return renderDiff(opts, filters, base, local,
+	return app.renderDiff(opts, filters, base, local,
 		baseSide, diffSide{Label: "working tree"},
 		manifestEntryReader(cl), diskEntryReader(root))
 }
@@ -156,19 +156,19 @@ func runDiff(dir string, paths []string, opts diffOptions) error {
 // runDiffRemote compares the working tree with the folder's current remote state.
 // The path-level rendering answers from metadata alone, so it costs a few
 // directory-node fetches; a unified text diff streams both sides' bytes per entry.
-func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filters []string, opts diffOptions) error {
-	if opts.pathLevel() {
-		c, err := compareWorkingTreeToRemote(cl, prof, root)
+func (app *application) runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filters []string, opts diffOptions) error {
+	if opts.pathLevel(app.json) {
+		c, err := app.compareWorkingTreeToRemote(cl, prof, root)
 		if err != nil {
 			return err
 		}
-		return emitComparison(c.filter(filters))
+		return app.emitComparison(c.filter(filters))
 	}
 	res, err := folderResource(cl, root)
 	if err != nil {
 		return err
 	}
-	mk, unlocked, err := unlockForComparison(prof)
+	mk, unlocked, err := app.unlockForComparison(prof)
 	if err != nil {
 		return err
 	}
@@ -183,7 +183,7 @@ func runDiffRemote(cl *client.Client, prof *identity.Profile, root string, filte
 		return err
 	}
 	warnSkipped(local.Skipped)
-	base, err := folderstate.LoadBase(root, flagProfile)
+	base, err := folderstate.LoadBase(root, app.profile)
 	if err != nil {
 		return err
 	}
@@ -209,22 +209,22 @@ func folderResource(cl *client.Client, root string) (api.GetResourceResponse, er
 
 // renderDiff prints one comparison in the shape the flags asked for: classified paths,
 // or a unified text diff of the entries' bytes.
-func renderDiff(opts diffOptions, filters []string, oldManifest, newManifest syncengine.Manifest, oldSide, newSide diffSide, readOld, readNew entryReader) error {
-	if !opts.pathLevel() {
+func (app *application) renderDiff(opts diffOptions, filters []string, oldManifest, newManifest syncengine.Manifest, oldSide, newSide diffSide, readOld, readNew entryReader) error {
+	if !opts.pathLevel(app.json) {
 		return renderManifestDiff(oldManifest, newManifest, filters, readOld, readNew)
 	}
-	return emitComparison(newComparison(oldSide, newSide, syncengine.Diff(oldManifest, newManifest)).filter(filters))
+	return app.emitComparison(newComparison(oldSide, newSide, syncengine.Diff(oldManifest, newManifest)).filter(filters))
 }
 
-func emitComparison(c comparison) error {
-	if flagJSON {
+func (app *application) emitComparison(c comparison) error {
+	if app.json {
 		return printJSON(c)
 	}
 	printComparison(c)
 	return nil
 }
 
-func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, local syncengine.Manifest, filters []string, snapshotID string, opts diffOptions) error {
+func (app *application) diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, local syncengine.Manifest, filters []string, snapshotID string, opts diffOptions) error {
 	snap, err := cl.GetSnapshot(snapshotID)
 	if errors.Is(err, client.ErrNotFound) {
 		return fmt.Errorf("snapshot %s not found (or not yours)", snapshotID)
@@ -240,13 +240,13 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 		return fmt.Errorf("snapshot %s belongs to resource %s, not this folder (%s)", snapshotID, snap.Snapshot.ResourceID, st.ID)
 	}
 	snapshotSide := diffSide{Label: "snapshot " + snapshotID, Version: snap.Snapshot.Version}
-	if opts.pathLevel() {
+	if opts.pathLevel(app.json) {
 		// Which paths differ is a question about metadata, and the snapshot's manifest
 		// already answers it — read it the way --against=remote reads the remote's
 		// rather than reconstructing the whole tree on disk to hash back what the
 		// manifest records. base.json is only a node-reuse hint here; an absent one
 		// loads empty, which is why this mode never required it.
-		base, err := folderstate.LoadBase(root, flagProfile)
+		base, err := folderstate.LoadBase(root, app.profile)
 		if err != nil {
 			return err
 		}
@@ -254,7 +254,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 		if err != nil {
 			return fmt.Errorf("read snapshot %s: %w", snapshotID, err)
 		}
-		return emitComparison(newComparison(snapshotSide, workingTreeSide,
+		return app.emitComparison(newComparison(snapshotSide, workingTreeSide,
 			syncengine.Diff(snapshotManifest, local)).filter(filters))
 	}
 	// A unified text diff needs both sides' bytes, which is the one thing the manifest
@@ -264,7 +264,7 @@ func diffAgainstSnapshot(cl *client.Client, mk crypto.MasterKey, root string, lo
 		return err
 	}
 	defer func() { _ = os.RemoveAll(tmp) }()
-	if err := materializeWithMaster(cl, mk, snapshotAsResource(snap), tmp); err != nil {
+	if err := app.materializeWithMaster(cl, mk, snapshotAsResource(snap), tmp); err != nil {
 		return fmt.Errorf("reconstruct snapshot %s: %w", snapshotID, err)
 	}
 	snapshotManifest, err := syncengine.Scan(tmp)

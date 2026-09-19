@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,7 +15,8 @@ import (
 // path: CreateSnapshot over the wire, the live state moving on (which supersedes the
 // snapshotted version), then a client-side reconstruct of the snapshot.
 func TestSnapshotRestoreRoundTrip(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -23,7 +26,7 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 	writeTree(t, src, "sub/b.txt", "original B")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,14 +47,17 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("list snapshots = %d err=%v, want 1", len(snaps), err)
 	}
 
-	// Restore side-by-side into a fresh dir; it must match the pre-mutation tree.
-	got, err := cl.GetSnapshot(snap.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Restore by ID from outside a tracked folder; the live state stays unchanged.
 	dest := filepath.Join(t.TempDir(), "restored")
-	if _, err := reconstructSnapshot(cl, prof, got, dest, false); err != nil {
-		t.Fatalf("reconstruct: %v", err)
+	out := captureStdout(t, func() {
+		runCmd(t, app.rootCmd(), "restore", snap.ID, t.TempDir(), "--out", dest, "--json")
+	})
+	var report struct {
+		SnapshotID string `json:"snapshotId"`
+		Out        string `json:"out"`
+	}
+	if err := json.Unmarshal([]byte(out), &report); err != nil || report.SnapshotID != snap.ID || report.Out != dest {
+		t.Fatalf("restore report = %q, err = %v", out, err)
 	}
 	if c := readTree(t, dest, "a.txt"); c != "original A" {
 		t.Fatalf("a.txt = %q, want 'original A'", c)
@@ -60,12 +66,16 @@ func TestSnapshotRestoreRoundTrip(t *testing.T) {
 		t.Fatalf("sub/b.txt = %q, want 'original B'", c)
 	}
 	assertAbsent(t, dest, "c.txt")
+	if c := readTree(t, src, "a.txt"); c != "CHANGED A" {
+		t.Fatalf("side-by-side restore changed the live tree: %q", c)
+	}
 }
 
 // A label set on create is sealed client-side and reads back decrypted on browse,
 // without the server ever seeing the plaintext.
 func TestSnapshotLabelEndToEnd(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -74,18 +84,18 @@ func TestSnapshotLabelEndToEnd(t *testing.T) {
 	writeTree(t, src, "a.txt", "hi")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
 	rid := h.folderID(src)
-	runCmd(t, snapshotCreateCmd(), src, "milestone-1")
+	runCmd(t, app.snapshotCreateCmd(), src, "milestone-1")
 
 	snaps, err := cl.ListSnapshots(rid)
 	if err != nil || len(snaps) != 1 {
 		t.Fatalf("list = %d err=%v, want 1", len(snaps), err)
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +107,8 @@ func TestSnapshotLabelEndToEnd(t *testing.T) {
 
 // Pruning a snapshot deletes it; a subsequent fetch is a not-found.
 func TestSnapshotPrune(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -106,7 +117,7 @@ func TestSnapshotPrune(t *testing.T) {
 	writeTree(t, src, "a.txt", "hello")
 	h.sync(src)
 
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}

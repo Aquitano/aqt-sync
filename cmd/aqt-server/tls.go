@@ -59,10 +59,6 @@ func loadTLSSettings() (tlsSettings, error) {
 	return s, nil
 }
 
-func (s tlsSettings) enabled() bool {
-	return s.certFile != "" || len(s.autocertDomains) > 0
-}
-
 // tlsConfig builds the *tls.Config for the selected mode, or nil when TLS is off.
 // Static certs are loaded eagerly so a bad path fails startup rather than the first
 // handshake; autocert fetches per-host certificates on demand over the TLS-ALPN-01

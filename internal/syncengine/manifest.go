@@ -58,7 +58,8 @@ type Manifest struct {
 	Skipped []SkippedPath `json:"-"`
 }
 
-func (m *Manifest) dirsByPath() map[string]DirEntry {
+// DirsByPath indexes the tracked directories by path.
+func (m *Manifest) DirsByPath() map[string]DirEntry {
 	out := make(map[string]DirEntry, len(m.Dirs))
 	for _, d := range m.Dirs {
 		out[d.Path] = d
@@ -66,23 +67,18 @@ func (m *Manifest) dirsByPath() map[string]DirEntry {
 	return out
 }
 
-// DirsByPath indexes the manifest's tracked directories by their path.
-func (m *Manifest) DirsByPath() map[string]DirEntry { return m.dirsByPath() }
-
 func sortDirs(ds []DirEntry) {
 	sort.Slice(ds, func(i, j int) bool { return ds[i].Path < ds[j].Path })
 }
 
-func (m *Manifest) byPath() map[string]Entry {
+// ByPath indexes entries by path.
+func (m *Manifest) ByPath() map[string]Entry {
 	out := make(map[string]Entry, len(m.Entries))
 	for _, e := range m.Entries {
 		out[e.Path] = e
 	}
 	return out
 }
-
-// ByPath indexes the manifest's entries by their path.
-func (m *Manifest) ByPath() map[string]Entry { return m.byPath() }
 
 // Lookup returns the entry for a path, if present.
 func (m *Manifest) Lookup(path string) (Entry, bool) {

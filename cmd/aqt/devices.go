@@ -14,31 +14,31 @@ import (
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
-func devicesCmd() *cobra.Command {
+func (app *application) devicesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "devices",
 		Short: "List or revoke the devices attached to your account",
 		Args:  cobra.NoArgs,
 		// Bare `aqt devices` lists; `aqt devices ls|rm` use the subcommands.
-		RunE: func(cmd *cobra.Command, args []string) error { return runDevicesList(flagJSON) },
+		RunE: func(cmd *cobra.Command, args []string) error { return app.runDevicesList(app.json) },
 	}
-	cmd.AddCommand(devicesLsCmd(), devicesRmCmd())
+	cmd.AddCommand(app.devicesLsCmd(), app.devicesRmCmd())
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func devicesLsCmd() *cobra.Command {
+func (app *application) devicesLsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "ls",
 		Short: "List attached devices",
 		Args:  cobra.NoArgs,
-		RunE:  func(cmd *cobra.Command, args []string) error { return runDevicesList(flagJSON) },
+		RunE:  func(cmd *cobra.Command, args []string) error { return app.runDevicesList(app.json) },
 	}
 	markJSONSupported(cmd)
 	return cmd
 }
 
-func devicesRmCmd() *cobra.Command {
+func (app *application) devicesRmCmd() *cobra.Command {
 	var yes bool
 	cmd := &cobra.Command{
 		Use:   "rm <device-id>...",
@@ -48,7 +48,7 @@ func devicesRmCmd() *cobra.Command {
 			if err := confirmDestructive(fmt.Sprintf("Revoke %d device(s)? A revoked device must re-login. [y/N] ", len(args)), yes); err != nil {
 				return err
 			}
-			return runDevicesRemove(args)
+			return app.runDevicesRemove(args)
 		},
 	}
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
@@ -56,8 +56,8 @@ func devicesRmCmd() *cobra.Command {
 	return cmd
 }
 
-func runDevicesList(asJSON bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runDevicesList(asJSON bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
@@ -87,13 +87,13 @@ func runDevicesList(asJSON bool) error {
 	return printTable(os.Stdout, []string{"ID", "NAME", ""}, rows)
 }
 
-func runDevicesRemove(ids []string) error {
-	cl, prof, err := authedClient()
+func (app *application) runDevicesRemove(ids []string) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	return runDevicesRemoveWithClient(cl, prof.DeviceID, ids, func() error {
-		return identity.ClearSession(firstNonEmpty(flagProfile, identity.DefaultProfile))
+	return app.runDevicesRemoveWithClient(cl, prof.DeviceID, ids, func() error {
+		return identity.ClearSession(firstNonEmpty(app.profile, identity.DefaultProfile))
 	})
 }
 
@@ -102,7 +102,7 @@ type deviceRemoveClient interface {
 	DeleteDevice(string) error
 }
 
-func runDevicesRemoveWithClient(cl deviceRemoveClient, currentID string, requested []string, clearSession func() error) error {
+func (app *application) runDevicesRemoveWithClient(cl deviceRemoveClient, currentID string, requested []string, clearSession func() error) error {
 	devices, err := cl.ListDevices()
 	if err != nil {
 		return err
@@ -129,7 +129,7 @@ func runDevicesRemoveWithClient(cl deviceRemoveClient, currentID string, request
 	}
 	if len(failures) > 0 {
 		err = failBatchPreflight(results, failures)
-		return finishDestructiveBatch(destructiveBatchReport{Results: results}, "revoke", err)
+		return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "revoke", err)
 	}
 
 	for i, id := range ids {
@@ -144,9 +144,9 @@ func runDevicesRemoveWithClient(cl deviceRemoveClient, currentID string, request
 				deleteErr = fmt.Errorf("device %s not found (or not yours); run `aqt devices` to list yours", id)
 			}
 			err = markBatchFailure(results, i, deleteErr)
-			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "revoke", err)
+			return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "revoke", err)
 		}
 		results[i].Status = batchSucceeded
 	}
-	return finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "revoked", nil)
+	return app.finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "revoked", nil)
 }

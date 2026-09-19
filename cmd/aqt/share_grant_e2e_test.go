@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -26,7 +27,7 @@ import (
 )
 
 // grantSignup registers a second account with a published enc key under its own
-// profile name, so a test acts as several users by flipping flagProfile.
+// profile name, so a test can select it for a separate command invocation.
 func grantSignup(t *testing.T, h *e2eHarness, email, profile, pass string) {
 	t.Helper()
 	kdf := cryptotest.KdfParams(t)
@@ -73,10 +74,10 @@ func grantSignup(t *testing.T, h *e2eHarness, email, profile, pass string) {
 	}
 }
 
-func asProfile(name string, fn func()) {
-	old := flagProfile
-	flagProfile = name
-	defer func() { flagProfile = old }()
+func (app *application) asProfile(name string, fn func()) {
+	old := app.profile
+	app.profile = name
+	defer func() { app.profile = old }()
 	fn()
 }
 
@@ -84,8 +85,9 @@ func asProfile(name string, fn func()) {
 // says there are any: a private, ungranted resource used to cost one /grants
 // round-trip per resource just to be skipped.
 func TestShareLsFetchesGrantsOnlyWhereTheyExist(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	var grantGets atomic.Int64
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/grants") {
 			grantGets.Add(1)
 		}
@@ -93,24 +95,24 @@ func TestShareLsFetchesGrantsOnlyWhereTheyExist(t *testing.T) {
 	})
 	grantSignup(t, h, "count-grantee@example.com", "count-grantee", "another passphrase")
 
-	private := pushSecretFile(t, "private.txt", "p")
-	public := pushSecretFile(t, "public.txt", "pub")
-	granted := pushSecretFile(t, "granted.txt", "g")
-	pubGranted := pushSecretFile(t, "pubgranted.txt", "pg")
-	if err := runShare(public, "", true, linkPolicy{}); err != nil {
+	private := app.pushSecretFile(t, "private.txt", "p")
+	public := app.pushSecretFile(t, "public.txt", "pub")
+	granted := app.pushSecretFile(t, "granted.txt", "g")
+	pubGranted := app.pushSecretFile(t, "pubgranted.txt", "pg")
+	if err := app.runShare(public, "", true, linkPolicy{}); err != nil {
 		t.Fatalf("share public: %v", err)
 	}
-	if err := runShare(pubGranted, "", true, linkPolicy{}); err != nil {
+	if err := app.runShare(pubGranted, "", true, linkPolicy{}); err != nil {
 		t.Fatalf("share public+granted: %v", err)
 	}
 	for _, id := range []string{granted, pubGranted} {
-		if err := runShareWith(id, "count-grantee@example.com"); err != nil {
+		if err := app.runShareWith(id, "count-grantee@example.com"); err != nil {
 			t.Fatalf("share --with %s: %v", id, err)
 		}
 	}
 
 	grantGets.Store(0)
-	rows := shareListRows(t)
+	rows := app.shareListRows(t)
 	if _, ok := rows[private]; ok {
 		t.Fatalf("share ls lists the private, ungranted resource: %v", rows)
 	}
@@ -131,12 +133,12 @@ func TestShareLsFetchesGrantsOnlyWhereTheyExist(t *testing.T) {
 }
 
 // shareListRows runs `share ls --json` and indexes the rows by resource id.
-func shareListRows(t *testing.T) map[string]shareListRow {
+func (app *application) shareListRows(t *testing.T) map[string]shareListRow {
 	t.Helper()
 	var out string
-	withJSON(t, func() {
+	app.withJSON(t, func() {
 		out = captureStdout(t, func() {
-			if err := runShareList(""); err != nil {
+			if err := app.runShareList(""); err != nil {
 				t.Fatalf("share ls --json: %v", err)
 			}
 		})
@@ -153,16 +155,16 @@ func shareListRows(t *testing.T) map[string]shareListRow {
 }
 
 // pushSecretFile pushes one inline file as the current profile and returns its id.
-func pushSecretFile(t *testing.T, name, content string) string {
+func (app *application) pushSecretFile(t *testing.T, name, content string) string {
 	t.Helper()
 	fpath := filepath.Join(t.TempDir(), name)
 	if err := os.WriteFile(fpath, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,18 +188,19 @@ func pushSecretFile(t *testing.T, name, content string) string {
 // TestGrantFileShareAndRevoke is the issue #79 file-path acceptance test: grant,
 // list, pull as the grantee, strict read-only, then revoke with key rotation.
 func TestGrantFileShareAndRevoke(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	const content = "grant me this"
-	id := pushSecretFile(t, "granted.txt", content)
+	id := app.pushSecretFile(t, "granted.txt", content)
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 
-	if err := runShareWith(id, "bob@example.com"); err != nil {
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share --with: %v", err)
 	}
 
-	asProfile("bob", func() {
+	app.asProfile("bob", func() {
 		out := captureStdout(t, func() {
-			if err := sharesCmd().RunE(nil, nil); err != nil {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
 				t.Fatalf("shares: %v", err)
 			}
 		})
@@ -206,7 +209,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		}
 
 		dest := filepath.Join(t.TempDir(), "out.txt")
-		if err := runPull("aqt://"+id, dest, "", false, false); err != nil {
+		if err := app.runPull("aqt://"+id, dest, "", false, false); err != nil {
 			t.Fatalf("grantee pull: %v", err)
 		}
 		got, err := os.ReadFile(dest)
@@ -219,7 +222,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 
 		// A grant is read-only: every mutation stays owner-scoped and answers 404,
 		// indistinguishable from no access at all.
-		cl, _, err := authedClient()
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -234,12 +237,12 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		}
 	})
 
-	if err := runShareRevoke(id, "bob@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "bob@example.com"); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 
-	asProfile("bob", func() {
-		cl, _, err := authedClient()
+	app.asProfile("bob", func() {
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -256,7 +259,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 	})
 
 	// Revoking a second time reports the missing grant instead of succeeding.
-	if err := runShareRevoke(id, "bob@example.com"); err == nil || !strings.Contains(err.Error(), "no grant") {
+	if err := app.runShareRevoke(id, "bob@example.com"); err == nil || !strings.Contains(err.Error(), "no grant") {
 		t.Fatalf("second revoke: got %v, want a no-grant error", err)
 	}
 }
@@ -265,7 +268,8 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 // subpath-pulls a chunked folder read-only, object reads stay scoped to the granted
 // resource, and revoking one grantee rotates the key while re-wrapping the rest.
 func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
 	// A second private folder with different content: its objects must not be
@@ -274,21 +278,21 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 	h.init(other)
 	writeTree(t, other, "other/secret.txt", "TOP SECRET NEIGHBOR")
 	h.sync(other)
-	foreignRoot := ownerTreeRootID(t, h.folderID(other))
+	foreignRoot := app.ownerTreeRootID(t, h.folderID(other))
 
 	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
 	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
-	if err := runShareWith(id, "bob@example.com"); err != nil {
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share --with bob: %v", err)
 	}
-	if err := runShareWith(id, "carol@example.com"); err != nil {
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
 		t.Fatalf("share --with carol: %v", err)
 	}
 
 	cloneAndCheck := func(profile string) {
 		dest := filepath.Join(t.TempDir(), "clone")
-		asProfile(profile, func() {
-			if err := runClone("aqt://"+id, dest, false, ""); err != nil {
+		app.asProfile(profile, func() {
+			if err := app.runClone("aqt://"+id, dest, false, ""); err != nil {
 				t.Fatalf("%s clone: %v", profile, err)
 			}
 		})
@@ -311,10 +315,10 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 	}
 	cloneAndCheck("bob")
 
-	asProfile("bob", func() {
+	app.asProfile("bob", func() {
 		// Subpath pull through the grant.
 		dest := filepath.Join(t.TempDir(), "readme.txt")
-		if err := runPull("aqt://"+id+"/docs/readme.txt", dest, "", false, false); err != nil {
+		if err := app.runPull("aqt://"+id+"/docs/readme.txt", dest, "", false, false); err != nil {
 			t.Fatalf("grantee subpath pull: %v", err)
 		}
 		want, _ := os.ReadFile(filepath.Join(origin, "docs/readme.txt"))
@@ -325,7 +329,7 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 
 		// Pack-neighbor isolation: an object of the owner's other resource is
 		// refused wholesale through the granted resource's object endpoint.
-		cl, _, err := authedClient()
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -334,12 +338,12 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 		}
 	})
 
-	if err := runShareRevoke(id, "carol@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com"); err != nil {
 		t.Fatalf("revoke carol: %v", err)
 	}
 
-	asProfile("carol", func() {
-		cl, _, err := authedClient()
+	app.asProfile("carol", func() {
+		cl, _, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -356,9 +360,10 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 // a deterministic, correctly self-signed keyset, indistinguishable in shape from a
 // real account's.
 func TestAccountKeysDecoy(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	grantSignup(t, h, "real@example.com", "real", "real horse battery staple")
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,26 +462,27 @@ func TestAccountKeysDecoy(t *testing.T) {
 // re-run its own error message told you to make hit the "no grant for ..." early return
 // and stopped — so forward secrecy stayed broken with no way back.
 func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	var failRotation atomic.Bool
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if failRotation.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
 		pass(w, r)
 	})
-	id := pushSecretFile(t, "revoke-retry.txt", "rotate me")
+	id := app.pushSecretFile(t, "revoke-retry.txt", "rotate me")
 	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
-	if err := runShareWith(id, "carol@example.com"); err != nil {
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
 		t.Fatalf("share --with: %v", err)
 	}
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	failRotation.Store(true)
-	err = runShareRevoke(id, "carol@example.com")
+	err = app.runShareRevoke(id, "carol@example.com")
 	if err == nil {
 		t.Fatal("revoke reported success while the key rotation was failing")
 	}
@@ -497,7 +503,7 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 
 	// The recovery the error points at actually works.
 	failRotation.Store(false)
-	if err := runShareRevoke(id, "carol@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com"); err != nil {
 		t.Fatalf("re-run after a failed rotation: %v", err)
 	}
 	grants, err = cl.ListGrants(id)
@@ -516,20 +522,21 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 // later share fails as if the server were substituting keys. `aqt contacts rm` is the
 // way out, and the mismatch error has to say so.
 func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	const (
 		email   = "dave@example.com"
 		content = "shared too early"
 	)
-	id := pushSecretFile(t, "early.txt", content)
+	id := app.pushSecretFile(t, "early.txt", content)
 
 	// Dave has no account yet: this pins a placeholder.
-	if err := runShareWith(id, email); err != nil {
+	if err := app.runShareWith(id, email); err != nil {
 		t.Fatalf("share --with an unregistered email: %v", err)
 	}
 	grantSignup(t, h, email, "dave", "dave horse battery staple")
 
-	err := runShareWith(id, email)
+	err := app.runShareWith(id, email)
 	if err == nil {
 		t.Fatal("re-share after registration should refuse: the real key cannot match the pinned decoy")
 	}
@@ -537,7 +544,7 @@ func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 		t.Fatalf("mismatch error = %v, want it to point at `aqt contacts rm`", err)
 	}
 
-	cmd := contactsCmd()
+	cmd := app.contactsCmd()
 	cmd.SetArgs([]string{"rm", email})
 	captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
@@ -546,12 +553,12 @@ func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 	})
 
 	// With the placeholder dropped, the share re-pins Dave's real key and reaches him.
-	if err := runShareWith(id, email); err != nil {
+	if err := app.runShareWith(id, email); err != nil {
 		t.Fatalf("re-share after `aqt contacts rm`: %v", err)
 	}
-	asProfile("dave", func() {
+	app.asProfile("dave", func() {
 		dest := filepath.Join(t.TempDir(), "out.txt")
-		if err := runPull("aqt://"+id, dest, "", false, false); err != nil {
+		if err := app.runPull("aqt://"+id, dest, "", false, false); err != nil {
 			t.Fatalf("grantee pull after recovery: %v", err)
 		}
 		got, err := os.ReadFile(dest)
@@ -570,13 +577,14 @@ func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
 // revoked account, undoing the rotation the revoke just performed. The proxy here
 // injects the revoked grantee back into every grant listing to force the issue.
 func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	var (
 		revoked         atomic.Value // string: the handle a hostile server keeps listing
 		recording       atomic.Bool  // gate CreateGrant recording to the revoke, past the setup shares
 		createGrantsFor sync.Map     // handle -> true: CreateGrant POSTs seen while recording
 	)
 
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		switch {
 		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/grants"):
 			raw, _ := io.ReadAll(r.Body)
@@ -611,17 +619,17 @@ func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 		}
 	})
 
-	id := pushSecretFile(t, "hostile.txt", "rotate away")
+	id := app.pushSecretFile(t, "hostile.txt", "rotate away")
 	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
 	grantSignup(t, h, "dave@example.com", "dave", "dave horse battery staple")
-	if err := runShareWith(id, "carol@example.com"); err != nil {
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
 		t.Fatalf("share --with carol: %v", err)
 	}
-	if err := runShareWith(id, "dave@example.com"); err != nil {
+	if err := app.runShareWith(id, "dave@example.com"); err != nil {
 		t.Fatalf("share --with dave: %v", err)
 	}
 
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +644,7 @@ func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 	revoked.Store(carolKeys.Handle) // from here the "server" keeps listing carol
 	recording.Store(true)           // and from here we watch which re-wraps the client emits
 
-	if err := runShareRevoke(id, "carol@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com"); err != nil {
 		t.Fatalf("revoke carol: %v", err)
 	}
 

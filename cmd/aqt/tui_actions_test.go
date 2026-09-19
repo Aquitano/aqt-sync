@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -39,7 +40,8 @@ func menuCommand(t *testing.T, menu *tuiMenu, want string) tea.Cmd {
 // entry has to answer to its own key with the same kind of action the menu
 // promises. A menu-only entry is an action the shortcut silently dropped.
 func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 	for _, panel := range []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources} {
 		m.setFocus(panel)
 		for _, option := range m.panelActions() {
@@ -60,10 +62,11 @@ func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
 // equal to what panelActions would actually return in every state that can empty
 // a panel: no tracked folder, and an empty snapshot or resource list.
 func TestTUIHasActionsMatchesPanelActions(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	panels := []tuiPanelID{tuiPanelStatus, tuiPanelFiles, tuiPanelSnapshots, tuiPanelResources}
 	for _, root := range []string{"/tmp/vault", ""} {
 		for _, empty := range []bool{false, true} {
-			m := testModel(t)
+			m := app.testModel(t)
 			m.ctx.root = root
 			if empty {
 				m.snaps, m.resources = nil, nil
@@ -81,7 +84,8 @@ func TestTUIHasActionsMatchesPanelActions(t *testing.T) {
 }
 
 func TestTUIIssue92SingleKeyActions(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 
 	m.setFocus(tuiPanelFiles)
 	_, cmd := m.handleKey(key("u"))
@@ -117,7 +121,8 @@ func TestTUIIssue92SingleKeyActions(t *testing.T) {
 }
 
 func TestTUIIssue92ResourceActions(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 	res := *m.selectedResource()
 
@@ -165,10 +170,11 @@ func TestTUIIssue92ResourceActions(t *testing.T) {
 }
 
 func TestTUIIssue92SnapshotActions(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 	m.setFocus(tuiPanelSnapshots)
 	snap := *m.selectedSnapshot()
-	if got := menuKeys(&tuiMenu{options: m.snapshotsActions()}); got != "n,d,a,o,e,k,f,R,x" {
+	if got := menuKeys(&tuiMenu{options: m.snapshotsActions()}); got != "n,d,a,o,k,f,R,x" {
 		t.Fatalf("snapshot actions = %q", got)
 	}
 
@@ -193,7 +199,8 @@ func TestTUIIssue92SnapshotActions(t *testing.T) {
 }
 
 func TestTUIIssue92AccountMenu(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 	m.setFocus(tuiPanelStatus)
 	if got := menuKeys(&tuiMenu{options: m.statusActions()}); got != "u,i,c,h,o,U,d" {
 		t.Fatalf("account actions = %q", got)
@@ -237,7 +244,8 @@ func TestTUIIssue92AccountMenu(t *testing.T) {
 }
 
 func TestTUISharePasswordPreservesWhitespaceAndResultPersists(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 	res := *m.selectedResource()
 	opened := menuCommand(t, m.shareDialog(res).(*tuiMenu), "p")().(tuiOpenDialogMsg)
 	secret := opened.dialog.(*tuiInput)

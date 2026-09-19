@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,13 +26,11 @@ func TestLoadTLSSettings(t *testing.T) {
 		name    string
 		env     map[string]string
 		wantErr bool
-		enabled bool
 	}{
-		{name: "plain", env: nil, enabled: false},
+		{name: "plain", env: nil},
 		{
-			name:    "static ok",
-			env:     map[string]string{"AQT_TLS_CERT": "c.pem", "AQT_TLS_KEY": "k.pem"},
-			enabled: true,
+			name: "static ok",
+			env:  map[string]string{"AQT_TLS_CERT": "c.pem", "AQT_TLS_KEY": "k.pem"},
 		},
 		{
 			name:    "cert without key",
@@ -44,9 +43,8 @@ func TestLoadTLSSettings(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name:    "autocert ok",
-			env:     map[string]string{"AQT_TLS_AUTOCERT_DOMAINS": "aqt.example.com"},
-			enabled: true,
+			name: "autocert ok",
+			env:  map[string]string{"AQT_TLS_AUTOCERT_DOMAINS": "aqt.example.com"},
 		},
 		{
 			name: "static and autocert conflict",
@@ -72,8 +70,9 @@ func TestLoadTLSSettings(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if s.enabled() != tc.enabled {
-				t.Fatalf("enabled() = %v, want %v", s.enabled(), tc.enabled)
+			if s.certFile != tc.env["AQT_TLS_CERT"] || s.keyFile != tc.env["AQT_TLS_KEY"] ||
+				!slices.Equal(s.autocertDomains, splitCSV(tc.env["AQT_TLS_AUTOCERT_DOMAINS"])) {
+				t.Fatalf("loaded TLS settings = %+v, want env %v", s, tc.env)
 			}
 		})
 	}

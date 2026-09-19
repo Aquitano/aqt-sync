@@ -370,7 +370,7 @@ whatever account happens to be active. What the folder tracks is regenerable, an
 silent adoption is the one outcome that cannot be undone after the fact.
 
 **Atomic materialization.** Operations that create trees commit all-or-nothing.
-`clone`, directory pulls, snapshot export, and side-by-side restore download into a
+`clone`, directory pulls, and side-by-side restore download into a
 staging directory beside the destination and rename it into place only on success (an
 in-place restore stages and swaps with rollback), so an interrupted transfer, a
 permission failure, or a destination collision leaves the destination exactly as it
@@ -497,8 +497,8 @@ resumes when git finishes. An edit that lands mid-sync is not lost. The git scan
 best-effort (an unreadable subtree is skipped, not treated as idle) and covers nested
 repos, submodules, and worktrees.
 
-`-d/--daemon` unlocks the session on the launching terminal first, so the detached
-child — which has no tty — never needs to prompt, writes a pid and log under `.aqt/`,
-and waits for the child to come up. If the cached session later expires the daemon
-stops cleanly rather than looping, because it cannot prompt. `aqt agent
-status|stop|logs` manages it and will not signal a recycled PID.
+`aqt watch` runs in the foreground. `aqt agent start` unlocks the session on the
+launching terminal, starts a detached watcher, and waits for it to come up.
+The child writes its pid and log under `.aqt/`. If its cached session expires,
+the child stops because it has no terminal on which to prompt.
+`aqt agent status|stop|logs` manages the watcher and will not signal a recycled PID.

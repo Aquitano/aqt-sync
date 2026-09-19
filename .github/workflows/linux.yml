@@ -52,7 +52,13 @@ jobs:
       # -race roughly triples the suite, so go test's 10m per-package default is
       # a tighter fit here than it looks. The windows job hit exactly that wall.
       - name: Test
-        run: go test -race -timeout 20m ./...
+        run: go test -race -shuffle=on -timeout 20m ./...
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          package-manager-cache: false
+      - name: Test share page
+        run: make test-web
       # The only end-to-end proof that a backup is actually restorable. It broke
       # unnoticed once already because nothing ran it.
       - name: Restore drill

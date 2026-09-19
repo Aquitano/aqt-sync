@@ -78,7 +78,7 @@ func openFolderRoot(res api.GetResourceResponse, ck crypto.ContentKey) (syncengi
 // downloading anything else: only the directory nodes on the path's spine, then
 // just that entry's content chunks. A non-nil slices selects the exact-slice
 // transport (share link or grant) for both, instead of the owner's pack path.
-func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck crypto.ContentKey, subpath, out string, toStdout, force bool, slices sliceFetch) error {
+func (app *application) pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck crypto.ContentKey, subpath, out string, toStdout, force bool, slices sliceFetch) error {
 	root, err := openFolderRoot(res, ck)
 	if errors.Is(err, errNotAFolder) {
 		return fmt.Errorf("resource %s is not a folder; drop the /%s suffix", id, subpath)
@@ -103,7 +103,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 		if toStdout {
 			return fmt.Errorf("%s is a directory: `aqt ls aqt://%s/%s` lists it, `aqt pull` materializes it", subpath, id, subpath)
 		}
-		return pullSubtree(cl, root.Version, child, fetch, subpath, out, slices)
+		return app.pullSubtree(cl, root.Version, child, fetch, subpath, out, slices)
 	case syncengine.ChildSymlink:
 		if toStdout {
 			return fmt.Errorf("%s is a symlink to %s; use `aqt pull` to recreate the link", subpath, child.Link)
@@ -173,7 +173,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 	}); err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"path": dest, "bytes": e.Size})
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, e.Size)
@@ -183,7 +183,7 @@ func pullSubpath(cl *client.Client, id string, res api.GetResourceResponse, ck c
 // pullSubtree materializes one directory subtree into a fresh destination: the
 // subtree's own node is a complete content-addressed root, so the rest of the
 // folder is never fetched.
-func pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, slices sliceFetch) error {
+func (app *application) pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fetch func(ids []string) (map[string][]byte, error), subpath, out string, slices sliceFetch) error {
 	sub := syncengine.TreeRoot{Version: version, Root: *child.Node}
 	m, err := syncengine.OpenTreeBatched(sub, fetch)
 	if err != nil {
@@ -206,7 +206,7 @@ func pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fet
 		get = src.Get
 	}
 	if err := materializeStaged(abs, func(staging string) error {
-		prog := newProgressBar("downloading", entriesBytes(m.Entries))
+		prog := app.newProgressBar("downloading", entriesBytes(m.Entries))
 		// A subpath pull writes into a plain directory, not a tracked folder, so there
 		// is no base manifest for its mtimes to feed.
 		var dlErr error
@@ -224,7 +224,7 @@ func pullSubtree(cl *client.Client, version int, child syncengine.TreeChild, fet
 	}); err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"path": abs, "files": len(m.Entries)})
 	}
 	fmt.Fprintf(os.Stderr, "pulled %d files into %s\n", len(m.Entries), abs)
@@ -288,12 +288,12 @@ func collectFolderRows(cl *client.Client, mk crypto.MasterKey, ref string) ([]fo
 	return rows, nil
 }
 
-func runLsFolder(cl *client.Client, mk crypto.MasterKey, ref string) error {
+func (app *application) runLsFolder(cl *client.Client, mk crypto.MasterKey, ref string) error {
 	rows, err := collectFolderRows(cl, mk, ref)
 	if err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(rows)
 	}
 	if len(rows) == 0 {

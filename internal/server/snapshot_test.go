@@ -5,8 +5,10 @@ package server
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -513,5 +515,26 @@ func TestListResourcesReflectsAutoSnapshot(t *testing.T) {
 	}
 	if items[0].AutoSnapshot {
 		t.Fatal("auto_snapshot should be false after opt-out")
+	}
+}
+
+// Snapshotting a reclaimed tombstone has no ciphertext to pin. It used to 500, which
+// violates the stable-error-code contract and which the client's idempotent retry
+// treats as worth repeating.
+func TestSnapshotOfTombstoneIsGoneNot500(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("snap-tombstone@example.com", "a passphrase here")
+	put := h.putPublicViaAPI(token, mk, 0, 1)
+
+	if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", nil, nil); got.Code != http.StatusOK {
+		t.Fatalf("first read = %d", got.Code)
+	}
+	owner, _ := h.store.OwnerByToken(token)
+	if _, err := h.store.SweepExpired(owner, time.Now().Unix()+2*int64(gcMinAge/time.Second)); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if code := h.do(http.MethodPost, "/v1/snapshots", token, api.CreateSnapshotRequest{ResourceID: put.ID}, nil); code != http.StatusGone {
+		t.Fatalf("snapshot of a tombstone = %d, want 410", code)
 	}
 }

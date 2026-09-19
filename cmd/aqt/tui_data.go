@@ -21,6 +21,8 @@ import (
 // master key, and the tracked folder it was opened in (root == "" when outside
 // one — the resources and snapshots panels still work account-wide).
 type tuiCtx struct {
+	app *application
+
 	prof     *identity.Profile
 	cl       *client.Client
 	mk       crypto.MasterKey
@@ -131,9 +133,11 @@ func (c *tuiCtx) unlockCmd(passphrase string) tea.Cmd {
 }
 
 func (c *tuiCtx) localStatusCmd() tea.Cmd {
+	app := c.app
+
 	root := c.root
 	return func() tea.Msg {
-		base, err := folderstate.LoadBase(root, flagProfile)
+		base, err := folderstate.LoadBase(root, app.profile)
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
@@ -145,7 +149,7 @@ func (c *tuiCtx) localStatusCmd() tea.Cmd {
 		if err != nil {
 			return tuiLocalMsg{err: err}
 		}
-		return tuiLocalMsg{changes: computeLocalChanges(local, base), conflicts: conflicts}
+		return tuiLocalMsg{changes: newChangeSet(syncengine.Diff(base, local)), conflicts: conflicts}
 	}
 }
 
@@ -167,6 +171,8 @@ func tuiConflictCopies(root string) ([]string, error) {
 }
 
 func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
+	app := c.app
+
 	ctx := *c
 	return func() tea.Msg {
 		st, err := folderstate.LoadState(ctx.root)
@@ -185,7 +191,7 @@ func (c *tuiCtx) remoteStatusCmd() tea.Cmd {
 		}
 		// Server is ahead: try the entry-level breakdown.
 		{
-			base, berr := folderstate.LoadBase(ctx.root, flagProfile)
+			base, berr := folderstate.LoadBase(ctx.root, app.profile)
 			if berr == nil {
 				if inc, ierr := incomingFiles(ctx.cl, res, base, ctx.mk); ierr == nil {
 					note := fmt.Sprintf("incoming: %d change(s) to pull", inc.total())
@@ -267,9 +273,11 @@ func (c *tuiCtx) agentStatusCmd() tea.Cmd {
 // diffCmd computes what changed between a snapshot and the live resource, the
 // same metadata-only walk `aqt snapshot diff` does.
 func (c *tuiCtx) diffCmd(snapshotID string) tea.Cmd {
+	app := c.app
+
 	ctx := *c
 	return func() tea.Msg {
-		result, err := computeSnapshotDiff(ctx.cl, ctx.mk, snapshotID, "")
+		result, err := app.computeSnapshotDiff(ctx.cl, ctx.mk, snapshotID, "")
 		return tuiDiffMsg{snapshotID: snapshotID, result: result, err: err}
 	}
 }
@@ -278,13 +286,15 @@ func (c *tuiCtx) diffCmd(snapshotID string) tea.Cmd {
 // comparison `aqt diff --against=remote` reports. It runs in process on the
 // already-unlocked key, so it never prompts while the renderer owns the tty.
 func (c *tuiCtx) compareCmd() tea.Cmd {
+	app := c.app
+
 	ctx := *c
 	return func() tea.Msg {
 		res, err := folderResource(ctx.cl, ctx.root)
 		if err != nil {
 			return tuiCompareMsg{err: err}
 		}
-		result, err := computeRemoteComparison(ctx.cl, ctx.mk, ctx.root, res)
+		result, err := app.computeRemoteComparison(ctx.cl, ctx.mk, ctx.root, res)
 		return tuiCompareMsg{result: result, err: err}
 	}
 }

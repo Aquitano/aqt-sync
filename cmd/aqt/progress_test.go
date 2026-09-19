@@ -19,19 +19,18 @@ import (
 // packio.Uploader honors whatever context it is handed; what only this package can
 // prove is that newUploader hands it the root signal context, so a ^C stops a push
 // from sealing the rest of the tree. The client is deliberately left on its own
-// context: if the adapter dropped rootCtx, the dispatched pack would reach the
+// context: if the uploader dropped the command context, the dispatched pack would reach the
 // unroutable address and fail with a connection error instead of a cancellation.
 func TestNewUploaderObservesRootCancel(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	ctx, cancel := context.WithCancel(context.Background())
-	orig := rootCtx
-	rootCtx = ctx
-	t.Cleanup(func() { rootCtx = orig })
+	app.ctx = ctx
 
 	cl, err := client.New("https://127.0.0.1:1/", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	up := newUploader(cl, nil)
+	up := app.newUploader(cl, nil)
 	cancel()
 
 	var failed error

@@ -10,15 +10,15 @@ import (
 func TestParseVersionAcceptsOnlyExactSemanticVersions(t *testing.T) {
 	valid := []struct {
 		in   string
-		want string
+		want Version
 	}{
-		{"v0.3.0", "v0.3.0"},
-		{"0.3.0", "v0.3.0"},
-		{"v1.2.3-rc.1", "v1.2.3-rc.1"},
-		{"v1.2.3-0.beta", "v1.2.3-0.beta"},
-		{"v1.2.3+build.5", "v1.2.3+build.5"},
-		{"v1.2.3-rc.1+build.5", "v1.2.3-rc.1+build.5"},
-		{"v10.20.30", "v10.20.30"},
+		{"v0.3.0", Version{Major: 0, Minor: 3, Patch: 0}},
+		{"0.3.0", Version{Major: 0, Minor: 3, Patch: 0}},
+		{"v1.2.3-rc.1", Version{Major: 1, Minor: 2, Patch: 3, Pre: "rc.1"}},
+		{"v1.2.3-0.beta", Version{Major: 1, Minor: 2, Patch: 3, Pre: "0.beta"}},
+		{"v1.2.3+build.5", Version{Major: 1, Minor: 2, Patch: 3, Build: "build.5"}},
+		{"v1.2.3-rc.1+build.5", Version{Major: 1, Minor: 2, Patch: 3, Pre: "rc.1", Build: "build.5"}},
+		{"v10.20.30", Version{Major: 10, Minor: 20, Patch: 30}},
 	}
 	for _, tc := range valid {
 		v, err := ParseVersion(tc.in)
@@ -26,8 +26,8 @@ func TestParseVersionAcceptsOnlyExactSemanticVersions(t *testing.T) {
 			t.Errorf("ParseVersion(%q): %v", tc.in, err)
 			continue
 		}
-		if got := v.String(); got != tc.want {
-			t.Errorf("ParseVersion(%q).String() = %q, want %q", tc.in, got, tc.want)
+		if v != tc.want {
+			t.Errorf("ParseVersion(%q) = %+v, want %+v", tc.in, v, tc.want)
 		}
 	}
 

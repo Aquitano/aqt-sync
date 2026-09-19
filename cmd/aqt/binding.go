@@ -19,10 +19,9 @@ import (
 // to .aqt/state.json.
 //
 // Call it before authedClient()/loadProfile() in any command that acts on the
-// tracked folder's remote resource: it activates the bound profile by setting the
-// global flagProfile, which everything downstream (client auth, base sealing)
-// already keys on.
-func bindTrackedRoot(root string) error {
+// tracked folder's remote resource. The selected profile belongs to this command
+// invocation and is used for authentication and base sealing.
+func (app *application) bindTrackedRoot(root string) error {
 	st, err := folderstate.LoadState(root)
 	if err != nil || st.ID == "" {
 		// No usable state — unreadable, or written before the identity binding
@@ -34,24 +33,24 @@ func bindTrackedRoot(root string) error {
 	// renamed profile) is the folder's owner and must not be locked out. The
 	// authoritative check is sameAccount below, so this one only reports the
 	// mismatch it cannot clear.
-	if flagProfile != "" && flagProfile != st.Profile {
-		named, loadErr := identity.Load(flagProfile)
+	if app.profile != "" && app.profile != st.Profile {
+		named, loadErr := identity.Load(app.profile)
 		if loadErr != nil || !sameAccount(st, named) {
 			return fmt.Errorf("%s belongs to profile %q, but --profile %s was given; drop --profile (the folder's own profile is used automatically), or re-clone the folder under the other profile to move it",
-				root, st.Profile, flagProfile)
+				root, st.Profile, app.profile)
 		}
 	}
-	if flagServer != "" && st.Server != "" && !sameServer(flagServer, st.Server) {
+	if app.server != "" && st.Server != "" && !sameServer(app.server, st.Server) {
 		return fmt.Errorf("%s tracks a resource on %s, but --server %s was given; drop --server, or `aqt clone` the folder against the other server (its resources do not exist there)",
-			root, st.Server, flagServer)
+			root, st.Server, app.server)
 	}
-	// Activate the recorded profile. Leaving flagProfile empty when the recorded
+	// Activate the recorded profile. Leaving app.profile empty when the recorded
 	// profile is the default keeps the flag's "unset" reading (and its output)
 	// unchanged for the overwhelmingly common single-profile setup.
-	if flagProfile == "" && st.Profile != identity.DefaultProfile {
-		flagProfile = st.Profile
+	if app.profile == "" && st.Profile != identity.DefaultProfile {
+		app.profile = st.Profile
 	}
-	prof, err := identity.Load(flagProfile)
+	prof, err := identity.Load(app.profile)
 	if err != nil {
 		return fmt.Errorf("%s belongs to profile %q, which is not configured on this machine: %w", root, st.Profile, err)
 	}
@@ -87,12 +86,12 @@ func bindTrackedRoot(root string) error {
 // bindTrackedDir is bindTrackedRoot for commands whose directory argument may not
 // be tracked at all (e.g. snapshot commands driven by --id): not-a-tracked-folder
 // is simply nothing to bind.
-func bindTrackedDir(dir string) error {
+func (app *application) bindTrackedDir(dir string) error {
 	root, err := trackedRoot(dir)
 	if err != nil {
 		return nil
 	}
-	return bindTrackedRoot(root)
+	return app.bindTrackedRoot(root)
 }
 
 // sameAccount reports whether a tracked folder's recorded identity and a profile

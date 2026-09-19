@@ -77,15 +77,7 @@ func newIPRateLimiter(rps, burst float64) *ipRateLimiter {
 	return &ipRateLimiter{buckets: make(map[string]*tokenBucket), rps: rps, burst: burst, now: time.Now}
 }
 
-// allow reports whether a request from key may proceed, consuming one token.
-func (l *ipRateLimiter) allow(key string) bool {
-	ok, _ := l.reserve(key)
-	return ok
-}
-
-// reserve is allow with the caller's Retry-After hint: on a denial it returns how
-// long until the bucket has refilled one token, so the middleware can advertise it.
-// The duration is zero when the request is allowed.
+// reserve consumes a token or returns the wait until one becomes available.
 func (l *ipRateLimiter) reserve(key string) (bool, time.Duration) {
 	l.mu.Lock()
 	defer l.mu.Unlock()

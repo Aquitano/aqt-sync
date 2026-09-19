@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
@@ -148,7 +149,8 @@ func TestSealMemoRejectsBadNames(t *testing.T) {
 // the stored one, so it passing proves a reused push wrote the same root and refs
 // a cold seal would — and the clone proves no live object was collected.
 func TestSealMemoReuseAcrossSyncAndPrune(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -165,7 +167,7 @@ func TestSealMemoReuseAcrossSyncAndPrune(t *testing.T) {
 	writeTree(t, dir, "a/keep.txt", "keep me around, edited")
 	h.sync(dir)
 
-	if err := runPrune(false, false); err != nil {
+	if err := app.runPrune(false, false); err != nil {
 		t.Fatalf("prune after a reused push: %v", err)
 	}
 

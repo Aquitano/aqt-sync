@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -136,8 +137,9 @@ func TestRenameCaseOnlyToleratesMissingSource(t *testing.T) {
 // applies cleanly on a case-folding replica — the old names convert to renames, the
 // content survives, and the replica has nothing new to push afterwards.
 func TestSyncAppliesCaseOnlyRenameOnFoldingFS(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	t.Setenv("AQT_TEST_CASE_INSENSITIVE", "1")
-	h := newE2E(t)
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "File.txt", "x")

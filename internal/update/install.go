@@ -97,7 +97,7 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 	// this process can only clear on a later run.
 	CleanStale(in.Dir, "")
 
-	archive, err := DownloadArtifact(ctx, opts.Source, opts.Version, opts.Artifact, in.Dir)
+	archive, err := DownloadArtifact(ctx, opts.Source, opts.Artifact, in.Dir)
 	if err != nil {
 		return res, err
 	}

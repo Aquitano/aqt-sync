@@ -87,7 +87,7 @@ func TestScanKeepsUnreadableFileAsLastSynced(t *testing.T) {
 	if !errors.Is(got.Skipped[0].Err, fs.ErrPermission) {
 		t.Fatalf("skip reason = %v, want a permission error", got.Skipped[0].Err)
 	}
-	if d := Diff(base, got); !d.Empty() {
+	if d := Diff(base, got); len(d.Changes) != 0 || len(d.Renamed) != 0 {
 		t.Fatalf("an unreadable file must read as unchanged, got %+v", d.Changes)
 	}
 }

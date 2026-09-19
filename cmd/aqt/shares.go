@@ -56,23 +56,23 @@ func (r shareRow) sender() string {
 // aqt:// ref of their choosing.
 func foreignText(s string) string { return safetext.Clean(s, safetext.DisplayMax) }
 
-func sharesCmd() *cobra.Command {
+func (app *application) sharesCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "shares",
 		Short: "List resources other accounts granted you (read-only)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, rows, err := collectShares()
+			_, rows, err := app.collectShares()
 			if err != nil {
 				return err
 			}
 			if len(rows) == 0 {
-				if flagJSON {
+				if app.json {
 					return printJSON([]shareRow{})
 				}
 				fmt.Println("no incoming shares")
 				return nil
 			}
-			if flagJSON {
+			if app.json {
 				return printJSON(rows)
 			}
 			for _, r := range rows {
@@ -90,15 +90,15 @@ func sharesCmd() *cobra.Command {
 		},
 	}
 	markJSONSupported(cmd)
-	cmd.AddCommand(sharesRmCmd(), sharesBlockedCmd(), sharesUnblockCmd())
+	cmd.AddCommand(app.sharesRmCmd(), app.sharesBlockedCmd(), app.sharesUnblockCmd())
 	return cmd
 }
 
 // collectShares decrypts each incoming grant's metadata and attributes it to a
 // pinned contact where one matches. It returns the authed client it built so a
 // caller acting on a row does not construct a second one.
-func collectShares() (*client.Client, []shareRow, error) {
-	cl, prof, err := authedClient()
+func (app *application) collectShares() (*client.Client, []shareRow, error) {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -109,7 +109,7 @@ func collectShares() (*client.Client, []shareRow, error) {
 	if len(items) == 0 {
 		return cl, nil, nil
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -157,7 +157,7 @@ func collectShares() (*client.Client, []shareRow, error) {
 
 // sharesRmCmd is the grantee-side counterpart of `aqt unshare --with`: until it
 // existed, only the account that appended a row to your share list could remove it.
-func sharesRmCmd() *cobra.Command {
+func (app *application) sharesRmCmd() *cobra.Command {
 	var block bool
 	cmd := &cobra.Command{
 		Use:     "rm <ref-or-name>",
@@ -169,7 +169,7 @@ func sharesRmCmd() *cobra.Command {
 			"lift it with `aqt shares unblock`.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSharesRemove(args[0], block)
+			return app.runSharesRemove(args[0], block)
 		},
 	}
 	cmd.Flags().BoolVar(&block, "block", false, "also refuse future shares from the account that sent this one")
@@ -177,8 +177,8 @@ func sharesRmCmd() *cobra.Command {
 	return cmd
 }
 
-func runSharesRemove(ref string, block bool) error {
-	cl, rows, err := collectShares()
+func (app *application) runSharesRemove(ref string, block bool) error {
+	cl, rows, err := app.collectShares()
 	if err != nil {
 		return err
 	}
@@ -193,7 +193,7 @@ func runSharesRemove(ref string, block bool) error {
 	if err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{
 			"ref": row.Ref, "from": foreignText(resp.OwnerHandle), "removed": resp.Removed, "blocked": resp.Blocked,
 		})
@@ -246,13 +246,13 @@ type blockRow struct {
 	Blocked string `json:"blocked"`
 }
 
-func sharesBlockedCmd() *cobra.Command {
+func (app *application) sharesBlockedCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "blocked",
 		Short: "List accounts whose shares you are refusing",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
@@ -275,7 +275,7 @@ func sharesBlockedCmd() *cobra.Command {
 				})
 			}
 			sort.Slice(rows, func(i, j int) bool { return rows[i].Handle < rows[j].Handle })
-			if flagJSON {
+			if app.json {
 				return printJSON(rows)
 			}
 			if len(rows) == 0 {
@@ -297,13 +297,13 @@ func sharesBlockedCmd() *cobra.Command {
 	return cmd
 }
 
-func sharesUnblockCmd() *cobra.Command {
+func (app *application) sharesUnblockCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "unblock <email-or-handle>",
 		Short: "Let a blocked account share with you again",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			cl, prof, err := authedClient()
+			cl, prof, err := app.authedClient()
 			if err != nil {
 				return err
 			}
@@ -320,7 +320,7 @@ func sharesUnblockCmd() *cobra.Command {
 			} else if err != nil {
 				return err
 			}
-			if flagJSON {
+			if app.json {
 				return printJSON(map[string]any{"unblocked": handle})
 			}
 			fmt.Printf("unblocked %s; it can share with you again\n", args[0])

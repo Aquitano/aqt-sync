@@ -35,7 +35,7 @@ type pushOptions struct {
 	policy   linkPolicy
 }
 
-func pushCmd() *cobra.Command {
+func (app *application) pushCmd() *cobra.Command {
 	var (
 		opts     pushOptions
 		pw       passwordFlags
@@ -74,7 +74,7 @@ func pushCmd() *cobra.Command {
 				return errors.New("--expire/--max-reads/--burn require --public (or -P)")
 			}
 			opts.policy = policy
-			return runPush(args[0], opts)
+			return app.runPush(args[0], opts)
 		},
 	}
 	f := cmd.Flags()
@@ -92,7 +92,7 @@ func pushCmd() *cobra.Command {
 	return cmd
 }
 
-func runPush(path string, opts pushOptions) error {
+func (app *application) runPush(path string, opts pushOptions) error {
 	// A directory would only die later with a raw `read ...: is a directory`;
 	// point at the folder workflow instead.
 	if path != "-" {
@@ -101,7 +101,7 @@ func runPush(path string, opts pushOptions) error {
 				"`aqt init %s` + `aqt sync %s`, or materialize it elsewhere with `aqt clone`", path, path, path)
 		}
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
@@ -109,7 +109,7 @@ func runPush(path string, opts pushOptions) error {
 	// Large regular files stream (private, public, or gated); stdin stays inline.
 	if path != "-" {
 		if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Size() >= streamThreshold {
-			return runPushStream(cl, prof, path, opts)
+			return app.runPushStream(cl, prof, path, opts)
 		}
 	}
 
@@ -154,7 +154,7 @@ func runPush(path string, opts pushOptions) error {
 	// Always wrap the content key under the master key so the owner can manage
 	// the resource later (share/private). For public resources the server strips
 	// this wrapped key from non-owner reads.
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -186,18 +186,18 @@ func runPush(path string, opts pushOptions) error {
 		// (and, for public pushes, deletable — its key lived only in the link).
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
-	return printResult(resp.ID, ref, name, int64(len(data)), req.Visibility, opts)
+	return app.printResult(resp.ID, ref, name, int64(len(data)), req.Visibility, opts)
 }
 
 // runPushStream uploads a large private file as convergent chunk objects under a
 // sealed FileRoot, so the file is never held whole in memory.
-func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts pushOptions) error {
+func (app *application) runPushStream(cl *client.Client, prof *identity.Profile, path string, opts pushOptions) error {
 	name := opts.name
 	if name == "" {
 		name = filepath.Base(path)
 	}
 
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -222,11 +222,11 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 		return err
 	}
 
-	up := newUploader(cl, nil)
+	up := app.newUploader(cl, nil)
+	defer func() { _ = up.Wait() }()
 	chunker := syncengine.DefaultChunkSelector().ChunkerFor(info.Size())
 	chunks, size, err := syncengine.ChunkFile(f, conv, chunker, up)
 	if err != nil {
-		_ = up.Wait() // drain in-flight uploads before returning the chunking error
 		return err
 	}
 	// A large file's chunk list would itself overflow the resource blob, so above a
@@ -234,7 +234,6 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	// refs carries both the content chunks and those segments as GC roots.
 	root, refs, err := syncengine.BuildFileRoot(chunks, size, conv, up)
 	if err != nil {
-		_ = up.Wait()
 		return err
 	}
 	if err := up.Flush(); err != nil {
@@ -303,7 +302,7 @@ func runPushStream(cl *client.Client, prof *identity.Profile, path string, opts 
 	if err != nil {
 		return fmt.Errorf("uploaded as id %s, but building the share link failed: %w", resp.ID, err)
 	}
-	return printResult(resp.ID, ref, name, size, visibility, opts)
+	return app.printResult(resp.ID, ref, name, size, visibility, opts)
 }
 
 // confirmPolicy fails closed when a requested lifecycle policy was not enforced by the
@@ -369,11 +368,11 @@ func buildPushJSON(id, link, name string, size int64, vis api.Visibility) pushJS
 	return out
 }
 
-func printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) error {
-	if flagJSON {
+func (app *application) printResult(id, ref, name string, size int64, vis api.Visibility, opts pushOptions) error {
+	if app.json {
 		return printJSON(buildPushJSON(id, ref, name, size, vis))
 	}
-	if flagQuiet {
+	if app.quiet {
 		fmt.Println(ref)
 		return nil
 	}

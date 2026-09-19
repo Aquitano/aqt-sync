@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -38,13 +39,14 @@ import (
 // It complements the example-based conflict-copy tests by exercising operation
 // orderings no hand-written case enumerates.
 func TestMultiDeviceSim(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("skips the multi-device sync simulation under -short")
 	}
 	for _, seed := range simSeeds(t) {
 		for _, mode := range hostModes {
 			t.Run(fmt.Sprintf("seed-%d/%s", seed, mode.name), func(t *testing.T) {
-				runSim(t, seed, mode)
+				app.runSim(t, seed, mode)
 			})
 		}
 	}
@@ -197,6 +199,8 @@ type conflictRec struct {
 }
 
 type sim struct {
+	app *application
+
 	t     *testing.T
 	seed  int64
 	mode  hostMode
@@ -213,9 +217,9 @@ type sim struct {
 	trace     []string
 }
 
-func runSim(t *testing.T, seed int64, mode hostMode) {
+func (app *application) runSim(t *testing.T, seed int64, mode hostMode) {
 	t.Helper()
-	s := &sim{t: t, seed: seed, mode: mode, rng: rand.New(rand.NewSource(seed)), server: contentMap{}}
+	s := &sim{app: app, t: t, seed: seed, mode: mode, rng: rand.New(rand.NewSource(seed)), server: contentMap{}}
 	s.setup()
 
 	for step := range simSteps {
@@ -232,6 +236,8 @@ func runSim(t *testing.T, seed int64, mode hostMode) {
 // --- setup ---
 
 func (s *sim) setup() {
+	app := s.app
+
 	t := s.t
 	s.startServer()
 
@@ -248,13 +254,13 @@ func (s *sim) setup() {
 	url := s.fault.url
 	s.use(s.devs[0])
 	signupAt(t, url, email, pass)
-	if err := runInit(s.devs[0].dir, nil); err != nil {
+	if err := app.runInit(s.devs[0].dir, nil); err != nil {
 		t.Fatalf("init device 0: %v", err)
 	}
 	seed := s.freshContent()
 	writeTree(t, s.devs[0].dir, "a.txt", seed)
 	s.devs[0].tree["a.txt"] = seed
-	if err := runSync(s.devs[0].dir, syncOptions{}); err != nil {
+	if err := app.runSync(s.devs[0].dir, syncOptions{}); err != nil {
 		t.Fatalf("initial sync: %v", err)
 	}
 	folderID := folderIDOf(t, s.devs[0].dir)
@@ -264,7 +270,7 @@ func (s *sim) setup() {
 	for i := 1; i < simDevices; i++ {
 		s.use(s.devs[i])
 		reattach(t, url, email, pass)
-		if err := runClone(folderID, s.devs[i].dir, false, ""); err != nil {
+		if err := app.runClone(folderID, s.devs[i].dir, false, ""); err != nil {
 			t.Fatalf("clone device %d: %v", i, err)
 		}
 		s.devs[i].tree = s.server.clone()
@@ -398,7 +404,9 @@ func (s *sim) doRename(step int, d *simDevice) {
 }
 
 func (s *sim) doSync(step int, d *simDevice) {
-	if err := runSync(d.dir, s.syncOpts()); err != nil {
+	app := s.app
+
+	if err := app.runSync(d.dir, s.syncOpts()); err != nil {
 		s.fatalf(step, "dev %d sync returned an unexpected error: %v", d.id, err)
 	}
 	s.applyMerge(step, d)
@@ -412,15 +420,17 @@ func (s *sim) doSync(step int, d *simDevice) {
 // the device's unchanged local edits against the server regardless of how far the
 // aborted attempt got, so the converged result is the same either way.
 func (s *sim) doCrashSync(step int, d *simDevice) {
+	app := s.app
+
 	k := s.rng.Intn(simMaxCrashK) + 1
 	s.fault.arm(k)
-	crashErr := runSync(d.dir, s.syncOpts())
+	crashErr := app.runSync(d.dir, s.syncOpts())
 	s.fault.disarm()
 
 	recovered := crashErr == nil
 	var lastErr error
 	for attempt := 0; attempt < 4 && !recovered; attempt++ {
-		if err := runSync(d.dir, s.syncOpts()); err == nil {
+		if err := app.runSync(d.dir, s.syncOpts()); err == nil {
 			recovered = true
 		} else {
 			lastErr = err
@@ -543,11 +553,13 @@ func (s *sim) checkModelMatchesDisk(step int, d *simDevice) {
 // copy created when one device syncs only reaches the others on their next pull, and a
 // copy made in the last active round needs a further round to propagate.
 func (s *sim) quiesce() {
+	app := s.app
+
 	s.fault.disarm()
 	for round := range simQuiesce {
 		for _, d := range s.devs {
 			s.use(d)
-			if err := runSync(d.dir, s.syncOpts()); err != nil {
+			if err := app.runSync(d.dir, s.syncOpts()); err != nil {
 				s.fatalf(-1, "quiesce round %d dev %d sync error: %v", round, d.id, err)
 			}
 			s.applyMerge(-1, d)

@@ -6,11 +6,13 @@ subsystems at once may sit until there is time to review it properly.
 
 ## Build and test
 
-Go 1.25.4 or newer (see `go.mod`), and nothing else.
+Building the client and server requires Go 1.25.4 or newer (see `go.mod`).
+The share page tests also require Node.js 24 or newer, with no npm dependencies.
 
 ```sh
 go build ./...            # everything compiles
-go test ./...             # the full suite
+go test ./...             # the Go suite
+make test-web             # execute the share page with its shipped crypto libraries
 make build                # ./bin/aqt, ./bin/git-remote-aqt, ./bin/aqt-server
 ```
 
@@ -19,6 +21,9 @@ runs under the race detector, `make vet` is `go vet ./...`, `make fmt` is
 `gofmt -w`, and `make fuzz` gives every fuzz target a ten-second burst.
 `make restore-drill` runs a full backup, restore, and byte-diff against real
 binaries — worth running for anything that touches the sync or crypto paths.
+
+The share page tests use a simulated DOM and HTTP responses. They exercise
+decryption, consent, retries, and downloads, but do not check browser rendering.
 
 The landing site is separate: `cd landing && pnpm install && pnpm run build`.
 

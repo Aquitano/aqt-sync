@@ -85,23 +85,10 @@ type tuiExecDoneMsg struct {
 	err   error
 }
 
-// tuiExecArgs finalizes a subcommand's argv with the session-wide flag overrides,
-// so an action targets the same server/profile the TUI itself talks to.
-func tuiExecArgs(sub []string) []string {
-	args := append([]string(nil), sub...)
-	if flagServer != "" {
-		args = append(args, "--server", flagServer)
-	}
-	if flagProfile != "" {
-		args = append(args, "--profile", flagProfile)
-	}
-	return args
-}
-
 // tuiExecCmd starts `exe args...` and returns the started message; output lines
 // and the final result arrive on the channel via tuiExecListen.
-func tuiExecCmd(exe string, sub []string, stdin string) tea.Cmd {
-	args := tuiExecArgs(sub)
+func (app *application) tuiExecCmd(exe string, sub []string, stdin string) tea.Cmd {
+	args := app.childArgs(sub)
 	title := "aqt " + joinArgs(redactSecrets(args))
 	return func() tea.Msg {
 		ch := make(chan tea.Msg, 64)

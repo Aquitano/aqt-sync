@@ -83,18 +83,6 @@ func snapshotRestoreOutDialog(snap snapshotRow) tuiDialog {
 	})
 }
 
-func snapshotExportDialog(snap snapshotRow) tuiDialog {
-	return tuiNewInput("Export plaintext snapshot", "trusted output directory", func(out string) tea.Cmd {
-		return func() tea.Msg {
-			return tuiOpenDialogMsg{dialog: &tuiConfirm{
-				title:   "Export plaintext",
-				body:    fmt.Sprintf("Decrypt %q into %s?\nThe exported files are outside aqt's encryption boundary.", snap.displayName(), out),
-				confirm: tuiRequestExec("snapshot", "export", snap.ID, "--out", out),
-			}}
-		}
-	})
-}
-
 func snapshotRetentionDialog(snap snapshotRow) tuiDialog {
 	return &tuiMenu{title: "Snapshot retention", options: []tuiMenuOption{
 		{key: "k", label: "keep newest N for this resource…", dialog: tuiNewInput(

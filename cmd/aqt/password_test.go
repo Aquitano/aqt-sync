@@ -3,11 +3,14 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"os"
 	"strings"
 	"testing"
 
 	"github.com/charmbracelet/bubbles/textinput"
+
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -69,7 +72,8 @@ func TestPasswordFlagsResolve(t *testing.T) {
 // The TUI collects the share password in a masked prompt, so it must never hand it
 // to the child in argv, where any local user can read it out of ps.
 func TestTUISharePasswordNeverHitsArgv(t *testing.T) {
-	m := testModel(t)
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
 	m.setFocus(tuiPanelResources)
 
 	// s opens the share menu; its "p" entry opens the password prompt.
@@ -127,4 +131,44 @@ func contains(ss []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// Bare -P/--password prompts on a terminal; without one it must error rather than
+// hang or silently take an empty password. docs/cli.md promises the prompt.
+func TestPasswordFlagPromptsWithoutValue(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	cmd := app.pushCmd()
+	f := cmd.Flags().Lookup("password")
+	if f == nil {
+		t.Fatal("push has no --password flag")
+	}
+	if f.NoOptDefVal == "" {
+		t.Fatal("--password requires a value; bare -P cannot prompt")
+	}
+
+	pw := passwordFlags{value: f.NoOptDefVal}
+	withStdin(t, "") // a pipe, not a terminal
+	if _, err := pw.resolve(); err == nil || !strings.Contains(err.Error(), "terminal") {
+		t.Errorf("resolve() with sentinel and no tty = %v, want a terminal error", err)
+	}
+}
+
+func TestPasswordFlagHelpIsPrintable(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	cmd := app.pushCmd()
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	if err := cmd.Help(); err != nil {
+		t.Fatal(err)
+	}
+	help := out.String()
+	if strings.ContainsRune(help, '\x00') {
+		t.Fatalf("push help contains a NUL byte:\n%q", help)
+	}
+	if strings.Contains(help, passwordPromptSentinel) {
+		t.Fatalf("push help exposes the internal password sentinel:\n%s", help)
+	}
+	if !strings.Contains(help, `--password string[="prompt"]`) {
+		t.Fatalf("push help does not describe the optional prompt value:\n%s", help)
+	}
 }

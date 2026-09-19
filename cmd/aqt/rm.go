@@ -12,7 +12,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/client"
 )
 
-func rmCmd() *cobra.Command {
+func (app *application) rmCmd() *cobra.Command {
 	var (
 		withSnapshots bool
 		yes           bool
@@ -22,7 +22,7 @@ func rmCmd() *cobra.Command {
 		Short: "Delete the server-side ciphertext and metadata for one or more resources",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runRemove(args, withSnapshots, yes)
+			return app.runRemove(args, withSnapshots, yes)
 		},
 	}
 	cmd.Flags().BoolVar(&withSnapshots, "with-snapshots", false, "also delete every snapshot of each resource")
@@ -31,15 +31,15 @@ func rmCmd() *cobra.Command {
 	return cmd
 }
 
-func runRemove(refs []string, withSnapshots, assumeYes bool) error {
+func (app *application) runRemove(refs []string, withSnapshots, assumeYes bool) error {
 	if err := requireConfirmable(assumeYes); err != nil {
 		return err
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 	results := newBatchResults(ids)
 	if len(resolveFailures) > 0 {
 		err = failBatchPreflight(results, resolveFailures)
-		return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
+		return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 	}
 
 	// Preflight only refuses anchored snapshots; the list the deletes actually work
@@ -111,10 +111,10 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		}
 		if len(failures) > 0 {
 			err = failBatchPreflight(results, failures)
-			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
+			return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 		}
 	}
-	if !flagJSON {
+	if !app.json {
 		for _, label := range labels {
 			fmt.Fprintf(os.Stderr, "will delete %s\n", label)
 		}
@@ -133,7 +133,7 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 				deleteErr = fmt.Errorf("resource %s not found (or not yours); run `aqt ls` to list yours", id)
 			}
 			err = markBatchFailure(results, i, deleteErr)
-			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
+			return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 		}
 		// Snapshots pin the resource's ciphertext independently of the live row, so a
 		// plain rm leaves every snapshotted version fetchable. Listing after the delete
@@ -144,7 +144,7 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		snaps, listErr := cl.ListSnapshots(id)
 		if listErr != nil {
 			err = markBatchFailure(results, i, fmt.Errorf("list snapshots of %s: %w", id, listErr))
-			return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
+			return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 		}
 		// The resource itself is already gone; from here on a failure must not be
 		// reported as a failed delete, or a retry hits "resource not found".
@@ -152,7 +152,7 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 		case len(snaps) == 0:
 		case !withSnapshots:
 			results[i].SnapshotsRemaining = len(snaps)
-			if !flagJSON {
+			if !app.json {
 				fmt.Fprintf(os.Stderr, "note: %d snapshot(s) still retain %s's data; list them with `aqt snapshot list --id %s`, or delete with `aqt snapshot prune`\n", len(snaps), id, id)
 			}
 		default:
@@ -161,12 +161,12 @@ func runRemove(refs []string, withSnapshots, assumeYes bool) error {
 					results[i].SnapshotsRemaining = len(snaps) - results[i].SnapshotsDeleted
 					results[i].Status = batchSucceeded
 					err = fmt.Errorf("deleted resource %s, but snapshot %s could not be deleted: %w; remove the rest with `aqt snapshot prune --id %s`", id, sn.ID, snapErr, id)
-					return finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
+					return app.finishDestructiveBatch(destructiveBatchReport{Results: results}, "delete", err)
 				}
 				results[i].SnapshotsDeleted++
 			}
 		}
 		results[i].Status = batchSucceeded
 	}
-	return finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "deleted", nil)
+	return app.finishDestructiveBatch(destructiveBatchReport{Complete: true, Results: results}, "deleted", nil)
 }

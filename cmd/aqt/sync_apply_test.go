@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -27,6 +28,7 @@ func contentHash(s string) string {
 // renames onto the still-populated directory and fails (EISDIR/ENOTEMPTY), wedging
 // the sync. The whole pull must complete and leave foo a regular file.
 func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, syncengine.ControlDir), 0o700); err != nil {
 		t.Fatal(err)
@@ -46,7 +48,7 @@ func TestApplySyncReplacesDirectoryWithFile(t *testing.T) {
 
 	actions := syncengine.Plan(base, base, remote)
 	apply := applyCtx{root: root, opts: syncOptions{pullOnly: true}, base: base, local: base, remote: remote}
-	if err := applySync(apply, actions, nil); err != nil {
+	if err := app.applySync(apply, actions, nil); err != nil {
 		t.Fatalf("applySync: %v", err)
 	}
 
@@ -82,6 +84,7 @@ func applyTestCtx(t *testing.T, root string, base, local, remote syncengine.Mani
 // the on-disk bytes no longer match what the snapshot saw, so the delete is downgraded
 // to a conflict and the local edit survives.
 func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	root := t.TempDir()
 	writeTree(t, root, "f", "edited in the window") // what is actually on disk now
 
@@ -90,7 +93,7 @@ func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
 	base := syncengine.Manifest{Entries: []syncengine.Entry{orig}}
 	apply, actions := applyTestCtx(t, root, base, base, syncengine.Manifest{})
 
-	if err := applySync(apply, actions, nil); !errors.Is(err, errConflictsRemain) {
+	if err := app.applySync(apply, actions, nil); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("applySync = %v, want errConflictsRemain", err)
 	}
 	if got := readTree(t, root, "f"); got != "edited in the window" {
@@ -100,6 +103,7 @@ func TestApplySyncSkipsDeleteOfWindowEditedFile(t *testing.T) {
 
 // A file edited in the window must not be overwritten by a remote download either.
 func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	root := t.TempDir()
 	writeTree(t, root, "g", "edited in the window")
 
@@ -110,7 +114,7 @@ func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
 	}}
 	apply, actions := applyTestCtx(t, root, base, base, remote)
 
-	if err := applySync(apply, actions, nil); !errors.Is(err, errConflictsRemain) {
+	if err := app.applySync(apply, actions, nil); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("applySync = %v, want errConflictsRemain", err)
 	}
 	if got := readTree(t, root, "g"); got != "edited in the window" {
@@ -121,6 +125,7 @@ func TestApplySyncSkipsOverwriteOfWindowEditedFile(t *testing.T) {
 // The guard must not over-fire: a download whose target still holds the bytes the
 // snapshot saw is applied normally.
 func TestApplySyncOverwritesUnchangedFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	root := t.TempDir()
 	writeTree(t, root, "g", "orig") // on disk == snapshot
 
@@ -131,7 +136,7 @@ func TestApplySyncOverwritesUnchangedFile(t *testing.T) {
 	}}
 	apply, actions := applyTestCtx(t, root, base, base, remote)
 
-	if err := applySync(apply, actions, nil); err != nil {
+	if err := app.applySync(apply, actions, nil); err != nil {
 		t.Fatalf("applySync = %v, want nil", err)
 	}
 	if got := readTree(t, root, "g"); got != "from remote" {

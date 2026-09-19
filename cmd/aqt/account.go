@@ -18,7 +18,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
 
-func accountCmd() *cobra.Command {
+func (app *application) accountCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "account",
 		Short: "Manage your account on the server",
@@ -30,7 +30,7 @@ func accountCmd() *cobra.Command {
 		Aliases: []string{"unregister"},
 		Short:   "Erase your account and everything stored under it (cannot be undone)",
 		Args:    cobra.NoArgs,
-		RunE:    func(cmd *cobra.Command, args []string) error { return runAccountDelete(yes, flagJSON) },
+		RunE:    func(cmd *cobra.Command, args []string) error { return app.runAccountDelete(yes, app.json) },
 	}
 	del.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
 	markJSONSupported(del)
@@ -50,16 +50,16 @@ type accountDeleteClient interface {
 // checked locally against the stored wrapped root before anything is sent, so a
 // typo fails without a round trip, and the verifier derived from it is what
 // actually authorizes the erasure server-side.
-func runAccountDelete(assumeYes, asJSON bool) error {
+func (app *application) runAccountDelete(assumeYes, asJSON bool) error {
 	// Fail before any auth or network work if a confirmation could never be answered.
 	if err := requireConfirmable(assumeYes); err != nil {
 		return err
 	}
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	verifier, err := accountDeleteProof(prof, assumeYes, cl)
+	verifier, err := app.accountDeleteProof(prof, assumeYes, cl)
 	if err != nil {
 		return err
 	}
@@ -87,13 +87,13 @@ func runAccountDelete(assumeYes, asJSON bool) error {
 
 // accountDeleteProof runs the confirmation and returns the auth verifier that
 // authorizes the erasure.
-func accountDeleteProof(prof *identity.Profile, assumeYes bool, cl accountDeleteClient) ([]byte, error) {
+func (app *application) accountDeleteProof(prof *identity.Profile, assumeYes bool, cl accountDeleteClient) ([]byte, error) {
 	if !assumeYes {
 		if err := confirmAccountDelete(prof.Email, cl); err != nil {
 			return nil, err
 		}
 	}
-	pass, err := promptPassphrase("Passphrase: ")
+	pass, err := app.promptPassphrase("Passphrase: ")
 	if err != nil {
 		return nil, err
 	}

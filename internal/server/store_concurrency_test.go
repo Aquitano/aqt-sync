@@ -4,10 +4,11 @@ package server
 
 import (
 	"errors"
-	"github.com/aquitano/aqt-sync/internal/crypto"
-	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/cryptotest"
 )
 
 func TestStoreConcurrencyConfig(t *testing.T) {

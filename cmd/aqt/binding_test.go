@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -17,7 +18,8 @@ import (
 
 // A tracked folder records its owning profile and account fingerprint at init.
 func TestInitRecordsIdentityBinding(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -34,26 +36,26 @@ func TestInitRecordsIdentityBinding(t *testing.T) {
 }
 
 func TestBindingRejectsConflictingProfile(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
-	flagProfile = "other"
-	t.Cleanup(func() { flagProfile = "" })
-	err := runSync(dir, syncOptions{})
+	app.profile = "other"
+	err := app.runSync(dir, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "belongs to profile") {
 		t.Fatalf("sync with a conflicting --profile = %v, want a binding error", err)
 	}
 }
 
 func TestBindingRejectsConflictingServer(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
-	flagServer = "http://elsewhere.invalid"
-	t.Cleanup(func() { flagServer = "" })
-	err := runSync(dir, syncOptions{})
+	app.server = "http://elsewhere.invalid"
+	err := app.runSync(dir, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "--server") {
 		t.Fatalf("sync with a conflicting --server = %v, want a binding error", err)
 	}
@@ -62,7 +64,8 @@ func TestBindingRejectsConflictingServer(t *testing.T) {
 // State written before the binding fields existed carries no owner, so the active
 // profile must not adopt it — the folder is refused until it is re-tracked.
 func TestBindingRefusesStateWithoutOwner(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "a.txt", "hi")
@@ -91,7 +94,7 @@ func TestBindingRefusesStateWithoutOwner(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			err = runSync(dir, syncOptions{})
+			err = app.runSync(dir, syncOptions{})
 			if err == nil || !strings.Contains(err.Error(), "records no owning profile and account") {
 				t.Fatalf("sync of unbound state = %v, want a re-track error", err)
 			}
@@ -102,7 +105,8 @@ func TestBindingRefusesStateWithoutOwner(t *testing.T) {
 // A profile that was re-logged into a different account must not sync a folder the
 // old account owns. The owner handle is what identifies the account.
 func TestBindingRefusesAccountMismatch(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -115,7 +119,7 @@ func TestBindingRefusesAccountMismatch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err = runSync(dir, syncOptions{})
+	err = app.runSync(dir, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "different account") {
 		t.Fatalf("sync under a swapped account = %v, want a binding error", err)
 	}
@@ -125,7 +129,8 @@ func TestBindingRefusesAccountMismatch(t *testing.T) {
 // recorded fingerprint goes stale on every device at once. The account is unchanged,
 // so the folder must keep syncing — and catch its fingerprint up.
 func TestBindingToleratesRootKeyRotation(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -138,7 +143,7 @@ func TestBindingToleratesRootKeyRotation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := runSync(dir, syncOptions{}); err != nil {
+	if err := app.runSync(dir, syncOptions{}); err != nil {
 		t.Fatalf("sync after a root-key rotation = %v, want success", err)
 	}
 	st, err := folderstate.LoadState(dir)
@@ -153,7 +158,8 @@ func TestBindingToleratesRootKeyRotation(t *testing.T) {
 // The same account under a different local profile name is still the owner: a
 // restored $HOME re-logged in as --profile work must not lock the folder out.
 func TestBindingAcceptsRenamedProfileForSameAccount(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -166,10 +172,9 @@ func TestBindingAcceptsRenamedProfileForSameAccount(t *testing.T) {
 	if err := identity.Save(&renamed); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { flagProfile = "" })
-	flagProfile = "work"
+	app.profile = "work"
 
-	if err := bindTrackedRoot(dir); err != nil {
+	if err := app.bindTrackedRoot(dir); err != nil {
 		t.Fatalf("binding under a renamed profile for the same account = %v, want success", err)
 	}
 }
@@ -178,7 +183,8 @@ func TestBindingAcceptsRenamedProfileForSameAccount(t *testing.T) {
 // covered end-to-end by the rollback tests (restoreServer moves the URL); here the
 // state write-back itself is asserted.
 func TestBindingFollowsProfileServerMove(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 
@@ -191,7 +197,7 @@ func TestBindingFollowsProfileServerMove(t *testing.T) {
 	if err := identity.Save(prof); err != nil {
 		t.Fatal(err)
 	}
-	if err := bindTrackedRoot(dir); err != nil {
+	if err := app.bindTrackedRoot(dir); err != nil {
 		t.Fatalf("bind after a canonical-equal server change: %v", err)
 	}
 }
@@ -199,7 +205,8 @@ func TestBindingFollowsProfileServerMove(t *testing.T) {
 // A failed local commit during init deletes the just-created remote resource, so a
 // failed init has no side effects at all.
 func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	dir := t.TempDir()
 
 	orig := commitInitState
@@ -208,7 +215,7 @@ func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { commitInitState = orig })
 
-	err := runInit(dir, nil)
+	err := app.runInit(dir, nil)
 	if err == nil || !strings.Contains(err.Error(), "injected") {
 		t.Fatalf("init = %v, want the injected failure", err)
 	}
@@ -218,7 +225,7 @@ func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".aqtignore")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("failed init left .aqtignore behind (stat err=%v)", err)
 	}
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,23 +241,24 @@ func TestInitCleansUpRemoteOnLocalFailure(t *testing.T) {
 
 // An unwritable destination fails init before anything is created on the server.
 func TestInitPermissionFailureCreatesNoRemote(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if !supportsPOSIXPermissions {
 		t.Skip("POSIX directory write permissions are not enforced on Windows")
 	}
 	if os.Geteuid() == 0 {
 		t.Skip("running as root; permission bits do not apply")
 	}
-	h := newE2E(t)
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	if err := os.Chmod(dir, 0o500); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Chmod(dir, 0o755) })
 
-	if err := runInit(dir, nil); err == nil {
+	if err := app.runInit(dir, nil); err == nil {
 		t.Fatal("init into an unwritable directory succeeded")
 	}
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}

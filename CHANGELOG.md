@@ -4,8 +4,22 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Bare-path uploads now require `aqt push <path>` instead of `aqt <path>`.
+- `snapshot export` is removed. Use `aqt restore <snapshot-id> --out <path>`.
+  The TUI uses the same restore action.
+- `watch` runs in the foreground. Use `agent start` for background watching.
+  `watch -d` and `agent start --foreground` are removed. `watch --once` remains
+  available for scheduled runs.
+
 ### Fixed
 
+- The backup restore drill now waits for server shutdown before copying its data
+  and stops its server on exit. Subshells previously discarded the process IDs.
+- Watchers select the tracked folder's profile before unlocking the session, so
+  a folder bound to another profile no longer fails because the default profile
+  is locked.
 - **`aqt update` now fails if closing the extracted binary fails.** The extractor
   synced the new binary but discarded the error from closing it, so a write that only
   failed at close (a full or remote filesystem flushing on the last descriptor) could
@@ -18,6 +32,9 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
+- CLI flags and cancellation belong to each command invocation instead of global
+  variables. Snapshot creation and checkpoints share one implementation, as do
+  folder validation and server/profile forwarding to child commands.
 - **Opening a resource you own reports the same three refusals everywhere.** A missing
   owner key, a resource that is not a folder, and a pre-tree folder used to be worded
   differently by each command.

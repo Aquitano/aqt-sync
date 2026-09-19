@@ -91,8 +91,8 @@ func markBatchFailure(results []destructiveBatchResult, failed int, err error) e
 	return batchFailure(err)
 }
 
-func finishDestructiveBatch(report destructiveBatchReport, action string, err error) error {
-	if flagJSON {
+func (app *application) finishDestructiveBatch(report destructiveBatchReport, action string, err error) error {
+	if app.json {
 		if printErr := printJSON(report); printErr != nil {
 			return errors.Join(err, printErr)
 		}

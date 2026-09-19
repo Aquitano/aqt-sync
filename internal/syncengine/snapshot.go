@@ -245,7 +245,7 @@ func ScanReusing(dir string, base *Manifest, rehash bool) (Manifest, error) {
 	var reuse map[string]Entry
 	var reuseDirs map[string]DirEntry
 	if base != nil {
-		reuse = base.byPath()
+		reuse = base.ByPath()
 		reuseDirs = base.DirsByPath()
 	}
 	var m Manifest
@@ -416,7 +416,7 @@ func Take(dir string, conv crypto.ConvergenceKey, chunker ChunkSelector, base *M
 	var reuse map[string]Entry
 	var reuseDirs map[string]DirEntry
 	if base != nil {
-		reuse = base.byPath()
+		reuse = base.ByPath()
 		reuseDirs = base.DirsByPath()
 	}
 	var m Manifest

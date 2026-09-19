@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -37,7 +38,8 @@ func runCmd(t *testing.T, cmd interface {
 // checkpoint saves an anchored, named snapshot; restore resolves it by that name and
 // rolls the tree back, both side-by-side and in place over a modified tree.
 func TestCheckpointRestoreByName(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -47,13 +49,13 @@ func TestCheckpointRestoreByName(t *testing.T) {
 	writeTree(t, src, "sub/b.txt", "original B")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
 	rid := h.folderID(src)
 
-	runCmd(t, checkpointCmd(), "release-1", src)
+	runCmd(t, app.checkpointCmd(), "release-1", src)
 
 	// The checkpoint exists, is anchored, and its name decrypts locally.
 	snaps, err := cl.ListSnapshots(rid)
@@ -63,7 +65,7 @@ func TestCheckpointRestoreByName(t *testing.T) {
 	if !snaps[0].Anchored {
 		t.Fatal("checkpoint snapshot is not anchored")
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +82,7 @@ func TestCheckpointRestoreByName(t *testing.T) {
 
 	// Restore by name, side-by-side into a fresh dir: must match the pre-mutation tree.
 	dest := filepath.Join(t.TempDir(), "restored")
-	runCmd(t, restoreCmd(), "release-1", src, "--out", dest)
+	runCmd(t, app.restoreCmd(), "release-1", src, "--out", dest)
 	if c := readTree(t, dest, "a.txt"); c != "original A" {
 		t.Fatalf("side-by-side a.txt = %q", c)
 	}
@@ -91,7 +93,7 @@ func TestCheckpointRestoreByName(t *testing.T) {
 
 	// Restore by name in place over the modified tree: the live folder rolls back
 	// only with the explicit --in-place (side-by-side is the default).
-	runCmd(t, restoreCmd(), "release-1", src, "--in-place", "-y")
+	runCmd(t, app.restoreCmd(), "release-1", src, "--in-place", "-y")
 	if c := readTree(t, src, "a.txt"); c != "original A" {
 		t.Fatalf("in-place a.txt = %q", c)
 	}
@@ -104,7 +106,8 @@ func TestCheckpointRestoreByName(t *testing.T) {
 // restore resolves a bare snapshot id, reports a clear error for an unknown name, and
 // disambiguates a reused name by preferring the anchored snapshot.
 func TestRestoreByIDAndAmbiguity(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -113,14 +116,14 @@ func TestRestoreByIDAndAmbiguity(t *testing.T) {
 	writeTree(t, src, "a.txt", "hi")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
 	rid := h.folderID(src)
 
 	// Two snapshots share the label "dup"; neither anchored yet.
-	sealed, err := sealSnapshotLabel(cl, prof, rid, "dup")
+	sealed, err := app.sealSnapshotLabel(cl, prof, rid, "dup")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,19 +137,19 @@ func TestRestoreByIDAndAmbiguity(t *testing.T) {
 	}
 
 	// Ambiguous name errors with the candidate ids.
-	if _, err := resolveRestoreTarget(cl, prof, "dup", src, ""); err == nil ||
+	if _, err := app.resolveRestoreTarget(cl, prof, "dup", src, ""); err == nil ||
 		!strings.Contains(err.Error(), "matches 2 snapshots") {
 		t.Fatalf("ambiguous restore err = %v, want a candidates listing", err)
 	}
 
 	// Unknown name (and not an id) errors clearly.
-	if _, err := resolveRestoreTarget(cl, prof, "nope", src, ""); err == nil ||
+	if _, err := app.resolveRestoreTarget(cl, prof, "nope", src, ""); err == nil ||
 		!strings.Contains(err.Error(), "no checkpoint named") {
 		t.Fatalf("unknown restore err = %v", err)
 	}
 
 	// A bare snapshot id still resolves.
-	got, err := resolveRestoreTarget(cl, prof, first.ID, src, "")
+	got, err := app.resolveRestoreTarget(cl, prof, first.ID, src, "")
 	if err != nil || got.Snapshot.ID != first.ID {
 		t.Fatalf("by-id restore = %v err=%v, want %s", got.Snapshot.ID, err, first.ID)
 	}
@@ -155,7 +158,7 @@ func TestRestoreByIDAndAmbiguity(t *testing.T) {
 	if _, err := cl.SetSnapshotAnchor(second.ID, true); err != nil {
 		t.Fatal(err)
 	}
-	got, err = resolveRestoreTarget(cl, prof, "dup", src, "")
+	got, err = app.resolveRestoreTarget(cl, prof, "dup", src, "")
 	if err != nil || got.Snapshot.ID != second.ID {
 		t.Fatalf("anchored-preferred restore = %v err=%v, want %s", got.Snapshot.ID, err, second.ID)
 	}
@@ -164,7 +167,8 @@ func TestRestoreByIDAndAmbiguity(t *testing.T) {
 // The server refuses to prune an anchored snapshot over the wire (409 -> a typed
 // error naming the escape hatch); removing the anchor makes the same delete succeed.
 func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -173,7 +177,7 @@ func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 	writeTree(t, src, "a.txt", "hi")
 	h.sync(src)
 
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,6 +207,7 @@ func TestAnchoredDeleteRefusedOverWire(t *testing.T) {
 // setSnapshotAnchor fails closed when the server echoes a state that does not match the
 // requested one — a server that ignores the anchor field entirely.
 func TestSetSnapshotAnchorFailsClosed(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	stub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Echo a snapshot with no anchored field, so it reads back as unanchored.
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": "s1"})
@@ -212,7 +217,7 @@ func TestSetSnapshotAnchorFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := setSnapshotAnchor(cl, "s1", true); err == nil || !strings.Contains(err.Error(), "did not apply the anchor change") {
+	if err := app.setSnapshotAnchor(cl, "s1", true); err == nil || !strings.Contains(err.Error(), "did not apply the anchor change") {
 		t.Fatalf("setSnapshotAnchor against an unanchoring server = %v, want a fail-closed error", err)
 	}
 }
@@ -256,7 +261,8 @@ func anchorStrippingProxy(t *testing.T, backend string) *httptest.Server {
 // deletes the unprotected snapshot it just created and errors, so no prunable
 // "checkpoint" is left behind.
 func TestCheckpointFailsClosedWhenTheServerDropsTheAnchor(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -266,7 +272,7 @@ func TestCheckpointFailsClosedWhenTheServerDropsTheAnchor(t *testing.T) {
 	h.sync(src)
 
 	// A client at the real server, to inspect the aftermath.
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +291,7 @@ func TestCheckpointFailsClosedWhenTheServerDropsTheAnchor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := checkpointCmd()
+	cmd := app.checkpointCmd()
 	cmd.SetArgs([]string{"release-1", src})
 	err = cmd.Execute()
 	if err == nil || !strings.Contains(err.Error(), "did not anchor the checkpoint") {

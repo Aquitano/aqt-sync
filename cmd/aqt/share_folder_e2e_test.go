@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -36,10 +37,10 @@ func pushSharedFolder(t *testing.T, h *e2eHarness) (id, origin string) {
 }
 
 // shareFolder runs `aqt share` on id and returns the printed link.
-func shareFolder(t *testing.T, id, password string, policy linkPolicy) string {
+func (app *application) shareFolder(t *testing.T, id, password string, policy linkPolicy) string {
 	t.Helper()
 	link := strings.TrimSpace(captureStdout(t, func() {
-		if err := runShare(id, password, true, policy); err != nil {
+		if err := app.runShare(id, password, true, policy); err != nil {
 			t.Fatalf("share: %v", err)
 		}
 	}))
@@ -51,9 +52,9 @@ func shareFolder(t *testing.T, id, password string, policy linkPolicy) string {
 
 // ownerTreeRootID opens the folder's root as the owner and returns the root
 // directory node's object id — a referenced object usable in public-read assertions.
-func ownerTreeRootID(t *testing.T, id string) string {
+func (app *application) ownerTreeRootID(t *testing.T, id string) string {
 	t.Helper()
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,22 +81,23 @@ func ownerTreeRootID(t *testing.T, id string) string {
 // shares a chunked folder, and a machine with no credentials clones the link and
 // pulls single entries through both subpath link forms.
 func TestShareFolderLinkCloneAndSubpathPull(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
-	link := shareFolder(t, id, "", linkPolicy{})
+	link := app.shareFolder(t, id, "", linkPolicy{})
 	if !strings.Contains(link, "#k.") {
 		t.Fatalf("folder share link %q missing public key fragment", link)
 	}
 
 	// --adopt needs an account; a link is read-only.
-	if err := runClone(link, t.TempDir(), true, ""); err == nil {
+	if err := app.runClone(link, t.TempDir(), true, ""); err == nil {
 		t.Fatal("clone --adopt of a share link should be refused")
 	}
 
 	withFreshEnv(t, func() {
 		dest := filepath.Join(t.TempDir(), "clone")
-		if err := runClone(link, dest, false, ""); err != nil {
+		if err := app.runClone(link, dest, false, ""); err != nil {
 			t.Fatalf("link clone: %v", err)
 		}
 		assertTreeEqual(t, origin, dest)
@@ -109,7 +111,7 @@ func TestShareFolderLinkCloneAndSubpathPull(t *testing.T) {
 
 		// Subpath pull, naive-append form: <whole link>/<path>.
 		out := filepath.Join(t.TempDir(), "readme.txt")
-		if err := runPull(link+"/docs/readme.txt", out, "", false, false); err != nil {
+		if err := app.runPull(link+"/docs/readme.txt", out, "", false, false); err != nil {
 			t.Fatalf("link subpath pull: %v", err)
 		}
 		if got, err := os.ReadFile(out); err != nil || string(got) != "hello folder share" {
@@ -119,7 +121,7 @@ func TestShareFolderLinkCloneAndSubpathPull(t *testing.T) {
 		// Subpath pull, URL form: path segments before the fragment, multi-chunk file.
 		urlForm := strings.Replace(link, "#", "/data/big.bin#", 1)
 		out2 := filepath.Join(t.TempDir(), "big.bin")
-		if err := runPull(urlForm, out2, "", false, false); err != nil {
+		if err := app.runPull(urlForm, out2, "", false, false); err != nil {
 			t.Fatalf("url-form subpath pull: %v", err)
 		}
 		if got, err := os.ReadFile(out2); err != nil || string(got) != bigContent() {
@@ -133,20 +135,21 @@ func TestShareFolderLinkCloneAndSubpathPull(t *testing.T) {
 // owner still clones the folder intact, and a re-share mints a fresh key the old
 // fragment cannot substitute for.
 func TestPrivateRotatesFolderLink(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
-	link := shareFolder(t, id, "", linkPolicy{})
+	link := app.shareFolder(t, id, "", linkPolicy{})
 	withFreshEnv(t, func() {
-		if err := runClone(link, filepath.Join(t.TempDir(), "pre"), false, ""); err != nil {
+		if err := app.runClone(link, filepath.Join(t.TempDir(), "pre"), false, ""); err != nil {
 			t.Fatalf("pre-rotation link clone: %v", err)
 		}
 	})
 
-	if err := runPrivate(id); err != nil {
+	if err := app.runPrivate(id); err != nil {
 		t.Fatalf("private: %v", err)
 	}
-	rootObjID := ownerTreeRootID(t, id)
+	rootObjID := app.ownerTreeRootID(t, id)
 
 	// The owner still clones the folder byte-for-byte: the rotation re-sent the full
 	// GC roots and re-sealed the root under the new wrapped key.
@@ -157,7 +160,7 @@ func TestPrivateRotatesFolderLink(t *testing.T) {
 	// The old link is dead: the resource is private, so the fetch 404s and the
 	// public object read refuses even a genuinely referenced node object.
 	withFreshEnv(t, func() {
-		if err := runClone(link, filepath.Join(t.TempDir(), "dead"), false, ""); err == nil {
+		if err := app.runClone(link, filepath.Join(t.TempDir(), "dead"), false, ""); err == nil {
 			t.Fatal("old link still cloned after rotation")
 		}
 	})
@@ -170,15 +173,15 @@ func TestPrivateRotatesFolderLink(t *testing.T) {
 	}
 
 	// A re-share mints a new key; the old fragment cannot decrypt the re-shared root.
-	relink := shareFolder(t, id, "", linkPolicy{})
+	relink := app.shareFolder(t, id, "", linkPolicy{})
 	if relink == link {
 		t.Fatal("re-share printed the old link; the key did not rotate")
 	}
 	withFreshEnv(t, func() {
-		if err := runClone(relink, filepath.Join(t.TempDir(), "fresh"), false, ""); err != nil {
+		if err := app.runClone(relink, filepath.Join(t.TempDir(), "fresh"), false, ""); err != nil {
 			t.Fatalf("re-shared link clone: %v", err)
 		}
-		if err := runClone(link, filepath.Join(t.TempDir(), "stale"), false, ""); err == nil {
+		if err := app.runClone(link, filepath.Join(t.TempDir(), "stale"), false, ""); err == nil {
 			t.Fatal("old fragment decrypted the re-shared folder")
 		}
 	})
@@ -187,22 +190,23 @@ func TestPrivateRotatesFolderLink(t *testing.T) {
 // TestGatedFolderShareLinkClone covers a password-gated folder link: it clones with
 // the password and refuses without it.
 func TestGatedFolderShareLinkClone(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	const password = "hunter2 correct horse"
 	id, origin := pushSharedFolder(t, h)
 
-	link := shareFolder(t, id, password, linkPolicy{})
+	link := app.shareFolder(t, id, password, linkPolicy{})
 	if !strings.Contains(link, "#p.") {
 		t.Fatalf("gated folder link %q missing gated fragment", link)
 	}
 
 	withFreshEnv(t, func() {
 		dest := filepath.Join(t.TempDir(), "gated")
-		if err := runClone(link, dest, false, password); err != nil {
+		if err := app.runClone(link, dest, false, password); err != nil {
 			t.Fatalf("gated link clone: %v", err)
 		}
 		assertTreeEqual(t, origin, dest)
-		if err := runClone(link, filepath.Join(t.TempDir(), "wrong"), false, "not the password"); err == nil {
+		if err := app.runClone(link, filepath.Join(t.TempDir(), "wrong"), false, "not the password"); err == nil {
 			t.Fatal("gated link cloned with the wrong password")
 		}
 	})
@@ -212,22 +216,23 @@ func TestGatedFolderShareLinkClone(t *testing.T) {
 // only the resource fetch counts against --max-reads, so a clone's many object
 // requests consume one read, and the next fetch is gone.
 func TestFolderLinkBurnCountsCloneAsOneRead(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
 	policy, err := resolveLinkPolicy("", 0, true, api.ExpiryRetire)
 	if err != nil {
 		t.Fatal(err)
 	}
-	link := shareFolder(t, id, "", policy)
+	link := app.shareFolder(t, id, "", policy)
 
 	withFreshEnv(t, func() {
 		dest := filepath.Join(t.TempDir(), "burn")
-		if err := runClone(link, dest, false, ""); err != nil {
+		if err := app.runClone(link, dest, false, ""); err != nil {
 			t.Fatalf("burn link first clone: %v", err)
 		}
 		assertTreeEqual(t, origin, dest)
-		if err := runClone(link, filepath.Join(t.TempDir(), "again"), false, ""); err == nil {
+		if err := app.runClone(link, filepath.Join(t.TempDir(), "again"), false, ""); err == nil {
 			t.Fatal("burn link cloned twice")
 		}
 	})
@@ -237,14 +242,15 @@ func TestFolderLinkBurnCountsCloneAsOneRead(t *testing.T) {
 // token every write surface is refused, and the public object endpoint never serves
 // an object the shared folder does not reference (pack-neighbor isolation).
 func TestFolderLinkIsReadOnly(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	id, _ := pushSharedFolder(t, h)
-	shareFolder(t, id, "", linkPolicy{})
+	app.shareFolder(t, id, "", linkPolicy{})
 
 	// A private streamed file of the same owner shares the pack space; its objects
 	// must not be readable through the public folder.
-	otherID, _, _ := pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
-	neighborObj := ownerFileRoot(t, otherID).ChunkIDs()[0]
+	otherID, _, _ := app.pushRandomStreamedFile(t, 9<<20, pushOptions{noClip: true})
+	neighborObj := app.ownerFileRoot(t, otherID).ChunkIDs()[0]
 
 	anon, err := client.New(h.url, "")
 	if err != nil {
@@ -266,7 +272,7 @@ func TestFolderLinkIsReadOnly(t *testing.T) {
 
 	// The write attempts changed nothing: the owner still sees the folder public
 	// and at its original version.
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,12 +311,13 @@ func TestSplitRefPathShareURLForms(t *testing.T) {
 // after `aqt share` silently killed the link, and the link's expiry reclaimed the whole
 // resource, so `--expire` deleted the folder every device syncs against.
 func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	id, origin := pushSharedFolder(t, h)
 
 	// Drive the real command, so the end-of-life action `aqt share` asks for is under
 	// test and not just the server's handling of it.
-	cmd := shareCmd()
+	cmd := app.shareCmd()
 	cmd.SetArgs([]string{"--expire", "1h", "--no-clip", "--", id})
 	captureStdout(t, func() {
 		if err := cmd.Execute(); err != nil {
@@ -318,7 +325,7 @@ func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
 		}
 	})
 
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -370,7 +377,8 @@ func TestSharedFolderSurvivesSyncAndLinkExpiry(t *testing.T) {
 // erroring without disarming would still destroy an already-public folder on expiry.
 // The proxy here strips onExpiry from the visibility response to imitate that server.
 func TestShareExpireDisarmsPolicyWhenTheServerDropsOnExpiry(t *testing.T) {
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/visibility") {
 			rec := httptest.NewRecorder()
 			pass(rec, r)
@@ -396,10 +404,10 @@ func TestShareExpireDisarmsPolicyWhenTheServerDropsOnExpiry(t *testing.T) {
 	id, _ := pushSharedFolder(t, h)
 
 	// Share it plain first, so the resource is already public with a live link.
-	shareFolder(t, id, "", linkPolicy{})
+	app.shareFolder(t, id, "", linkPolicy{})
 
 	// Now attach an expiry. The stripped echo makes the client see a reclaiming server.
-	cmd := shareCmd()
+	cmd := app.shareCmd()
 	cmd.SetArgs([]string{id, "--expire", "1h", "--no-clip"})
 	err := cmd.Execute()
 	if err == nil {
@@ -419,7 +427,7 @@ func TestShareExpireDisarmsPolicyWhenTheServerDropsOnExpiry(t *testing.T) {
 		t.Fatalf("policy left armed after a failed share: expiry=%v maxReads=%v", hasExpiry, hasMaxReads)
 	}
 	// And the pre-existing link is untouched — the resource is still public.
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}

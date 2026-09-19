@@ -71,7 +71,7 @@ func (g GHWebSource) Fetch(ctx context.Context, ch Channel) (Release, error) {
 }
 
 // FetchArtifact streams a release archive from the URL the signed manifest names.
-func (g GHWebSource) FetchArtifact(ctx context.Context, _ string, a Artifact, w io.Writer) error {
+func (g GHWebSource) FetchArtifact(ctx context.Context, a Artifact, w io.Writer) error {
 	return streamURL(ctx, g.Client, a.URL, w)
 }
 

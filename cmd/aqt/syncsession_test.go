@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -13,29 +14,30 @@ import (
 	"github.com/aquitano/aqt-sync/internal/folderstate"
 )
 
-// TestCheckSyncFormat pins the server-truth routing: a pre-tree folder is refused
+// TestRequireTreeFolder pins the server-truth routing: a pre-tree folder is refused
 // rather than reconciled as an empty chunked manifest (the silent tree-wipe), and a
 // tree folder is accepted.
-func TestCheckSyncFormat(t *testing.T) {
+func TestRequireTreeFolder(t *testing.T) {
 	cases := []struct {
 		name string
 		meta api.Metadata
 		want string // substring of the expected error; empty means accepted
 	}{
-		{"chunked tree folder", api.Metadata{Tree: true}, ""},
-		{"legacy folder", api.Metadata{}, "unsupported legacy format"},
+		{"chunked tree folder", api.Metadata{Kind: api.KindFolder, Tree: true}, ""},
+		{"file marked as tree", api.Metadata{Kind: api.KindFile, Tree: true}, "not a folder"},
+		{"legacy folder", api.Metadata{Kind: api.KindFolder}, "unsupported legacy format"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := checkSyncFormat(tc.meta)
+			err := requireTreeFolder(tc.meta)
 			if tc.want == "" {
 				if err != nil {
-					t.Fatalf("checkSyncFormat(%+v) = %v, want accepted", tc.meta, err)
+					t.Fatalf("requireTreeFolder(%+v) = %v, want accepted", tc.meta, err)
 				}
 				return
 			}
 			if err == nil || !strings.Contains(err.Error(), tc.want) {
-				t.Fatalf("checkSyncFormat(%+v) = %v, want error containing %q", tc.meta, err, tc.want)
+				t.Fatalf("requireTreeFolder(%+v) = %v, want error containing %q", tc.meta, err, tc.want)
 			}
 		})
 	}
@@ -45,7 +47,8 @@ func TestCheckSyncFormat(t *testing.T) {
 // syncing against an empty base resurrects deleted files, so it is refused unless
 // --reconcile opts in.
 func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "A")
@@ -54,11 +57,11 @@ func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 	if err := os.Remove(folderstate.BasePath(origin)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := openSyncSession(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {
+	if _, err := app.openSyncSession(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {
 		t.Fatalf("openSyncSession without a base = %v, want errSyncNoBase", err)
 	}
 
-	sess, err := openSyncSession(origin, syncOptions{reconcile: true})
+	sess, err := app.openSyncSession(origin, syncOptions{reconcile: true})
 	if err != nil {
 		t.Fatalf("openSyncSession with --reconcile: %v", err)
 	}
@@ -72,7 +75,8 @@ func TestOpenSyncSessionRefusesMissingBase(t *testing.T) {
 // unified on: a rolled-back server is a data-integrity signal about the server, so it
 // must be reported before any format refusal.
 func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "v1")
@@ -83,7 +87,7 @@ func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 	h.sync(origin)
 	h.restoreServer(backup)
 
-	sess, err := openSyncSession(origin, syncOptions{})
+	sess, err := app.openSyncSession(origin, syncOptions{})
 	if err != nil {
 		t.Fatalf("openSyncSession: %v", err)
 	}
@@ -110,7 +114,8 @@ func TestOpenRemoteRollbackOutranksFormatMismatch(t *testing.T) {
 // — rather than silently falling back to defaults. `{"pack": true}` is the stale
 // config left by the removed pack-and-seal format; it is now just an unknown field.
 func TestSyncRefusesUnparsableConfig(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "v1")
@@ -119,7 +124,7 @@ func TestSyncRefusesUnparsableConfig(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(origin, ".aqtconfig"), []byte(`{"pack": true}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err := runSync(origin, syncOptions{})
+	err := app.runSync(origin, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "pack") {
 		t.Fatalf("sync with an unparsable config = %v, want an error naming the offending field", err)
 	}

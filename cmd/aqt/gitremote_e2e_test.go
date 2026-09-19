@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -21,6 +22,7 @@ import (
 )
 
 func TestGitRemotePushAndClone(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -30,10 +32,10 @@ func TestGitRemotePushAndClone(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	newE2E(t)
+	app.newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if err := runRepoCreate("brain", 64); err != nil {
+	if err := app.runRepoCreate("brain", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 	source := t.TempDir()
@@ -131,6 +133,7 @@ func TestGitRemotePushAndClone(t *testing.T) {
 }
 
 func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -143,7 +146,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 	// The conflict belongs to the push's root update; arming it only after the remote
 	// exists keeps it off the create's own id-binding write.
 	var armed, injected atomic.Bool
-	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" && injected.CompareAndSwap(false, true) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
@@ -153,7 +156,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 		pass(w, r)
 	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := runRepoCreate("retry", 64); err != nil {
+	if err := app.runRepoCreate("retry", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 	armed.Store(true)
@@ -174,6 +177,7 @@ func TestGitRemotePushRetriesVersionConflict(t *testing.T) {
 }
 
 func TestGitRemoteSHA256PushAndClone(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -183,9 +187,9 @@ func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	newE2E(t)
+	app.newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := runRepoCreate("sha256", 64); err != nil {
+	if err := app.runRepoCreate("sha256", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 	source := t.TempDir()
@@ -211,6 +215,7 @@ func TestGitRemoteSHA256PushAndClone(t *testing.T) {
 }
 
 func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -222,7 +227,7 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	installGitRemoteHelper(t, bin)
 	var armed, injected atomic.Bool
 	var resourcePuts atomic.Int32
-	newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" {
 			if resourcePuts.Add(1) == 2 && injected.CompareAndSwap(false, true) {
 				w.WriteHeader(http.StatusConflict)
@@ -232,7 +237,7 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 		pass(w, r)
 	})
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := runRepoCreate("compact", 2); err != nil {
+	if err := app.runRepoCreate("compact", 2); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 
@@ -263,7 +268,7 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 		t.Fatal("compaction retry was not exercised")
 	}
 
-	remote := openRemoteForTest(t, "compact")
+	remote := app.openRemoteForTest(t, "compact")
 	if len(remote.root.Bundles) != 1 || !remote.root.Bundles[0].Full || remote.root.Generation != 1 {
 		remote.close()
 		t.Fatalf("compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
@@ -293,10 +298,10 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	gitRun(t, filepath.Join(freshParent, "fresh"), "fsck", "--full")
 
 	t.Chdir(preexisting)
-	if err := runRepoGC("compact", false); err != nil {
+	if err := app.runRepoGC("compact", false); err != nil {
 		t.Fatalf("explicit repo gc: %v", err)
 	}
-	remote = openRemoteForTest(t, "compact")
+	remote = app.openRemoteForTest(t, "compact")
 	if len(remote.root.Bundles) != 1 || !remote.root.Bundles[0].Full || remote.root.Generation != 1 {
 		remote.close()
 		t.Fatalf("no-op compacted root = bundles %d generation %d", len(remote.root.Bundles), remote.root.Generation)
@@ -313,10 +318,10 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 	if len(snapshots) != 1 {
 		t.Fatalf("no-op gc created snapshots: got %d, want 1", len(snapshots))
 	}
-	if err := runRepoRemove("compact", true); err != nil {
+	if err := app.runRepoRemove("compact", true); err != nil {
 		t.Fatalf("repo rm: %v", err)
 	}
-	h := &remoteHelper{remoteName: "origin", rawURL: "compact", errOut: os.Stderr}
+	h := &remoteHelper{app: app, remoteName: "origin", rawURL: "compact", errOut: os.Stderr}
 	if remote, err := h.openRemote(); err == nil {
 		remote.close()
 		t.Fatal("deleted git remote is still resolvable")
@@ -324,6 +329,7 @@ func TestGitRemoteCompactionAndExistingClone(t *testing.T) {
 }
 
 func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -333,9 +339,9 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	newE2E(t)
+	app.newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := runRepoCreate("restore", 2); err != nil {
+	if err := app.runRepoCreate("restore", 2); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 
@@ -353,7 +359,7 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 	gitRun(t, source, "commit", "-m", "two")
 	gitRun(t, source, "push", "origin", "main")
 
-	remote := openRemoteForTest(t, "restore")
+	remote := app.openRemoteForTest(t, "restore")
 	snapshots, err := remote.client.ListSnapshots(remote.res.ID)
 	remote.close()
 	if err != nil {
@@ -362,10 +368,10 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 	if len(snapshots) != 1 || !snapshots[0].Automatic {
 		t.Fatalf("pre-compaction snapshots = %+v", snapshots)
 	}
-	if err := runRepoRestore(snapshots[0].ID, true, false); err != nil {
+	if err := app.runRepoRestore(snapshots[0].ID, true, false); err != nil {
 		t.Fatalf("repo restore: %v", err)
 	}
-	remote = openRemoteForTest(t, "restore")
+	remote = app.openRemoteForTest(t, "restore")
 	if len(remote.root.Bundles) != 2 || remote.root.Generation != 0 {
 		remote.close()
 		t.Fatalf("restored root = bundles %d generation %d, want 2/0", len(remote.root.Bundles), remote.root.Generation)
@@ -389,6 +395,7 @@ func TestGitRemoteRestorePreCompactionSnapshot(t *testing.T) {
 }
 
 func TestGitRemoteConcurrentPushRace(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -398,9 +405,9 @@ func TestGitRemoteConcurrentPushRace(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	newE2E(t)
+	app.newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := runRepoCreate("race", 64); err != nil {
+	if err := app.runRepoCreate("race", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 
@@ -471,6 +478,7 @@ func TestGitRemoteConcurrentPushRace(t *testing.T) {
 }
 
 func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -480,9 +488,9 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	harness := newE2E(t)
+	harness := app.newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if err := runRepoCreate("crash", 64); err != nil {
+	if err := app.runRepoCreate("crash", 64); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 	source := t.TempDir()
@@ -495,13 +503,13 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 	gitRun(t, source, "add", "crash.txt")
 	gitRun(t, source, "commit", "-m", "crash boundary")
 	gitRun(t, source, "remote", "add", "origin", "aqt::crash")
-	created := openRemoteForTest(t, "crash")
+	created := app.openRemoteForTest(t, "crash")
 	createdVersion := created.res.Version
 	created.close()
 
 	t.Setenv("AQT_TEST_GITREMOTE_EXIT_AFTER_UPLOAD", "1")
 	gitMustFail(t, source, "push", "origin", "main")
-	remote := openRemoteForTest(t, "crash")
+	remote := app.openRemoteForTest(t, "crash")
 	if remote.res.Version != createdVersion || len(remote.root.Refs) != 0 || len(remote.root.Bundles) != 0 {
 		remote.close()
 		t.Fatalf("root changed after helper crash: version=%d refs=%v bundles=%d", remote.res.Version, remote.root.Refs, len(remote.root.Bundles))
@@ -516,7 +524,7 @@ func TestGitRemoteCrashAfterUploadLeavesRootUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	objectsBefore := harness.usageObjects()
-	if err := runPrune(false, false); err != nil {
+	if err := app.runPrune(false, false); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if after := harness.usageObjects(); after >= objectsBefore {
@@ -543,9 +551,9 @@ func runGitCommand(dir string, args ...string) gitCommandResult {
 	return gitCommandResult{dir: dir, output: strings.TrimSpace(string(data)), err: err}
 }
 
-func openRemoteForTest(t *testing.T, ref string) *openedGitRemote {
+func (app *application) openRemoteForTest(t *testing.T, ref string) *openedGitRemote {
 	t.Helper()
-	h := &remoteHelper{remoteName: "origin", rawURL: ref, errOut: os.Stderr}
+	h := &remoteHelper{app: app, remoteName: "origin", rawURL: ref, errOut: os.Stderr}
 	remote, err := h.openRemote()
 	if err != nil {
 		t.Fatalf("open remote %s: %v", ref, err)
@@ -653,6 +661,7 @@ func gitMustFail(t *testing.T, dir string, args ...string) string {
 // every retention path — so a checkpoint the next compaction does not release pins a
 // full copy of the repository forever. Successive compactions must converge on one.
 func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("builds helper binaries and runs Git end to end")
 	}
@@ -662,10 +671,10 @@ func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
 	configureGitTestEnv(t)
 	bin := t.TempDir()
 	installGitRemoteHelper(t, bin)
-	newE2E(t)
+	app.newE2E(t)
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	if err := runRepoCreate("repeat", 2); err != nil {
+	if err := app.runRepoCreate("repeat", 2); err != nil {
 		t.Fatalf("repo create: %v", err)
 	}
 	source := t.TempDir()
@@ -686,7 +695,7 @@ func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
 	}
 	commit("one")
 
-	remote := openRemoteForTest(t, "repeat")
+	remote := app.openRemoteForTest(t, "repeat")
 	resourceID, cl := remote.res.ID, remote.client
 	remote.close()
 	manual, err := cl.CreateSnapshot(resourceID, nil, true)
@@ -723,17 +732,17 @@ func TestGitRemoteCompactionReleasesOldCheckpoints(t *testing.T) {
 	}
 
 	// The surviving checkpoint must still be a usable rollback.
-	remote = openRemoteForTest(t, "repeat")
+	remote = app.openRemoteForTest(t, "repeat")
 	generation := remote.root.Generation
 	remote.close()
 	for _, snap := range snaps {
 		if snap.Automatic && snap.Anchored {
-			if err := runRepoRestore(snap.ID, true, false); err != nil {
+			if err := app.runRepoRestore(snap.ID, true, false); err != nil {
 				t.Fatalf("restore from surviving checkpoint: %v", err)
 			}
 		}
 	}
-	remote = openRemoteForTest(t, "repeat")
+	remote = app.openRemoteForTest(t, "repeat")
 	restored := remote.root.Generation
 	remote.close()
 	if restored >= generation {

@@ -113,12 +113,12 @@ func (c comparison) filter(filters []string) comparison {
 // `status` does. It is strictly read-only: it uploads nothing, writes nothing into
 // the tree, and leaves .aqt/base.json and the pinned remote version untouched, so
 // running it can never change what a later sync decides to do.
-func compareWorkingTreeToRemote(cl *client.Client, prof *identity.Profile, root string) (comparison, error) {
+func (app *application) compareWorkingTreeToRemote(cl *client.Client, prof *identity.Profile, root string) (comparison, error) {
 	res, err := folderResource(cl, root)
 	if err != nil {
 		return comparison{}, err
 	}
-	mk, unlocked, err := unlockForComparison(prof)
+	mk, unlocked, err := app.unlockForComparison(prof)
 	if err != nil {
 		return comparison{}, err
 	}
@@ -126,13 +126,13 @@ func compareWorkingTreeToRemote(cl *client.Client, prof *identity.Profile, root 
 		return unavailableComparison(remoteSide(res), workingTreeSide, reasonSessionLocked), nil
 	}
 	defer mk.Wipe()
-	return computeRemoteComparison(cl, mk, root, res)
+	return app.computeRemoteComparison(cl, mk, root, res)
 }
 
 // computeRemoteComparison needs the already-unlocked master key: it must never
 // prompt, because the TUI calls it from inside a raw-mode terminal session.
-func computeRemoteComparison(cl *client.Client, mk crypto.MasterKey, root string, res api.GetResourceResponse) (comparison, error) {
-	base, err := folderstate.LoadBase(root, flagProfile)
+func (app *application) computeRemoteComparison(cl *client.Client, mk crypto.MasterKey, root string, res api.GetResourceResponse) (comparison, error) {
+	base, err := folderstate.LoadBase(root, app.profile)
 	if err != nil {
 		return comparison{}, err
 	}
@@ -179,14 +179,14 @@ func remoteManifest(cl *client.Client, res api.GetResourceResponse, mk crypto.Ma
 // only when someone is there to answer: --json and a non-terminal stdin both mean the
 // caller is a script, and a passphrase prompt would hang it. A locked session then
 // reports itself in the result instead of blocking.
-func unlockForComparison(prof *identity.Profile) (crypto.MasterKey, bool, error) {
+func (app *application) unlockForComparison(prof *identity.Profile) (crypto.MasterKey, bool, error) {
 	if mk, ok := identity.LoadSession(prof.Name); ok {
 		return mk, true, nil
 	}
-	if flagJSON || !interactiveStdin() {
+	if app.json || !interactiveStdin() {
 		return crypto.MasterKey{}, false, nil
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return crypto.MasterKey{}, false, err
 	}

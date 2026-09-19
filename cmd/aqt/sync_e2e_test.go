@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
@@ -38,7 +39,8 @@ import (
 // propagation, independent-edit merge, and a both-sides conflict resolved with
 // --force.
 func TestSyncE2E(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 
 	// One machine inits and pushes a tree with a small file, a nested file, and a
 	// chunked file (larger than the inline cutoff, so it exercises chunk upload).
@@ -89,7 +91,7 @@ func TestSyncE2E(t *testing.T) {
 	writeTree(t, origin, "notes/todo.txt", "origin edit")
 	h.sync(origin)
 	writeTree(t, replica, "notes/todo.txt", "replica edit")
-	if err := runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
+	if err := app.runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("expected conflict abort, got %v", err)
 	}
 	h.syncOpts(replica, syncOptions{force: true}) // local (replica) wins
@@ -105,7 +107,8 @@ func TestSyncE2E(t *testing.T) {
 // version lands in exactly one conflict-copy. A following round pushes the copy and the
 // other replica pulls it, with no conflict re-triggered.
 func TestSyncConflictCopyBothModified(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "notes/todo.txt", "base")
@@ -118,7 +121,7 @@ func TestSyncConflictCopyBothModified(t *testing.T) {
 	h.sync(origin)
 	writeTree(t, replica, "notes/todo.txt", "replica edit")
 
-	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+	if err := app.runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
 		t.Fatalf("copy-mode sync: %v", err)
 	}
 	if got := readTree(t, replica, "notes/todo.txt"); got != "replica edit" {
@@ -154,8 +157,9 @@ func TestSyncConflictCopyBothModified(t *testing.T) {
 // suffix. A one-shot injected 409 on the folder commit stands in for another device that
 // committed first, forcing reconcileWithRetry to re-plan the same conflict.
 func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	var armed, injected atomic.Bool
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" &&
 			injected.CompareAndSwap(false, true) {
 			w.WriteHeader(http.StatusConflict)
@@ -178,7 +182,7 @@ func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
 
 	// Arm the 409 only for the conflicting copy-mode sync, not the setup pushes above.
 	armed.Store(true)
-	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+	if err := app.runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
 		t.Fatalf("copy-mode sync through retry: %v", err)
 	}
 	if !injected.Load() {
@@ -206,7 +210,8 @@ func TestSyncConflictCopyRetryDoesNotDuplicate(t *testing.T) {
 // remote edit is preserved as a copy, the primary stays absent locally, and the remote
 // primary is dropped (local delete wins), so it disappears from the other replica too.
 func TestSyncConflictCopyLocalDeleteRemoteModify(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "doc.txt", "base")
@@ -219,7 +224,7 @@ func TestSyncConflictCopyLocalDeleteRemoteModify(t *testing.T) {
 	h.sync(origin)
 	removeTree(t, replica, "doc.txt")
 
-	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+	if err := app.runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
 		t.Fatalf("copy-mode sync: %v", err)
 	}
 	assertAbsent(t, replica, "doc.txt")
@@ -243,7 +248,8 @@ func TestSyncConflictCopyLocalDeleteRemoteModify(t *testing.T) {
 // remote has no bytes to preserve, so no copy is written; the local edit is kept and
 // pushed, resurrecting the file on the other replica.
 func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "doc.txt", "base")
@@ -256,7 +262,7 @@ func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
 	h.sync(origin)
 	writeTree(t, replica, "doc.txt", "replica edit")
 
-	if err := runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+	if err := app.runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
 		t.Fatalf("copy-mode sync: %v", err)
 	}
 	if copies := globConflicts(t, replica); len(copies) != 0 {
@@ -276,22 +282,24 @@ func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
 // incompatible with --force and with the baseless --reconcile/--accept-rollback
 // plans.
 func TestSyncConflictCopyValidation(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 
 	dir := t.TempDir()
 	h.init(dir)
-	if err := runSync(dir, syncOptions{conflicts: "copy", force: true}); err == nil ||
+	if err := app.runSync(dir, syncOptions{conflicts: "copy", force: true}); err == nil ||
 		!strings.Contains(err.Error(), "force") {
 		t.Fatalf("copy+force: got %v, want a contradiction error", err)
 	}
-	if err := runSync(dir, syncOptions{conflicts: "copy", reconcile: true}); err == nil ||
+	if err := app.runSync(dir, syncOptions{conflicts: "copy", reconcile: true}); err == nil ||
 		!strings.Contains(err.Error(), "three-way") {
 		t.Fatalf("copy+reconcile: got %v, want a three-way error", err)
 	}
 }
 
 func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "notes.md", "one\ntwo\nthree\nfour\n")
@@ -339,10 +347,11 @@ func TestSyncConflictMergeCleanAndOverlapFallback(t *testing.T) {
 // the copy path — and has to say so, or a copy nobody asked for reads as an overlap
 // the merge could not resolve.
 func TestSyncConflictMergeBudgetFallsBackToCopy(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	original := maxMergedBytesHeld
 	t.Cleanup(func() { maxMergedBytesHeld = original })
 
-	h := newE2E(t)
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	body := func(first, last string) string {
@@ -396,10 +405,11 @@ func TestSyncConflictMergeBudgetFallsBackToCopy(t *testing.T) {
 }
 
 func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	var armed, blocked atomic.Bool
 	putStarted := make(chan struct{})
 	releasePUT := make(chan struct{})
-	h := newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
 		if armed.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" &&
 			blocked.CompareAndSwap(false, true) {
 			close(putStarted)
@@ -421,7 +431,7 @@ func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
 
 	armed.Store(true)
 	result := make(chan error, 1)
-	go func() { result <- runSync(replica, syncOptions{conflicts: "merge"}) }()
+	go func() { result <- app.runSync(replica, syncOptions{conflicts: "merge"}) }()
 	<-putStarted
 	newer := "one\nTWO\nthree\nFOUR\n"
 	writeTree(t, replica, "notes.md", newer)
@@ -434,7 +444,7 @@ func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
 	}
 
 	armed.Store(false)
-	if err := runSync(replica, syncOptions{conflicts: "merge"}); err != nil {
+	if err := app.runSync(replica, syncOptions{conflicts: "merge"}); err != nil {
 		t.Fatalf("reconcile preserved edit: %v", err)
 	}
 	if got, want := readTree(t, replica, "notes.md"), "ONE\nTWO\nthree\nFOUR\n"; got != want {
@@ -443,7 +453,8 @@ func TestSyncConflictMergeKeepsEditMadeWhilePUTIsInFlight(t *testing.T) {
 }
 
 func TestSyncConflictMergeMissingBaseChunkFallsBackToCopy(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	lines := make([]string, 700)
@@ -474,7 +485,7 @@ func TestSyncConflictMergeMissingBaseChunkFallsBackToCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	objectsBefore := h.usageObjects()
-	if err := runPrune(false, false); err != nil {
+	if err := app.runPrune(false, false); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if h.usageObjects() >= objectsBefore {
@@ -534,7 +545,8 @@ func globConflicts(t *testing.T, root string) []string {
 // bumped past this build's capability (simulating a device that wrote a newer
 // format); a clone must fail with client.ErrUpgradeRequired before any decrypt runs.
 func TestMixedVersionUpgradeRequired(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := filepath.Join(t.TempDir(), "origin")
 
 	h.init(origin)
@@ -549,7 +561,7 @@ func TestMixedVersionUpgradeRequired(t *testing.T) {
 		t.Fatalf("bump min_client: %v", err)
 	}
 
-	err := runClone(id, filepath.Join(t.TempDir(), "replica"), false, "")
+	err := app.runClone(id, filepath.Join(t.TempDir(), "replica"), false, "")
 	if !errors.Is(err, client.ErrUpgradeRequired) {
 		t.Fatalf("clone error = %v, want client.ErrUpgradeRequired", err)
 	}
@@ -569,17 +581,18 @@ func TestMixedVersionUpgradeRequired(t *testing.T) {
 // than render as "(unreadable)", which is what a corrupted blob or a wrong passphrase
 // looks like.
 func TestLsNamesTheCapabilityGap(t *testing.T) {
-	h := newE2E(t)
-	id := pushSecretFile(t, "future.txt", "written by a newer device")
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	id := app.pushSecretFile(t, "future.txt", "written by a newer device")
 	if err := h.store.SetResourceMinClientForTest(id, api.ClientCapability+1); err != nil {
 		t.Fatalf("bump min_client: %v", err)
 	}
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -606,7 +619,8 @@ func TestLsNamesTheCapabilityGap(t *testing.T) {
 // changes uploads no new packs (the have/want gate dedups), and a clone reconstructs
 // the chunked content byte-for-byte from the packs.
 func TestSyncDedupHoldsOnResync(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "big.dat", bigContent())
@@ -637,7 +651,8 @@ func TestSyncDedupHoldsOnResync(t *testing.T) {
 // than reconcile against an empty base (which resurrects deletions), and
 // --reconcile must surface one-sided differences as conflicts.
 func TestSyncRefusesMissingBase(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "keep.txt", "data")
@@ -647,7 +662,7 @@ func TestSyncRefusesMissingBase(t *testing.T) {
 	if err := os.Remove(folderstate.BasePath(origin)); err != nil {
 		t.Fatal(err)
 	}
-	if err := runSync(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {
+	if err := app.runSync(origin, syncOptions{}); !errors.Is(err, errSyncNoBase) {
 		t.Fatalf("expected errSyncNoBase, got %v", err)
 	}
 	// With identical local and remote, --reconcile finds nothing to do and rebuilds
@@ -660,7 +675,8 @@ func TestSyncRefusesMissingBase(t *testing.T) {
 // resource names and sizes, and `find` must expand a tracked folder into its
 // member files so a single index covers everything.
 func TestLsAndFindDecryptNames(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 
 	// A single-file push.
 	fdir := t.TempDir()
@@ -668,7 +684,7 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 	if err := os.WriteFile(fpath, []byte("API_KEY=xyz"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
+	if err := app.pushQuiet(fpath, pushOptions{noClip: true}); err != nil {
 		t.Fatalf("push: %v", err)
 	}
 
@@ -678,7 +694,7 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 	writeTree(t, folder, "notes/todo.txt", "buy milk")
 	h.sync(folder)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -726,7 +742,7 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 		t.Errorf("member ref = %q, want aqt://<id>%s", memberRef, want)
 	}
 	dest := filepath.Join(t.TempDir(), "todo.txt")
-	if err := runPull(memberRef, dest, "", false, false); err != nil {
+	if err := app.runPull(memberRef, dest, "", false, false); err != nil {
 		t.Fatalf("pull of find ref: %v", err)
 	}
 	if got, err := os.ReadFile(dest); err != nil || string(got) != "buy milk" {
@@ -739,7 +755,8 @@ func TestLsAndFindDecryptNames(t *testing.T) {
 // files. Pulling it must remove the stale local symlink and create the directory, not
 // abort on "descends through a symlink" and leave the folder stuck.
 func TestSyncSymlinkBecomesDir(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "target.txt", "data")
@@ -773,13 +790,15 @@ func TestSyncSymlinkBecomesDir(t *testing.T) {
 // --- harness ---
 
 type e2eHarness struct {
+	app *application
+
 	t       *testing.T
 	url     string
 	dataDir string
 	store   *server.Store
 }
 
-func newE2E(t *testing.T) *e2eHarness {
+func (app *application) newE2E(t *testing.T) *e2eHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	home := t.TempDir()
@@ -794,7 +813,7 @@ func newE2E(t *testing.T) *e2eHarness {
 	ts := httptest.NewServer(server.NewWithConfig(store, server.Config{}).Router())
 	t.Cleanup(ts.Close)
 
-	h := &e2eHarness{t: t, url: ts.URL, dataDir: dataDir, store: store}
+	h := &e2eHarness{app: app, t: t, url: ts.URL, dataDir: dataDir, store: store}
 	h.signup("e2e@example.com", "correct horse battery staple")
 	return h
 }
@@ -802,7 +821,7 @@ func newE2E(t *testing.T) *e2eHarness {
 // newE2EWithProxy is newE2E with a reverse proxy in front of the server, so a test can
 // intercept requests (e.g. inject a one-shot 409 to force a version-conflict retry).
 // intercept is called for every request and either handles it or forwards via pass.
-func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc)) *e2eHarness {
+func (app *application) newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc)) *e2eHarness {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	home := t.TempDir()
@@ -827,7 +846,7 @@ func newE2EWithProxy(t *testing.T, intercept func(w http.ResponseWriter, r *http
 	}))
 	t.Cleanup(front.Close)
 
-	h := &e2eHarness{t: t, url: front.URL, dataDir: dataDir, store: store}
+	h := &e2eHarness{app: app, t: t, url: front.URL, dataDir: dataDir, store: store}
 	h.signup("e2e@example.com", "correct horse battery staple")
 	return h
 }
@@ -919,15 +938,19 @@ func (h *e2eHarness) unlockSession() {
 }
 
 func (h *e2eHarness) init(dir string) {
+	app := h.app
+
 	h.t.Helper()
-	if err := runInit(dir, nil); err != nil {
+	if err := app.runInit(dir, nil); err != nil {
 		h.t.Fatalf("init %s: %v", dir, err)
 	}
 }
 
 func (h *e2eHarness) clone(id, dir string) {
+	app := h.app
+
 	h.t.Helper()
-	if err := runClone(id, dir, false, ""); err != nil {
+	if err := app.runClone(id, dir, false, ""); err != nil {
 		h.t.Fatalf("clone %s: %v", id, err)
 	}
 }
@@ -935,8 +958,10 @@ func (h *e2eHarness) clone(id, dir string) {
 func (h *e2eHarness) sync(dir string) { h.syncOpts(dir, syncOptions{}) }
 
 func (h *e2eHarness) syncOpts(dir string, opts syncOptions) {
+	app := h.app
+
 	h.t.Helper()
-	if err := runSync(dir, opts); err != nil {
+	if err := app.runSync(dir, opts); err != nil {
 		h.t.Fatalf("sync %s: %v", dir, err)
 	}
 }
@@ -953,8 +978,10 @@ func (h *e2eHarness) folderID(dir string) string {
 // resourceExists reports whether the account still owns a resource, for tests that
 // assert a command did (or did not) delete the server side.
 func (h *e2eHarness) resourceExists(id string) bool {
+	app := h.app
+
 	h.t.Helper()
-	cl, _, err := authedClient()
+	cl, _, err := app.authedClient()
 	if err != nil {
 		h.t.Fatalf("authed client: %v", err)
 	}
@@ -1076,10 +1103,11 @@ func bigContent() string {
 // must wait for all of them before the resource is rooted. A clone then has to
 // reconstruct every byte, which fails if any dispatched pack was lost or a wait skipped.
 func TestSyncLargeMultiPackRoundTrip(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if testing.Short() {
 		t.Skip("skips the multi-pack upload test under -short")
 	}
-	h := newE2E(t)
+	h := app.newE2E(t)
 
 	origin := t.TempDir()
 	h.init(origin)

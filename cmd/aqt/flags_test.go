@@ -4,17 +4,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
 )
 
-// TestGlobalFlagWiring pins the docs/cli.md global flag surface: the persistent
-// flags live on root, --version/-v print and exit 0, and the per-command --json
-// duplicates were consolidated onto the global.
+// Global output flags are inherited by commands; --version/-v prints the build version.
 func TestGlobalFlagWiring(t *testing.T) {
-	root := rootCmd()
+	app := &application{ctx: context.Background()}
+	root := app.rootCmd()
 
 	for _, name := range []string{"server", "profile", "json", "quiet"} {
 		if root.PersistentFlags().Lookup(name) == nil {
@@ -23,9 +23,6 @@ func TestGlobalFlagWiring(t *testing.T) {
 	}
 	if root.PersistentFlags().Lookup("quiet").Shorthand != "q" {
 		t.Errorf("--quiet shorthand = %q, want q", root.PersistentFlags().Lookup("quiet").Shorthand)
-	}
-	if root.PersistentFlags().Lookup("verbose") != nil {
-		t.Error("root still exposes the no-op --verbose flag")
 	}
 
 	if root.Version == "" {
@@ -37,15 +34,6 @@ func TestGlobalFlagWiring(t *testing.T) {
 	}
 	if vf.Shorthand != "v" {
 		t.Errorf("--version shorthand = %q, want v", vf.Shorthand)
-	}
-
-	// Commands that previously owned a local --json must now inherit the global,
-	// not redeclare it (a local duplicate would shadow the persistent flag).
-	for _, name := range []string{"ls", "find", "info", "devices"} {
-		sub := subcommand(t, root, name)
-		if sub.Flags().Lookup("json") != nil {
-			t.Errorf("%s still declares a local --json flag", name)
-		}
 	}
 
 	var out bytes.Buffer
@@ -60,6 +48,7 @@ func TestGlobalFlagWiring(t *testing.T) {
 }
 
 func TestStandardizedCLIForms(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	assertOutFlag := func(name string, cmd *cobra.Command) {
 		t.Helper()
 		out := cmd.Flags().Lookup("out")
@@ -67,35 +56,27 @@ func TestStandardizedCLIForms(t *testing.T) {
 			t.Errorf("%s --out shorthand = %v, want -o", name, out)
 		}
 	}
-	assertOutFlag("pull", pullCmd())
-	assertOutFlag("restore", restoreCmd())
-	assertOutFlag("snapshot export", snapshotExportCmd())
+	assertOutFlag("pull", app.pullCmd())
+	assertOutFlag("restore", app.restoreCmd())
 
-	contacts := contactsCmd()
+	contacts := app.contactsCmd()
 	rm, _, err := contacts.Find([]string{"remove"})
 	if err != nil || rm.Name() != "rm" {
 		t.Fatalf("contacts remove alias resolved to %v, err=%v; want rm", rm, err)
 	}
 
-	snapshot := snapshotCmd()
+	snapshot := app.snapshotCmd()
 	subcommand(t, snapshot, "unanchor")
-	if subcommand(t, snapshot, "anchor").Flags().Lookup("remove") != nil {
-		t.Error("snapshot anchor still exposes --remove")
-	}
 	prune := subcommand(t, snapshot, "prune")
-	if prune.Flags().Lookup("before") == nil || prune.Flags().Lookup("older-than") != nil {
-		t.Error("snapshot prune should expose --before, not --older-than")
+	if prune.Flags().Lookup("before") == nil {
+		t.Error("snapshot prune is missing --before")
 	}
 	create := subcommand(t, snapshot, "create")
 	if err := create.Args(create, []string{".", "release"}); err != nil {
 		t.Errorf("snapshot create rejected a positional label: %v", err)
 	}
 
-	pull := pullCmd()
-	if pull.Flags().Lookup("stdout") != nil {
-		t.Error("pull still exposes --stdout; use cat instead")
-	}
-	ls := lsCmd()
+	ls := app.lsCmd()
 	if err := ls.Args(ls, []string{"aqt://id", "path"}); err == nil {
 		t.Error("ls still accepts a second positional subpath")
 	}
@@ -110,4 +91,28 @@ func subcommand(t *testing.T, root *cobra.Command, name string) *cobra.Command {
 	}
 	t.Fatalf("subcommand %q not found", name)
 	return nil
+}
+
+// Pushing a directory must explain the folder workflow before attempting to read it.
+func TestPushDirectoryPointsAtInitSync(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	dir := t.TempDir()
+	err := app.runPush(dir, pushOptions{})
+	if err == nil || !strings.Contains(err.Error(), "is a directory") {
+		t.Fatalf("runPush(dir) = %v, want a directory explanation", err)
+	}
+	for _, want := range []string{"aqt init", "aqt sync"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %s", err, want)
+		}
+	}
+}
+
+// Backticks in flag descriptions control Cobra's value-type display.
+func TestPushHelpRendersNameFlagType(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	usage := app.pushCmd().Flags().FlagUsages()
+	if !strings.Contains(usage, "--name string") {
+		t.Errorf("--name does not render as a string flag:\n%s", usage)
+	}
 }

@@ -28,12 +28,13 @@ export AQT_NO_KEYCHAIN=1
 log()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[31mFAIL:\033[0m %s\n' "$*" >&2; exit 1; }
 
-SERVER_PIDS=()
-LAST_SERVER_PID=""
+SERVER_PID=""
+SERVER_URL=""
 cleanup() {
-	for pid in "${SERVER_PIDS[@]:-}"; do
-		[ -n "$pid" ] && kill "$pid" 2>/dev/null || true
-	done
+	if [ -n "$SERVER_PID" ]; then
+		kill "$SERVER_PID" 2>/dev/null || true
+		wait "$SERVER_PID" 2>/dev/null || true
+	fi
 	rm -rf "$WORK"
 }
 trap cleanup EXIT
@@ -48,27 +49,24 @@ AQT="$WORK/bin/aqt"
 SERVER="$WORK/bin/aqt-server"
 export PATH="$WORK/bin:$PATH"
 
-# start_server DATA_DIR LOG_FILE -> prints the base URL. Binds an ephemeral port
-# (AQT_ADDR=127.0.0.1:0) and reads the actual port back from the server's log, so no
-# port picker or extra tooling is needed. Background jobs are disabled to keep the
-# drill deterministic.
+# start_server DATA_DIR LOG_FILE sets SERVER_PID and SERVER_URL in this shell so
+# shutdown can wait for the server before copying or removing its data directory.
+# It reads the ephemeral port from the log. Background jobs are disabled.
 start_server() {
 	local datadir="$1" logf="$2"
 	AQT_DATA_DIR="$datadir" AQT_ADDR="127.0.0.1:0" \
 		AQT_SNAPSHOT_INTERVAL=0 AQT_GC_INTERVAL=0 \
 		"$SERVER" >"$logf" 2>&1 &
-	local pid=$!
-	SERVER_PIDS+=("$pid")
-	LAST_SERVER_PID="$pid"
+	SERVER_PID=$!
 	local addr=""
 	for _ in $(seq 1 100); do
 		addr="$(sed -n 's/.*listening on \([0-9.]*:[0-9]*\).*/\1/p' "$logf" | head -1)"
 		[ -n "$addr" ] && break
-		kill -0 "$pid" 2>/dev/null || { cat "$logf" >&2; fail "server exited before it started listening"; }
+		kill -0 "$SERVER_PID" 2>/dev/null || { cat "$logf" >&2; fail "server exited before it started listening"; }
 		sleep 0.1
 	done
 	[ -n "$addr" ] || { cat "$logf" >&2; fail "server did not report a listen address"; }
-	echo "http://$addr"
+	SERVER_URL="http://$addr"
 }
 
 # wait_health polls /livez until the server answers (best effort: skipped if curl
@@ -112,7 +110,8 @@ export HOME="$CONFIG_A/home"
 export XDG_CONFIG_HOME="$CONFIG_A"
 mkdir -p "$HOME"
 
-URL_A="$(start_server "$DATA_A" "$WORK/server-a.log")"
+start_server "$DATA_A" "$WORK/server-a.log"
+URL_A="$SERVER_URL"
 log "server A listening at $URL_A"
 wait_health "$URL_A"
 
@@ -149,15 +148,17 @@ git -C "$GIT_ORIGIN" push -u origin main refs/tags/v1
 
 # --- Phase 2: cold backup of the server data dir. ---
 log "stopping server A and taking a cold backup of the data dir"
-kill "$LAST_SERVER_PID" 2>/dev/null || true
-wait "$LAST_SERVER_PID" 2>/dev/null || true
+kill "$SERVER_PID"
+wait "$SERVER_PID"
+SERVER_PID=""
 BACKUP="$WORK/backup"
 cp -a "$DATA_A" "$BACKUP"
 
 # --- Phase 3: fresh server from a copy of the backup. ---
 RESTORED_DATA="$WORK/data-restored"
 cp -a "$BACKUP" "$RESTORED_DATA"
-URL_B="$(start_server "$RESTORED_DATA" "$WORK/server-b.log")"
+start_server "$RESTORED_DATA" "$WORK/server-b.log"
+URL_B="$SERVER_URL"
 log "restored server listening at $URL_B"
 wait_health "$URL_B"
 

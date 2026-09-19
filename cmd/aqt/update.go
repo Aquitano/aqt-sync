@@ -45,7 +45,7 @@ type updateOptions struct {
 	asJSON         bool
 }
 
-func updateCmd() *cobra.Command {
+func (app *application) updateCmd() *cobra.Command {
 	var opts updateOptions
 	cmd := &cobra.Command{
 		Use:   "update",
@@ -61,8 +61,8 @@ The previous binary is kept until the new one has run and reported the version t
 manifest promised; every failure puts it back.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			opts.asJSON = flagJSON
-			return runUpdate(opts)
+			opts.asJSON = app.json
+			return app.runUpdate(opts)
 		},
 	}
 	cmd.Flags().BoolVar(&opts.checkOnly, "check", false, "report what is available without installing anything")
@@ -71,7 +71,7 @@ manifest promised; every failure puts it back.`,
 	cmd.Flags().BoolVar(&opts.acceptRollback, "accept-rollback", false, "accept a release older than the newest one this machine has authenticated (after an upstream retraction)")
 	markJSONSupported(cmd)
 	markQuietSupported(cmd)
-	cmd.AddCommand(updatePolicyCmd())
+	cmd.AddCommand(app.updatePolicyCmd())
 	return cmd
 }
 
@@ -84,7 +84,7 @@ type updateReport struct {
 	Owner     string `json:"owner,omitempty"`
 }
 
-func runUpdate(opts updateOptions) error {
+func (app *application) runUpdate(opts updateOptions) error {
 	ch := update.ChannelStable
 	if opts.prerelease {
 		ch = update.ChannelBeta
@@ -104,7 +104,7 @@ func runUpdate(opts updateOptions) error {
 	if opts.acceptRollback {
 		floor = ""
 	}
-	ctx, cancel := context.WithTimeout(rootCtx, updateCheckTimeout)
+	ctx, cancel := context.WithTimeout(app.ctx, updateCheckTimeout)
 	res, err := update.Check(ctx, update.Options{
 		Build:   update.Build{Version: version, Kind: buildKind},
 		Channel: ch,
@@ -149,7 +149,7 @@ func runUpdate(opts updateOptions) error {
 		if opts.asJSON {
 			return printJSON(report)
 		}
-		printCheckResult(res)
+		app.printCheckResult(res)
 		return nil
 	}
 
@@ -163,8 +163,8 @@ func runUpdate(opts updateOptions) error {
 		if opts.asJSON {
 			return printJSON(report)
 		}
-		printAvailable(res)
-		if !in.Replaceable() && !flagQuiet {
+		app.printAvailable(res)
+		if !in.Replaceable() && !app.quiet {
 			fmt.Printf("note:    %s\n", in.Why())
 		}
 		return nil
@@ -180,14 +180,14 @@ func runUpdate(opts updateOptions) error {
 	}
 
 	if !opts.asJSON {
-		printAvailable(res)
+		app.printAvailable(res)
 	}
 	prompt := fmt.Sprintf("Replace %s with %s? [y/N] ", in.Path, res.AvailableVersion)
 	if err := confirmDestructive(prompt, opts.assumeYes); err != nil {
 		return err
 	}
 
-	applied, err := applyUpdate(rootCtx, in, res)
+	applied, err := applyUpdate(app.ctx, in, res)
 	if err != nil {
 		return err
 	}
@@ -198,10 +198,10 @@ func runUpdate(opts updateOptions) error {
 		return printJSON(report)
 	}
 	fmt.Printf("installed %s -> %s\n", applied.FromVersion, applied.ToVersion)
-	if applied.RollbackPath != "" && !flagQuiet {
+	if applied.RollbackPath != "" && !app.quiet {
 		fmt.Println("the previous binary is still open by this process; the next update that installs removes it")
 	}
-	if link, stale := staleHelperLink(in); stale && !flagQuiet {
+	if link, stale := staleHelperLink(in); stale && !app.quiet {
 		fmt.Printf("%s still points at the previous binary; run `aqt git setup` to relink it\n", link)
 	}
 	return nil
@@ -225,11 +225,11 @@ func applyUpdate(ctx context.Context, in update.Install, res update.Result) (upd
 	return applied, nil
 }
 
-func printCheckResult(res update.Result) {
+func (app *application) printCheckResult(res update.Result) {
 	switch res.Status {
 	case update.StatusUnsupported:
 		fmt.Printf("aqt %s is a development build; automatic updates cover published releases only.\n", res.CurrentVersion)
-		if !flagQuiet {
+		if !app.quiet {
 			fmt.Printf("Install a release from https://github.com/%s/releases, or keep building from source with `make build`.\n", update.DefaultRepo)
 		}
 	case update.StatusUpToDate:
@@ -237,9 +237,9 @@ func printCheckResult(res update.Result) {
 	}
 }
 
-func printAvailable(res update.Result) {
+func (app *application) printAvailable(res update.Result) {
 	fmt.Printf("update available: %s -> %s (%s)\n", res.CurrentVersion, res.AvailableVersion, res.Channel)
-	if flagQuiet {
+	if app.quiet {
 		return
 	}
 	fmt.Printf("release: %s\n", res.ReleaseURL)
@@ -265,7 +265,7 @@ var updateArtifactSource = func() update.ArtifactSource {
 	return updateSource()
 }
 
-func updatePolicyCmd() *cobra.Command {
+func (app *application) updatePolicyCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "policy [off|notify|auto]",
 		Short: "Show or set what ordinary commands do about updates",
@@ -289,7 +289,7 @@ changes the exit status of the command that triggered it.`,
 				if err != nil {
 					return err
 				}
-				if flagJSON {
+				if app.json {
 					return printJSON(st)
 				}
 				fmt.Println(st.Policy)
@@ -302,7 +302,7 @@ changes the exit status of the command that triggered it.`,
 			if err := store.SetPolicy(p); err != nil {
 				return err
 			}
-			if !flagQuiet {
+			if !app.quiet {
 				fmt.Printf("update policy: %s\n", p)
 			}
 			return nil

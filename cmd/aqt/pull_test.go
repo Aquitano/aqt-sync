@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -40,6 +41,7 @@ func TestSafeOutputName(t *testing.T) {
 // TestWriteOutputConfinesToCWD verifies that a default destination derived from
 // attacker-controlled metadata cannot escape the working directory.
 func TestWriteOutputConfinesToCWD(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	tmp := t.TempDir()
 	oldCWD, err := os.Getwd()
 	if err != nil {
@@ -59,7 +61,7 @@ func TestWriteOutputConfinesToCWD(t *testing.T) {
 
 	names := []string{"../../evil", "/etc/passwd", "sub/dir/file", "report.txt"}
 	for _, name := range names {
-		if err := writeOutput([]byte("x"), "", api.Metadata{Name: name}, false, false); err != nil {
+		if err := app.writeOutput([]byte("x"), "", api.Metadata{Name: name}, false, false); err != nil {
 			t.Fatalf("writeOutput(%q): %v", name, err)
 		}
 		base := filepath.Base(name)

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,4 +77,19 @@ func readIgnore(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// init's .git question needs a scriptable answer — the TUI drives init through the
+// CLI and has no terminal to answer a prompt on.
+func TestInitGitFlags(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	cmd := app.initCmd()
+	if cmd.Flags().Lookup("git") == nil || cmd.Flags().Lookup("no-git") == nil {
+		t.Fatal("init is missing --git/--no-git")
+	}
+	root := app.rootCmd()
+	root.SetArgs([]string{"init", t.TempDir(), "--git", "--no-git"})
+	if err := root.Execute(); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("init --git --no-git err = %v, want a mutual-exclusion error", err)
+	}
 }

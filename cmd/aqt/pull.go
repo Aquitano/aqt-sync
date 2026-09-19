@@ -22,7 +22,7 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-func pullCmd() *cobra.Command {
+func (app *application) pullCmd() *cobra.Command {
 	var (
 		out   string
 		pw    passwordFlags
@@ -37,7 +37,7 @@ func pullCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runPull(args[0], out, password, false, force)
+			return app.runPull(args[0], out, password, false, force)
 		},
 	}
 	cmd.Flags().StringVarP(&out, "out", "o", "", "write to this path")
@@ -50,7 +50,7 @@ func pullCmd() *cobra.Command {
 	return cmd
 }
 
-func catCmd() *cobra.Command {
+func (app *application) catCmd() *cobra.Command {
 	var pw passwordFlags
 	cmd := &cobra.Command{
 		Use:   "cat <name-or-id|tracked-path|url>[/path]",
@@ -61,14 +61,14 @@ func catCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runPull(args[0], "", password, true, false)
+			return app.runPull(args[0], "", password, true, false)
 		},
 	}
 	pw.bind(cmd, "password for a gated link")
 	return cmd
 }
 
-func runPull(ref, out, password string, toStdout, force bool) error {
+func (app *application) runPull(ref, out, password string, toStdout, force bool) error {
 	baseRef, subpath := splitRefPath(ref)
 	id, fragment, origin := parseRef(baseRef)
 
@@ -76,8 +76,8 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	// ref needs the account token (to fetch) and passphrase (to unwrap). Honor a
 	// host embedded in the ref so a share link is self-contained, but never attach
 	// the token to a foreign host (see newLinkClient).
-	prof := loadProfileOptional()
-	cl, err := newLinkClient(origin, prof)
+	prof := app.loadProfileOptional()
+	cl, err := app.newLinkClient(origin, prof)
 	if err != nil {
 		return err
 	}
@@ -88,7 +88,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	// prompt for the passphrase again whenever session caching is unavailable.
 	var master *crypto.MasterKey
 	if origin == "" && fragment == "" && prof != nil {
-		mk, err := unlockMaster(prof)
+		mk, err := app.unlockMaster(prof)
 		if err != nil {
 			return err
 		}
@@ -111,7 +111,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 		return err
 	}
 
-	ck, err := contentKeyWithMaster(res, fragment, password, prof, master)
+	ck, err := app.contentKeyWithMaster(res, fragment, password, prof, master)
 	if err != nil {
 		return err
 	}
@@ -121,7 +121,7 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	// addresses one entry inside a folder: only the path's spine nodes and that
 	// entry's chunks are fetched, never the tree.
 	if subpath != "" {
-		return pullSubpath(cl, id, res, ck, subpath, out, toStdout, force, remoteFetch(cl, res, fragment))
+		return app.pullSubpath(cl, id, res, ck, subpath, out, toStdout, force, remoteFetch(cl, res, fragment))
 	}
 
 	meta, err := decodeMeta(res.EncryptedMeta, ck, id)
@@ -141,19 +141,19 @@ func runPull(ref, out, password string, toStdout, force bool) error {
 	if meta.Streamed {
 		// A share link has no account token for the authed pack-locate path, and a
 		// grantee has a token but no pack access; both read exact object slices.
-		return pullStream(cl, res, ck, out, meta, remoteFetch(cl, res, fragment), toStdout, force)
+		return app.pullStream(cl, res, ck, out, meta, remoteFetch(cl, res, fragment), toStdout, force)
 	}
 
 	plaintext, err := crypto.OpenBound(res.Blob, ck, crypto.AADBlob, id)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
 	}
-	return writeOutput(plaintext, out, meta, toStdout, force)
+	return app.writeOutput(plaintext, out, meta, toStdout, force)
 }
 
 // pullStream reconstructs a streamed file from its objects, writing chunks to the
 // destination as they are fetched so the whole file is never held in memory.
-func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, slices sliceFetch, toStdout, force bool) error {
+func (app *application) pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.ContentKey, out string, meta api.Metadata, slices sliceFetch, toStdout, force bool) error {
 	root, err := syncengine.OpenFileRoot(res.Blob, ck, res.ID)
 	if err != nil {
 		return fmt.Errorf("decrypt failed (wrong key or corrupted): %w", err)
@@ -205,7 +205,7 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 	}); err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"path": dest, "bytes": root.Size})
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", dest, root.Size)
@@ -214,18 +214,18 @@ func pullStream(cl *client.Client, res api.GetResourceResponse, ck crypto.Conten
 
 // contentKey recovers the content key either from the share fragment (public/
 // gated) or by unwrapping with the master key (private).
-func contentKey(res api.GetResourceResponse, fragment, password string, prof *identity.Profile) (crypto.ContentKey, error) {
-	return contentKeyWithMaster(res, fragment, password, prof, nil)
+func (app *application) contentKey(res api.GetResourceResponse, fragment, password string, prof *identity.Profile) (crypto.ContentKey, error) {
+	return app.contentKeyWithMaster(res, fragment, password, prof, nil)
 }
 
 // contentKeyWithMaster is contentKey given an already-unlocked master key to reuse.
 // A caller that has unlocked once (e.g. info resolving an owned ref by name) passes it
 // so unwrapping the owner or grant key does not prompt for the passphrase a second time
 // when session caching is unavailable. A nil master is unlocked on demand.
-func contentKeyWithMaster(res api.GetResourceResponse, fragment, password string, prof *identity.Profile, master *crypto.MasterKey) (crypto.ContentKey, error) {
+func (app *application) contentKeyWithMaster(res api.GetResourceResponse, fragment, password string, prof *identity.Profile, master *crypto.MasterKey) (crypto.ContentKey, error) {
 	if fragment != "" {
 		if strings.HasPrefix(fragment, "p.") && password == "" {
-			p, err := promptPassphrase("Share password: ")
+			p, err := app.promptPassphrase("Share password: ")
 			if err != nil {
 				return crypto.ContentKey{}, err
 			}
@@ -240,7 +240,7 @@ func contentKeyWithMaster(res api.GetResourceResponse, fragment, password string
 		if prof == nil {
 			return crypto.ContentKey{}, errors.New("granted resource: run `aqt login` to decrypt it")
 		}
-		mk, owned, err := borrowMaster(prof, master)
+		mk, owned, err := app.borrowMaster(prof, master)
 		if err != nil {
 			return crypto.ContentKey{}, err
 		}
@@ -255,7 +255,7 @@ func contentKeyWithMaster(res api.GetResourceResponse, fragment, password string
 	if prof == nil {
 		return crypto.ContentKey{}, errors.New("private resource: run `aqt login` to decrypt it")
 	}
-	mk, owned, err := borrowMaster(prof, master)
+	mk, owned, err := app.borrowMaster(prof, master)
 	if err != nil {
 		return crypto.ContentKey{}, err
 	}
@@ -267,11 +267,11 @@ func contentKeyWithMaster(res api.GetResourceResponse, fragment, password string
 
 // borrowMaster returns the caller's already-unlocked master key when non-nil (owned is
 // false; the caller wipes it), otherwise unlocks a fresh key the caller must wipe.
-func borrowMaster(prof *identity.Profile, shared *crypto.MasterKey) (mk crypto.MasterKey, owned bool, err error) {
+func (app *application) borrowMaster(prof *identity.Profile, shared *crypto.MasterKey) (mk crypto.MasterKey, owned bool, err error) {
 	if shared != nil {
 		return *shared, false, nil
 	}
-	mk, err = unlockMaster(prof)
+	mk, err = app.unlockMaster(prof)
 	if err != nil {
 		return crypto.MasterKey{}, false, err
 	}
@@ -292,7 +292,7 @@ func safeOutputName(name string) string {
 	return base
 }
 
-func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, force bool) error {
+func (app *application) writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, force bool) error {
 	if toStdout {
 		_, err := os.Stdout.Write(plaintext)
 		return err
@@ -308,7 +308,7 @@ func writeOutput(plaintext []byte, out string, meta api.Metadata, toStdout, forc
 	if err := fsatomic.WriteFile(out, plaintext, 0o600); err != nil {
 		return err
 	}
-	if flagJSON {
+	if app.json {
 		return printJSON(map[string]any{"path": out, "bytes": len(plaintext)})
 	}
 	fmt.Fprintf(os.Stderr, "wrote %s (%d B)\n", out, len(plaintext))

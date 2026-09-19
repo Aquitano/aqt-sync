@@ -23,8 +23,7 @@ type Version struct {
 }
 
 // ParseVersion parses "v1.2.3", "1.2.3-rc.1", "v1.2.3+meta" and rejects anything
-// else. The leading "v" is optional on input; String always emits it, matching the
-// release tags.
+// else. The leading "v" is optional.
 func ParseVersion(s string) (Version, error) {
 	raw := s
 	bad := func() (Version, error) { return Version{}, fmt.Errorf("%w %q", ErrBadVersion, raw) }
@@ -57,17 +56,6 @@ func ParseVersion(s string) (Version, error) {
 	}
 	v.Major, v.Minor, v.Patch = nums[0], nums[1], nums[2]
 	return v, nil
-}
-
-func (v Version) String() string {
-	s := fmt.Sprintf("v%d.%d.%d", v.Major, v.Minor, v.Patch)
-	if v.Pre != "" {
-		s += "-" + v.Pre
-	}
-	if v.Build != "" {
-		s += "+" + v.Build
-	}
-	return s
 }
 
 // IsPrerelease reports whether this version carries a prerelease suffix, which is

@@ -9,14 +9,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/aquitano/aqt-sync/internal/api"
-	"github.com/aquitano/aqt-sync/internal/crypto"
 	"math"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
 // readLocated resolves an object to its current pack and returns the bytes that pack
@@ -466,5 +468,31 @@ func TestPackCountersStayConsistent(t *testing.T) {
 	}
 	if n != 0 {
 		t.Fatalf("%d packs remain after full teardown, want 0", n)
+	}
+}
+
+// TestChunkEndpointsCapIDCount covers the id-count cap on check/locate: over the cap
+// is a 400 with the too_many_ids code, exactly at the cap is accepted.
+func TestChunkEndpointsCapIDCount(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, _ := h.signup("chunkcap@example.com", "a passphrase for chunks")
+
+	ids := make([]string, maxPublicObjectIDs+1)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("%064x", i)
+	}
+
+	for _, path := range []string{"/v1/chunks/check", "/v1/chunks/locate"} {
+		var e api.ErrorResponse
+		if code := h.do(http.MethodPost, path, token, api.ChunkCheckRequest{IDs: ids}, &e); code != http.StatusBadRequest {
+			t.Fatalf("%s over cap: status %d, want 400", path, code)
+		}
+		if e.Code != api.ErrCodeTooManyIDs {
+			t.Fatalf("%s over cap: code = %q, want %q", path, e.Code, api.ErrCodeTooManyIDs)
+		}
+		if code := h.do(http.MethodPost, path, token, api.ChunkCheckRequest{IDs: ids[:maxPublicObjectIDs]}, nil); code != http.StatusOK {
+			t.Fatalf("%s at cap: status %d, want 200", path, code)
+		}
 	}
 }

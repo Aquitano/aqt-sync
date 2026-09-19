@@ -33,7 +33,7 @@ var (
 // ArtifactSource fetches one release archive. Kept apart from Source because
 // metadata is small enough to hold in memory and an archive is not: this streams.
 type ArtifactSource interface {
-	FetchArtifact(ctx context.Context, version string, a Artifact, w io.Writer) error
+	FetchArtifact(ctx context.Context, a Artifact, w io.Writer) error
 }
 
 // DownloadArtifact streams the archive into a temporary file in dir, verifying
@@ -44,7 +44,7 @@ type ArtifactSource interface {
 //
 // The caller owns the returned file and must remove it unless it is renamed into
 // place. On any error nothing is left behind.
-func DownloadArtifact(ctx context.Context, src ArtifactSource, version string, a Artifact, dir string) (path string, err error) {
+func DownloadArtifact(ctx context.Context, src ArtifactSource, a Artifact, dir string) (path string, err error) {
 	if src == nil {
 		return "", errors.New("no artifact source configured")
 	}
@@ -67,7 +67,7 @@ func DownloadArtifact(ctx context.Context, src ArtifactSource, version string, a
 	// The limit is the manifest's own declared size: one byte more and this is not
 	// the artifact that was signed, whatever it turns out to hash to.
 	counter := &boundedWriter{w: io.MultiWriter(f, h), limit: a.Size}
-	if err = src.FetchArtifact(ctx, version, a, counter); err != nil {
+	if err = src.FetchArtifact(ctx, a, counter); err != nil {
 		return "", err
 	}
 	if counter.n != a.Size {
@@ -107,7 +107,7 @@ func (b *boundedWriter) Write(p []byte) (int, error) {
 
 // FetchArtifact streams a release asset over HTTPS. The URL comes from the signed
 // manifest, which CheckURLs has already pinned to the one location it may name.
-func (h HTTPSource) FetchArtifact(ctx context.Context, _ string, a Artifact, w io.Writer) error {
+func (h HTTPSource) FetchArtifact(ctx context.Context, a Artifact, w io.Writer) error {
 	return streamURL(ctx, h.Client, a.URL, w)
 }
 

@@ -58,21 +58,28 @@ const exitDeferred = 75
 // no terminal to prompt). Retrying without re-login cannot fix it.
 var errSessionRequired = errors.New("no unlocked session and no passphrase provided; run `aqt login`")
 
-var (
-	flagServer   string
-	flagProfile  string
-	flagJSON     bool
-	flagQuiet    bool
-	flagProgress bool
-)
+// application owns one command invocation's flags and cancellation context.
+// Commands and the work they start share this instance, never process-wide flags.
+type application struct {
+	server   string
+	profile  string
+	json     bool
+	quiet    bool
+	progress bool
+	ctx      context.Context
+}
 
-// rootCtx is canceled on SIGINT/SIGTERM and parents every server request (each
-// client is bound to it at construction), so ^C aborts an in-flight transfer —
-// including its retry and rate-limit waits — instead of letting it run out the
-// stall clock. A package variable like the global flags above: one process, one
-// command, one root context. Tests run commands without main(), so the default
-// keeps them uncancellable.
-var rootCtx context.Context = context.Background()
+// childArgs passes the current server and profile to a child aqt command.
+func (app *application) childArgs(sub []string) []string {
+	args := append([]string(nil), sub...)
+	if app.server != "" {
+		args = append(args, "--server", app.server)
+	}
+	if app.profile != "" {
+		args = append(args, "--profile", app.profile)
+	}
+	return args
+}
 
 func main() { os.Exit(run()) }
 
@@ -81,7 +88,7 @@ func main() { os.Exit(run()) }
 func run() int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rootCtx = ctx
+	app := &application{ctx: ctx}
 	go func() {
 		// After the first signal starts a graceful abort, restore default handling
 		// so a second ^C kills a process that is wedged in cleanup.
@@ -89,7 +96,7 @@ func run() int {
 		stop()
 	}()
 
-	root := rootCmd()
+	root := app.rootCmd()
 	root.SetArgs(rootArgs(os.Args))
 	cmd, err := root.ExecuteC()
 	if err != nil {
@@ -99,7 +106,7 @@ func run() int {
 	// Only after the command succeeded and printed what it was asked for: the
 	// update policy is off by default, and even when on it never affects this
 	// command's output or status.
-	maybeBackgroundUpdate(cmd)
+	app.maybeBackgroundUpdate(cmd)
 	return 0
 }
 
@@ -206,59 +213,44 @@ func isNetworkError(err error) bool {
 	return errors.As(err, &urlErr)
 }
 
-func rootCmd() *cobra.Command {
+func (app *application) rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "aqt",
 		Short:         "Zero-knowledge encrypted file & folder sync",
 		SilenceUsage:  true,
 		SilenceErrors: true,
-		Args:          cobra.ArbitraryArgs,
+		Args:          cobra.NoArgs,
 		// --json, -q and --progress are global flags, so a command that does not
 		// implement one must say so rather than accept it and behave identically:
 		// silently printing prose a script would try to parse, or promising a bar it
 		// never draws.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if flagJSON && cmd.Annotations[jsonAnnotation] == "" {
+			if app.json && cmd.Annotations[jsonAnnotation] == "" {
 				return fmt.Errorf("%s does not support --json", cmd.CommandPath())
 			}
-			if flagQuiet && cmd.Annotations[quietAnnotation] == "" {
+			if app.quiet && cmd.Annotations[quietAnnotation] == "" {
 				return fmt.Errorf("%s does not support -q/--quiet", cmd.CommandPath())
 			}
-			if flagProgress && cmd.Annotations[progressAnnotation] == "" {
+			if app.progress && cmd.Annotations[progressAnnotation] == "" {
 				return fmt.Errorf("%s does not support --progress", cmd.CommandPath())
 			}
 			return nil
 		},
-		// Bare `aqt <path>` is sugar for `aqt push <path>` (private default), but only
-		// when the argument unambiguously looks like a path: a typo'd subcommand
-		// (`aqt statsu`) must never silently upload a file that happens to match it.
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(args) == 0 {
-				if flagJSON {
-					return errors.New("aqt does not support --json without a command or path")
-				}
-				return cmd.Help()
-			}
-			return runPushSugar(args[0])
-		},
+		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	root.PersistentFlags().StringVar(&flagServer, "server", "", "server URL override")
-	root.PersistentFlags().StringVar(&flagProfile, "profile", "", "profile name")
-	root.PersistentFlags().BoolVar(&flagJSON, "json", false, "output as JSON")
-	root.PersistentFlags().BoolVarP(&flagQuiet, "quiet", "q", false, "print only essential output")
-	root.PersistentFlags().BoolVar(&flagProgress, "progress", false, "show a live transfer progress bar (on a terminal, for pull/sync/clone/watch/restore)")
+	root.PersistentFlags().StringVar(&app.server, "server", "", "server URL override")
+	root.PersistentFlags().StringVar(&app.profile, "profile", "", "profile name")
+	root.PersistentFlags().BoolVar(&app.json, "json", false, "output as JSON")
+	root.PersistentFlags().BoolVarP(&app.quiet, "quiet", "q", false, "print only essential output")
+	root.PersistentFlags().BoolVar(&app.progress, "progress", false, "show a live transfer progress bar (on a terminal, for pull/sync/clone/watch/restore)")
 
-	root.AddCommand(signupCmd(), loginCmd(), lockCmd(), logoutCmd(), whoamiCmd(), usageCmd(), pruneCmd(), passphraseCmd(), accountCmd(), devicesCmd(), pushCmd(), pullCmd(), catCmd(), lsCmd(), infoCmd(), findCmd(), shareCmd(), unshareCmd(), rmCmd(), renameCmd())
-	root.AddCommand(initCmd(), untrackCmd(), statusCmd(), diffCmd(), syncCmd(), cloneCmd(), watchCmd(), agentCmd())
-	root.AddCommand(snapshotCmd(), checkpointCmd(), restoreCmd())
-	root.AddCommand(sharesCmd(), contactsCmd())
-	root.AddCommand(repoCmd(), gitCmd())
-	root.AddCommand(gitRemoteHelperCmd())
-	root.AddCommand(tuiCmd(), updateCmd())
-
-	// The bare-path push sugar runs push's own printer, so root carries push's flags.
-	markJSONSupported(root)
-	markQuietSupported(root)
+	root.AddCommand(app.signupCmd(), app.loginCmd(), app.lockCmd(), app.logoutCmd(), app.whoamiCmd(), app.usageCmd(), app.pruneCmd(), app.passphraseCmd(), app.accountCmd(), app.devicesCmd(), app.pushCmd(), app.pullCmd(), app.catCmd(), app.lsCmd(), app.infoCmd(), app.findCmd(), app.shareCmd(), app.unshareCmd(), app.rmCmd(), app.renameCmd())
+	root.AddCommand(app.initCmd(), app.untrackCmd(), app.statusCmd(), app.diffCmd(), app.syncCmd(), app.cloneCmd(), app.watchCmd(), app.agentCmd())
+	root.AddCommand(app.snapshotCmd(), app.checkpointCmd(), app.restoreCmd())
+	root.AddCommand(app.sharesCmd(), app.contactsCmd())
+	root.AddCommand(app.repoCmd(), app.gitCmd())
+	root.AddCommand(app.gitRemoteHelperCmd())
+	root.AddCommand(app.tuiCmd(), app.updateCmd())
 
 	// root.Version makes cobra print the version when the flag is set; register the
 	// flag explicitly so it carries the conventional -v shorthand.
@@ -313,46 +305,22 @@ func requireConfirmable(assumeYes bool) error {
 	return nil
 }
 
-// runPushSugar handles a bare `aqt <arg>`. An argument with a path separator is
-// clearly a file and pushes directly; a bare word that exists as a regular file
-// pushes only after an interactive confirmation; anything else is an unknown
-// command. This keeps the sugar while closing the typo'd-command upload hole.
-func runPushSugar(arg string) error {
-	if strings.ContainsRune(arg, os.PathSeparator) || strings.ContainsRune(arg, '/') {
-		return runPush(arg, pushOptions{})
-	}
-	if info, err := os.Stat(arg); err == nil && info.Mode().IsRegular() {
-		if !interactiveStdin() {
-			return fmt.Errorf("unknown command %q for \"aqt\"; to upload the file %q, run `aqt push %s`", arg, arg, arg)
-		}
-		ok, err := promptYesNo(fmt.Sprintf("Upload the file %q? [y/N] ", arg), false)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return errors.New("aborted")
-		}
-		return runPush(arg, pushOptions{})
-	}
-	return fmt.Errorf("unknown command %q for \"aqt\"; run `aqt --help` for the command list", arg)
-}
-
 // loadProfile loads the active profile and applies a --server override.
-func loadProfile() (*identity.Profile, error) {
-	p, err := identity.Load(flagProfile)
+func (app *application) loadProfile() (*identity.Profile, error) {
+	p, err := identity.Load(app.profile)
 	if err != nil {
 		return nil, err
 	}
-	if flagServer != "" {
-		p.Server = flagServer
+	if app.server != "" {
+		p.Server = app.server
 	}
 	return p, nil
 }
 
 // loadProfileOptional returns the active profile, or nil if none is configured.
 // Used by commands that can run without auth (e.g. pulling a public link).
-func loadProfileOptional() *identity.Profile {
-	p, err := loadProfile()
+func (app *application) loadProfileOptional() *identity.Profile {
+	p, err := app.loadProfile()
 	if err != nil {
 		return nil
 	}
@@ -362,20 +330,20 @@ func loadProfileOptional() *identity.Profile {
 // newBoundClient is client.New bound to the process's root signal context, so a
 // ^C reaches every request the client sends. All CLI client construction goes
 // through here.
-func newBoundClient(server, token string) (*client.Client, error) {
+func (app *application) newBoundClient(server, token string) (*client.Client, error) {
 	c, err := client.New(server, token)
 	if err != nil {
 		return nil, err
 	}
-	return c.WithContext(rootCtx), nil
+	return c.WithContext(app.ctx), nil
 }
 
-func authedClient() (*client.Client, *identity.Profile, error) {
-	p, err := loadProfile()
+func (app *application) authedClient() (*client.Client, *identity.Profile, error) {
+	p, err := app.loadProfile()
 	if err != nil {
 		return nil, nil, err
 	}
-	c, err := newBoundClient(p.Server, p.Token)
+	c, err := app.newBoundClient(p.Server, p.Token)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -384,11 +352,11 @@ func authedClient() (*client.Client, *identity.Profile, error) {
 
 // serverURL resolves a server for commands that may run without a profile (e.g.
 // pulling a public link on a fresh machine).
-func serverURL() string {
-	if flagServer != "" {
-		return flagServer
+func (app *application) serverURL() string {
+	if app.server != "" {
+		return app.server
 	}
-	if p, err := identity.Load(flagProfile); err == nil && p.Server != "" {
+	if p, err := identity.Load(app.profile); err == nil && p.Server != "" {
 		return p.Server
 	}
 	return defaultServer
@@ -400,10 +368,10 @@ func serverURL() string {
 // default. ownServer reports whether the account token may be attached: only when
 // the operator chose the server explicitly (--server) or the resolved host matches
 // the profile's server. A foreign host from a share link is never the own server.
-func linkServer(origin string, prof *identity.Profile) (server string, ownServer bool) {
+func (app *application) linkServer(origin string, prof *identity.Profile) (server string, ownServer bool) {
 	switch {
-	case flagServer != "":
-		return flagServer, true
+	case app.server != "":
+		return app.server, true
 	case origin != "":
 		return origin, prof != nil && sameServer(origin, prof.Server)
 	case prof != nil && prof.Server != "":
@@ -419,13 +387,13 @@ func linkServer(origin string, prof *identity.Profile) (server string, ownServer
 // the token for a foreign host loses nothing for the intended flow while a crafted
 // link cannot exfiltrate the device credential to an attacker host. client.New's
 // loopback/HTTPS guard still applies to the resolved host as defense in depth.
-func newLinkClient(origin string, prof *identity.Profile) (*client.Client, error) {
-	server, own := linkServer(origin, prof)
+func (app *application) newLinkClient(origin string, prof *identity.Profile) (*client.Client, error) {
+	server, own := app.linkServer(origin, prof)
 	token := ""
 	if own && prof != nil {
 		token = prof.Token
 	}
-	return newBoundClient(server, token)
+	return app.newBoundClient(server, token)
 }
 
 // sameServer compares two server URLs ignoring a trailing slash. A mismatch only
@@ -438,7 +406,7 @@ func sameServer(a, b string) bool {
 // promptPassphrase reads a passphrase without echoing it on a real terminal.
 // When stdin is not a terminal (pipe/CI), it reads a single line instead so the
 // CLI stays scriptable.
-func promptPassphrase(label string) (string, error) {
+func (app *application) promptPassphrase(label string) (string, error) {
 	fd := int(os.Stdin.Fd())
 	if term.IsTerminal(fd) {
 		fmt.Fprint(os.Stderr, label)
@@ -467,7 +435,7 @@ func promptPassphrase(label string) (string, error) {
 				return "", r.err
 			}
 			return strings.TrimRight(string(r.b), "\r\n"), nil
-		case <-rootCtx.Done():
+		case <-app.ctx.Done():
 			_ = term.Restore(fd, state)
 			fmt.Fprintln(os.Stderr)
 			return "", context.Canceled
@@ -539,11 +507,11 @@ func copyToClipboard(s string) bool {
 
 // unlockMaster returns the master key from the session cache, or prompts for the
 // passphrase (refusing an empty one), derives the key, and caches it.
-func unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
+func (app *application) unlockMaster(prof *identity.Profile) (crypto.MasterKey, error) {
 	if mk, ok := identity.LoadSession(prof.Name); ok {
 		return mk, nil
 	}
-	pass, err := promptPassphrase("Passphrase: ")
+	pass, err := app.promptPassphrase("Passphrase: ")
 	if err != nil {
 		return crypto.MasterKey{}, err
 	}

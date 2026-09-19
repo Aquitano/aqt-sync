@@ -99,7 +99,7 @@ type watchOptions struct {
 	intervalSet bool // whether --interval was passed (vs. taken from .aqtconfig/default)
 }
 
-func watchCmd() *cobra.Command {
+func (app *application) watchCmd() *cobra.Command {
 	var opts watchOptions
 	cmd := &cobra.Command{
 		Use:   "watch [dir]",
@@ -111,26 +111,23 @@ func watchCmd() *cobra.Command {
 			"watch.gitGuard); --interval overrides them.",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// The dispatch below takes --once first, so accepting both would detach
-			// nothing and exit after one sync — with -d silently doing nothing.
-			if opts.once && opts.daemon {
-				return errors.New("--once and -d/--daemon are mutually exclusive: --once syncs once in the foreground, -d watches in the background")
-			}
 			opts.intervalSet = cmd.Flags().Changed("interval")
-			return runWatch(dirArg(args), opts)
+			return app.runWatch(dirArg(args), opts)
 		},
 	}
 	f := cmd.Flags()
-	f.BoolVarP(&opts.daemon, "daemon", "d", false, "detach and watch in the background")
 	f.BoolVar(&opts.once, "once", false, "sync once and exit (cron-friendly)")
 	f.DurationVar(&opts.interval, "interval", defaultInterval, "debounce floor between syncs")
 	markProgressSupported(cmd) // every sync it runs draws the sync bars
 	return cmd
 }
 
-func runWatch(dir string, opts watchOptions) error {
+func (app *application) runWatch(dir string, opts watchOptions) error {
 	root, err := trackedRoot(dir)
 	if err != nil {
+		return err
+	}
+	if err := app.bindTrackedRoot(root); err != nil {
 		return err
 	}
 	cfg, err := syncengine.LoadConfig(root)
@@ -144,11 +141,11 @@ func runWatch(dir string, opts watchOptions) error {
 	gitGuard := cfg.Watch.GitGuardEnabled()
 	switch {
 	case opts.once:
-		return runWatchOnce(root, interval, gitGuard)
+		return app.runWatchOnce(root, interval, gitGuard)
 	case opts.daemon:
-		return startWatchDaemon(root, interval)
+		return app.startWatchDaemon(root, interval)
 	default:
-		return runWatchLoop(root, interval, gitGuard)
+		return app.runWatchLoop(root, interval, gitGuard)
 	}
 }
 
@@ -177,9 +174,9 @@ func resolveInterval(opts watchOptions, wc syncengine.WatchConfig) (time.Duratio
 // bounded time for any in-progress git operation to finish first; if git is still
 // busy past the cap it returns errWatchSkipped rather than push a half-written
 // tree (a later run picks the change up).
-func runWatchOnce(root string, interval time.Duration, gitGuard bool) error {
+func (app *application) runWatchOnce(root string, interval time.Duration, gitGuard bool) error {
 	if !gitGuard || waitGitIdle(root, gitIdleWaitOnce, interval) {
-		return runSync(root, syncOptions{})
+		return app.runSync(root, syncOptions{})
 	}
 	return errWatchSkipped
 }
@@ -201,7 +198,7 @@ func waitGitIdle(root string, timeout, poll time.Duration) bool {
 // agent pid file (so a second watcher on the same folder is refused and `aqt
 // agent` can find this one) and confirms a usable session up front so a detached
 // daemon never wedges on an un-promptable passphrase mid-loop.
-func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
+func (app *application) runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 	release, err := acquireAgentLock(root)
 	if err != nil {
 		return err
@@ -211,20 +208,20 @@ func runWatchLoop(root string, interval time.Duration, gitGuard bool) error {
 	// registry is what lets an update started somewhere else see that it does.
 	registerWatchAgent(root)
 	defer unregisterWatchAgent(root)
-	if err := ensureSession(); err != nil {
+	if err := app.ensureSession(); err != nil {
 		return err
 	}
 
 	// The root signal context already covers SIGINT/SIGTERM; registering a second
 	// handler here would swallow the "second ^C force-kills" escape main arranges.
-	ctx := rootCtx
+	ctx := app.ctx
 
 	logger := log.New(os.Stdout, "", log.LstdFlags)
 	w := &watcher{
 		root:    root,
 		scan:    func() (string, error) { return scanSignature(root) },
 		gitBusy: gitGuardFunc(root, gitGuard),
-		sync:    func() error { return runSync(root, syncOptions{}) },
+		sync:    func() error { return app.runSync(root, syncOptions{}) },
 		logf:    logger.Printf,
 	}
 	// Prefer kernel file events over the poll walk; the poll survives as a slow
@@ -262,12 +259,12 @@ func gitGuardFunc(root string, enabled bool) func() (bool, string, error) {
 // ensureSession confirms (and, on a terminal, prompts to establish) an unlocked
 // session, warming the on-disk cache so a later runSync — including in a detached
 // daemon with no tty — can unlock without prompting.
-func ensureSession() error {
-	prof, err := loadProfile()
+func (app *application) ensureSession() error {
+	prof, err := app.loadProfile()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
@@ -465,11 +462,11 @@ func acquireAgentLock(root string) (func(), error) {
 // terminal) first, so the child inherits a warm cache and never needs a tty. The
 // child owns the pid file; we wait for it so a caller who immediately runs `aqt
 // agent status` sees a consistent state.
-func startWatchDaemon(root string, interval time.Duration) error {
+func (app *application) startWatchDaemon(root string, interval time.Duration) error {
 	if pid, ok := readLockPID(controlPath(root, agentPIDFile)); ok && processAlive(pid) {
 		return fmt.Errorf("a watch agent is already running here (pid %d)", pid)
 	}
-	if err := ensureSession(); err != nil {
+	if err := app.ensureSession(); err != nil {
 		return err
 	}
 	exe, err := os.Executable()
@@ -482,13 +479,7 @@ func startWatchDaemon(root string, interval time.Duration) error {
 	}
 	defer func() { _ = logFile.Close() }()
 
-	args := []string{"watch", root, "--interval", interval.String()}
-	if flagServer != "" {
-		args = append(args, "--server", flagServer)
-	}
-	if flagProfile != "" {
-		args = append(args, "--profile", flagProfile)
-	}
+	args := app.childArgs([]string{"watch", root, "--interval", interval.String()})
 	cmd := exec.Command(exe, args...)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -521,28 +512,22 @@ func waitForAgent(root string, timeout time.Duration) bool {
 	}
 }
 
-func agentCmd() *cobra.Command {
+func (app *application) agentCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "agent",
 		Short: "Manage background watch agents",
 	}
-	var (
-		startOpts  watchOptions
-		foreground bool
-	)
+	startOpts := watchOptions{daemon: true}
 	start := &cobra.Command{
 		Use:   "start [dir]",
-		Short: "Start the watch agent for a tracked folder (detached; alias for `aqt watch -d`)",
+		Short: "Start a background watch agent for a tracked folder",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			startOpts.daemon = !foreground
 			startOpts.intervalSet = cmd.Flags().Changed("interval")
-			return runWatch(dirArg(args), startOpts)
+			return app.runWatch(dirArg(args), startOpts)
 		},
 	}
 	start.Flags().DurationVar(&startOpts.interval, "interval", defaultInterval, "debounce floor between syncs")
-	start.Flags().BoolVar(&foreground, "foreground", false, "stay attached to this terminal instead of detaching")
-	markProgressSupported(start) // --foreground runs the same watch loop as `aqt watch`
 	cmd.AddCommand(start)
 	cmd.AddCommand(
 		&cobra.Command{

@@ -67,9 +67,6 @@
       return width === 2 ? size + 256 : size;
     },
   };
-  if (window.__aqtTestHooks && window.__aqtTestHooks.crypto) {
-    AqtCrypto = window.__aqtTestHooks.crypto;
-  }
 
   /* ---------------- fragment + base64 helpers (parsing, not crypto) -- */
 
@@ -251,8 +248,6 @@
 
   /* ---------------- public object transport -------------------------- */
 
-  var fetchImpl = (window.__aqtTestHooks && window.__aqtTestHooks.fetch) || window.fetch.bind(window);
-
   // publicBatchBytes windows one objects request by estimated ciphertext size, the
   // same 8 MiB bound the CLI uses, so a large file's download streams in windows
   // rather than buffering the whole response. frameOverhead over-estimates a
@@ -309,6 +304,9 @@
     if (!raw) return null;
     var s = String(raw).trim();
     if (/^\d+$/.test(s)) return clampDelay(Number(s) * 1000);
+    // Date.parse also accepts numbers such as "-1" as calendar dates. HTTP dates
+    // start with a weekday; malformed numeric delays must use the body fallback.
+    if (!/^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)/i.test(s)) return null;
     var when = Date.parse(s);
     if (isNaN(when)) return null;
     return clampDelay(when - Date.now());
@@ -391,7 +389,7 @@
 
   function fetchPreflight() {
     return send(function () {
-      return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/preflight", {
+      return window.fetch("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/preflight", {
         headers: { Accept: "application/json", "X-Aqt-Capability": String(CLIENT_CAPABILITY) },
       });
     }).then(function (res) {
@@ -405,7 +403,7 @@
 
   function fetchResource() {
     return send(function () {
-      return fetchImpl("/v1/resources/" + encodeURIComponent(RES_ID), {
+      return window.fetch("/v1/resources/" + encodeURIComponent(RES_ID), {
         headers: { Accept: "application/json", "X-Aqt-Capability": String(CLIENT_CAPABILITY) },
       });
     }).then(function (res) {
@@ -423,7 +421,7 @@
   // the one resource fetch above does, so browsing a folder costs one read total.
   function fetchObjects(ids) {
     return send(function () {
-      return fetchImpl("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/objects", {
+      return window.fetch("/v1/public/resources/" + encodeURIComponent(RES_ID) + "/objects", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/vnd.aqt.object-frames; version=1" },
         body: JSON.stringify({ ids: ids }),
@@ -459,8 +457,7 @@
 
   var nodeCache = {}; // node id -> children array, so back-navigation refetches nothing
 
-  // fetchNode fetches and opens one directory node, returning its children. The node
-  // ciphertext is verified against its content address inside openObject.
+  // fetchNode authenticates and opens one directory node, returning its children.
   function fetchNode(node) {
     try {
       objectLen(node, maxTreeNodeBytes);
@@ -705,9 +702,9 @@
   function resolveEntryChunks(child, onProgress) {
     if (child.inline != null) {
       var rawLen = typeof child.size === "number" ? child.size : -1;
-      return Promise.resolve([decompress(
-        b64Decode(child.inline), child.inlineAlg || "", rawLen, maxDownloadBytes
-      )]);
+      return Promise.resolve().then(function () {
+        return [decompress(b64Decode(child.inline), child.inlineAlg || "", rawLen, maxDownloadBytes)];
+      });
     }
     var listP = (child.chunksRef && child.chunksRef.length)
       ? resolveChunkList(child.chunksRef)

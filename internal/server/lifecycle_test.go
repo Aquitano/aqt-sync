@@ -3,7 +3,9 @@
 package server
 
 import (
+	"encoding/json"
 	"errors"
+	"net/http"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -736,5 +738,140 @@ func TestGetResourceLifecycleFieldsOwnerOnly(t *testing.T) {
 	if pub.ExpiresAt != 0 || pub.MaxReads != 0 || pub.Reads != 0 || pub.CreatedAt != 0 || pub.UpdatedAt != 0 {
 		t.Fatalf("public read leaked lifecycle fields: expires=%d maxReads=%d reads=%d created=%d updated=%d",
 			pub.ExpiresAt, pub.MaxReads, pub.Reads, pub.CreatedAt, pub.UpdatedAt)
+	}
+}
+
+// A reclaimed tombstone must be visible on the wire (Reclaimed flag in the list)
+// and immutable except for rm/re-push; changing visibility must not reset its reads.
+func TestReclaimedTombstoneVisibleAndGuarded(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	owner := h.store.mustAccount(t, "tombstone@example.com")
+
+	ck, _ := crypto.GenerateContentKey()
+	blob, _ := crypto.Seal([]byte("sealed"), ck, crypto.AADBlob)
+	meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+	wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte{})
+	rid, _, err := h.store.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+		Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+		ExpireSeconds: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Sweep well past expiry and grace so the link is reclaimed.
+	if n, err := h.store.SweepExpired(owner, time.Now().Add(24*time.Hour).Unix()); err != nil || n != 1 {
+		t.Fatalf("sweep: n=%d err=%v", n, err)
+	}
+
+	items, _, err := h.store.ListResources(owner, pageParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found *api.ResourceListItem
+	for i := range items {
+		if items[i].ID == rid {
+			found = &items[i]
+		}
+	}
+	if found == nil {
+		t.Fatal("tombstone missing from the owner's list")
+	}
+	if !found.Reclaimed {
+		t.Fatal("tombstone not marked reclaimed on the wire")
+	}
+
+	if _, err := h.store.SetVisibility(owner, rid, api.SetVisibilityRequest{Visibility: api.Public}); !errors.Is(err, ErrGone) {
+		t.Fatalf("SetVisibility on a tombstone: err = %v, want ErrGone", err)
+	}
+	// rm still works: the one mutation a tombstone supports.
+	if err := h.store.DeleteResource(owner, rid); err != nil {
+		t.Fatalf("rm of a tombstone: %v", err)
+	}
+}
+
+// A read the server goes on to refuse serves no bytes, so it must not spend one of a
+// --burn / --max-reads link's permits. Both refusal paths run before the count.
+func TestRefusedReadDoesNotSpendAPermit(t *testing.T) {
+	t.Parallel()
+	t.Run("stale capability", func(t *testing.T) {
+		h := newHarness(t)
+		token, mk := h.signup("burn-cap@example.com", "a passphrase here")
+		ck, _ := crypto.GenerateContentKey()
+		blob, _ := crypto.Seal([]byte("public body"), ck, crypto.AADBlob)
+		meta, _ := crypto.Seal([]byte(`{"name":"f","size":0}`), ck, crypto.AADMeta)
+		wrapped, _ := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+		rec := h.putCap(token, "2", api.PutResourceRequest{
+			Visibility: api.Public, Blob: blob, EncryptedMeta: meta, WrappedKey: &wrapped,
+			MaxReads: 1, MinClient: api.CapabilityIDBinding,
+		})
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("create = %d: %s", rec.Code, rec.Body.String())
+		}
+		var put api.PutResourceResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &put); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", map[string]string{"X-Aqt-Capability": "1"}, nil); got.Code != http.StatusUpgradeRequired {
+			t.Fatalf("stale-capability read = %d, want 426", got.Code)
+		}
+		if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", map[string]string{"X-Aqt-Capability": "2"}, nil); got.Code != http.StatusOK {
+			t.Fatalf("the recipient's read after a 426 = %d, want 200 (410 means the 426 burned the permit)", got.Code)
+		}
+	})
+
+	t.Run("unacceptable Accept", func(t *testing.T) {
+		h := newHarness(t)
+		token, mk := h.signup("burn-accept@example.com", "a passphrase here")
+		put := h.putPublicViaAPI(token, mk, 0, 1)
+
+		if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", map[string]string{"Accept": "text/html"}, nil); got.Code != http.StatusNotAcceptable {
+			t.Fatalf("text/html read = %d, want 406", got.Code)
+		}
+		if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", nil, nil); got.Code != http.StatusOK {
+			t.Fatalf("the recipient's read after a 406 = %d, want 200 (410 means the 406 burned the permit)", got.Code)
+		}
+	})
+
+	t.Run("exhaustion is still enforced", func(t *testing.T) {
+		h := newHarness(t)
+		token, mk := h.signup("burn-exhaust@example.com", "a passphrase here")
+		put := h.putPublicViaAPI(token, mk, 0, 1)
+
+		if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", nil, nil); got.Code != http.StatusOK {
+			t.Fatalf("first read = %d, want 200", got.Code)
+		}
+		if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", nil, nil); got.Code != http.StatusGone {
+			t.Fatalf("second read = %d, want 410", got.Code)
+		}
+	})
+}
+
+// A reclaimed tombstone answers 410 to everyone, including the owner, whose only
+// remaining action is to delete the row. The delete must therefore work.
+func TestReclaimedTombstoneIsDeletable(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("tombstone@example.com", "a passphrase here")
+	put := h.putPublicViaAPI(token, mk, 0, 1)
+
+	if got := h.raw(http.MethodGet, "/v1/resources/"+put.ID, "", nil, nil); got.Code != http.StatusOK {
+		t.Fatalf("first public read = %d, want 200", got.Code)
+	}
+	owner, _ := h.store.OwnerByToken(token)
+	if _, err := h.store.SweepExpired(owner, time.Now().Unix()+2*int64(gcMinAge/time.Second)); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	// An unpinned delete is what the client falls back to once the version fetch
+	// reports 410; it must be accepted.
+	if code := h.do(http.MethodDelete, "/v1/resources/"+put.ID, token, nil, nil); code != http.StatusNoContent {
+		t.Fatalf("delete of a tombstone = %d, want 204", code)
+	}
+	var list api.ListResourcesResponse
+	if code := h.do(http.MethodGet, "/v1/resources", token, nil, &list); code != http.StatusOK {
+		t.Fatalf("list = %d", code)
+	}
+	if len(list.Resources) != 0 {
+		t.Fatalf("listing still has %d row(s) after deleting the tombstone", len(list.Resources))
 	}
 }

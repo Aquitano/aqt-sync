@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -57,7 +58,8 @@ func TestFilterSnapshots(t *testing.T) {
 // The index `snapshot find` searches is built from the same decrypted rows as
 // `list`: the resource name and the optional label both come back in the clear.
 func TestSnapshotFindIndex(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	src := filepath.Join(t.TempDir(), "work")
 	if err := os.MkdirAll(src, 0o755); err != nil {
 		t.Fatal(err)
@@ -66,12 +68,12 @@ func TestSnapshotFindIndex(t *testing.T) {
 	writeTree(t, src, "a.txt", "hi")
 	h.sync(src)
 
-	cl, prof, err := authedClient()
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		t.Fatal(err)
 	}
 	rid := h.folderID(src)
-	sealed, err := sealSnapshotLabel(cl, prof, rid, "tagged")
+	sealed, err := app.sealSnapshotLabel(cl, prof, rid, "tagged")
 	if err != nil {
 		t.Fatalf("seal label: %v", err)
 	}
@@ -83,7 +85,7 @@ func TestSnapshotFindIndex(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		t.Fatal(err)
 	}

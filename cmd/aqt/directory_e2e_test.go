@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,7 +16,8 @@ import (
 // explicitly empty directory round-trips through clone and pull, a directory mode
 // propagates, and removing an empty directory propagates as a removal.
 func TestSyncEmptyDirsAndModes(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 
@@ -69,10 +71,11 @@ func TestSyncEmptyDirsAndModes(t *testing.T) {
 // conflict) rather than silently resolving local-wins, so a plain sync aborts and --force
 // is required to take local.
 func TestSyncDirModeConflictSurfaces(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	if runtime.GOOS == "windows" {
 		t.Skip("directory permission bits are not meaningful on Windows")
 	}
-	h := newE2E(t)
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	if err := os.MkdirAll(filepath.Join(origin, "d"), 0o755); err != nil {
@@ -94,12 +97,12 @@ func TestSyncDirModeConflictSurfaces(t *testing.T) {
 	}
 
 	// A plain sync must refuse: d changed on both sides since base.
-	if err := runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
+	if err := app.runSync(replica, syncOptions{}); !errors.Is(err, errConflictsRemain) {
 		t.Fatalf("expected a directory-mode conflict to abort the sync, got %v", err)
 	}
 
 	// --force resolves it local-wins (0750) and completes.
-	if err := runSync(replica, syncOptions{force: true}); err != nil {
+	if err := app.runSync(replica, syncOptions{force: true}); err != nil {
 		t.Fatalf("--force should resolve the dir conflict local-wins: %v", err)
 	}
 	fi, err := os.Stat(filepath.Join(replica, "d"))
@@ -116,7 +119,8 @@ func TestSyncDirModeConflictSurfaces(t *testing.T) {
 // directory node are content-addressed and already on the server. Only the new root
 // node (its child was renamed) is uploaded, so the pack count grows by at most one.
 func TestSyncSubtreeDedupOnMove(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "lib/util.dat", bigContent())

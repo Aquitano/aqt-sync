@@ -25,13 +25,13 @@ import (
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
-func gitRemoteHelperCmd() *cobra.Command {
+func (app *application) gitRemoteHelperCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:    "git-remote-helper <remote> <url>",
 		Hidden: true,
 		Args:   cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			h := &remoteHelper{
+			h := &remoteHelper{app: app,
 				remoteName: args[0], rawURL: args[1],
 				in: os.Stdin, out: bufio.NewWriter(os.Stdout), errOut: os.Stderr,
 			}
@@ -41,6 +41,8 @@ func gitRemoteHelperCmd() *cobra.Command {
 }
 
 type remoteHelper struct {
+	app *application
+
 	remoteName   string
 	rawURL       string
 	in           io.Reader
@@ -914,7 +916,9 @@ func (u *gitObjectUploader) flush() error {
 }
 
 func (h *remoteHelper) openRemote() (*openedGitRemote, error) {
-	cl, prof, err := authedClient()
+	app := h.app
+
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return nil, err
 	}

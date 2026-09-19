@@ -189,7 +189,7 @@ func TestDiffIgnoresSymlinkMode(t *testing.T) {
 	cur := Manifest{Entries: []Entry{link("ln", "target")}}
 	cur.Entries[0].Mode = 0o777
 
-	if got := Diff(old, cur); !got.Empty() {
+	if got := Diff(old, cur); len(got.Changes) != 0 || len(got.Renamed) != 0 {
 		t.Errorf("symlink mode reported as a change: %+v", got.Changes)
 	}
 }
@@ -265,8 +265,8 @@ func TestDiffProps(t *testing.T) {
 			}
 		}
 
-		// Diff is the definition of Empty: identical manifests produce nothing.
-		if same := Diff(old, old); !same.Empty() {
+		// Identical manifests produce no changes.
+		if same := Diff(old, old); len(same.Changes) != 0 || len(same.Renamed) != 0 {
 			t.Fatalf("manifest diffed against itself is non-empty: %+v", same)
 		}
 	})

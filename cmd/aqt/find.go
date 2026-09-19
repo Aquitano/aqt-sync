@@ -41,7 +41,7 @@ type findEntry struct {
 	ID         string `json:"id"`
 }
 
-func findCmd() *cobra.Command {
+func (app *application) findCmd() *cobra.Command {
 	var noFzf bool
 	cmd := &cobra.Command{
 		Use:   "find [query]",
@@ -54,7 +54,7 @@ func findCmd() *cobra.Command {
 			"Without a terminal or fzf, the index is printed as a table instead.",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runFind(strings.Join(args, " "), flagJSON, noFzf)
+			return app.runFind(strings.Join(args, " "), app.json, noFzf)
 		},
 	}
 	cmd.Flags().BoolVar(&noFzf, "no-fzf", false, "print the index as a table instead of opening fzf")
@@ -62,12 +62,12 @@ func findCmd() *cobra.Command {
 	return cmd
 }
 
-func runFind(query string, asJSON, noFzf bool) error {
-	cl, prof, err := authedClient()
+func (app *application) runFind(query string, asJSON, noFzf bool) error {
+	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
 	}
-	mk, err := unlockMaster(prof)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}

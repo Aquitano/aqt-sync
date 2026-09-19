@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
@@ -110,12 +111,13 @@ func withBuild(t *testing.T, v, kind string) {
 }
 
 func TestUpdateCheckJSONContract(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	requirePublishedPlatform(t)
 	serveUpdateFixture(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	out := captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true, asJSON: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true, asJSON: true}); err != nil {
 			t.Fatalf("update --check --json: %v", err)
 		}
 	})
@@ -144,12 +146,13 @@ func TestUpdateCheckJSONContract(t *testing.T) {
 }
 
 func TestUpdateCheckReportsTheAvailableAssetForThisPlatform(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	requirePublishedPlatform(t)
 	serveUpdateFixture(t, "v9.9.9")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	out := captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("update --check: %v", err)
 		}
 	})
@@ -163,11 +166,12 @@ func TestUpdateCheckReportsTheAvailableAssetForThisPlatform(t *testing.T) {
 }
 
 func TestUpdateCheckReportsUpToDate(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	serveUpdateFixture(t, "v0.3.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	out := captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("update --check: %v", err)
 		}
 	})
@@ -179,12 +183,13 @@ func TestUpdateCheckReportsUpToDate(t *testing.T) {
 // A source build must say so and offer no way to overwrite itself, without
 // contacting anything to find out.
 func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	withUpdateStore(t)
 	t.Setenv(updateBaseURLEnv, "https://127.0.0.1:1/never-reached")
 	withBuild(t, "0.3.0-dev", "dev")
 
 	out := captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("update --check: %v", err)
 		}
 	})
@@ -195,10 +200,11 @@ func TestUpdateCheckRefusesToActOnADevelopmentBuild(t *testing.T) {
 
 // A published release older than the running build is refused rather than offered.
 func TestUpdateCheckRefusesARollback(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	serveUpdateFixture(t, "v0.2.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
-	if err := runUpdate(updateOptions{checkOnly: true}); err == nil {
+	if err := app.runUpdate(updateOptions{checkOnly: true}); err == nil {
 		t.Fatal("a downgrade was reported as an update")
 	}
 }
@@ -208,12 +214,13 @@ func TestUpdateCheckRefusesARollback(t *testing.T) {
 // is blind to it — must be refused, and `--accept-rollback` is the deliberate
 // way through after a real upstream retraction.
 func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	requirePublishedPlatform(t)
 	store := serveUpdateFixture(t, "v0.5.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("first check: %v", err)
 		}
 	})
@@ -228,7 +235,7 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 	// Upstream now serves v0.4.0 — newer than the running v0.3.0, older than the
 	// authenticated v0.5.0. Before the ceiling this replay was offered as an update.
 	serveUpdateManifest(t, "v0.4.0")
-	err = runUpdate(updateOptions{checkOnly: true})
+	err = app.runUpdate(updateOptions{checkOnly: true})
 	if !errors.Is(err, update.ErrStaleManifest) {
 		t.Fatalf("replayed manifest: got %v, want ErrStaleManifest", err)
 	}
@@ -241,7 +248,7 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 	// report — or a run the user declines partway — must leave the old ceiling
 	// standing (else a mistaken origin could lower it durably with no install).
 	captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
 			t.Fatalf("--accept-rollback --check: %v", err)
 		}
 	})
@@ -256,14 +263,14 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 		}
 	}
 	assertCeiling("v0.5.0")
-	if err := runUpdate(updateOptions{checkOnly: true}); !errors.Is(err, update.ErrStaleManifest) {
+	if err := app.runUpdate(updateOptions{checkOnly: true}); !errors.Is(err, update.ErrStaleManifest) {
 		t.Fatalf("plain check after --accept-rollback --check: got %v, want the refusal to persist", err)
 	}
 
 	// An install run that aborts before completing (here: the test binary is not
 	// a replaceable release install / no terminal to confirm) commits nothing.
 	var insErr error
-	captureStdout(t, func() { insErr = runUpdate(updateOptions{acceptRollback: true}) })
+	captureStdout(t, func() { insErr = app.runUpdate(updateOptions{acceptRollback: true}) })
 	if insErr == nil {
 		t.Fatal("install run unexpectedly succeeded in a test environment")
 	}
@@ -273,13 +280,13 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 	// it, lowers the record, and later plain checks pass clean.
 	withBuild(t, "v0.4.0", update.KindRelease)
 	captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true, acceptRollback: true}); err != nil {
 			t.Fatalf("--accept-rollback on the running version: %v", err)
 		}
 	})
 	assertCeiling("v0.4.0")
 	captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true}); err != nil {
 			t.Fatalf("check after accepted rollback: %v", err)
 		}
 	})
@@ -290,12 +297,13 @@ func TestUpdateRefusesAReplayedOlderManifest(t *testing.T) {
 // are stable-only, and a prerelease-track user would otherwise never establish
 // the floor they consult.
 func TestBetaCheckRaisesTheStableCeiling(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	requirePublishedPlatform(t)
 	store := serveUpdateFixture(t, "v0.5.0")
 	withBuild(t, "v0.3.0", update.KindRelease)
 
 	captureStdout(t, func() {
-		if err := runUpdate(updateOptions{checkOnly: true, prerelease: true}); err != nil {
+		if err := app.runUpdate(updateOptions{checkOnly: true, prerelease: true}); err != nil {
 			t.Fatalf("beta check: %v", err)
 		}
 	})
@@ -312,7 +320,8 @@ func TestBetaCheckRaisesTheStableCeiling(t *testing.T) {
 }
 
 func TestUpdateCommandSurface(t *testing.T) {
-	root := rootCmd()
+	app := &application{ctx: context.Background()}
+	root := app.rootCmd()
 	cmd := subcommand(t, root, "update")
 	if cmd.Annotations[jsonAnnotation] == "" {
 		t.Error("`aqt update` does not advertise --json support")

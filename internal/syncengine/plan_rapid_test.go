@@ -44,7 +44,7 @@ func TestPlanProps(t *testing.T) {
 		local, base, remote := ms[0], ms[1], ms[2]
 		actions := Plan(local, base, remote)
 
-		lp, bp, rp := local.byPath(), base.byPath(), remote.byPath()
+		lp, bp, rp := local.ByPath(), base.ByPath(), remote.ByPath()
 		seen := map[string]bool{}
 		for _, a := range actions {
 			if seen[a.Path] {
@@ -55,8 +55,8 @@ func TestPlanProps(t *testing.T) {
 			l, lok := lp[a.Path]
 			b, bok := bp[a.Path]
 			r, rok := rp[a.Path]
-			localChanged := changed(l, lok, b, bok)
-			remoteChanged := changed(r, rok, b, bok)
+			localChanged := changed(l, lok, b, bok, entryDiffers)
+			remoteChanged := changed(r, rok, b, bok, entryDiffers)
 
 			// Never lose a side's bytes: an action that overwrites or deletes the
 			// local file is only legal when local is unchanged since base, and an
@@ -108,7 +108,7 @@ func TestPlanReconcileProps(t *testing.T) {
 		local, remote := ms[0], ms[2]
 		actions := PlanReconcile(local, remote)
 
-		lp, rp := local.byPath(), remote.byPath()
+		lp, rp := local.ByPath(), remote.ByPath()
 		seen := map[string]bool{}
 		for _, a := range actions {
 			if seen[a.Path] {

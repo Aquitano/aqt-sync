@@ -3,11 +3,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/folderstate"
+	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -82,4 +85,42 @@ func TestSyncLockReclaimsStale(t *testing.T) {
 		t.Fatalf("expected a stale lock to be reclaimed: %v", err)
 	}
 	release()
+}
+
+// `aqt lock` advertises that the device stays attached, so it must not cost the
+// tracked folders anything. Sealing base.json under the session key meant a routine
+// lock made every base unreadable, and `aqt sync` then refused with errSyncNoBase —
+// pushing the user into a --reconcile that resurrects deletions.
+func TestLockLeavesTrackedFoldersSyncable(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "note.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h.init(dir)
+	if err := app.runSync(dir, syncOptions{}); err != nil {
+		t.Fatalf("initial sync: %v", err)
+	}
+
+	// This is exactly what `aqt lock` does.
+	if err := identity.ClearSession(identity.DefaultProfile); err != nil {
+		t.Fatalf("lock: %v", err)
+	}
+
+	base, ok, err := folderstate.LoadBaseForSync(dir, app.profile)
+	if err != nil {
+		t.Fatalf("LoadBaseForSync: %v", err)
+	}
+	if !ok {
+		t.Fatal("the sealed base is unreadable after `aqt lock`; sync would refuse with errSyncNoBase")
+	}
+	if len(base.Entries) == 0 {
+		t.Fatal("the base opened but is empty")
+	}
+	// Unlocking again (what `aqt login` does) and syncing must work against that base.
+	h.unlockSession()
+	if err := app.runSync(dir, syncOptions{}); err != nil {
+		t.Fatalf("sync after lock: %v", err)
+	}
 }

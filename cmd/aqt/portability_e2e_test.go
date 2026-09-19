@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,14 +25,15 @@ func requireCaseSensitiveFS(t *testing.T) {
 // case-insensitive clone, whose next sync then uploads the survivor's bytes under
 // both names. The push is where the trap is armed, so the push is what refuses.
 func TestSyncRefusesCaseCollidingPush(t *testing.T) {
+	app := &application{ctx: context.Background()}
 	requireCaseSensitiveFS(t)
-	h := newE2E(t)
+	h := app.newE2E(t)
 	dir := t.TempDir()
 	h.init(dir)
 	writeTree(t, dir, "Notes.md", "upper")
 	writeTree(t, dir, "notes.md", "lower")
 
-	err := runSync(dir, syncOptions{})
+	err := app.runSync(dir, syncOptions{})
 	if err == nil || !strings.Contains(err.Error(), "case-colliding") {
 		t.Fatalf("push of case twins: %v", err)
 	}
@@ -61,7 +63,8 @@ func TestDownloadsRefuseCaseTwinsOnFoldingFS(t *testing.T) {
 // not read their absence as a local delete to push: a capable device must still
 // see them.
 func TestSymlinksDegradeWithoutSupport(t *testing.T) {
-	h := newE2E(t)
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
 	origin := t.TempDir()
 	h.init(origin)
 	writeTree(t, origin, "a.txt", "v1")

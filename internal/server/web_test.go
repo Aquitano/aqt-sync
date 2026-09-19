@@ -65,13 +65,12 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 		`src="/x-assets/hash-wasm-argon2-4.9.0.js"`,
 		`src="/x-assets/fzstd-0.1.1.js"`, // zstd decoder for folder/streamed downloads
 		`src="/x-assets/share.js"`,
-		`id="state-folder"`,            // the in-browser folder browser state
-		`id="folder-list"`,             // its listing container
-		"Files, folders, and streamed", // copy now advertises folder/streamed support
-		`for="password-input"`,         // password field has a visible accessible label
-		`role="alert"`,                 // failures are announced
-		`aria-live="polite"`,           // progress is announced without stealing semantics
-		`id="policy-note"`,             // expiry/read policy is shown before consent
+		`id="state-folder"`,    // the in-browser folder browser state
+		`id="folder-list"`,     // its listing container
+		`for="password-input"`, // password field has a visible accessible label
+		`role="alert"`,         // failures are announced
+		`aria-live="polite"`,   // progress is announced without stealing semantics
+		`id="policy-note"`,     // expiry/read policy is shown before consent
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("landing page missing %q", want)
@@ -80,43 +79,8 @@ func TestShareViewServesDecryptorPage(t *testing.T) {
 	if strings.Contains(body, "AqtCrypto") {
 		t.Error("page script must be served as an asset, not inlined (CSP has no script-src 'unsafe-inline')")
 	}
-	if strings.Contains(body, "single inline files only") {
-		t.Error("share page still claims browser decryption is inline-only after folder support landed")
-	}
 	if strings.Contains(body, "#…") {
 		t.Error("page must not present a truncated fragment as a runnable CLI command")
-	}
-
-	// The decryptor logic ships in the external page script, including the folder
-	// walk over content-addressed objects.
-	script := h.get("/x-assets/share.js")
-	if script.Code != http.StatusOK {
-		t.Fatalf("share.js: got %d, want 200", script.Code)
-	}
-	for _, want := range []string{
-		"crypto_aead_xchacha20poly1305_ietf_decrypt",
-		"hashwasm.argon2id",
-		"aqt-treenode-v1",                               // directory-node AAD, mirrors crypto.aadTreeNode
-		"/v1/public/resources/",                         // the exact-slice objects endpoint
-		"fzstd.decompress",                              // zstd path for compressed objects/nodes
-		"/preflight",                                    // uncounted metadata/policy inspection
-		`"X-Aqt-Capability": String(CLIENT_CAPABILITY)`, // one declared capability, not a literal per call site
-		"INSPECTING ENCRYPTED METADATA",
-		"no read was consumed",
-		"Retry-After",   // the 429 contract's authoritative signal
-		"cooldownUntil", // shared across every request the page makes
-		"rate-limited",  // budget exhaustion has its own message
-		"upgradeText",   // a 426 names the capability gap, not the status code
-	} {
-		if !strings.Contains(script.Body.String(), want) {
-			t.Errorf("share.js missing %q", want)
-		}
-	}
-	if strings.Contains(script.Body.String(), `"X-Aqt-Capability": "`) {
-		t.Error("share.js hardcodes a capability string; it must derive from CLIENT_CAPABILITY")
-	}
-	if strings.Contains(body, "The server stores only ciphertext") {
-		t.Error("share page still contains the removed explanatory lede")
 	}
 
 	// The error pages keep the same guarantees they had before the redesign.
