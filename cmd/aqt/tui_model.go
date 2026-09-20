@@ -870,7 +870,7 @@ func (m *tuiModel) snapshotsActions() []tuiMenuOption {
 		tuiMenuOption{key: "d", label: "diff against live tree", cmd: tuiStartDiff(snap.ID)},
 		tuiMenuOption{key: "a", label: anchorLabel, cmd: m.anchorCmd(*snap)},
 		tuiMenuOption{key: "o", label: "restore side-by-side…", dialog: snapshotRestoreOutDialog(*snap)},
-		tuiMenuOption{key: "k", label: "retention prune…", dialog: snapshotRetentionDialog(*snap)},
+		tuiMenuOption{key: "P", label: "retention prune…", dialog: snapshotRetentionDialog(*snap)},
 		tuiMenuOption{key: "f", label: "list with time/limit filters…", dialog: snapshotListFiltersDialog(*snap)},
 	)
 	if m.ctx.root != "" {
@@ -949,8 +949,8 @@ func (m *tuiModel) resourcesActions() []tuiMenuOption {
 	}
 	opts = append(opts,
 		tuiMenuOption{key: "s", label: "share…", dialog: m.shareDialog(*res)},
-		tuiMenuOption{key: "g", label: "grant read-only access…", dialog: grantDialog(*res)},
-		tuiMenuOption{key: "r", label: "revoke account grant…", dialog: revokeGrantDialog(*res)},
+		tuiMenuOption{key: "S", label: "grant read-only access…", dialog: grantDialog(*res)},
+		tuiMenuOption{key: "u", label: "revoke account grant…", dialog: revokeGrantDialog(*res)},
 		tuiMenuOption{key: "A", label: autoSnapshotLabel(*res), cmd: autoSnapshotCmd(*res)})
 	if res.Kind == string(api.KindFolder) {
 		opts = append(opts, tuiMenuOption{key: "c", label: "clone into a new directory…", dialog: resourceCloneDialog(*res, false)}, tuiMenuOption{key: "C", label: "clone and adopt an existing directory…", dialog: resourceCloneDialog(*res, true)})

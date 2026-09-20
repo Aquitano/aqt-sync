@@ -33,7 +33,10 @@ All notable changes to this project are documented in this file.
 - **TUI shortcuts and the space menu are one table.** Every entry in a panel's actions
   menu now answers to the key it shows: incoming shares (`h`), contacts (`o`), account
   usage (`U`) and clone-and-adopt (`C`) previously had menu entries without a working
-  shortcut.
+  shortcut. Three entries advertised a key the cursor owned, so pressing it moved the
+  selection or refreshed the panel instead: retention prune is now `P` (was `k`),
+  grant read-only access is `S` (was `g`) and revoke account grant is `u` (was `r`).
+  Inside the retention menu, keep-newest is `n` (was `k`).
 
 ### Changed
 

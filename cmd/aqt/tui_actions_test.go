@@ -38,7 +38,10 @@ func menuCommand(t *testing.T, menu *tuiMenu, want string) tea.Cmd {
 
 // The actions menu is the only definition of a panel's key mapping, so every
 // entry has to answer to its own key with the same kind of action the menu
-// promises. A menu-only entry is an action the shortcut silently dropped.
+// promises. The key goes through handleKey, not handleActionKey, because the
+// navigation keys (j/k, g/G, r) are matched first and would shadow an entry that
+// advertised one of them. Nested menus dispatch through tuiMenu.Update, which
+// consumes its own cursor keys the same way.
 func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
 	app := &application{ctx: context.Background()}
 	m := app.testModel(t)
@@ -49,11 +52,31 @@ func TestTUIPanelActionKeysComeFromTheMenu(t *testing.T) {
 				t.Fatalf("%s option %q has no key", m.panel().title, option.label)
 			}
 			m.dialog = nil
-			_, cmd := m.handleActionKey(key(option.key))
+			_, cmd := m.handleKey(key(option.key))
 			if (m.dialog != nil) != (option.dialog != nil) || (m.dialog == nil && cmd == nil) {
 				t.Fatalf("%s key %q resolved to dialog=%T cmd=%v, want the menu's %T",
 					m.panel().title, option.key, m.dialog, cmd != nil, option.dialog)
 			}
+			if nested, ok := option.dialog.(*tuiMenu); ok {
+				assertMenuKeysSelect(t, m.panel().title+" > "+option.label, nested)
+			}
+		}
+	}
+}
+
+func assertMenuKeysSelect(t *testing.T, path string, menu *tuiMenu) {
+	t.Helper()
+	for _, option := range menu.options {
+		if option.key == "" {
+			continue
+		}
+		fresh := &tuiMenu{title: menu.title, options: menu.options}
+		cmd, done := fresh.Update(key(option.key))
+		if !done || cmd == nil {
+			t.Fatalf("%s key %q did not select %q (done=%v cmd=%v)", path, option.key, option.label, done, cmd != nil)
+		}
+		if nested, ok := option.dialog.(*tuiMenu); ok {
+			assertMenuKeysSelect(t, path+" > "+option.label, nested)
 		}
 	}
 }
@@ -174,7 +197,7 @@ func TestTUIIssue92SnapshotActions(t *testing.T) {
 	m := app.testModel(t)
 	m.setFocus(tuiPanelSnapshots)
 	snap := *m.selectedSnapshot()
-	if got := menuKeys(&tuiMenu{options: m.snapshotsActions()}); got != "n,d,a,o,k,f,R,x" {
+	if got := menuKeys(&tuiMenu{options: m.snapshotsActions()}); got != "n,d,a,o,P,f,R,x" {
 		t.Fatalf("snapshot actions = %q", got)
 	}
 
@@ -193,7 +216,7 @@ func TestTUIIssue92SnapshotActions(t *testing.T) {
 		t.Fatalf("snapshot filter menu = %q", got)
 	}
 	retentionMenu := snapshotRetentionDialog(snap).(*tuiMenu)
-	if got := menuKeys(retentionMenu); got != "k,o" {
+	if got := menuKeys(retentionMenu); got != "n,o" {
 		t.Fatalf("snapshot retention menu = %q", got)
 	}
 }

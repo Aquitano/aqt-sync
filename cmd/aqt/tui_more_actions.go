@@ -85,7 +85,7 @@ func snapshotRestoreOutDialog(snap snapshotRow) tuiDialog {
 
 func snapshotRetentionDialog(snap snapshotRow) tuiDialog {
 	return &tuiMenu{title: "Snapshot retention", options: []tuiMenuOption{
-		{key: "k", label: "keep newest N for this resource…", dialog: tuiNewInput(
+		{key: "n", label: "keep newest N for this resource…", dialog: tuiNewInput(
 			"Keep newest snapshots", "number to keep", func(n string) tea.Cmd {
 				return tuiOpenDialog(&tuiConfirm{
 					title:   "Prune by retention",
