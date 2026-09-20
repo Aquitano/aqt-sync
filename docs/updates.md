@@ -236,9 +236,11 @@ Updates install only when you run `aqt update`. A saved `auto` policy from an
 older version is treated as `notify`, preserving release notifications without
 installing anything.
 
-Folder watchers and the global agent registry remain enabled. After an explicit
-install, the updater checks for live agents and reminds you to restart them to use
-the new binary. It removes stale registry entries for agents that have exited.
+Each `aqt watch` process records its folder root and pid in `agents.json`, beside
+`update.json`, so an update started in one folder can see the agents running in
+every other. Entries are removed on clean shutdown and reaped on read once the
+process is gone. After an explicit install, `aqt update` lists the agents still
+running and reminds you to restart them so they pick up the new binary.
 
 ## Manifest
 

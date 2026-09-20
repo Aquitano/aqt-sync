@@ -1,11 +1,12 @@
 # Architecture
 
 Zero-knowledge, end-to-end-encrypted file and folder sync for developers: a private
-encrypted pastebin (`aqt push`), a git-style tracked folder (`aqt sync`), an
-auto-watch daemon (`aqt watch`), and encrypted Git remotes (`aqt::`). The client
-encrypts file contents and filenames before upload. The server stores
-ciphertext, public keys, wrapped keys, and operational metadata; it does not receive
-plaintext decryption keys. See the [threat model](threat-model.md) for the limits.
+encrypted pastebin (`aqt push`), a git-style tracked folder (`aqt sync`), a
+file-event watcher (`aqt watch`, detached by `aqt agent start`), and encrypted Git
+remotes (`aqt::`). The client encrypts file contents and filenames before upload.
+The server stores ciphertext, public keys, wrapped keys, and operational metadata;
+it does not receive plaintext decryption keys. See the
+[threat model](threat-model.md) for the limits.
 
 ## Locked decisions
 

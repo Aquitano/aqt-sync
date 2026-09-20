@@ -214,9 +214,9 @@ When a new write format lands that older releases cannot read:
    `ClientCapability` to it.
 2. At each sealing site that writes the new format, declare
    `MinClient: api.Capability<New>` on the `PutResourceRequest`. `rg 'MinClient:'
-   cmd/aqt` lists them all; today they are `cmd/aqt/sync.go`, `cmd/aqt/share.go`,
-   `cmd/aqt/push.go`, `cmd/aqt/repo.go`, and the two root flips in
-   `cmd/aqt/git_remote_helper.go`.
+   cmd/aqt` lists them all; today they are `cmd/aqt/folderresource.go`,
+   `cmd/aqt/share.go`, `cmd/aqt/push.go`, `cmd/aqt/repo.go`, and the two root flips
+   in `cmd/aqt/git_remote_helper.go`.
    Sites still writing an older format keep their lower declaration.
 3. Add a `### Breaking Changes` / `### Changed` note to `CHANGELOG.md` and extend the
    capability table above.

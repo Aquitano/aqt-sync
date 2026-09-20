@@ -567,8 +567,6 @@ func swapTree(root, staging string) error {
 	return os.RemoveAll(backup)
 }
 
-// --- export ---
-
 // --- diff ---
 
 func (app *application) snapshotDiffCmd() *cobra.Command {
