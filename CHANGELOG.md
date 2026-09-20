@@ -2,19 +2,47 @@
 
 All notable changes to this project are documented in this file.
 
-## [Unreleased]
+## [v0.10.0] - 2026-09-20
+
+A client-side release. Nothing in it changes a sealed format, the wire protocol, or
+the server's schema; the server's source was split into files and keeps the same
+routes and handlers. Every breaking entry is a CLI change.
 
 ### Breaking Changes
 
-- Update policies are now `off` and `notify`. Existing `auto` settings become
-  `notify`; installation requires an explicit `aqt update`. Running folder agents
-  are still tracked, and explicit installs remind you to restart them.
-- Bare-path uploads now require `aqt push <path>` instead of `aqt <path>`.
-- `snapshot export` is removed. Use `aqt restore <snapshot-id> --out <path>`.
-  The TUI uses the same restore action.
-- `watch` runs in the foreground. Use `agent start` for background watching.
-  `watch -d` and `agent start --foreground` are removed. `watch --once` remains
-  available for scheduled runs.
+- **Update policies are now `off` and `notify`; `auto` is gone.** A saved `auto`
+  policy is read as `notify`, so release notices keep arriving and nothing installs
+  until you run `aqt update`. `aqt update policy auto` is refused. Running folder
+  agents are still tracked, and an explicit install lists the ones to restart.
+- **A bare path is no longer an upload.** `aqt <path>` was shorthand for
+  `aqt push <path>`; it now fails as an unknown command, with no hint, so scripts
+  that relied on it have to say `push`.
+- **`snapshot export` is removed.** `aqt restore <snapshot-id> --out <path>` writes
+  the same side-by-side plaintext tree, and the TUI's restore action uses it.
+  `restore --json` reports the directory as `out` where export reported `to`. Inside
+  a tracked folder, `restore` matches its argument against that folder's checkpoint
+  names before treating it as a snapshot id.
+- **`watch` runs in the foreground.** `watch -d` and `agent start --foreground` are
+  removed: `aqt agent start` is the background path and `aqt watch` the attached one.
+  `agent start` therefore no longer accepts `--progress`, which only the removed
+  attached mode could draw. `watch --once` remains for scheduled runs.
+
+### Upgrading
+
+- **`aqt update` from v0.9.0 works unchanged.** The manifest, its signature, the
+  archive layout, and the trust roots are the same. A v0.9.0 client on the `auto`
+  policy installs this release on its next daily check if no watch agent is running,
+  and defers with a notice otherwise; run `aqt update` to install it now.
+- **Restart running watch agents after installing.** `aqt update` names the folders
+  whose agents are still on the old binary; `aqt agent stop` and `aqt agent start`
+  in each.
+- **The server can move on its own schedule.** v0.9.0 and v0.10.0 servers and clients
+  interoperate in every combination: no migration runs on first start, and a data
+  directory opened by v0.10.0 still opens under v0.9.0.
+- **Grep your scripts for the removed forms**: `aqt <path>` (use `aqt push`),
+  `aqt watch -d` (use `aqt agent start`), `aqt agent start --foreground` (use
+  `aqt watch`), `aqt snapshot export` (use `aqt restore --out`), and
+  `aqt update policy auto` (use `notify`).
 
 ### Fixed
 
@@ -28,8 +56,14 @@ All notable changes to this project are documented in this file.
 - **`aqt update` now fails if closing the extracted binary fails.** The extractor
   synced the new binary but discarded the error from closing it, so a write that only
   failed at close (a full or remote filesystem flushing on the last descriptor) could
-  produce a short executable that was then chmodded, verified, and renamed over the
-  working one.
+  stage a short executable. The version probe that runs the staged binary before
+  anything is renamed was the only check left between that file and the install.
+- **The browser share page handles two failure paths it used to mishandle.** A
+  `Retry-After` header that is not an HTTP date (a server sending `-1`) was parsed
+  by `Date.parse` as a calendar date; the page now falls back to the body's
+  `retryAfterSeconds`. A malformed inline folder entry threw synchronously after the
+  download button was disabled, leaving it dead; the failure is now reported and
+  the button re-enabled. Both are covered by the new `tests/share-page.test.mjs`.
 - **TUI shortcuts and the space menu are one table.** Every entry in a panel's actions
   menu now answers to the key it shows: incoming shares (`h`), contacts (`o`), account
   usage (`U`) and clone-and-adopt (`C`) previously had menu entries without a working
@@ -51,6 +85,8 @@ All notable changes to this project are documented in this file.
   differently by each command.
 - **`aqt-server` validates its environment before it opens the data directory**, so a
   bad `AQT_*` value is reported without creating the store first.
+- `aqt update policy --json` no longer reports `deferredVersion`; with `auto` gone
+  there is no deferred install to report.
 
 ## [v0.9.0] - 2026-08-30
 
