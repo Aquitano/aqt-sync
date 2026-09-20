@@ -1768,7 +1768,7 @@ func (m *tuiModel) bottomBar() string {
 			}
 		case tuiPanelResources:
 			if m.panels[tuiPanelResources].list.current() != nil {
-				hints = []string{tuiKeyHint("o", "pull"), tuiKeyHint("g", "grant"), tuiKeyHint("s", "share"), tuiKeyHint("x", "delete")}
+				hints = []string{tuiKeyHint("o", "pull"), tuiKeyHint("S", "grant"), tuiKeyHint("s", "share"), tuiKeyHint("x", "delete")}
 			}
 		}
 		hints = append(hints, tuiKeyHint("tab", "panel"), tuiKeyHint("/", "filter"))

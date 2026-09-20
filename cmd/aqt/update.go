@@ -206,7 +206,10 @@ func (app *application) runUpdate(opts updateOptions) error {
 	}
 	if !app.quiet && storeErr == nil {
 		if agents := liveWatchAgents(store); len(agents) > 0 {
-			fmt.Printf("restart %d running folder agent(s) to use the new version (`aqt agent stop` then `aqt agent start` in each folder)\n", len(agents))
+			fmt.Printf("restart %d running folder agent(s) to use the new version (`aqt agent stop` then `aqt agent start` in each):\n", len(agents))
+			for _, a := range agents {
+				fmt.Printf("  %s\n", a.Root)
+			}
 		}
 	}
 	return nil
