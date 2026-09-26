@@ -496,6 +496,23 @@ func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	return nil
 }
 
+// chargeGrowth refuses, and answers, a write that grows the owner's usage by added
+// bytes past its quota. A write that does not grow usage always passes, so an account
+// over its quota can still rename or re-wrap what it already stores. The caller holds
+// the owner's accountLimits lock across the check and the write.
+func (s *Server) chargeGrowth(c *gin.Context, owner string, added int64) bool {
+	if added <= 0 {
+		return true
+	}
+	if err := s.checkAccountLimit(owner, "", added); err != nil {
+		if !abortLimit(c, err) {
+			abort(c, http.StatusInternalServerError, "usage lookup failed")
+		}
+		return false
+	}
+	return true
+}
+
 func abortLimit(c *gin.Context, err error) bool {
 	var limit *LimitExceededError
 	if !errors.As(err, &limit) {

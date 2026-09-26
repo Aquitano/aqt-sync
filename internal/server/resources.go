@@ -1208,6 +1208,20 @@ func (s *Server) handleUpdateResourceMetadata(c *gin.Context) {
 		return
 	}
 	capability := requestCapability(c)
+	defer s.accountLimits.lock(owner)()
+	stored, err := s.store.ResourceMetaBytes(owner, c.Param("id"))
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	metaJSON, err := json.Marshal(req.EncryptedMeta)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "metadata update failed")
+		return
+	}
+	if !s.chargeGrowth(c, owner, int64(len(metaJSON))-stored) {
+		return
+	}
 	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), capability, req)
 	var upgrade *UpgradeRequiredError
 	if errors.As(err, &upgrade) {

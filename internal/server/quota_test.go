@@ -66,6 +66,30 @@ func TestQuotaChargesOnlyTheUpdateDelta(t *testing.T) {
 	}
 }
 
+// Sealed metadata counts toward usage, so a rename that grows it past the quota is
+// refused like any other write; a rename that does not grow it still goes through.
+func TestQuotaChargesMetadataGrowth(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 16 * 1024})
+	token, mk := h.signup("quota-meta@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	rename := func(n int) int {
+		return h.do(http.MethodPut, "/v1/resources/"+res.ID+"/metadata", token, api.UpdateResourceMetadataRequest{
+			EncryptedMeta:   crypto.SealedBlob{Nonce: make([]byte, 24), Ciphertext: make([]byte, n)},
+			ExpectedVersion: res.Version,
+		}, nil)
+	}
+	if code := rename(32 * 1024); code != http.StatusInsufficientStorage {
+		t.Fatalf("32 KiB metadata under a 16 KiB quota = %d, want 507", code)
+	}
+	if code := rename(16); code != http.StatusOK {
+		t.Fatalf("small rename = %d, want 200", code)
+	}
+}
+
 // A create replayed under its Idempotency-Key stores nothing new. Charging it as a
 // fresh create answered 507 for a resource that already existed, defeating the retry
 // the key exists for.
