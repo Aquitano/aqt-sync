@@ -588,6 +588,21 @@ func (s *Store) ResourceMetaBytes(owner, id string) (int64, error) {
 	return n, err
 }
 
+// GrantStoredBytes reports what an existing grant adds to its owner's usage, the
+// same term AccountUsage sums, so re-posting a grantee (the rotation re-wrap) is
+// charged only its growth. No such grant reports 0.
+func (s *Store) GrantStoredBytes(owner, resourceID, grantee string) (int64, error) {
+	var n int64
+	err := s.rdb.QueryRow(
+		`SELECT length(wrapped_key) + 128 FROM grants WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
+		resourceID, owner, grantee,
+	).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return n, err
+}
+
 // ResourceCreateKeyRecorded reports whether req's Idempotency-Key was already
 // recorded for a create. A replay stores nothing new, so charging it against the
 // quota would answer 507 for a resource that exists — defeating the retry the key

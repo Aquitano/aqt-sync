@@ -4,6 +4,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -87,6 +88,38 @@ func TestQuotaChargesMetadataGrowth(t *testing.T) {
 	}
 	if code := rename(16); code != http.StatusOK {
 		t.Fatalf("small rename = %d, want 200", code)
+	}
+}
+
+// Grant rows count toward usage, so new grantees past the quota are refused, while
+// re-posting an existing grantee, as key rotation does, still goes through.
+func TestQuotaChargesNewGrants(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 16 * 1024})
+	token, mk := h.signup("quota-grants@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	grant := func(grantee string) int {
+		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
+			GranteeHandle: grantee, WrappedKey: make([]byte, maxGrantWrapSize),
+		}, nil)
+	}
+	refused := false
+	for i := range 32 {
+		if code := grant(fmt.Sprintf("grantee-%d", i)); code == http.StatusInsufficientStorage {
+			refused = true
+			break
+		} else if code != http.StatusCreated {
+			t.Fatalf("grant %d = %d", i, code)
+		}
+	}
+	if !refused {
+		t.Fatal("32 KiB of grants under a 16 KiB quota were all accepted")
+	}
+	if code := grant("grantee-0"); code != http.StatusCreated {
+		t.Fatalf("re-wrapping an existing grantee at the quota = %d, want 201", code)
 	}
 }
 
