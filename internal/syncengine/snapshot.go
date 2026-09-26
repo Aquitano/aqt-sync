@@ -366,6 +366,66 @@ func ListPaths(dir string) ([]string, error) {
 	return paths, err
 }
 
+// Untracked returns the relative slash paths under dir that a scan skips: each ignored
+// file, each ignored directory as one path (its subtree is never walked), and each
+// special file. The control directory is left out. They are the parts of a folder
+// that live only on this machine, which a tree-replacing operation must carry over.
+func Untracked(dir string) ([]string, error) {
+	ig := newIgnore()
+	var out []string
+	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if walkErr != nil {
+			return walkErr
+		}
+		switch {
+		case rel == ".":
+			ig.loadDir(dir, "")
+		case rel == ControlDir:
+			return filepath.SkipDir
+		case d.IsDir() && ig.Match(rel, true):
+			out = append(out, rel)
+			return filepath.SkipDir
+		case d.IsDir():
+			ig.loadDir(path, rel)
+		case ig.Match(rel, false), special(d.Type()):
+			out = append(out, rel)
+		}
+		return nil
+	})
+	return out, err
+}
+
+// Skips reports whether a scan of dir leaves out the slash path rel, whose file mode
+// is mode: a special file always does, anything else when it or a directory above it
+// is ignored by the .aqtignore files in effect there.
+func Skips(dir, rel string, mode fs.FileMode) bool {
+	if special(mode) {
+		return true
+	}
+	ig := newIgnore()
+	ig.loadDir(dir, "")
+	parts := strings.Split(rel, "/")
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		if ig.Match(parent, true) {
+			return true
+		}
+		ig.loadDir(filepath.Join(dir, filepath.FromSlash(parent)), parent)
+	}
+	return ig.Match(rel, mode.IsDir())
+}
+
+// special reports whether mode is a device, socket, fifo, or other type a scan never
+// records.
+func special(mode fs.FileMode) bool {
+	return !mode.IsRegular() && mode&(fs.ModeDir|fs.ModeSymlink) == 0
+}
+
 // Fingerprint summarizes the tracked tree from metadata only — path, size,
 // mtime, mode, and symlink target — without reading any file contents. It is the
 // watch daemon's cheap change detector: one lstat per file instead of a full

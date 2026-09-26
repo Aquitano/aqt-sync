@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -505,10 +506,11 @@ func (app *application) restoreInPlace(cl *client.Client, prof *identity.Profile
 }
 
 // swapTree replaces root's contents (everything but the .aqt control dir) with
-// staging's. It moves the live entries aside into a sibling backup dir first, then
-// moves the staged entries in, so a rename that fails partway can be rolled back to
-// the original tree rather than left half-replaced. Backup, staging, and root share
-// a parent, so every rename stays on one filesystem (and is atomic).
+// staging's, then carries the old tree's untracked paths back (carryUntracked). It
+// moves the live entries aside into a sibling backup dir first, then moves the staged
+// entries in, so a rename that fails partway can be rolled back to the original tree
+// rather than left half-replaced. Backup, staging, and root share a parent, so every
+// rename stays on one filesystem (and is atomic).
 func swapTree(root, staging string) error {
 	backup, err := os.MkdirTemp(filepath.Dir(root), ".aqt-backup-*")
 	if err != nil {
@@ -564,7 +566,81 @@ func swapTree(root, staging string) error {
 		movedIn = append(movedIn, e.Name())
 	}
 
+	if !carryUntracked(backup, root) {
+		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s: it holds ignored or special files "+
+			"that could not be moved back without colliding with the restored tree or being synced under its "+
+			".aqtignore; take what you need and delete it\n", backup)
+		return nil
+	}
 	return os.RemoveAll(backup)
+}
+
+// carryUntracked moves every path the pre-restore tree's scan skipped (ignored files
+// and directories such as .git, special files) from backup back into root. A snapshot
+// only holds what synced, so these exist nowhere else and the restore must not take
+// them with the rest of the old tree. It reports whether all of them moved; a path
+// carryPath refuses stays in backup.
+func carryUntracked(backup, root string) bool {
+	paths, err := syncengine.Untracked(backup)
+	if err != nil {
+		return false
+	}
+	all := true
+	for _, rel := range paths {
+		if carryPath(backup, root, rel) != nil {
+			all = false
+		}
+	}
+	return all
+}
+
+// carryPath moves backup/rel to root/rel unless something already occupies it or the
+// restored tree's .aqtignore would sync it. The propagation sync runs right after the
+// swap, so a path the restored rules track would be published to every device.
+func carryPath(backup, root, rel string) error {
+	src := filepath.Join(backup, filepath.FromSlash(rel))
+	info, err := os.Lstat(src)
+	if err != nil {
+		return err
+	}
+	if !syncengine.Skips(root, rel, info.Mode()) {
+		return fmt.Errorf("%s is not ignored in the restored tree", rel)
+	}
+	if err := mkdirLike(root, backup, filepath.Dir(filepath.FromSlash(rel))); err != nil {
+		return err
+	}
+	dst := filepath.Join(root, filepath.FromSlash(rel))
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("%s: %w", dst, fs.ErrExist)
+	}
+	return os.Rename(src, dst)
+}
+
+// mkdirLike makes root/rel a directory, creating each missing component with the
+// mode its counterpart under like has. A component that exists as anything but a
+// real directory is refused, so a symlink the restored tree put there cannot
+// redirect a move out of root or onto a path its rules would sync.
+func mkdirLike(root, like, rel string) error {
+	if rel == "." {
+		return nil
+	}
+	if err := mkdirLike(root, like, filepath.Dir(rel)); err != nil {
+		return err
+	}
+	dir := filepath.Join(root, rel)
+	if fi, err := os.Lstat(dir); err == nil {
+		if fi.Mode().Type() != fs.ModeDir {
+			return fmt.Errorf("%s is not a directory", dir)
+		}
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	orig, err := os.Stat(filepath.Join(like, rel))
+	if err != nil {
+		return err
+	}
+	return os.Mkdir(dir, orig.Mode().Perm())
 }
 
 // --- diff ---
