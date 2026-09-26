@@ -140,6 +140,12 @@ func Encode(raw []byte) ([]byte, string) {
 // expected output length, which is the caller's tamper check; rawLen < 0 leaves only
 // maxDecoded.
 func Decode(payload []byte, alg string, rawLen int) ([]byte, error) {
+	// rawLen sizes the output buffer before decoding, and it comes from the same
+	// key holder maxDecoded guards against (a chunk record's Len), so it gets the
+	// same bound: no payload can decode past it anyway.
+	if rawLen > maxDecoded {
+		return nil, fmt.Errorf("payload declares %d bytes, over the %d-byte decode bound", rawLen, maxDecoded)
+	}
 	return decodeWith(decoder, payload, alg, rawLen)
 }
 
