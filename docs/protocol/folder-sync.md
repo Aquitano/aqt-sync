@@ -376,7 +376,11 @@ in-place restore stages and swaps with rollback), so an interrupted transfer, a
 permission failure, or a destination collision leaves the destination exactly as it
 was. `init` stages the local `.aqt` control state before registering the remote
 resource and deletes the just-created resource if the local commit fails, so a failed
-init is side-effect-free on both ends.
+init is side-effect-free on both ends. An in-place restore replaces only what syncs:
+ignored files and directories (`.git`, whatever `.aqtignore` keeps local) are in no
+snapshot, so they are moved back beside the restored tree, and where the restored tree
+already holds such a path the old tree is kept in its `.aqt-backup-*` directory with a
+warning rather than deleted.
 
 **Untracking.** `aqt untrack [dir]` removes `.aqt` and leaves both the working tree
 and the server-side resource alone (`--delete-remote` opts into deleting the

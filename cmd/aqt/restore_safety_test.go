@@ -47,6 +47,42 @@ func TestInPlaceRestoreWithConflictsCopyConfig(t *testing.T) {
 	}
 }
 
+// An in-place restore replaces what syncs and nothing else. A .git directory and a
+// file .aqtignore keeps local are in no snapshot, so swapping the whole old tree out
+// and deleting it would destroy the only copy of them.
+func TestInPlaceRestoreKeepsUntrackedFiles(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	src := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.init(src)
+	writeTree(t, src, ".aqtignore", "local.env\n")
+	writeTree(t, src, "a.txt", "original")
+	h.sync(src)
+	runCmd(t, app.checkpointCmd(), "pin", src)
+
+	writeTree(t, src, "a.txt", "changed")
+	writeTree(t, src, "local.env", "TOKEN=only-here")
+	writeTree(t, src, ".git/HEAD", "ref: refs/heads/main\n")
+	h.sync(src)
+
+	runCmd(t, app.restoreCmd(), "pin", src, "--in-place", "-y")
+	for path, want := range map[string]string{
+		"a.txt":     "original",
+		"local.env": "TOKEN=only-here",
+		".git/HEAD": "ref: refs/heads/main\n",
+	} {
+		if got := readTree(t, src, path); got != want {
+			t.Fatalf("%s = %q after restore, want %q", path, got, want)
+		}
+	}
+	if left, _ := filepath.Glob(filepath.Join(filepath.Dir(src), ".aqt-backup-*")); len(left) != 0 {
+		t.Fatalf("restore left a backup behind: %v", left)
+	}
+}
+
 // Adopting a clone whose synced .aqtconfig selects conflicts=copy used to wedge the
 // internal reconcile the same way (copy contradicts --reconcile); it pins block too.
 func TestAdoptWithConflictsCopyConfig(t *testing.T) {
