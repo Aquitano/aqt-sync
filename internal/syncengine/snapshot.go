@@ -392,12 +392,38 @@ func Untracked(dir string) ([]string, error) {
 			return filepath.SkipDir
 		case d.IsDir():
 			ig.loadDir(path, rel)
-		case ig.Match(rel, false), !d.Type().IsRegular() && d.Type()&fs.ModeSymlink == 0:
+		case ig.Match(rel, false), special(d.Type()):
 			out = append(out, rel)
 		}
 		return nil
 	})
 	return out, err
+}
+
+// Skips reports whether a scan of dir leaves out the slash path rel, whose file mode
+// is mode: a special file always does, anything else when it or a directory above it
+// is ignored by the .aqtignore files in effect there.
+func Skips(dir, rel string, mode fs.FileMode) bool {
+	if special(mode) {
+		return true
+	}
+	ig := newIgnore()
+	ig.loadDir(dir, "")
+	parts := strings.Split(rel, "/")
+	for i := 1; i < len(parts); i++ {
+		parent := strings.Join(parts[:i], "/")
+		if ig.Match(parent, true) {
+			return true
+		}
+		ig.loadDir(filepath.Join(dir, filepath.FromSlash(parent)), parent)
+	}
+	return ig.Match(rel, mode.IsDir())
+}
+
+// special reports whether mode is a device, socket, fifo, or other type a scan never
+// records.
+func special(mode fs.FileMode) bool {
+	return !mode.IsRegular() && mode&(fs.ModeDir|fs.ModeSymlink) == 0
 }
 
 // Fingerprint summarizes the tracked tree from metadata only — path, size,

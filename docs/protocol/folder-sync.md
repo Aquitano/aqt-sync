@@ -377,10 +377,13 @@ permission failure, or a destination collision leaves the destination exactly as
 was. `init` stages the local `.aqt` control state before registering the remote
 resource and deletes the just-created resource if the local commit fails, so a failed
 init is side-effect-free on both ends. An in-place restore replaces only what syncs:
-ignored files and directories (`.git`, whatever `.aqtignore` keeps local) are in no
-snapshot, so they are moved back beside the restored tree, and where the restored tree
-already holds such a path the old tree is kept in its `.aqt-backup-*` directory with a
-warning rather than deleted.
+ignored files and directories (`.git`, whatever `.aqtignore` keeps local) and special
+files are in no snapshot, so they are moved back into the restored tree. A path stays
+behind when the restored tree already holds it, when a directory above it is now a
+symlink or a file, or when the restored `.aqtignore` would sync it, since the restore's
+own propagation sync would then publish it. In each of those cases the old tree is
+kept in the `.aqt-backup-*` directory beside the folder, with a warning, rather than
+deleted.
 
 **Untracking.** `aqt untrack [dir]` removes `.aqt` and leaves both the working tree
 and the server-side resource alone (`--delete-remote` opts into deleting the

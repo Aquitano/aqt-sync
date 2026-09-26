@@ -83,6 +83,36 @@ func TestInPlaceRestoreKeepsUntrackedFiles(t *testing.T) {
 	}
 }
 
+// A snapshot taken before a file was ignored restores an .aqtignore that tracks it.
+// Moving that file back would let the restore's propagation sync publish it, so it
+// stays in the backup.
+func TestInPlaceRestoreKeepsUntrackedFromRestoredRules(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	src := filepath.Join(t.TempDir(), "work")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.init(src)
+	writeTree(t, src, "a.txt", "original")
+	h.sync(src)
+	runCmd(t, app.checkpointCmd(), "pin", src)
+
+	writeTree(t, src, ".aqtignore", "local.env\n")
+	writeTree(t, src, "local.env", "TOKEN=only-here")
+	h.sync(src)
+
+	runCmd(t, app.restoreCmd(), "pin", src, "--in-place", "-y")
+	assertAbsent(t, src, "local.env")
+	other := filepath.Join(t.TempDir(), "other")
+	h.clone(h.folderID(src), other)
+	assertAbsent(t, other, "local.env")
+	left, _ := filepath.Glob(filepath.Join(filepath.Dir(src), ".aqt-backup-*"))
+	if len(left) != 1 || readTree(t, left[0], "local.env") != "TOKEN=only-here" {
+		t.Fatalf("local.env was not kept in the backup: %v", left)
+	}
+}
+
 // A snapshot can hold a symlink where the live tree has a directory. An ignored file
 // in that directory stays in the backup instead of following the link out of the folder.
 func TestInPlaceRestoreKeepsUntrackedOutOfSymlinks(t *testing.T) {
