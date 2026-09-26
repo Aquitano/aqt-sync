@@ -3,6 +3,8 @@
 package syncengine
 
 import (
+	"cmp"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -124,21 +126,16 @@ func coalesceDirRenames(renames []Rename, cur, old Manifest) []Rename {
 	for _, r := range renames {
 		renameTo[r.From] = r.To
 	}
+	oldIdx, curIdx := newTreeIndex(old), newTreeIndex(cur)
 	var accepted []Rename
-	underAccepted := func(from, to string) bool {
-		for _, a := range accepted {
-			if strings.HasPrefix(from, a.From+"/") || strings.HasPrefix(to, a.To+"/") {
-				return true
-			}
-		}
-		return false
-	}
+	acceptedFrom, acceptedTo := map[string]bool{}, map[string]bool{}
 	for _, p := range pairs {
-		if underAccepted(p.from, p.to) {
+		if hasProperAncestorIn(p.from, acceptedFrom) || hasProperAncestorIn(p.to, acceptedTo) {
 			continue
 		}
-		if dirMoveComplete(p.from, p.to, renameTo, cur, old) {
+		if dirMoveComplete(p.from, p.to, renameTo, curIdx, oldIdx) {
 			accepted = append(accepted, Rename{From: p.from, To: p.to, Dir: true})
+			acceptedFrom[p.from], acceptedTo[p.to] = true, true
 		}
 	}
 	if len(accepted) == 0 {
@@ -146,74 +143,110 @@ func coalesceDirRenames(renames []Rename, cur, old Manifest) []Rename {
 	}
 	out := accepted
 	for _, r := range renames {
-		consumed := false
-		for _, a := range accepted {
-			if strings.HasPrefix(r.From, a.From+"/") {
-				consumed = true
-				break
-			}
-		}
-		if !consumed {
+		if !hasProperAncestorIn(r.From, acceptedFrom) {
 			out = append(out, r)
 		}
 	}
 	return out
 }
 
-func dirMoveComplete(from, to string, renameTo map[string]string, cur, old Manifest) bool {
-	fp, tp := from+"/", to+"/"
-	moved := 0
-	for _, e := range old.Entries {
-		if e.Path == to || strings.HasPrefix(e.Path, tp) {
-			return false // destination predates the move
-		}
-		if strings.HasPrefix(e.Path, fp) {
-			if renameTo[e.Path] != tp+e.Path[len(fp):] {
-				return false
-			}
-			moved++
+// hasProperAncestorIn reports whether any directory strictly above p is in dirs.
+// Walking p's O(depth) ancestors keeps rename coalescing linear in the number of
+// renames rather than quadratic in the directories a mass move produces.
+func hasProperAncestorIn(p string, dirs map[string]bool) bool {
+	for i := range len(p) {
+		if p[i] == '/' && dirs[p[:i]] {
+			return true
 		}
 	}
-	if moved == 0 {
+	return false
+}
+
+// treeIndex holds one manifest's paths sorted, so what sits at or below a directory
+// is a binary search away instead of a scan of the whole tree per candidate.
+type treeIndex struct {
+	entries []string
+	dirs    []indexedDir
+}
+
+// indexedDir keeps a directory's manifest position, which decides between
+// duplicate paths the way a scan in manifest order would.
+type indexedDir struct {
+	DirEntry
+	pos int
+}
+
+func newTreeIndex(m Manifest) treeIndex {
+	x := treeIndex{entries: make([]string, len(m.Entries)), dirs: make([]indexedDir, len(m.Dirs))}
+	for i, e := range m.Entries {
+		x.entries[i] = e.Path
+	}
+	slices.Sort(x.entries)
+	for i, d := range m.Dirs {
+		x.dirs[i] = indexedDir{d, i}
+	}
+	slices.SortFunc(x.dirs, func(a, b indexedDir) int {
+		return cmp.Or(strings.Compare(a.Path, b.Path), cmp.Compare(a.pos, b.pos))
+	})
+	return x
+}
+
+// sortedSpan returns the half-open index range of the sorted keys in [lo, hi).
+// Every path strictly below dir lies in [dir+"/", dir+"0"), '0' being the byte
+// after '/', and dir itself is the only string in [dir, dir+"\x00").
+func sortedSpan(n int, key func(int) string, lo, hi string) (int, int) {
+	return sort.Search(n, func(i int) bool { return key(i) >= lo }), sort.Search(n, func(i int) bool { return key(i) >= hi })
+}
+
+func (x treeIndex) entriesUnder(dir string) []string {
+	lo, hi := sortedSpan(len(x.entries), func(i int) string { return x.entries[i] }, dir+"/", dir+"0")
+	return x.entries[lo:hi]
+}
+
+func (x treeIndex) hasEntry(p string) bool {
+	_, found := slices.BinarySearch(x.entries, p)
+	return found
+}
+
+// dirsAtOrUnder returns dir and every tracked directory below it, in manifest order.
+func (x treeIndex) dirsAtOrUnder(dir string) []indexedDir {
+	key := func(i int) string { return x.dirs[i].Path }
+	lo, hi := sortedSpan(len(x.dirs), key, dir, dir+"\x00")
+	out := slices.Clone(x.dirs[lo:hi])
+	lo, hi = sortedSpan(len(x.dirs), key, dir+"/", dir+"0")
+	out = append(out, x.dirs[lo:hi]...)
+	slices.SortFunc(out, func(a, b indexedDir) int { return cmp.Compare(a.pos, b.pos) })
+	return out
+}
+
+func dirMoveComplete(from, to string, renameTo map[string]string, cur, old treeIndex) bool {
+	fp, tp := from+"/", to+"/"
+	if old.hasEntry(to) || len(old.entriesUnder(to)) > 0 {
+		return false // destination predates the move
+	}
+	moved := old.entriesUnder(from)
+	if len(moved) == 0 {
 		return false
 	}
-	arrived := 0
-	for _, e := range cur.Entries {
-		if e.Path == from || strings.HasPrefix(e.Path, fp) {
-			return false // something remains under the source
-		}
-		if strings.HasPrefix(e.Path, tp) {
-			arrived++
+	for _, p := range moved {
+		if renameTo[p] != tp+p[len(fp):] {
+			return false
 		}
 	}
-	if arrived != moved {
+	if cur.hasEntry(from) || len(cur.entriesUnder(from)) > 0 {
+		return false // something remains under the source
+	}
+	if len(cur.entriesUnder(to)) != len(moved) {
 		return false // destination gained content from elsewhere
 	}
 
 	// Tracked dirs must move as one set, keeping their modes ("" is the moved
 	// dir itself).
-	oldDirs := map[string]uint32{}
-	for _, d := range old.Dirs {
-		if d.Path == to || strings.HasPrefix(d.Path, tp) {
-			return false
-		}
-		if d.Path == from {
-			oldDirs[""] = d.Mode
-		} else if strings.HasPrefix(d.Path, fp) {
-			oldDirs[d.Path[len(fp):]] = d.Mode
-		}
+	if len(old.dirsAtOrUnder(to)) > 0 || len(cur.dirsAtOrUnder(from)) > 0 {
+		return false
 	}
-	curDirs := map[string]uint32{}
-	for _, d := range cur.Dirs {
-		if d.Path == from || strings.HasPrefix(d.Path, fp) {
-			return false
-		}
-		if d.Path == to {
-			curDirs[""] = d.Mode
-		} else if strings.HasPrefix(d.Path, tp) {
-			curDirs[d.Path[len(tp):]] = d.Mode
-		}
-	}
+	oldDirs := relativeDirModes(old.dirsAtOrUnder(from), from)
+	curDirs := relativeDirModes(cur.dirsAtOrUnder(to), to)
 	if len(oldDirs) != len(curDirs) {
 		return false
 	}
@@ -223,4 +256,16 @@ func dirMoveComplete(from, to string, renameTo map[string]string, cur, old Manif
 		}
 	}
 	return true
+}
+
+func relativeDirModes(dirs []indexedDir, root string) map[string]uint32 {
+	out := make(map[string]uint32, len(dirs))
+	for _, d := range dirs {
+		rel := ""
+		if len(d.Path) > len(root) {
+			rel = d.Path[len(root)+1:]
+		}
+		out[rel] = d.Mode
+	}
+	return out
 }
