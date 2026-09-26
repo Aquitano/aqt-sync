@@ -100,6 +100,29 @@ func TestIdempotentCreateReplayNotChargedAgain(t *testing.T) {
 	}
 }
 
+// The snapshot counterpart: a create that took the last snapshot slot must replay
+// under its key, not answer 507 as though it were a second snapshot.
+func TestIdempotentSnapshotReplayNotChargedAgain(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{MaxSnapshots: 1})
+	token, mk := h.signup("snapshot-replay@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	body := []byte(`{"resourceId":"` + res.ID + `"}`)
+	hdr := map[string]string{"Idempotency-Key": "retry-snapshot"}
+
+	first := h.raw(http.MethodPost, "/v1/snapshots", token, hdr, body)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first snapshot = %d: %s", first.Code, first.Body.String())
+	}
+	replay := h.raw(http.MethodPost, "/v1/snapshots", token, hdr, body)
+	if replay.Code != http.StatusCreated || replay.Body.String() != first.Body.String() {
+		t.Fatalf("replayed snapshot = %d %s, want the original 201 %s", replay.Code, replay.Body.String(), first.Body.String())
+	}
+}
+
 // A reused Idempotency-Key with a different payload can never store anything, so the
 // key conflict must win over the quota: answering 507 (as the digest-hashing quota
 // preflight once did) told the client to free space for a request that would still

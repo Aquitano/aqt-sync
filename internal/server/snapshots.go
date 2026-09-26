@@ -605,36 +605,40 @@ func (s *Server) handleCreateSnapshot(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "resourceId is required")
 		return
 	}
-	defer s.accountLimits.lock(owner)()
-	// Uncounted: this read only sizes the quota charge. The id may name another
-	// account's public link, which the store then refuses; a counted read would have
-	// spent one of that link's permits on a request that serves nothing.
-	resource, _, err := s.store.GetResourceUncounted(req.ResourceID, owner)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotFound):
-			abortNotFound(c)
-		case errors.Is(err, ErrGone):
-			// A reclaimed tombstone has no ciphertext left to pin. Answer the stable
-			// 410 rather than a 500, which doIdempotent would retry against an
-			// operation that can never succeed.
-			abortGone(c)
-		default:
-			abort(c, http.StatusInternalServerError, "resource lookup failed")
-		}
-		return
-	}
-	if err := s.checkAccountLimit(owner, "snapshots", estimatedResourceBytes(api.PutResourceRequest{Blob: resource.Blob, EncryptedMeta: resource.EncryptedMeta, WrappedKey: resource.WrappedKey})); err != nil {
-		if !abortLimit(c, err) {
-			abort(c, http.StatusInternalServerError, "usage lookup failed")
-		}
-		return
-	}
 	if key := c.GetHeader("Idempotency-Key"); len(key) > 128 {
 		abort(c, http.StatusBadRequest, "Idempotency-Key must be at most 128 bytes")
 		return
 	} else {
 		req.IdempotencyKey = key
+	}
+	// A replayed create stores nothing new, so it is not charged again; see
+	// ResourceCreateKeyRecorded.
+	if !s.store.SnapshotCreateKeyRecorded(owner, req.IdempotencyKey) {
+		defer s.accountLimits.lock(owner)()
+		// Uncounted: this read only sizes the quota charge. The id may name another
+		// account's public link, which the store then refuses; a counted read would
+		// have spent one of that link's permits on a request that serves nothing.
+		resource, _, err := s.store.GetResourceUncounted(req.ResourceID, owner)
+		if err != nil {
+			switch {
+			case errors.Is(err, ErrNotFound):
+				abortNotFound(c)
+			case errors.Is(err, ErrGone):
+				// A reclaimed tombstone has no ciphertext left to pin. Answer the stable
+				// 410 rather than a 500, which doIdempotent would retry against an
+				// operation that can never succeed.
+				abortGone(c)
+			default:
+				abort(c, http.StatusInternalServerError, "resource lookup failed")
+			}
+			return
+		}
+		if err := s.checkAccountLimit(owner, "snapshots", estimatedResourceBytes(api.PutResourceRequest{Blob: resource.Blob, EncryptedMeta: resource.EncryptedMeta, WrappedKey: resource.WrappedKey})); err != nil {
+			if !abortLimit(c, err) {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+			}
+			return
+		}
 	}
 	info, err := s.store.CreateSnapshotIdempotent(owner, req)
 	if errors.Is(err, ErrIdempotencyConflict) {

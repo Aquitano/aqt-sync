@@ -591,13 +591,26 @@ func (s *Store) ResourceStoredBytes(owner, id string) (int64, error) {
 // cannot be swept mid-request; an older row just falls back to the normal
 // quota-checked path (where a genuine replay still replays).
 func (s *Store) ResourceCreateKeyRecorded(owner string, req api.PutResourceRequest) bool {
-	if req.IdempotencyKey == "" || req.ID != "" {
+	if req.ID != "" {
+		return false
+	}
+	return s.createKeyRecorded(owner, "resource.create", req.IdempotencyKey)
+}
+
+// SnapshotCreateKeyRecorded is ResourceCreateKeyRecorded for snapshot creates, and
+// skips the snapshot count and byte checks for the same reason.
+func (s *Store) SnapshotCreateKeyRecorded(owner, key string) bool {
+	return s.createKeyRecorded(owner, "snapshot.create", key)
+}
+
+func (s *Store) createKeyRecorded(owner, kind, key string) bool {
+	if key == "" {
 		return false
 	}
 	minCreatedAt := time.Now().Add(-(idempotencyTTL - time.Hour)).Unix()
 	var one int
 	err := s.rdb.QueryRow(`SELECT 1 FROM idempotency_keys WHERE owner_handle = ? AND kind = ? AND key = ? AND created_at >= ?`,
-		owner, "resource.create", req.IdempotencyKey, minCreatedAt).Scan(&one)
+		owner, kind, key, minCreatedAt).Scan(&one)
 	return err == nil
 }
 
