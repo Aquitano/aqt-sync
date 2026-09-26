@@ -3,7 +3,8 @@
 package syncengine
 
 // Case-insensitive filesystems (the macOS and Windows defaults) resolve two
-// manifest paths that differ only by case to one file, so materializing both
+// manifest paths that differ only by case (on macOS, or by Unicode normalization)
+// to one file, so materializing both
 // silently drops one — and the survivor is then re-uploaded under both names on
 // the next sync, destroying the remote copies too. Symlink creation on Windows
 // needs a privilege that is off by default outside Developer Mode. The helpers
@@ -15,19 +16,27 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"golang.org/x/text/unicode/norm"
 )
 
+// FoldName is the key under which a case-insensitive filesystem resolves a path. It
+// folds Unicode normalization along with case because APFS, the macOS default, is
+// insensitive to both: café spelled with a precomposed é and with e plus a combining
+// accent name one file there, exactly as Notes.md and notes.md do.
+func FoldName(p string) string { return strings.ToLower(norm.NFC.String(p)) }
+
 // CaseCollisions groups the manifest paths (files, symlinks, and directories)
-// that a case-insensitive filesystem would resolve to the same name. Groups and
-// their members come back sorted, for stable messages.
+// that a case-insensitive filesystem would resolve to the same name (see FoldName).
+// Groups and their members come back sorted, for stable messages.
 func CaseCollisions(entries []Entry, dirs []DirEntry) [][]string {
 	byFold := map[string][]string{}
 	for _, e := range entries {
-		k := strings.ToLower(e.Path)
+		k := FoldName(e.Path)
 		byFold[k] = append(byFold[k], e.Path)
 	}
 	for _, d := range dirs {
-		k := strings.ToLower(d.Path)
+		k := FoldName(d.Path)
 		byFold[k] = append(byFold[k], d.Path)
 	}
 	var groups [][]string

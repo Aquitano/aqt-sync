@@ -639,8 +639,8 @@ func filterDriftedTargets(root string, downloads []syncengine.Entry, localDelete
 // remote turned into a directory, so the directory cannot be created until it is
 // gone), or the delete is a descendant of a download (a directory the remote turned
 // into a file, so the file cannot be materialized until the directory is emptied).
-// On a case-folding filesystem (fold) the nesting compares case-insensitively,
-// because that is how the filesystem will resolve the paths.
+// On a case-folding filesystem (fold) the nesting compares folded names
+// (syncengine.FoldName), because that is how the filesystem will resolve the paths.
 // A remote directory rename arrives as N deletes plus N downloads with no nesting
 // between them, so this must not compare every pair: each delete answers both
 // nesting questions against the download keys directly — a sorted slice for "is
@@ -650,7 +650,7 @@ func filterDriftedTargets(root string, downloads []syncengine.Entry, localDelete
 func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry, fold bool) (early, late []string) {
 	key := func(p string) string {
 		if fold {
-			return strings.ToLower(p)
+			return syncengine.FoldName(p)
 		}
 		return p
 	}
@@ -682,14 +682,14 @@ func partitionDeletesByDownload(deletes []string, downloads []syncengine.Entry, 
 }
 
 // caseRename is a local delete converted into a rename: its target survives the
-// merge under a name differing only by case, so on a case-folding filesystem the
-// delete and the survivor are one physical entry.
+// merge under a name differing only by case or Unicode normalization, so on a
+// case-folding filesystem the delete and the survivor are one physical entry.
 type caseRename struct {
 	from, to string
 }
 
 // planCaseOnlyRenames pairs each pending local delete (file or directory) with a
-// surviving merged path that differs from it only by case, if one exists. Each pair
+// surviving merged path that folds to the same name (syncengine.FoldName). Each pair
 // becomes a rename and leaves the delete lists; everything unpaired is kept. Only
 // meaningful on a case-folding filesystem, where applying such a delete after its
 // survivor lands would destroy the survivor. Renames come back sorted shallowest
@@ -697,21 +697,21 @@ type caseRename struct {
 func planCaseOnlyRenames(localDeletes, dirRemovals []string, newBase map[string]syncengine.Entry, newBaseDirs map[string]syncengine.DirEntry) (renames []caseRename, keptDeletes, keptDirRemovals []string) {
 	fileSurvivors := make(map[string]string, len(newBase))
 	for p := range newBase {
-		fileSurvivors[strings.ToLower(p)] = p
+		fileSurvivors[syncengine.FoldName(p)] = p
 	}
 	dirSurvivors := make(map[string]string, len(newBaseDirs))
 	for p := range newBaseDirs {
-		dirSurvivors[strings.ToLower(p)] = p
+		dirSurvivors[syncengine.FoldName(p)] = p
 	}
 	for _, d := range localDeletes {
-		if s, ok := fileSurvivors[strings.ToLower(d)]; ok && s != d {
+		if s, ok := fileSurvivors[syncengine.FoldName(d)]; ok && s != d {
 			renames = append(renames, caseRename{from: d, to: s})
 		} else {
 			keptDeletes = append(keptDeletes, d)
 		}
 	}
 	for _, d := range dirRemovals {
-		if s, ok := dirSurvivors[strings.ToLower(d)]; ok && s != d {
+		if s, ok := dirSurvivors[syncengine.FoldName(d)]; ok && s != d {
 			renames = append(renames, caseRename{from: d, to: s})
 		} else {
 			keptDirRemovals = append(keptDirRemovals, d)

@@ -73,12 +73,12 @@ func warnSkipped(skipped []syncengine.SkippedPath) {
 }
 
 // refuseCaseCollisions fails an operation whose manifest holds paths that differ
-// only by case. Materializing them on a case-insensitive filesystem (the macOS and
-// Windows defaults) collapses them into one file, last writer wins, and the next
-// sync uploads the survivor's bytes under both names — so the collision destroys
-// both copies on the server, silently. Push refuses regardless of the local
-// filesystem: creating such a tree remotely arms the same trap for every other
-// device.
+// only by case or Unicode normalization. Materializing them on a case-insensitive
+// filesystem (the macOS and Windows defaults) collapses them into one file, last
+// writer wins, and the next sync uploads the survivor's bytes under both names — so
+// the collision destroys both copies on the server, silently. Push refuses
+// regardless of the local filesystem: creating such a tree remotely arms the same
+// trap for every other device.
 func refuseCaseCollisions(entries []syncengine.Entry, dirs []syncengine.DirEntry) error {
 	groups := syncengine.CaseCollisions(entries, dirs)
 	if len(groups) == 0 {
@@ -93,7 +93,7 @@ func refuseCaseCollisions(entries []syncengine.Entry, dirs []syncengine.DirEntry
 	if rest := len(groups) - show; rest > 0 {
 		suffix = fmt.Sprintf(" and %d more", rest)
 	}
-	return fmt.Errorf("refusing to sync case-colliding paths (%s%s): a case-insensitive filesystem would collapse each group into one file and the next sync would destroy the others; rename or .aqtignore all but one of each",
+	return fmt.Errorf("refusing to sync case-colliding paths (%s%s): a case-insensitive filesystem would collapse each group (names differing only by case or Unicode normalization) into one file and the next sync would destroy the others; rename or .aqtignore all but one of each",
 		strings.Join(names, "; "), suffix)
 }
 
