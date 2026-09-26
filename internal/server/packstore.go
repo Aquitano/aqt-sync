@@ -266,7 +266,7 @@ func (s *Store) storeVerifiedPack(owner string, pack verifiedPack, quotaBytes in
 	// The bytes are written and fsynced to a private temp file before the owner's
 	// GC lock, so concurrent uploads of one account overlap their disk writes; only
 	// the rename and the row commit, which GC must not interleave with, run under it.
-	tmp, err := s.stagePack(owner, packID, data)
+	tmp, err := s.stagePack(packID, data)
 	if err != nil {
 		return 0, err
 	}

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // A resource's blob is stored as one immutable file per nonce
@@ -96,7 +97,7 @@ func (s *Store) packPath(owner, id string) string {
 // the bytes are durable before the row that references them commits (a committed
 // manifest must never point at a pack the kernel has not flushed).
 func (s *Store) writePack(owner, id string, data []byte) error {
-	tmp, err := s.stagePack(owner, id, data)
+	tmp, err := s.stagePack(id, data)
 	if err != nil {
 		return err
 	}
@@ -107,15 +108,13 @@ func (s *Store) writePack(owner, id string, data []byte) error {
 	return nil
 }
 
-// stagePack writes data to a uniquely named, fsynced temp file beside the pack's
-// final path and returns its name. The name is unique so two uploads of the same
-// pack can stage concurrently without truncating each other's bytes.
-func (s *Store) stagePack(owner, id string, data []byte) (string, error) {
-	dir := filepath.Dir(s.packPath(owner, id))
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return "", err
-	}
-	f, err := os.CreateTemp(dir, id+".*.tmp")
+// stagePack writes data to a uniquely named, fsynced temp file in the staging
+// directory and returns its name. The name is unique so two uploads of the same
+// pack can stage concurrently without truncating each other's bytes. Staging stays
+// out of the owner's tree, so that tree changes only under the owner's GC lock,
+// and a crash's leftovers sit in one directory that sweepStaging can list.
+func (s *Store) stagePack(id string, data []byte) (string, error) {
+	f, err := os.CreateTemp(s.stagingDir, id+".*.tmp")
 	if err != nil {
 		return "", err
 	}
@@ -142,10 +141,37 @@ func (s *Store) stagePack(owner, id string, data []byte) (string, error) {
 // pointing at it) is not until the dir is fsynced, so a committed manifest could
 // otherwise reference a pack the kernel loses on a crash.
 func (s *Store) commitStagedPack(tmp, path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		return err
 	}
 	return fsyncDir(filepath.Dir(path))
+}
+
+// staleStagingAge is how old a staged pack must be before sweepStaging removes it.
+// A live upload renames its file as soon as it gets the owner's GC lock, so one
+// this old was left by a crash. The margin matters because an admin command opens
+// the store beside a running server, whose uploads are in flight.
+const staleStagingAge = time.Hour
+
+// sweepStaging removes staged packs older than staleStagingAge. Their unique names
+// are never reused, so nothing else would reclaim them. Best-effort: a leftover
+// costs only disk.
+func sweepStaging(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleStagingAge)
+	for _, e := range entries {
+		info, err := e.Info()
+		if err != nil || !info.Mode().IsRegular() || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, e.Name()))
+	}
 }
 
 // newID returns a URL-safe random identifier encoding nBytes of entropy.
