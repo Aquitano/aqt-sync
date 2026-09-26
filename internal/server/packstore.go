@@ -110,15 +110,21 @@ func recountPacks(tx *sql.Tx, owner string, packIDs []string) error {
 // Bumping the pack's created_at keeps it past the age guard until the PUT roots it.
 func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 	present := make(map[string]bool, len(ids))
+	seenPack := map[string]bool{}
+	var packs []string
 	if err := queryIDsBatched(s.rdb,
-		`SELECT chunk_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
+		`SELECT chunk_id, pack_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`,
 		[]any{owner}, ids,
 		func(rows *sql.Rows) error {
-			var id string
-			if err := rows.Scan(&id); err != nil {
+			var id, packID string
+			if err := rows.Scan(&id, &packID); err != nil {
 				return err
 			}
 			present[id] = true
+			if !seenPack[packID] {
+				seenPack[packID] = true
+				packs = append(packs, packID)
+			}
 			return nil
 		},
 	); err != nil {
@@ -131,38 +137,10 @@ func (s *Store) MissingChunks(owner string, ids []string) ([]string, error) {
 			missing = append(missing, id)
 		}
 	}
-	presentIDs := make([]string, 0, len(present))
-	for id := range present {
-		presentIDs = append(presentIDs, id)
-	}
-	if err := s.touchPacksFor(owner, presentIDs); err != nil {
+	if err := s.touchPacks(owner, packs); err != nil {
 		return nil, err
 	}
 	return missing, nil
-}
-
-// touchPacksFor resets created_at to now on every pack holding one of the given
-// objects, re-arming the GC age guard so a sync about to reference them has time to
-// commit. Touching the pack (not the object) is what the pack-granularity GC reads.
-// The one unbatched IN clause in this file is deliberate: the handler caps the id
-// set at maxPublicObjectIDs (10,000), ~10,003 bound variables against SQLite's
-// 32,766 limit, so it cannot overrun the way an unbounded set would.
-func (s *Store) touchPacksFor(owner string, objIDs []string) error {
-	if len(objIDs) == 0 {
-		return nil
-	}
-	args := make([]any, 0, len(objIDs)+3)
-	args = append(args, time.Now().Unix(), owner, owner)
-	for _, id := range objIDs {
-		args = append(args, id)
-	}
-	_, err := s.db.Exec(
-		`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id IN (
-		   SELECT pack_id FROM objects WHERE owner_handle = ? AND chunk_id IN (`+placeholders(len(objIDs))+`)
-		 )`,
-		args...,
-	)
-	return err
 }
 
 // placeholders returns "?,?,..." with n entries for an IN clause.
@@ -222,29 +200,53 @@ func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (in
 	return s.PutPackWithLimits(owner, packID, data, quotaBytes, 0)
 }
 
-func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (stored int, err error) {
+func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (int, error) {
+	pack, err := verifyPack(packID, data)
+	if err != nil {
+		return 0, err
+	}
+	return s.storeVerifiedPack(owner, pack, quotaBytes, maxObjects)
+}
+
+// verifiedPack is an uploaded pack whose address and every object slice have been
+// checked against their ids.
+type verifiedPack struct {
+	id    string
+	data  []byte
+	index []api.PackIndexEntry
+}
+
+// verifyPack checks that packID is the sha256 of data and that every indexed object
+// is an in-bounds slice hashing to its id. It touches no shared state, so callers
+// run it before taking any lock: hashing a full pack twice is the bulk of an
+// upload's CPU.
+func verifyPack(packID string, data []byte) (verifiedPack, error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
-		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
+		return verifiedPack{}, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
 	}
 	index, objectsEnd, err := parsePackIndex(data)
 	if err != nil {
-		return 0, err
+		return verifiedPack{}, err
 	}
 	for _, e := range index {
 		// Off and Len come from client JSON, so the bounds check must never add them
 		// (off=MaxInt64 + len=1 would wrap negative, slip past, and panic the slice).
 		// Compare against objectsEnd without ever computing Off+Len.
 		if e.Off < 0 || e.Len < 0 || e.Off > objectsEnd || e.Len > objectsEnd-e.Off {
-			return 0, fmt.Errorf("%w: object %s slice escapes the object region", ErrBadPack, e.ID)
+			return verifiedPack{}, fmt.Errorf("%w: object %s slice escapes the object region", ErrBadPack, e.ID)
 		}
 		s := sha256.Sum256(data[e.Off : e.Off+e.Len])
 		if hex.EncodeToString(s[:]) != e.ID {
-			return 0, fmt.Errorf("%w: object %s does not match its slice", ErrBadPack, e.ID)
+			return verifiedPack{}, fmt.Errorf("%w: object %s does not match its slice", ErrBadPack, e.ID)
 		}
 	}
+	return verifiedPack{id: packID, data: data, index: index}, nil
+}
 
-	defer s.gcLocks.lock(owner)()
+// storeVerifiedPack is PutPackWithLimits after verification.
+func (s *Store) storeVerifiedPack(owner string, pack verifiedPack, quotaBytes int64, maxObjects int) (stored int, err error) {
+	packID, data, index := pack.id, pack.data, pack.index
 	// Cheap early reject so an over-quota upload does not write a pack file it will
 	// discard. The authoritative check runs inside the transaction below.
 	if quotaBytes > 0 {
@@ -261,6 +263,16 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}
 
+	// The bytes are written and fsynced to a private temp file before the owner's
+	// GC lock, so concurrent uploads of one account overlap their disk writes; only
+	// the rename and the row commit, which GC must not interleave with, run under it.
+	tmp, err := s.stagePack(packID, data)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+
+	defer s.gcLocks.lock(owner)()
 	path := s.packPath(owner, packID)
 	_, statErr := os.Stat(path)
 	created := errors.Is(statErr, os.ErrNotExist)
@@ -277,7 +289,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}()
 
-	if err = s.writePack(owner, packID, data); err != nil {
+	if err = s.commitStagedPack(tmp, path); err != nil {
 		return 0, err
 	}
 	tx, err := s.db.Begin()
@@ -599,20 +611,48 @@ func (s *Store) orderedObjectSlices(owner, resourceID string, ids []string) ([]a
 	return out, nil
 }
 
-// touchPacks re-arms the GC age guard on the named packs. The id list is batched so
-// the IN clause stays well under SQLite's bound-variable limit even for a clone that
+// touchSlack is how recently a pack must have been re-armed for touchPacks to leave
+// it alone. Every read that touches packs would otherwise queue a write on the single
+// writer connection, and most find their packs re-armed seconds ago by the same sync
+// or download. packAgeCutoff adds the slack back, so a skipped touch still protects
+// the pack for a full age guard after the read that skipped it; the cost is that a
+// dead pack is reclaimed up to touchSlack later.
+const touchSlack = time.Minute
+
+// packAgeCutoff is the created_at a pack must predate to be older than minAge for
+// GC, prune, and repack purposes. See touchSlack.
+func packAgeCutoff(minAge time.Duration) int64 {
+	return time.Now().Add(-minAge - touchSlack).Unix()
+}
+
+// touchPacks re-arms the GC age guard on the named packs that were not re-armed
+// within touchSlack. Which packs need it is read from the read pool, so a touch that
+// changes nothing never waits for the writer. The id lists are batched so the IN
+// clause stays well under SQLite's bound-variable limit even for a clone that
 // resolves many packs at once.
 func (s *Store) touchPacks(owner string, packIDs []string) error {
+	now := time.Now()
+	stale := now.Add(-touchSlack).Unix()
+	var due []string
+	if err := queryIDsBatched(s.rdb,
+		`SELECT pack_id FROM packs WHERE owner_handle = ? AND created_at < ? AND pack_id IN (`,
+		[]any{owner, stale}, packIDs,
+		func(rows *sql.Rows) error {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			due = append(due, id)
+			return nil
+		},
+	); err != nil {
+		return err
+	}
 	const batch = 400
-	now := time.Now().Unix()
-	for start := 0; start < len(packIDs); start += batch {
-		end := start + batch
-		if end > len(packIDs) {
-			end = len(packIDs)
-		}
-		group := packIDs[start:end]
+	for start := 0; start < len(due); start += batch {
+		group := due[start:min(start+batch, len(due))]
 		args := make([]any, 0, len(group)+2)
-		args = append(args, now, owner)
+		args = append(args, now.Unix(), owner)
 		for _, id := range group {
 			args = append(args, id)
 		}
@@ -916,7 +956,7 @@ func (s *Store) ListOwnerChunks(owner, cursor string) ([]string, string, error) 
 // actually freed.
 func (s *Store) DeleteOwnerChunks(owner string, ids []string, minAge time.Duration) (deleted, skippedRecent int, freed int64, err error) {
 	defer s.gcLocks.lock(owner)()
-	cutoff := time.Now().Add(-minAge).Unix()
+	cutoff := packAgeCutoff(minAge)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, 0, err
@@ -1040,7 +1080,7 @@ func (s *Store) RunGCAll(minAge time.Duration) (api.GCResponse, error) {
 // then reap a pack a concurrent push was about to root — turning the FK backstop
 // into a spurious push failure instead of a clean dedup hit.
 func (s *Store) GCPacks(owner string, minAge time.Duration) (int, int64, error) {
-	cutoff := time.Now().Add(-minAge).Unix()
+	cutoff := packAgeCutoff(minAge)
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, 0, err
@@ -1154,7 +1194,7 @@ type repackCand struct {
 // or age-guard touch that lands mid-call makes the swap skip that pack rather than
 // strand a now-live object or a reader mid-fetch.
 func (s *Store) RepackOwner(owner string, minAge time.Duration) (repacked int, reclaimed int64, err error) {
-	cutoff := time.Now().Add(-minAge).Unix()
+	cutoff := packAgeCutoff(minAge)
 	candidates, err := s.repackCandidates(owner, cutoff)
 	if err != nil {
 		return 0, 0, err

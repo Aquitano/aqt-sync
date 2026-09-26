@@ -167,7 +167,9 @@ version commits. Objects (chunks) are not one file each:
 they are concatenated into **packs** (~16 MiB), one immutable content-addressed file
 with a self-describing trailing index, fanned out per owner:
 `packs/<owner>/<ab>/<cd>/<packID>.bin`. A pack ships as raw bytes (no base64), and a
-pull range-fetches only the span covering the objects it needs.
+pull range-fetches only the span covering the objects it needs. A new pack is written
+to `packs/.staging/` and then renamed into place. Opening the data directory removes
+anything a crash left there more than an hour ago.
 
 The server maps `chunkID → (packID, offset, length)` in an `objects` table and
 records, per resource, which object ids its current root references (opaque hashes)

@@ -233,6 +233,85 @@ func TestConcurrentPackWritesDoNotError(t *testing.T) {
 	}
 }
 
+// Uploads stage their bytes before taking the owner's lock, so two in-flight PUTs
+// of one pack (a client retrying a request it gave up on) write at the same time.
+// Each must stage privately, or one truncates the file the other renames into place.
+func TestConcurrentSamePackUploadsKeepItsBytes(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "samepack@example.com")
+	packID, data, _ := packOf(strings.Repeat("a", 1<<20), strings.Repeat("b", 1<<20))
+
+	const writers = 8
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.PutPack(owner, packID, data, 0)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent upload of one pack: %v", err)
+		}
+	}
+	got, err := os.ReadFile(s.packPath(owner, packID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("stored pack differs from the uploaded bytes")
+	}
+	if n := countFiles(t, s.packsDir); n != 1 {
+		t.Fatalf("%d files under packs/, want just the pack (a staged temp leaked)", n)
+	}
+}
+
+// A crash between staging a pack and renaming it into place leaves a temp file that
+// no later upload reuses. Opening the store removes the ones too old for any live
+// upload to still own, and keeps the rest.
+func TestOpenStoreSweepsStaleStagedPacks(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, err := OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	packID, data, _ := packOf("staged, never renamed")
+	stale, err := s.stagePack(packID, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := s.stagePack(packID, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	crashed := time.Now().Add(-staleStagingAge - time.Minute)
+	if err := os.Chtimes(stale, crashed, crashed); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err = OpenStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale staged pack survived the open: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh staged pack was swept: %v", err)
+	}
+}
+
 // Re-uploading a stored pack stores no new objects but re-arms its age guard, so a
 // client that re-pushes a pack mid-sync (idempotent retry) keeps it alive.
 func TestPutPackIdempotentReArm(t *testing.T) {
