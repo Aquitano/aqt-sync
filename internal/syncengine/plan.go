@@ -125,7 +125,8 @@ func MarkTypeClashes(actions, dirActions []Action, local Manifest) {
 // the tree then records that directory with no mode, and every later sync on the
 // adding device reports it as a directory conflict. A directory the remote removed
 // stays with the local entry when a local change survives inside it, and one removed
-// locally stays with the remote entry when a download lands inside it.
+// locally stays with the remote entry when a download lands inside it, even when the
+// remote also changed its mode.
 func KeepParents(actions, dirActions []Action, local Manifest) {
 	keptUnder := map[string]bool{}
 	incomingUnder := map[string]bool{}
@@ -148,10 +149,11 @@ func KeepParents(actions, dirActions []Action, local Manifest) {
 	scan(actions, func(p string) bool { _, ok := files[p]; return ok })
 	scan(dirActions, func(p string) bool { _, ok := dirs[p]; return ok })
 	for i, a := range dirActions {
+		_, inLocal := dirs[a.Path]
 		switch {
 		case a.Kind == DeleteLocal && keptUnder[a.Path]:
 			dirActions[i].Kind = Upload
-		case a.Kind == DeleteRemote && incomingUnder[a.Path]:
+		case (a.Kind == DeleteRemote || a.Kind == Conflict && !inLocal) && incomingUnder[a.Path]:
 			dirActions[i].Kind = Download
 		}
 	}
