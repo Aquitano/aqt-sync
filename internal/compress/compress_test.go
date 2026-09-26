@@ -68,6 +68,11 @@ func TestDecodeRejectsBadInput(t *testing.T) {
 	if _, err := Decode(raw, "", len(raw)-1); err == nil {
 		t.Fatal("raw length mismatch must be rejected")
 	}
+	// A chunk record's Len arrives from whoever sealed the chunk and sizes the
+	// output buffer; past the decode bound it must be an error, not a makeslice panic.
+	if _, err := Decode(payload, alg, 1<<50); err == nil {
+		t.Fatal("a pinned length over the decode bound must be rejected")
+	}
 }
 
 // WithLowerEncoderMem must not change output bytes: convergent object ids depend

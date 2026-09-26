@@ -5,6 +5,7 @@ package safetext
 import (
 	"strings"
 	"testing"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -57,4 +58,33 @@ func TestCleanNeverSplitsARune(t *testing.T) {
 			t.Fatalf("bound %d produced invalid UTF-8: %q", cut, got)
 		}
 	}
+}
+
+// FuzzClean holds Clean's output contract on arbitrary input, since everything it
+// sees came from someone else: valid UTF-8, within the byte bound plus the ellipsis,
+// and no rune that moves the cursor, starts an escape, or reorders what follows.
+func FuzzClean(f *testing.F) {
+	f.Add("safe\x1b[2Kforged", 200)
+	f.Add("abc\u202edcba\u2066x\u2069", 5)
+	f.Add("\u200dzwj\u200czwnj\u2028\u2029", 200)
+	f.Add("\xff\xfe\x85\u0085", 1)
+	f.Fuzz(func(t *testing.T, s string, maxLen int) {
+		if maxLen < 0 {
+			return // every caller passes DisplayMax
+		}
+		got := Clean(s, maxLen)
+		if !utf8.ValidString(got) {
+			t.Fatalf("Clean(%q, %d) = %q, not valid UTF-8", s, maxLen, got)
+		}
+		if len(got) > maxLen+len("…") {
+			t.Fatalf("Clean(%q, %d) is %d bytes", s, maxLen, len(got))
+		}
+		for _, r := range strings.TrimSuffix(got, "…") {
+			unsafe := r < 0x20 || (r >= 0x7f && r <= 0x9f) ||
+				(unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp) && r != '\u200c' && r != '\u200d')
+			if unsafe {
+				t.Fatalf("Clean(%q, %d) kept %U", s, maxLen, r)
+			}
+		}
+	})
 }

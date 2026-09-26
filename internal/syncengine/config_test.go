@@ -3,6 +3,7 @@
 package syncengine
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -207,6 +208,8 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 		{"negative watch interval", `{"watch": {"interval": "-2s"}}`},
 		{"wrong value type", `{"chunkProfile": 3}`},
 		{"trailing data", `{"conflicts": "copy"} {"conflicts": "block"}`},
+		{"trailing brace", `{"conflicts": "copy"}}`},
+		{"trailing bracket", `{"conflicts": "copy"}]`},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
@@ -277,4 +280,26 @@ func TestLoadConfigChunkProfile(t *testing.T) {
 	if ch.Normal != largeNormal {
 		t.Fatalf("normal = %d, want %d (large profile)", ch.Normal, largeNormal)
 	}
+}
+
+// FuzzParseConfig feeds arbitrary bytes to the .aqtconfig parser. A config it
+// accepts must be exactly one JSON value, and its chunk settings must build a
+// chunker: the parser is the only gate between a hand-edited file and the sync.
+func FuzzParseConfig(f *testing.F) {
+	f.Add([]byte(`{}`))
+	f.Add([]byte(`{"version": 1, "chunkProfile": "large", "watch": {"interval": "2s", "gitGuard": false}, "conflicts": "copy"}`))
+	f.Add([]byte(`{"chunk": {"min": 1, "normal": 1, "max": 1}}`))
+	f.Add([]byte(`{"conflicts": "copy"}}`)) // dec.More reports no trailing data before a stray '}'
+	f.Fuzz(func(t *testing.T, b []byte) {
+		c, err := ParseConfig(b)
+		if err != nil {
+			return
+		}
+		if !json.Valid(b) {
+			t.Fatalf("accepted %q, which is not a single JSON value", b)
+		}
+		if _, err := c.ChunkSelector(); err != nil {
+			t.Fatalf("accepted %q, whose chunk settings fail: %v", b, err)
+		}
+	})
 }
