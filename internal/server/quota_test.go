@@ -4,6 +4,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -66,6 +67,102 @@ func TestQuotaChargesOnlyTheUpdateDelta(t *testing.T) {
 	}
 }
 
+// Sealed metadata counts toward usage, so a rename that grows it past the quota is
+// refused like any other write; a rename that does not grow it still goes through.
+func TestQuotaChargesMetadataGrowth(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 16 * 1024})
+	token, mk := h.signup("quota-meta@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	rename := func(n int) int {
+		return h.do(http.MethodPut, "/v1/resources/"+res.ID+"/metadata", token, api.UpdateResourceMetadataRequest{
+			EncryptedMeta:   crypto.SealedBlob{Nonce: make([]byte, 24), Ciphertext: make([]byte, n)},
+			ExpectedVersion: res.Version,
+		}, nil)
+	}
+	if code := rename(32 * 1024); code != http.StatusInsufficientStorage {
+		t.Fatalf("32 KiB metadata under a 16 KiB quota = %d, want 507", code)
+	}
+	if code := rename(16); code != http.StatusOK {
+		t.Fatalf("small rename = %d, want 200", code)
+	}
+}
+
+// Grant rows count toward usage, so new grantees past the quota are refused, while
+// re-posting an existing grantee, as key rotation does, still goes through.
+func TestQuotaChargesNewGrants(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 16 * 1024})
+	token, mk := h.signup("quota-grants@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	grant := func(grantee string) int {
+		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
+			GranteeHandle: grantee, WrappedKey: make([]byte, maxGrantWrapSize),
+		}, nil)
+	}
+	refused := false
+	for i := range 32 {
+		if code := grant(fmt.Sprintf("grantee-%d", i)); code == http.StatusInsufficientStorage {
+			refused = true
+			break
+		} else if code != http.StatusCreated {
+			t.Fatalf("grant %d = %d", i, code)
+		}
+	}
+	if !refused {
+		t.Fatal("32 KiB of grants under a 16 KiB quota were all accepted")
+	}
+	if code := grant("grantee-0"); code != http.StatusCreated {
+		t.Fatalf("re-wrapping an existing grantee at the quota = %d, want 201", code)
+	}
+}
+
+// A reclaimed tombstone leaves the resource count, so rewriting one back into a live
+// resource adds a row and must pass the resource cap like a create; otherwise an
+// account could expire links into tombstones and revive them past the cap.
+func TestResurrectedTombstoneCountsAgainstResourceCap(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{MaxResources: 1})
+	token, mk := h.signup("resurrect@example.com", "a passphrase here")
+	owner, err := h.store.OwnerByToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := h.putPublicViaAPI(token, mk, 3600, 0)
+	if err := h.store.SetResourceExpiryForTest(link.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.GC(owner, gcMinAge); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := h.putSized(token, mk, "", 16); code != http.StatusCreated {
+		t.Fatalf("create in the slot the tombstone freed = %d, want 201", code)
+	}
+	if _, code := h.putSized(token, mk, link.ID, 16); code != http.StatusInsufficientStorage {
+		t.Fatalf("reviving the tombstone at the cap = %d, want 507", code)
+	}
+}
+
+// Re-uploading a pack the account already stores adds nothing, so a retry whose
+// first response was lost must succeed near the quota rather than answer 507.
+func TestPackReuploadAtQuotaIsIdempotent(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 8 * 1024})
+	token, _ := h.signup("pack-retry@example.com", "a passphrase here")
+	id, pack, _ := packOf(string(make([]byte, 5*1024)))
+	for i := range 2 {
+		if rec := h.raw(http.MethodPut, "/v1/packs/"+id, token, nil, pack); rec.Code != http.StatusOK {
+			t.Fatalf("upload %d of the same pack = %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // A create replayed under its Idempotency-Key stores nothing new. Charging it as a
 // fresh create answered 507 for a resource that already existed, defeating the retry
 // the key exists for.
@@ -97,6 +194,29 @@ func TestIdempotentCreateReplayNotChargedAgain(t *testing.T) {
 	}
 	if replay.Body.String() != first.Body.String() {
 		t.Fatalf("replay returned a different resource:\n%s\n%s", first.Body.String(), replay.Body.String())
+	}
+}
+
+// The snapshot counterpart: a create that took the last snapshot slot must replay
+// under its key, not answer 507 as though it were a second snapshot.
+func TestIdempotentSnapshotReplayNotChargedAgain(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{MaxSnapshots: 1})
+	token, mk := h.signup("snapshot-replay@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	body := []byte(`{"resourceId":"` + res.ID + `"}`)
+	hdr := map[string]string{"Idempotency-Key": "retry-snapshot"}
+
+	first := h.raw(http.MethodPost, "/v1/snapshots", token, hdr, body)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first snapshot = %d: %s", first.Code, first.Body.String())
+	}
+	replay := h.raw(http.MethodPost, "/v1/snapshots", token, hdr, body)
+	if replay.Code != http.StatusCreated || replay.Body.String() != first.Body.String() {
+		t.Fatalf("replayed snapshot = %d %s, want the original 201 %s", replay.Code, replay.Body.String(), first.Body.String())
 	}
 }
 

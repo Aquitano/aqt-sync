@@ -566,7 +566,17 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "cannot grant a resource to its own account")
 		return
 	}
-	err := s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ChunkRefs, req.ExpectedVersion)
+	defer s.accountLimits.lock(owner)()
+	stored, err := s.store.GrantStoredBytes(owner, c.Param("id"), req.GranteeHandle)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	// The new row's term in AccountUsage: the wrap plus a fixed row overhead.
+	if !s.chargeGrowth(c, owner, int64(len(req.WrappedKey))+128-stored) {
+		return
+	}
+	err = s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ChunkRefs, req.ExpectedVersion)
 	if errors.Is(err, ErrVersionConflict) {
 		abortCode(c, http.StatusConflict, "resource or grants changed since you last fetched it", api.ErrCodeVersionConflict)
 		return
@@ -585,6 +595,10 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	}
 	if errors.Is(err, ErrGitRemotePolicy) {
 		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
+		return
+	}
+	if errors.Is(err, ErrDanglingRefs) {
+		abortDanglingShareRefs(c)
 		return
 	}
 	if err != nil {

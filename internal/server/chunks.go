@@ -98,8 +98,11 @@ func (s *Server) handlePutPack(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	packID := c.Param("id")
 	data, err := io.ReadAll(c.Request.Body)
+	if bodyTooLarge(err) {
+		abort(c, http.StatusRequestEntityTooLarge, "pack exceeds the maximum pack size")
+		return
+	}
 	if err != nil {
-		// The body cap (http.MaxBytesReader) surfaces here when exceeded.
 		abort(c, http.StatusBadRequest, "read pack body failed")
 		return
 	}
@@ -117,11 +120,21 @@ func (s *Server) handlePutPack(c *gin.Context) {
 			abort(c, http.StatusInternalServerError, "usage lookup failed")
 			return
 		}
+		// A pack the owner already stores adds nothing (the store only re-arms it), so
+		// a retried upload whose first response was lost is not refused here.
 		if u.StorageBytes+int64(len(data)) > quota {
-			abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota})
-			return
+			stored, err := s.store.packExists(owner, packID)
+			if err != nil {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+				return
+			}
+			if !stored {
+				abortLimit(c, &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota})
+				return
+			}
 		}
-		packQuota = quota - (u.StorageBytes - packBytes)
+		// At least 1: the store reads a non-positive cap as no cap at all.
+		packQuota = max(1, quota-(u.StorageBytes-packBytes))
 	}
 	stored, err := s.store.PutPackWithLimits(owner, packID, data, packQuota, s.cfg.MaxObjects)
 	if errors.Is(err, ErrBadPack) {

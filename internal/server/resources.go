@@ -862,6 +862,13 @@ func (s *Server) handlePutResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
 		return
 	}
+	// The nonce names the blob file (see blobPath). An empty one names the same path
+	// removeStaleBlobs(id, nil) spares, so delete and reclaim would leave the blob on
+	// disk; a long one overruns the filesystem's name limit.
+	if len(req.Blob.Nonce) == 0 || len(req.Blob.Nonce) > maxBlobNonce {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("blob nonce must be 1 to %d bytes", maxBlobNonce))
+		return
+	}
 	switch req.Visibility {
 	case api.Private:
 		if req.WrappedKey == nil {
@@ -878,19 +885,28 @@ func (s *Server) handlePutResource(c *gin.Context) {
 	}
 	// An in-place update writes just as many physical bytes as a create, so it is
 	// charged too; it replaces the resource's current bytes rather than adding to
-	// them, so only the difference counts, and it adds no row (no count check).
-	// A replayed create is already stored and must not be charged again.
+	// them, so only the difference counts, and it adds no row (no count check)
+	// unless it rewrites a reclaimed tombstone, which usage does not count, back into
+	// a live resource. A replayed create is already stored and must not be charged
+	// again.
 	if !s.store.ResourceCreateKeyRecorded(owner, req) {
 		defer s.accountLimits.lock(owner)()
 		added, kind := estimatedResourceBytes(req), "resources"
 		if req.ID != "" {
-			kind = ""
 			stored, err := s.store.ResourceStoredBytes(owner, req.ID)
 			if err != nil {
 				abort(c, http.StatusInternalServerError, "usage lookup failed")
 				return
 			}
 			added = max(0, added-stored)
+			reclaimed, err := s.store.ResourceReclaimed(owner, req.ID)
+			if err != nil {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+				return
+			}
+			if !reclaimed {
+				kind = ""
+			}
 		}
 		if err := s.checkAccountLimit(owner, kind, added); err != nil {
 			if !abortLimit(c, err) {
@@ -1208,6 +1224,20 @@ func (s *Server) handleUpdateResourceMetadata(c *gin.Context) {
 		return
 	}
 	capability := requestCapability(c)
+	defer s.accountLimits.lock(owner)()
+	stored, err := s.store.ResourceMetaBytes(owner, c.Param("id"))
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "usage lookup failed")
+		return
+	}
+	metaJSON, err := json.Marshal(req.EncryptedMeta)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "metadata update failed")
+		return
+	}
+	if !s.chargeGrowth(c, owner, int64(len(metaJSON))-stored) {
+		return
+	}
 	version, err := s.store.UpdateResourceMetadata(owner, c.Param("id"), capability, req)
 	var upgrade *UpgradeRequiredError
 	if errors.As(err, &upgrade) {
@@ -1257,6 +1287,10 @@ func (s *Server) handleSetVisibility(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
 		return
 	}
+	if errors.Is(err, ErrDanglingRefs) {
+		abortDanglingShareRefs(c)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -1296,6 +1330,13 @@ func (s *Server) handleDeleteResource(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// abortDanglingShareRefs answers a visibility flip or grant whose refreshed chunk refs
+// name objects the owner no longer stores, with the same missing_chunks code a
+// manifest PUT gets for the same condition.
+func abortDanglingShareRefs(c *gin.Context) {
+	abortCode(c, http.StatusBadRequest, "the resource's chunk refs name objects the server no longer stores (a prune removed them); re-run sync, then share again", api.ErrCodeMissingChunks)
 }
 
 // policyErrorMessage maps the two lifecycle-policy validation errors to fixed,

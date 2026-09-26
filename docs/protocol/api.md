@@ -49,7 +49,9 @@ The resource envelope is a four-byte unsigned big-endian JSON-header length, a
 lower-camel JSON header of at most 32 MiB, then the sealed blob ciphertext as the
 remainder. The request header carries visibility, sealed metadata, wrapped key, blob
 nonce, chunk refs, expected version, minimum client capability, and lifecycle
-policy. `chunkRefs` is the only header field that grows with the resource — one
+policy. The blob nonce must be 1 to 64 bytes (the official client seals with 24);
+any other length is `400 invalid_request`. `chunkRefs` is the only header field
+that grows with the resource — one
 64-hex id per ref — so the 32 MiB header bound caps a *shared* folder's chunk
 count at roughly 500k (about 3.8 GiB at the official client's default ~8 KiB chunk
 profile); a header past the bound is `400 resource_too_large`. A private write
@@ -288,8 +290,9 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
 `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
 `account_exists`, `account_disabled`, `missing_chunks`
-(the manifest's refs name objects the owner no longer stores — a prune reaped an
-upload that outlived the grace period; re-running sync re-uploads them),
+(the refs a manifest PUT, visibility flip, or grant carries name objects the owner no
+longer stores — a prune reaped an upload that outlived the grace period; re-running
+sync re-uploads them),
 `invite_required`
 (signup on an invite-mode server without a valid token), `invalid_challenge`
 (request a fresh attach challenge and retry), `invalid_credentials` (the single

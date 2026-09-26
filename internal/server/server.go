@@ -235,6 +235,9 @@ func (s *Server) Router() *gin.Engine {
 	// per-route middleware below only tightens it (a forgotten route is still
 	// bounded, never unlimited).
 	r.Use(gin.Recovery(), s.metrics.middleware, limitBody(maxResourceBody))
+	// gin's default miss is a plain-text body; the error contract promises every
+	// error a JSON code, and an id carrying a slash lands here rather than on a route.
+	r.NoRoute(abortNotFound)
 
 	// Liveness probe for load balancers, container HEALTHCHECKs, and systemd. It
 	// reads no state and needs no auth, so it stays cheap and can be hit before a
@@ -493,6 +496,23 @@ func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	return nil
 }
 
+// chargeGrowth refuses, and answers, a write that grows the owner's usage by added
+// bytes past its quota. A write that does not grow usage always passes, so an account
+// over its quota can still rename or re-wrap what it already stores. The caller holds
+// the owner's accountLimits lock across the check and the write.
+func (s *Server) chargeGrowth(c *gin.Context, owner string, added int64) bool {
+	if added <= 0 {
+		return true
+	}
+	if err := s.checkAccountLimit(owner, "", added); err != nil {
+		if !abortLimit(c, err) {
+			abort(c, http.StatusInternalServerError, "usage lookup failed")
+		}
+		return false
+	}
+	return true
+}
+
 func abortLimit(c *gin.Context, err error) bool {
 	var limit *LimitExceededError
 	if !errors.As(err, &limit) {
@@ -590,10 +610,21 @@ func (s *Server) StartGC(interval time.Duration, stop <-chan struct{}) {
 
 func bindJSON(c *gin.Context, v any) bool {
 	if err := c.ShouldBindJSON(v); err != nil {
-		abort(c, http.StatusBadRequest, "invalid request body")
+		if bodyTooLarge(err) {
+			abort(c, http.StatusRequestEntityTooLarge, "request body exceeds limit")
+		} else {
+			abort(c, http.StatusBadRequest, "invalid request body")
+		}
 		return false
 	}
 	return true
+}
+
+// bodyTooLarge reports a read that hit the route's limitBody cap, which is the
+// client's to fix by sending less, not a malformed body.
+func bodyTooLarge(err error) bool {
+	var tooLarge *http.MaxBytesError
+	return errors.As(err, &tooLarge)
 }
 
 // abort answers with the status-bucket Code for its HTTP status, so every error

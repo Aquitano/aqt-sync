@@ -3,6 +3,8 @@
 package server
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -34,5 +36,32 @@ func TestCreateChallengeSweepsExpired(t *testing.T) {
 	}
 	if stale != 0 {
 		t.Fatalf("expired challenge was not swept: %d rows remain", stale)
+	}
+}
+
+// A challenge is single-use even when two attaches race on it: only one consume may
+// hand back the nonce, or a captured attach request could be replayed alongside the
+// original.
+func TestConcurrentConsumesSpendChallengeOnce(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	for range 20 {
+		id, _, err := s.CreateChallenge("race@example.com")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wins atomic.Int32
+		var wg sync.WaitGroup
+		for range 8 {
+			wg.Go(func() {
+				if _, err := s.ConsumeChallenge(id, "race@example.com"); err == nil {
+					wins.Add(1)
+				}
+			})
+		}
+		wg.Wait()
+		if n := wins.Load(); n != 1 {
+			t.Fatalf("challenge consumed %d times, want once", n)
+		}
 	}
 }

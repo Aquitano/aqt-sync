@@ -21,6 +21,10 @@ import (
 // blob rewrite. Superseded files are reclaimed after the row that supersedes
 // them commits.
 
+// maxBlobNonce bounds the nonce a write may carry, well above the 24 bytes every
+// client seals with, and short enough that the hex filename stays under 255 bytes.
+const maxBlobNonce = 64
+
 // blobPath addresses a resource's blob by id+nonce. Like packPath, it fans the file
 // out by id prefix (blobs/<ab>/<cd>/<id>.<nonce>.bin) so blobs/ never grows into one
 // flat directory whose every entry a glob (removeStaleBlobs) must scan.
