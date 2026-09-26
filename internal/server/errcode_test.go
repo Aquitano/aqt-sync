@@ -125,6 +125,20 @@ func TestErrorResponsesCarryCodes(t *testing.T) {
 	}
 }
 
+// TestUnmatchedPathCarriesNotFoundCode covers requests no route matches, such as an
+// id containing a slash or an empty trailing id: they get the same JSON not_found as
+// a missing resource instead of gin's plain-text page.
+func TestUnmatchedPathCarriesNotFoundCode(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	for _, path := range []string{"/v1/resources/a%2Fb", "/v1/snapshots/", "/v1/no-such-route"} {
+		var e api.ErrorResponse
+		if code := h.do(http.MethodGet, path, "", nil, &e); code != http.StatusNotFound || e.Code != api.ErrCodeNotFound {
+			t.Errorf("GET %s: got %d %q, want 404 %q", path, code, e.Code, api.ErrCodeNotFound)
+		}
+	}
+}
+
 // TestInviteRequiredCode covers signup against an invite-mode server: the refusal
 // carries invite_required so a client can prompt for a token instead of giving up.
 func TestInviteRequiredCode(t *testing.T) {

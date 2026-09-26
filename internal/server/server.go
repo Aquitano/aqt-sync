@@ -235,6 +235,9 @@ func (s *Server) Router() *gin.Engine {
 	// per-route middleware below only tightens it (a forgotten route is still
 	// bounded, never unlimited).
 	r.Use(gin.Recovery(), s.metrics.middleware, limitBody(maxResourceBody))
+	// gin's default miss is a plain-text body; the error contract promises every
+	// error a JSON code, and an id carrying a slash lands here rather than on a route.
+	r.NoRoute(abortNotFound)
 
 	// Liveness probe for load balancers, container HEALTHCHECKs, and systemd. It
 	// reads no state and needs no auth, so it stays cheap and can be hit before a
