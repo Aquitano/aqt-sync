@@ -106,7 +106,11 @@ func (s *Server) handlePutPack(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "read pack body failed")
 		return
 	}
-	defer s.accountLimits.lock(owner)()
+	pack, err := verifyPack(packID, data)
+	if err != nil {
+		abortCode(c, http.StatusBadRequest, "uploaded pack is malformed or fails verification", api.ErrCodeBadPack)
+		return
+	}
 	quota, err := s.effectiveQuota(owner)
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "usage lookup failed")
@@ -114,6 +118,11 @@ func (s *Server) handlePutPack(c *gin.Context) {
 	}
 	packQuota := quota
 	if quota > 0 {
+		// The usage read and the write must not interleave with another
+		// quota-checked write of this account. Without a byte quota there is
+		// nothing to keep exact, and the object cap is checked inside the store's
+		// transaction, so a sync's concurrent pack uploads are not serialized here.
+		defer s.accountLimits.lock(owner)()
 		u, usageErr := s.store.AccountUsage(owner)
 		packBytes, packErr := s.store.OwnerPackBytes(owner)
 		if usageErr != nil || packErr != nil {
@@ -136,11 +145,7 @@ func (s *Server) handlePutPack(c *gin.Context) {
 		// At least 1: the store reads a non-positive cap as no cap at all.
 		packQuota = max(1, quota-(u.StorageBytes-packBytes))
 	}
-	stored, err := s.store.PutPackWithLimits(owner, packID, data, packQuota, s.cfg.MaxObjects)
-	if errors.Is(err, ErrBadPack) {
-		abortCode(c, http.StatusBadRequest, "uploaded pack is malformed or fails verification", api.ErrCodeBadPack)
-		return
-	}
+	stored, err := s.store.storeVerifiedPack(owner, pack, packQuota, s.cfg.MaxObjects)
 	if errors.Is(err, ErrQuotaExceeded) {
 		if !abortLimit(c, err) {
 			u, _ := s.store.AccountUsage(owner)

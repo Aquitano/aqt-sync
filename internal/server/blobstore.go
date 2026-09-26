@@ -96,36 +96,55 @@ func (s *Store) packPath(owner, id string) string {
 // the bytes are durable before the row that references them commits (a committed
 // manifest must never point at a pack the kernel has not flushed).
 func (s *Store) writePack(owner, id string, data []byte) error {
-	path := s.packPath(owner, id)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	tmp, err := s.stagePack(owner, id, data)
 	if err != nil {
 		return err
 	}
+	if err := s.commitStagedPack(tmp, s.packPath(owner, id)); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
+// stagePack writes data to a uniquely named, fsynced temp file beside the pack's
+// final path and returns its name. The name is unique so two uploads of the same
+// pack can stage concurrently without truncating each other's bytes.
+func (s *Store) stagePack(owner, id string, data []byte) (string, error) {
+	dir := filepath.Dir(s.packPath(owner, id))
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, id+".*.tmp")
+	if err != nil {
+		return "", err
+	}
+	tmp := f.Name()
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return "", err
 	}
 	if err := f.Sync(); err != nil {
 		_ = f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return "", err
 	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return "", err
 	}
+	return tmp, nil
+}
+
+// commitStagedPack renames a staged pack into place. It also flushes the directory
+// entry: the renamed file's data is durable, but the rename itself (the entry
+// pointing at it) is not until the dir is fsynced, so a committed manifest could
+// otherwise reference a pack the kernel loses on a crash.
+func (s *Store) commitStagedPack(tmp, path string) error {
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
 		return err
 	}
-	// Flush the directory entry too: the renamed file's data is durable, but the
-	// rename itself (the entry pointing at it) is not until the dir is fsynced, so a
-	// committed manifest could otherwise reference a pack the kernel loses on a crash.
 	return fsyncDir(filepath.Dir(path))
 }
 

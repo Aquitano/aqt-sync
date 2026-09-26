@@ -222,29 +222,53 @@ func (s *Store) PutPack(owner, packID string, data []byte, quotaBytes int64) (in
 	return s.PutPackWithLimits(owner, packID, data, quotaBytes, 0)
 }
 
-func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (stored int, err error) {
+func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes int64, maxObjects int) (int, error) {
+	pack, err := verifyPack(packID, data)
+	if err != nil {
+		return 0, err
+	}
+	return s.storeVerifiedPack(owner, pack, quotaBytes, maxObjects)
+}
+
+// verifiedPack is an uploaded pack whose address and every object slice have been
+// checked against their ids.
+type verifiedPack struct {
+	id    string
+	data  []byte
+	index []api.PackIndexEntry
+}
+
+// verifyPack checks that packID is the sha256 of data and that every indexed object
+// is an in-bounds slice hashing to its id. It touches no shared state, so callers
+// run it before taking any lock: hashing a full pack twice is the bulk of an
+// upload's CPU.
+func verifyPack(packID string, data []byte) (verifiedPack, error) {
 	sum := sha256.Sum256(data)
 	if hex.EncodeToString(sum[:]) != packID {
-		return 0, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
+		return verifiedPack{}, fmt.Errorf("%w: pack id does not match its bytes", ErrBadPack)
 	}
 	index, objectsEnd, err := parsePackIndex(data)
 	if err != nil {
-		return 0, err
+		return verifiedPack{}, err
 	}
 	for _, e := range index {
 		// Off and Len come from client JSON, so the bounds check must never add them
 		// (off=MaxInt64 + len=1 would wrap negative, slip past, and panic the slice).
 		// Compare against objectsEnd without ever computing Off+Len.
 		if e.Off < 0 || e.Len < 0 || e.Off > objectsEnd || e.Len > objectsEnd-e.Off {
-			return 0, fmt.Errorf("%w: object %s slice escapes the object region", ErrBadPack, e.ID)
+			return verifiedPack{}, fmt.Errorf("%w: object %s slice escapes the object region", ErrBadPack, e.ID)
 		}
 		s := sha256.Sum256(data[e.Off : e.Off+e.Len])
 		if hex.EncodeToString(s[:]) != e.ID {
-			return 0, fmt.Errorf("%w: object %s does not match its slice", ErrBadPack, e.ID)
+			return verifiedPack{}, fmt.Errorf("%w: object %s does not match its slice", ErrBadPack, e.ID)
 		}
 	}
+	return verifiedPack{id: packID, data: data, index: index}, nil
+}
 
-	defer s.gcLocks.lock(owner)()
+// storeVerifiedPack is PutPackWithLimits after verification.
+func (s *Store) storeVerifiedPack(owner string, pack verifiedPack, quotaBytes int64, maxObjects int) (stored int, err error) {
+	packID, data, index := pack.id, pack.data, pack.index
 	// Cheap early reject so an over-quota upload does not write a pack file it will
 	// discard. The authoritative check runs inside the transaction below.
 	if quotaBytes > 0 {
@@ -261,6 +285,16 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}
 
+	// The bytes are written and fsynced to a private temp file before the owner's
+	// GC lock, so concurrent uploads of one account overlap their disk writes; only
+	// the rename and the row commit, which GC must not interleave with, run under it.
+	tmp, err := s.stagePack(owner, packID, data)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+
+	defer s.gcLocks.lock(owner)()
 	path := s.packPath(owner, packID)
 	_, statErr := os.Stat(path)
 	created := errors.Is(statErr, os.ErrNotExist)
@@ -277,7 +311,7 @@ func (s *Store) PutPackWithLimits(owner, packID string, data []byte, quotaBytes 
 		}
 	}()
 
-	if err = s.writePack(owner, packID, data); err != nil {
+	if err = s.commitStagedPack(tmp, path); err != nil {
 		return 0, err
 	}
 	tx, err := s.db.Begin()
