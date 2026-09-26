@@ -766,6 +766,7 @@ func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 	h := sha256.Sum256([]byte(token))
 	owner, deviceID, ok := s.auth.get(h)
 	if !ok {
+		gen := s.auth.generation()
 		err = s.rdb.QueryRow(
 			`SELECT d.owner_handle, d.device_id FROM devices d
 			   JOIN accounts a ON a.owner_handle = d.owner_handle
@@ -777,7 +778,7 @@ func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 		if err != nil {
 			return "", "", err
 		}
-		s.auth.put(h, owner, deviceID)
+		s.auth.put(h, owner, deviceID, gen)
 	}
 	disabled, err := s.accountSuspended(owner)
 	if err != nil {
