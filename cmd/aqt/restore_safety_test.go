@@ -83,6 +83,30 @@ func TestInPlaceRestoreKeepsUntrackedFiles(t *testing.T) {
 	}
 }
 
+// A snapshot can hold a symlink where the live tree has a directory. An ignored file
+// in that directory stays in the backup instead of following the link out of the folder.
+func TestInPlaceRestoreKeepsUntrackedOutOfSymlinks(t *testing.T) {
+	parent, outside := t.TempDir(), t.TempDir()
+	root, staging := filepath.Join(parent, "work"), filepath.Join(parent, "staging")
+	writeTree(t, root, ".aqtignore", "*.env\n")
+	writeTree(t, root, "a/local.env", "TOKEN=only-here")
+	writeTree(t, staging, ".aqtignore", "*.env\n")
+	if err := os.Symlink(outside, filepath.Join(staging, "a")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	if err := swapTree(root, staging); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "local.env")); !os.IsNotExist(err) {
+		t.Fatalf("local.env followed the restored symlink out of the folder: %v", err)
+	}
+	left, _ := filepath.Glob(filepath.Join(parent, ".aqt-backup-*"))
+	if len(left) != 1 || readTree(t, left[0], "a/local.env") != "TOKEN=only-here" {
+		t.Fatalf("local.env was not kept in the backup: %v", left)
+	}
+}
+
 // Adopting a clone whose synced .aqtconfig selects conflicts=copy used to wedge the
 // internal reconcile the same way (copy contradicts --reconcile); it pins block too.
 func TestAdoptWithConflictsCopyConfig(t *testing.T) {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -584,26 +585,50 @@ func carryUntracked(backup, root string) bool {
 	}
 	all := true
 	for _, rel := range paths {
-		src := filepath.Join(backup, filepath.FromSlash(rel))
-		dst := filepath.Join(root, filepath.FromSlash(rel))
-		if _, err := os.Lstat(dst); err == nil {
-			all = false
-			continue
-		}
-		parent, err := os.Stat(filepath.Dir(src))
-		if err != nil {
-			all = false
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(dst), parent.Mode().Perm()); err != nil {
-			all = false
-			continue
-		}
-		if err := os.Rename(src, dst); err != nil {
+		if carryPath(backup, root, filepath.FromSlash(rel)) != nil {
 			all = false
 		}
 	}
 	return all
+}
+
+// carryPath moves backup/rel to root/rel unless something already occupies it.
+func carryPath(backup, root, rel string) error {
+	if err := mkdirLike(root, backup, filepath.Dir(rel)); err != nil {
+		return err
+	}
+	dst := filepath.Join(root, rel)
+	if _, err := os.Lstat(dst); err == nil {
+		return fmt.Errorf("%s: %w", dst, fs.ErrExist)
+	}
+	return os.Rename(filepath.Join(backup, rel), dst)
+}
+
+// mkdirLike makes root/rel a directory, creating each missing component with the
+// mode its counterpart under like has. A component that exists as anything but a
+// real directory is refused, so a symlink the restored tree put there cannot
+// redirect a move out of root or onto a path its rules would sync.
+func mkdirLike(root, like, rel string) error {
+	if rel == "." {
+		return nil
+	}
+	if err := mkdirLike(root, like, filepath.Dir(rel)); err != nil {
+		return err
+	}
+	dir := filepath.Join(root, rel)
+	if fi, err := os.Lstat(dir); err == nil {
+		if fi.Mode().Type() != fs.ModeDir {
+			return fmt.Errorf("%s is not a directory", dir)
+		}
+		return nil
+	} else if !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	orig, err := os.Stat(filepath.Join(like, rel))
+	if err != nil {
+		return err
+	}
+	return os.Mkdir(dir, orig.Mode().Perm())
 }
 
 // --- diff ---
