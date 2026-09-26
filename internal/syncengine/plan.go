@@ -2,7 +2,10 @@
 
 package syncengine
 
-import "sort"
+import (
+	"path"
+	"sort"
+)
 
 // ActionKind is one reconciliation outcome for a path in a three-way sync.
 type ActionKind string
@@ -65,6 +68,44 @@ func plan[T any](local, base, remote map[string]T, differs func(T, T) bool) []Ac
 		actions = append(actions, Action{path, kind})
 	}
 	return actions
+}
+
+// KeepParents stops a directory from being deleted while the merge keeps an entry
+// inside it. Plan and PlanDirs decide each path on their own, so a file added under
+// a directory another device deleted would be pushed without its directory's entry:
+// the tree then records that directory with no mode, and every later sync on the
+// adding device reports it as a directory conflict. A directory the remote removed
+// stays with the local entry when a local change survives inside it, and one removed
+// locally stays with the remote entry when a download lands inside it.
+func KeepParents(actions, dirActions []Action, local Manifest) {
+	keptUnder := map[string]bool{}
+	incomingUnder := map[string]bool{}
+	mark := func(set map[string]bool, p string) {
+		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+			set[dir] = true
+		}
+	}
+	scan := func(acts []Action, localHas func(string) bool) {
+		for _, a := range acts {
+			switch {
+			case a.Kind == Upload, a.Kind == Conflict && localHas(a.Path):
+				mark(keptUnder, a.Path)
+			case a.Kind == Download:
+				mark(incomingUnder, a.Path)
+			}
+		}
+	}
+	files, dirs := local.ByPath(), local.DirsByPath()
+	scan(actions, func(p string) bool { _, ok := files[p]; return ok })
+	scan(dirActions, func(p string) bool { _, ok := dirs[p]; return ok })
+	for i, a := range dirActions {
+		switch {
+		case a.Kind == DeleteLocal && keptUnder[a.Path]:
+			dirActions[i].Kind = Upload
+		case a.Kind == DeleteRemote && incomingUnder[a.Path]:
+			dirActions[i].Kind = Download
+		}
+	}
 }
 
 // PlanReconcile has no trusted base, so every difference is a Conflict. A one-sided

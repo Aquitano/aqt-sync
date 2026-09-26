@@ -362,6 +362,7 @@ func (app *application) runSync(dir string, opts syncOptions) error {
 		if rs.trustBase {
 			actions = syncengine.Plan(local, base, remote)
 			dirActions = syncengine.PlanDirs(local, base, remote)
+			syncengine.KeepParents(actions, dirActions, local)
 		} else {
 			actions = syncengine.PlanReconcile(local, remote)
 			dirActions = syncengine.PlanDirsReconcile(local, remote)
