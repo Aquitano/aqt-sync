@@ -5,6 +5,7 @@ package packio
 import (
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,6 +184,41 @@ func TestSourceMissingObjectIsNotFound(t *testing.T) {
 	}
 	if _, err := src.Get("deadbeef"); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("get of an unlocated object = %v, want client.ErrNotFound", err)
+	}
+}
+
+// A locate response the span arithmetic cannot use must fail the pull at Locate,
+// not panic the download worker that later slices its object out of a span.
+func TestSourceRejectsImpossibleLocations(t *testing.T) {
+	cases := map[string][]api.ObjectLocation{
+		"negative length":   {{ID: "a", PackID: "p", Off: 0, Len: -1}},
+		"overflowing range": {{ID: "a", PackID: "p", Off: math.MaxInt64 - 1, Len: 16}},
+		"object in two packs": {
+			{ID: "a", PackID: "p", Off: 0, Len: 16},
+			{ID: "a", PackID: "q", Off: 40, Len: 16},
+		},
+	}
+	for name, locs := range cases {
+		t.Run(name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/chunks/locate", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(api.LocateResponse{Locations: locs})
+			})
+			mux.HandleFunc("/v1/packs/", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(strings.Repeat("P", 64)))
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			cl, err := client.New(srv.URL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := NewEmptySource(cl)
+			if err := src.Locate([]string{"a"}); err == nil {
+				_, getErr := src.Get("a")
+				t.Fatalf("Locate accepted %+v (Get: %v)", locs, getErr)
+			}
+		})
 	}
 }
 

@@ -104,6 +104,9 @@ func (s *Source) Locate(ids []string) error {
 	if err != nil {
 		return err
 	}
+	if err := checkLocations(located); err != nil {
+		return err
+	}
 	byPack := map[string][]api.ObjectLocation{}
 	for _, loc := range located {
 		s.locs[loc.ID] = loc
@@ -111,6 +114,25 @@ func (s *Source) Locate(ids []string) error {
 	}
 	for _, objs := range byPack {
 		s.assignSpans(objs)
+	}
+	return nil
+}
+
+// checkLocations refuses a locate response the span arithmetic cannot trust. The
+// server is untrusted, and Get slices each object out of its span by offset and
+// length: a negative or overflowing range, or one object placed in two packs (its
+// location from one, its span from the other), panics a download worker rather
+// than failing the pull. Every pack fits api.MaxPackBytes, which bounds both.
+func checkLocations(locs []api.ObjectLocation) error {
+	seen := make(map[string]bool, len(locs))
+	for _, l := range locs {
+		if l.Off < 0 || l.Len <= 0 || l.Len > api.MaxPackBytes || l.Off > api.MaxPackBytes-l.Len {
+			return fmt.Errorf("server located object %s at an impossible range (offset %d, length %d)", l.ID, l.Off, l.Len)
+		}
+		if seen[l.ID] {
+			return fmt.Errorf("server located object %s more than once", l.ID)
+		}
+		seen[l.ID] = true
 	}
 	return nil
 }
