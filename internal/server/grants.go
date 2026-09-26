@@ -587,6 +587,10 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
 		return
 	}
+	if errors.Is(err, ErrDanglingRefs) {
+		abortDanglingShareRefs(c)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "store failed")
 		return

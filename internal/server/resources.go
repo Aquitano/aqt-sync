@@ -1257,6 +1257,10 @@ func (s *Server) handleSetVisibility(c *gin.Context) {
 		abortCode(c, http.StatusBadRequest, ErrGitRemotePolicy.Error(), api.ErrCodeGitRemotePolicy)
 		return
 	}
+	if errors.Is(err, ErrDanglingRefs) {
+		abortDanglingShareRefs(c)
+		return
+	}
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -1296,6 +1300,13 @@ func (s *Server) handleDeleteResource(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// abortDanglingShareRefs answers a visibility flip or grant whose refreshed chunk refs
+// name objects the owner no longer stores, with the same missing_chunks code a
+// manifest PUT gets for the same condition.
+func abortDanglingShareRefs(c *gin.Context) {
+	abortCode(c, http.StatusBadRequest, "the resource's chunk refs name objects the server no longer stores (a prune removed them); re-run sync, then share again", api.ErrCodeMissingChunks)
 }
 
 // policyErrorMessage maps the two lifecycle-policy validation errors to fixed,

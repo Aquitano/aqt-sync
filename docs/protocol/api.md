@@ -288,8 +288,9 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
 `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
 `account_exists`, `account_disabled`, `missing_chunks`
-(the manifest's refs name objects the owner no longer stores — a prune reaped an
-upload that outlived the grace period; re-running sync re-uploads them),
+(the refs a manifest PUT, visibility flip, or grant carries name objects the owner no
+longer stores — a prune reaped an upload that outlived the grace period; re-running
+sync re-uploads them),
 `invite_required`
 (signup on an invite-mode server without a valid token), `invalid_challenge`
 (request a fresh attach challenge and retry), `invalid_credentials` (the single
