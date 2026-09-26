@@ -182,3 +182,31 @@ func TestSyncDirCreatedOnBothSidesDeletesCleanly(t *testing.T) {
 	assertAbsent(t, replica, "d")
 	assertAbsent(t, origin, "d")
 }
+
+// TestSyncDirWithEmptySubdirReplacedByFile covers a remote directory->file swap where
+// the local directory still holds an empty tracked subdirectory. The file deletes run
+// before the download; the subdirectory's removal must too, or the download cannot
+// replace the non-empty directory and every sync fails the same way.
+func TestSyncDirWithEmptySubdirReplacedByFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "d/f", "file")
+	if err := os.MkdirAll(filepath.Join(origin, "d", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	if err := os.RemoveAll(filepath.Join(origin, "d")); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "d", "now a file")
+	h.sync(origin)
+	h.sync(replica)
+	if got := readTree(t, replica, "d"); got != "now a file" {
+		t.Fatalf("replica d = %q", got)
+	}
+}

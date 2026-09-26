@@ -424,6 +424,13 @@ func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, 
 			return w, err
 		}
 	}
+	// The same holds for tracked directories below a file the remote put in place of
+	// their parent: an empty subdirectory keeps the parent non-empty, and the download
+	// cannot replace it.
+	earlyDirs, lateDirs := partitionDeletesByDownload(w.dirRemovals, w.downloads, foldFS)
+	if err := removeDirs(c.root, earlyDirs); err != nil {
+		return w, err
+	}
 	dlProg := app.newProgressBar("downloading", entriesBytes(w.downloads))
 	dlMTimes, dlErr := runDownloads(c.cl, nil, c.root, w.downloads, dlProg)
 	dlProg.finish(dlErr == nil)
@@ -442,7 +449,7 @@ func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, 
 	if err := syncengine.MaterializeDirs(c.root, w.dirDownloads); err != nil {
 		return w, err
 	}
-	if err := removeDirs(c.root, w.dirRemovals); err != nil {
+	if err := removeDirs(c.root, lateDirs); err != nil {
 		return w, err
 	}
 	// The deletes above prune now-empty parents blind to the tracked set (RemoveFile
