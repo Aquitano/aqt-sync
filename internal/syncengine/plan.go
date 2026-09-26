@@ -70,6 +70,55 @@ func plan[T any](local, base, remote map[string]T, differs func(T, T) bool) []Ac
 	return actions
 }
 
+// MarkTypeClashes turns every download that cannot coexist with what the local side
+// keeps into a Conflict: a remote file where local keeps a directory or anything
+// inside one, and a remote entry or directory beneath a file or symlink local keeps.
+// Plan decides each path on its own, so without this both sides land in the merged
+// manifest — a file x beside x/y, which no filesystem can hold. The conflict then
+// resolves like any other: local keeps the path, and a resolving mode preserves the
+// remote side as a conflict copy. Run it before KeepParents, so a directory a kept
+// local change needs is not removed by the remote's file replacing it.
+func MarkTypeClashes(actions, dirActions []Action, local Manifest) {
+	files, dirs := local.ByPath(), local.DirsByPath()
+	keptFiles := map[string]bool{}
+	keptDirs := map[string]bool{}
+	keptUnder := map[string]bool{}
+	keep := func(set map[string]bool, p string) {
+		set[p] = true
+		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+			keptUnder[dir] = true
+		}
+	}
+	for _, a := range actions {
+		if _, ok := files[a.Path]; ok && (a.Kind == Upload || a.Kind == Conflict) {
+			keep(keptFiles, a.Path)
+		}
+	}
+	for _, a := range dirActions {
+		if _, ok := dirs[a.Path]; ok && (a.Kind == Upload || a.Kind == Conflict) {
+			keep(keptDirs, a.Path)
+		}
+	}
+	underKeptFile := func(p string) bool {
+		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+			if keptFiles[dir] {
+				return true
+			}
+		}
+		return false
+	}
+	for i, a := range actions {
+		if a.Kind == Download && (keptDirs[a.Path] || keptUnder[a.Path] || underKeptFile(a.Path)) {
+			actions[i].Kind = Conflict
+		}
+	}
+	for i, a := range dirActions {
+		if a.Kind == Download && (keptFiles[a.Path] || underKeptFile(a.Path)) {
+			dirActions[i].Kind = Conflict
+		}
+	}
+}
+
 // KeepParents stops a directory from being deleted while the merge keeps an entry
 // inside it. Plan and PlanDirs decide each path on their own, so a file added under
 // a directory another device deleted would be pushed without its directory's entry:

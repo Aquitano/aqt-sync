@@ -278,6 +278,58 @@ func TestSyncConflictCopyRemoteDeleteLocalModify(t *testing.T) {
 	}
 }
 
+// TestSyncConflictCopyFileDirClash covers a file and a directory claiming one path
+// from two devices. Local keeps the path and the remote side lands as a copy, beside
+// it or with the suffix on the clashing ancestor, and both replicas converge instead
+// of the merge holding both d and d/f, a tree no filesystem can hold.
+func TestSyncConflictCopyFileDirClash(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "d/f", "base")
+	writeTree(t, origin, "x", "base")
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	for _, p := range []string{"d", "x"} {
+		if err := os.RemoveAll(filepath.Join(origin, p)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeTree(t, origin, "d", "origin file")
+	writeTree(t, origin, "x/y", "origin dir")
+	h.sync(origin)
+	writeTree(t, replica, "d/f", "replica edit")
+	writeTree(t, replica, "x", "replica edit")
+
+	if err := app.runSync(replica, syncOptions{conflicts: "copy"}); err != nil {
+		t.Fatalf("copy-mode sync: %v", err)
+	}
+	if got := readTree(t, replica, "d/f"); got != "replica edit" {
+		t.Fatalf("local d/f = %q", got)
+	}
+	if got := readTree(t, replica, "x"); got != "replica edit" {
+		t.Fatalf("local x = %q", got)
+	}
+	copies := globConflicts(t, replica)
+	want := map[string]string{"d.conflict-": "origin file", "x.conflict-": "origin dir"}
+	if len(copies) != len(want) {
+		t.Fatalf("conflict copies = %v, want one per clash", copies)
+	}
+	for _, cp := range copies {
+		prefix := cp[:strings.Index(cp, ".conflict-")+len(".conflict-")]
+		if got := readTree(t, replica, cp); got != want[prefix] {
+			t.Fatalf("copy %s = %q, want %q", cp, got, want[prefix])
+		}
+	}
+
+	h.syncOpts(replica, syncOptions{conflicts: "copy"})
+	h.syncOpts(origin, syncOptions{conflicts: "copy"})
+	assertTreeEqual(t, origin, replica)
+}
+
 // TestSyncConflictCopyValidation covers the flag-combination guards: copy is
 // incompatible with --force and with the baseless --reconcile/--accept-rollback
 // plans.

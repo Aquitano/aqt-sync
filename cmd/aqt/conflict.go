@@ -144,14 +144,38 @@ func copyEntries(copies []conflictCopyItem) []syncengine.Entry {
 // A numeric suffix is bumped until the name neither exists under root nor is in taken
 // (paths the sync will materialize: remote entries and copies already planned this
 // pass), so a copy never overwrites an existing file and never lands where a download
-// is headed.
+// is headed. A remote entry under a path the local side keeps as a file or symlink
+// cannot land beneath it, so the suffix goes on that ancestor instead: the remote
+// x/y beside a local file x is preserved as x.conflict-<host>-<ts>/y.
 func conflictCopyPath(root, path, host string, now time.Time, taken map[string]bool) string {
-	base := fmt.Sprintf("%s.conflict-%s-%s", path, host, now.UTC().Format("20060102-150405"))
-	candidate := base
+	stem, rest := path, ""
+	if a, ok := nonDirAncestor(root, path); ok {
+		stem, rest = a, strings.TrimPrefix(path, a)
+	}
+	base := fmt.Sprintf("%s.conflict-%s-%s", stem, host, now.UTC().Format("20060102-150405"))
+	candidate := base + rest
 	for i := 1; pathExists(root, candidate) || taken[candidate]; i++ {
-		candidate = fmt.Sprintf("%s-%d", base, i)
+		candidate = fmt.Sprintf("%s-%d%s", base, i, rest)
 	}
 	return candidate
+}
+
+// nonDirAncestor returns the shallowest proper ancestor of rel that exists under root
+// as something other than a directory.
+func nonDirAncestor(root, rel string) (string, bool) {
+	for i := range len(rel) {
+		if rel[i] != '/' {
+			continue
+		}
+		fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel[:i])))
+		if err != nil {
+			return "", false
+		}
+		if !fi.IsDir() {
+			return rel[:i], true
+		}
+	}
+	return "", false
 }
 
 func pathExists(root, rel string) bool {

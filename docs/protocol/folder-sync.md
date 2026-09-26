@@ -443,6 +443,12 @@ alongside as `<name>.conflict-<host>-<timestamp>`, then continues (exit 0); the 
 is ordinary content the next sync pushes. A directory-mode conflict has no copy and
 always resolves local-wins.
 
+A file (or symlink) on one side and a directory on the other claiming the same path
+is a conflict too, even when the two sides touched different paths (`x` against
+`x/y`). Local keeps the path; copy mode preserves a remote file as
+`<name>.conflict-<host>-<timestamp>` and a remote directory's entries under
+`<name>.conflict-<host>-<timestamp>/`.
+
 `--conflicts=merge` first attempts a bounded three-way line merge for text files.
 It materializes base, local, and remote text, combines non-overlapping line edits
 without markers, seals the result before the root CAS, then re-hashes the planned
