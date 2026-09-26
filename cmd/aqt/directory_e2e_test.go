@@ -153,3 +153,32 @@ func TestSyncSubtreeDedupOnMove(t *testing.T) {
 		t.Fatal("moved second file did not reconstruct")
 	}
 }
+
+// TestSyncDirCreatedOnBothSidesDeletesCleanly covers a directory two devices create
+// independently. It converges with no plan action, so only the converged fold puts it
+// in each base; without that, a later delete on one device is re-pushed by the other
+// as a local add and the directory comes back empty everywhere.
+func TestSyncDirCreatedOnBothSidesDeletesCleanly(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "d/a", "from origin")
+	h.sync(origin)
+	writeTree(t, replica, "d/b", "from replica")
+	h.sync(replica)
+	h.sync(origin)
+
+	if err := os.RemoveAll(filepath.Join(origin, "d")); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	h.sync(replica)
+	h.sync(origin)
+	assertAbsent(t, replica, "d")
+	assertAbsent(t, origin, "d")
+}

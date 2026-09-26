@@ -254,11 +254,17 @@ func classifyActions[T any](actions []syncengine.Action, sides actionSides[T], p
 // local add, the file is re-pushed, and the deletion never propagates. Keep the local
 // entry (same hash as remote): base.json is local-only bookkeeping, and the local entry
 // carries this machine's mtime, so the next sync stat-fast-paths the file instead of
-// re-hashing it.
+// re-hashing it. A directory both sides created with one mode folds the same way, or a
+// later delete of it elsewhere is re-pushed as a local add.
 func foldConvergedPaths(st applyState, localByPath, remoteByPath map[string]syncengine.Entry, localDirs, remoteDirs map[string]syncengine.DirEntry) {
 	for p, le := range localByPath {
 		if re, ok := remoteByPath[p]; ok && le.Hash == re.Hash {
 			st.newBase[p] = le
+		}
+	}
+	for p, ld := range localDirs {
+		if rd, ok := remoteDirs[p]; ok && ld.Mode == rd.Mode {
+			st.newBaseDirs[p] = ld
 		}
 	}
 	dropVanished(st.newBase, localByPath, remoteByPath)
