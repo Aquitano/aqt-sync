@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -161,4 +163,71 @@ func TestRemoveDirEmptyAndNonEmpty(t *testing.T) {
 	if _, err := os.Stat(full); err != nil {
 		t.Fatalf("a non-empty directory must not be removed: %v", err)
 	}
+}
+
+// FuzzMaterializeStaysInRoot materializes an arbitrary tree shape in the order a
+// clone does (files, then symlinks, then directories) and checks that nothing outside
+// the root changed. A remote tree's names are chosen by whoever holds its key, which
+// for a share link or a grant is another account. Each spec line is "f <path>",
+// "l <path> <target selector>" or "d <path> <octal mode>"; link targets stay inside a
+// per-run sandbox, so a failure is contained.
+func FuzzMaterializeStaysInRoot(f *testing.F) {
+	f.Add("l d 0\nd d 55") // a directory's mode once reached through a symlink at its path
+	f.Add("l . 0\nl y 1")  // an entry at the root's own path once replaced the root
+	f.Add("f a/x\nl a 0\nd a/b 7")
+	f.Fuzz(func(t *testing.T, spec string) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation needs a privilege Windows leaves off")
+		}
+		sandbox := t.TempDir()
+		root, outside := filepath.Join(sandbox, "root"), filepath.Join(sandbox, "outside")
+		for _, d := range []string{sandbox, root, outside} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		targets := []string{outside, sandbox}
+		var files, links []Entry
+		var dirs []DirEntry
+		for _, line := range strings.Split(spec, "\n") {
+			kind, rest, _ := strings.Cut(line, " ")
+			path, arg, _ := strings.Cut(rest, " ")
+			switch kind {
+			case "f":
+				files = append(files, Entry{Path: path, Mode: 0o600, Inline: []byte("x")})
+			case "l":
+				links = append(links, Entry{Path: path, Link: targets[len(arg)%len(targets)]})
+			case "d":
+				mode, _ := strconv.ParseUint(arg, 8, 32)
+				// Owner rwx always, so the sandbox stays removable; the fuzzed group
+				// and other bits are what a chmod through a link would reveal.
+				dirs = append(dirs, DirEntry{Path: path, Mode: 0o700 | uint32(mode)&0o077})
+			}
+		}
+		for _, e := range files {
+			_, _ = WriteFile(root, e, e.Inline)
+		}
+		for _, e := range links {
+			_ = WriteSymlink(root, e)
+		}
+		_ = MaterializeDirs(root, dirs)
+
+		if fi, err := os.Lstat(root); err != nil || !fi.IsDir() {
+			t.Fatalf("the root is no longer a directory (err %v)", err)
+		}
+		for _, d := range []string{sandbox, outside} {
+			if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o700 {
+				t.Fatalf("%s changed mode or vanished (err %v)", d, err)
+			}
+		}
+		if got, _ := os.ReadDir(outside); len(got) > 0 {
+			t.Fatalf("%d entries landed outside the root", len(got))
+		}
+		if got, _ := os.ReadDir(sandbox); len(got) != 2 {
+			t.Fatalf("the sandbox holds %d entries, want only root and outside", len(got))
+		}
+	})
 }
