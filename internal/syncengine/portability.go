@@ -3,13 +3,12 @@
 package syncengine
 
 // Case-insensitive filesystems (the macOS and Windows defaults) resolve two
-// manifest paths that differ only by case (on macOS, or by Unicode normalization)
-// to one file, so materializing both
-// silently drops one — and the survivor is then re-uploaded under both names on
-// the next sync, destroying the remote copies too. Symlink creation on Windows
-// needs a privilege that is off by default outside Developer Mode. The helpers
-// here detect both conditions so callers can refuse or degrade by name instead
-// of losing data.
+// manifest paths that differ only by case (or, on macOS, only by Unicode
+// normalization) to one file, so materializing both silently drops one — and the
+// survivor is then re-uploaded under both names on the next sync, destroying the
+// remote copies too. Symlink creation on Windows needs a privilege that is off by
+// default outside Developer Mode. The helpers here detect both conditions so
+// callers can refuse or degrade by name instead of losing data.
 
 import (
 	"os"
