@@ -80,6 +80,32 @@ func TestMaterializeDirsAppliesModesLast(t *testing.T) {
 	}
 }
 
+// A tree can list the same name as a symlink and as a directory. The directory's
+// mode must not be applied through the link to whatever it points at.
+func TestMaterializeDirsRefusesASymlinkAtTheDirectoryPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Chmod carries only the write bit")
+	}
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.Chmod(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSymlink(root, Entry{Path: "d", Link: outside}); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := MaterializeDirs(root, []DirEntry{{Path: "d", Mode: 0o755}}); err == nil {
+		t.Error("MaterializeDirs accepted a directory path that is a symlink")
+	}
+	fi, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("symlink target mode = %#o, want it left at 0700", got)
+	}
+}
+
 // TestRemoveDirPathBecameFile covers the dir->file type change: when a tracked directory
 // was replaced on disk by a regular file earlier in the same apply (a remote type change),
 // RemoveDir must be a no-op that leaves the replacement file intact rather than failing on
