@@ -26,6 +26,9 @@ func TestCaseCollisions(t *testing.T) {
 	if got := CaseCollisions(entries[2:], nil); len(got) != 0 {
 		t.Errorf("clean set reported %v", got)
 	}
+	if got := CaseCollisions([]Entry{{Path: "caf\u00e9"}, {Path: "cafe\u0301"}}, nil); len(got) != 1 {
+		t.Errorf("normalization twins reported %v, want one group", got)
+	}
 }
 
 func TestKeepUnsupportedLinks(t *testing.T) {
