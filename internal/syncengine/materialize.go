@@ -148,11 +148,13 @@ func entryMode(e Entry) os.FileMode {
 }
 
 // materializeAt runs prepare (the parent-path policy), creates parent dirs, runs
-// write into a sibling temp file, fsyncs it, applies mode, and renames it into place
+// write into a sibling temp file, syncs it, applies mode, and renames it into place
 // at full. Rename replaces whatever occupies the path atomically and without
 // following it, so a crash mid-write leaves the old file or the new one but never a
 // truncated mix, and a stale local symlink is overwritten rather than followed (a
-// plain write would write through it to a possibly out-of-tree target).
+// plain write would write through it to a possibly out-of-tree target). The file is
+// durable only once the caller runs FlushWrites, which it must do before recording
+// state that claims the file.
 //
 // It returns the mtime (UnixNano) the file carries once it is in place, so the caller
 // can record it on the entry it stores in the base manifest. A remote entry carries
@@ -183,7 +185,7 @@ func materializeAt(full string, mode os.FileMode, prepare func() error, write fu
 		_ = tmp.Close()
 		return 0, err
 	}
-	if err := tmp.Sync(); err != nil {
+	if err := syncForRename(tmp); err != nil {
 		_ = tmp.Close()
 		return 0, err
 	}

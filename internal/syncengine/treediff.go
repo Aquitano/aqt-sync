@@ -4,6 +4,7 @@ package syncengine
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 
@@ -239,14 +240,14 @@ func coalesceTreeRenames(added, removed []diffEntry) (renames []Rename, keptAdde
 		return sole
 	}
 
-	filesUnder := func(entries []diffEntry, dir string) int {
-		n := 0
-		for _, e := range entries {
-			if strings.HasPrefix(e.path, dir+"/") {
-				n++
-			}
-		}
-		return n
+	removedPaths := make([]string, len(removedFiles))
+	for i, e := range removedFiles {
+		removedPaths[i] = e.path
+	}
+	slices.Sort(removedPaths)
+	anyRemovedUnder := func(dir string) bool {
+		lo, hi := sortedSpan(len(removedPaths), func(i int) string { return removedPaths[i] }, dir+"/", dir+"0")
+		return lo < hi
 	}
 
 	remDir, addDir := soleByHash(removedDirs), soleByHash(addedDirs)
@@ -266,46 +267,28 @@ func coalesceTreeRenames(added, removed []diffEntry) (renames []Rename, keptAdde
 		return cands[i].from.path < cands[j].from.path
 	})
 	var dirRenames []Rename
-	consumed := func(from, to string) bool {
-		for _, r := range dirRenames {
-			if strings.HasPrefix(from, r.From+"/") || strings.HasPrefix(to, r.To+"/") {
-				return true
-			}
-		}
-		return false
-	}
+	renamedFrom, renamedTo := map[string]bool{}, map[string]bool{}
 	for _, c := range cands {
-		if consumed(c.from.path, c.to.path) {
-			continue
+		if hasProperAncestorIn(c.from.path, renamedFrom) || hasProperAncestorIn(c.to.path, renamedTo) {
+			continue // consumed by a shallower directory rename
 		}
-		if filesUnder(removedFiles, c.from.path) == 0 {
+		if !anyRemovedUnder(c.from.path) {
 			continue
 		}
 		dirRenames = append(dirRenames, Rename{From: c.from.path, To: c.to.path, Dir: true})
+		renamedFrom[c.from.path], renamedTo[c.to.path] = true, true
 	}
-	atOrUnder := func(path, dir string) bool {
-		return path == dir || strings.HasPrefix(path, dir+"/")
-	}
-	survives := func(es []diffEntry, side func(Rename) string) []diffEntry {
+	survives := func(es []diffEntry, renamed map[string]bool) []diffEntry {
 		var out []diffEntry
 		for _, e := range es {
-			covered := false
-			for _, r := range dirRenames {
-				if atOrUnder(e.path, side(r)) {
-					covered = true
-					break
-				}
-			}
-			if !covered {
+			if !renamed[e.path] && !hasProperAncestorIn(e.path, renamed) {
 				out = append(out, e)
 			}
 		}
 		return out
 	}
-	toSide := func(r Rename) string { return r.To }
-	fromSide := func(r Rename) string { return r.From }
-	remainAdded := survives(addedFiles, toSide)
-	remainRemoved := survives(removedFiles, fromSide)
+	remainAdded := survives(addedFiles, renamedTo)
+	remainRemoved := survives(removedFiles, renamedFrom)
 
 	remFile, addFile := soleByHash(remainRemoved), soleByHash(remainAdded)
 	renames = dirRenames
@@ -325,7 +308,7 @@ func coalesceTreeRenames(added, removed []diffEntry) (renames []Rename, keptAdde
 			keptAdded = append(keptAdded, e)
 		}
 	}
-	keptAdded = append(keptAdded, survives(addedDirs, toSide)...)
-	keptRemoved = append(keptRemoved, survives(removedDirs, fromSide)...)
+	keptAdded = append(keptAdded, survives(addedDirs, renamedTo)...)
+	keptRemoved = append(keptRemoved, survives(removedDirs, renamedFrom)...)
 	return renames, keptAdded, keptRemoved
 }
