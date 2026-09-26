@@ -149,6 +149,20 @@ func TestResurrectedTombstoneCountsAgainstResourceCap(t *testing.T) {
 	}
 }
 
+// Re-uploading a pack the account already stores adds nothing, so a retry whose
+// first response was lost must succeed near the quota rather than answer 507.
+func TestPackReuploadAtQuotaIsIdempotent(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 8 * 1024})
+	token, _ := h.signup("pack-retry@example.com", "a passphrase here")
+	id, pack, _ := packOf(string(make([]byte, 5*1024)))
+	for i := range 2 {
+		if rec := h.raw(http.MethodPut, "/v1/packs/"+id, token, nil, pack); rec.Code != http.StatusOK {
+			t.Fatalf("upload %d of the same pack = %d: %s", i, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // A create replayed under its Idempotency-Key stores nothing new. Charging it as a
 // fresh create answered 507 for a resource that already existed, defeating the retry
 // the key exists for.
