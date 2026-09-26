@@ -224,6 +224,22 @@ func TestSourceRejectsImpossibleLocations(t *testing.T) {
 	}
 }
 
+// A tree level with identical subtrees asks for one node id more than once, and the
+// same location coming back twice must not fail the pull.
+func TestSourceAcceptsARepeatedLocation(t *testing.T) {
+	f := &fakePackServer{
+		packs: map[string][]byte{"p1": []byte(strings.Repeat("A", 100))},
+		locs:  map[string]api.ObjectLocation{"a": {ID: "a", PackID: "p1", Off: 0, Len: 100}},
+	}
+	src, err := NewSource(f.client(t), []string{"a", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := src.Get("a"); err != nil || string(got) != strings.Repeat("A", 100) {
+		t.Fatalf("Get(a) = %q, %v", got, err)
+	}
+}
+
 // FuzzLocationSpans decodes arbitrary bytes into one or two locate responses, as a
 // level-by-level walk issues them. Whatever checkLocations accepts, every object must
 // lie inside the span assigned to it and every span inside one pack, because Get

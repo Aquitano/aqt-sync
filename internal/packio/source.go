@@ -120,19 +120,22 @@ func (s *Source) Locate(ids []string) error {
 
 // checkLocations refuses a locate response the span arithmetic cannot trust. The
 // server is untrusted, and Get slices each object out of its span by offset and
-// length: a negative or overflowing range, or one object placed in two packs (its
-// location from one, its span from the other), panics a download worker rather
-// than failing the pull. Every pack fits api.MaxPackBytes, which bounds both.
+// length: a negative or overflowing range, or one object placed at two different
+// locations (its location from one, its span from the other), panics a download
+// worker rather than failing the pull. Every pack fits api.MaxPackBytes, which
+// bounds both. The same location twice is legitimate: the server answers each
+// query batch on its own, so an id asked for twice (a tree level with identical
+// subtrees) can come back twice.
 func checkLocations(locs []api.ObjectLocation) error {
-	seen := make(map[string]bool, len(locs))
+	seen := make(map[string]api.ObjectLocation, len(locs))
 	for _, l := range locs {
 		if l.Off < 0 || l.Len <= 0 || l.Len > api.MaxPackBytes || l.Off > api.MaxPackBytes-l.Len {
 			return fmt.Errorf("server located object %s at an impossible range (offset %d, length %d)", l.ID, l.Off, l.Len)
 		}
-		if seen[l.ID] {
-			return fmt.Errorf("server located object %s more than once", l.ID)
+		if prev, ok := seen[l.ID]; ok && prev != l {
+			return fmt.Errorf("server located object %s at two different locations", l.ID)
 		}
-		seen[l.ID] = true
+		seen[l.ID] = l
 	}
 	return nil
 }
