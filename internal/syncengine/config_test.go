@@ -289,7 +289,7 @@ func FuzzParseConfig(f *testing.F) {
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`{"version": 1, "chunkProfile": "large", "watch": {"interval": "2s", "gitGuard": false}, "conflicts": "copy"}`))
 	f.Add([]byte(`{"chunk": {"min": 1, "normal": 1, "max": 1}}`))
-	f.Add([]byte(`{"conflicts": "copy"}}`)) // a stray closing brace once passed the trailing-data check
+	f.Add([]byte(`{"conflicts": "copy"}}`)) // dec.More reports no trailing data before a stray '}'
 	f.Fuzz(func(t *testing.T, b []byte) {
 		c, err := ParseConfig(b)
 		if err != nil {

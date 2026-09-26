@@ -251,7 +251,7 @@ func FuzzLocationSpans(f *testing.F) {
 		return binary.BigEndian.AppendUint64(b, uint64(n))
 	}
 	f.Add(uint8(1), slices.Concat(loc(0, 0, 0, 100), loc(1, 0, 100, 100), loc(2, 1, 0, 50)))
-	f.Add(uint8(0), loc(0, 0, 0, -1)) // a negative length once panicked Get
+	f.Add(uint8(0), loc(0, 0, 0, -1)) // unchecked, a negative length makes Get slice data[0:-1]
 	f.Add(uint8(0), slices.Concat(loc(0, 0, 0, 16), loc(0, 1, 40, 16)))
 	f.Fuzz(func(t *testing.T, split uint8, raw []byte) {
 		var all []api.ObjectLocation
