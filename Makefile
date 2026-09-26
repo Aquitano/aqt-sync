@@ -48,6 +48,10 @@ fuzz:
 	go test -run='^$$' -fuzz='^FuzzThreeWayCleanLinesComeFromInputs$$' -fuzztime=10s ./internal/syncengine/merge
 	go test -run='^$$' -fuzz='^FuzzDecodeFragment$$' -fuzztime=10s ./internal/crypto
 	go test -run='^$$' -fuzz='^FuzzFragmentRoundTrip$$' -fuzztime=10s ./internal/crypto
+	go test -run='^$$' -fuzz='^FuzzParseConfig$$' -fuzztime=10s ./internal/syncengine
+	go test -run='^$$' -fuzz='^FuzzLocationSpans$$' -fuzztime=10s ./internal/packio
+	go test -run='^$$' -fuzz='^FuzzParsePublicFrames$$' -fuzztime=10s ./internal/client
+	go test -run='^$$' -fuzz='^FuzzClean$$' -fuzztime=10s ./internal/safetext
 
 fmt:
 	gofmt -l -w .

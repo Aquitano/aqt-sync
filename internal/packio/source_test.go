@@ -3,11 +3,13 @@
 package packio
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -220,6 +222,59 @@ func TestSourceRejectsImpossibleLocations(t *testing.T) {
 			}
 		})
 	}
+}
+
+// FuzzLocationSpans decodes arbitrary bytes into one or two locate responses, as a
+// level-by-level walk issues them. Whatever checkLocations accepts, every object must
+// lie inside the span assigned to it and every span inside one pack, because Get
+// slices an object out of its span with no further check.
+func FuzzLocationSpans(f *testing.F) {
+	loc := func(id, pack byte, off, n int64) []byte {
+		b := []byte{id, pack}
+		b = binary.BigEndian.AppendUint64(b, uint64(off))
+		return binary.BigEndian.AppendUint64(b, uint64(n))
+	}
+	f.Add(uint8(1), slices.Concat(loc(0, 0, 0, 100), loc(1, 0, 100, 100), loc(2, 1, 0, 50)))
+	f.Add(uint8(0), loc(0, 0, 0, -1)) // a negative length once panicked Get
+	f.Add(uint8(0), slices.Concat(loc(0, 0, 0, 16), loc(0, 1, 40, 16)))
+	f.Fuzz(func(t *testing.T, split uint8, raw []byte) {
+		var all []api.ObjectLocation
+		for ; len(raw) >= 18; raw = raw[18:] {
+			all = append(all, api.ObjectLocation{
+				ID:     string(rune('a' + raw[0]%8)),
+				PackID: string(rune('p' + raw[1]%3)),
+				Off:    int64(binary.BigEndian.Uint64(raw[2:])),
+				Len:    int64(binary.BigEndian.Uint64(raw[10:])),
+			})
+		}
+		cut := int(split) % (len(all) + 1)
+		s := &Source{locs: map[string]api.ObjectLocation{}, objSpan: map[string]packSpan{}, spans: map[string][]packSpan{}}
+		// The same bookkeeping Locate does with a response, minus the transport.
+		for _, located := range [][]api.ObjectLocation{all[:cut], all[cut:]} {
+			if checkLocations(located) != nil {
+				return
+			}
+			byPack := map[string][]api.ObjectLocation{}
+			for _, l := range located {
+				s.locs[l.ID] = l
+				byPack[l.PackID] = append(byPack[l.PackID], l)
+			}
+			for _, objs := range byPack {
+				s.assignSpans(objs)
+			}
+		}
+		for id, l := range s.locs {
+			sp := s.objSpan[id]
+			if !slices.Contains(s.spans[l.PackID], sp) {
+				t.Fatalf("object %s in pack %s was given a span of another pack", id, l.PackID)
+			}
+			// Get fetches [base,end) and slices [Off-base, Off-base+Len) out of it.
+			inside := 0 <= sp.base && sp.base <= l.Off && l.Off < l.Off+l.Len && l.Off+l.Len <= sp.end && sp.end <= api.MaxPackBytes
+			if !inside {
+				t.Fatalf("object %s at offset %d length %d is not inside its span [%d,%d)", id, l.Off, l.Len, sp.base, sp.end)
+			}
+		}
+	})
 }
 
 var errUnexpectedBytes = errors.New("unexpected object bytes")
