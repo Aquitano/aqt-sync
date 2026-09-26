@@ -72,12 +72,12 @@ func plan[T any](local, base, remote map[string]T, differs func(T, T) bool) []Ac
 
 // MarkTypeClashes turns every download that cannot coexist with what the local side
 // keeps into a Conflict: a remote file where local keeps a directory or anything
-// inside one, and a remote entry or directory beneath a file or symlink local keeps.
-// Plan decides each path on its own, so without this both sides land in the merged
-// manifest — a file x beside x/y, which no filesystem can hold. The conflict then
-// resolves like any other: local keeps the path, and a resolving mode preserves the
-// remote side as a conflict copy. Run it before KeepParents, so a directory a kept
-// local change needs is not removed by the remote's file replacing it.
+// inside one, and a remote directory at, or any remote entry beneath, a file or
+// symlink local keeps. Plan decides each path on its own, so without this both sides
+// land in the merged manifest — a file x beside x/y, which no filesystem can hold.
+// The conflict then resolves like any other: local keeps the path, and a resolving
+// mode preserves the remote side as a conflict copy. Run it before KeepParents, so
+// KeepParents keeps no directory for a download this turns into a conflict.
 func MarkTypeClashes(actions, dirActions []Action, local Manifest) {
 	files, dirs := local.ByPath(), local.DirsByPath()
 	keptFiles := map[string]bool{}
