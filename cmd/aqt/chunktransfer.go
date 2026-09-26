@@ -63,7 +63,8 @@ const locateBatchChunks = 50_000
 // and caches a few, so neither a whole file nor the whole tree is ever in memory.
 // Files are materialized by a bounded worker pool; the first error wins and is
 // returned, matching the upload pipeline's aggregation. The returned map gives each
-// written file's resulting mtime, keyed by path, for the caller's base manifest.
+// written file's resulting mtime, keyed by path, for the caller's base manifest, and
+// every file in it is durable by then.
 func runDownloads(cl *client.Client, slices sliceFetch, root string, entries []syncengine.Entry, prog *progressBar) (map[string]int64, error) {
 	src := packio.NewEmptySource(cl)
 	cache := packio.NewCache(packio.DefaultCacheBytes)
@@ -83,6 +84,11 @@ func runDownloads(cl *client.Client, slices sliceFetch, root string, entries []s
 			mtimes[path] = mtime
 		}
 		src.ForgetLocations()
+	}
+	if len(entries) > 0 {
+		if err := syncengine.FlushWrites(root); err != nil {
+			return nil, err
+		}
 	}
 	return mtimes, nil
 }
