@@ -153,3 +153,60 @@ func TestSyncSubtreeDedupOnMove(t *testing.T) {
 		t.Fatal("moved second file did not reconstruct")
 	}
 }
+
+// TestSyncDirCreatedOnBothSidesDeletesCleanly covers a directory two devices create
+// independently. It converges with no plan action, so only the converged fold puts it
+// in each base; without that, a later delete on one device is re-pushed by the other
+// as a local add and the directory comes back empty everywhere.
+func TestSyncDirCreatedOnBothSidesDeletesCleanly(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "d/a", "from origin")
+	h.sync(origin)
+	writeTree(t, replica, "d/b", "from replica")
+	h.sync(replica)
+	h.sync(origin)
+
+	if err := os.RemoveAll(filepath.Join(origin, "d")); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	h.sync(replica)
+	h.sync(origin)
+	assertAbsent(t, replica, "d")
+	assertAbsent(t, origin, "d")
+}
+
+// TestSyncDirWithEmptySubdirReplacedByFile covers a remote directory->file swap where
+// the local directory still holds an empty tracked subdirectory. The file deletes run
+// before the download; the subdirectory's removal must too, or the download cannot
+// replace the non-empty directory and every sync fails the same way.
+func TestSyncDirWithEmptySubdirReplacedByFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "d/f", "file")
+	if err := os.MkdirAll(filepath.Join(origin, "d", "empty"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	if err := os.RemoveAll(filepath.Join(origin, "d")); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "d", "now a file")
+	h.sync(origin)
+	h.sync(replica)
+	if got := readTree(t, replica, "d"); got != "now a file" {
+		t.Fatalf("replica d = %q", got)
+	}
+}
