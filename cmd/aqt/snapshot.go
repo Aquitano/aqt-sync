@@ -564,7 +564,46 @@ func swapTree(root, staging string) error {
 		movedIn = append(movedIn, e.Name())
 	}
 
+	if !carryUntracked(backup, root) {
+		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s: it holds ignored or special files "+
+			"that could not be moved back beside the restored ones; take what you need and delete it\n", backup)
+		return nil
+	}
 	return os.RemoveAll(backup)
+}
+
+// carryUntracked moves every path the pre-restore tree's scan skipped (ignored files
+// and directories such as .git, special files) from backup back into root. A snapshot
+// only holds what synced, so these exist nowhere else and the restore must not take
+// them with the rest of the old tree. It reports whether all of them moved; a path the
+// restored tree already occupies stays in backup.
+func carryUntracked(backup, root string) bool {
+	paths, err := syncengine.Untracked(backup)
+	if err != nil {
+		return false
+	}
+	all := true
+	for _, rel := range paths {
+		src := filepath.Join(backup, filepath.FromSlash(rel))
+		dst := filepath.Join(root, filepath.FromSlash(rel))
+		if _, err := os.Lstat(dst); err == nil {
+			all = false
+			continue
+		}
+		parent, err := os.Stat(filepath.Dir(src))
+		if err != nil {
+			all = false
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(dst), parent.Mode().Perm()); err != nil {
+			all = false
+			continue
+		}
+		if err := os.Rename(src, dst); err != nil {
+			all = false
+		}
+	}
+	return all
 }
 
 // --- diff ---
