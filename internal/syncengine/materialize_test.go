@@ -172,8 +172,8 @@ func TestRemoveDirEmptyAndNonEmpty(t *testing.T) {
 // "l <path> <target selector>" or "d <path> <octal mode>"; link targets stay inside a
 // per-run sandbox, so a failure is contained.
 func FuzzMaterializeStaysInRoot(f *testing.F) {
-	f.Add("l d 0\nd d 55") // a directory's mode once reached through a symlink at its path
-	f.Add("l . 0\nl y 1")  // an entry at the root's own path once replaced the root
+	f.Add("l d 0\nd d 55") // a symlink and a directory at the same path
+	f.Add("l . 0\nl y 1")  // a symlink at the root's own path, then one inside the root
 	f.Add("f a/x\nl a 0\nd a/b 7")
 	f.Fuzz(func(t *testing.T, spec string) {
 		if runtime.GOOS == "windows" {
