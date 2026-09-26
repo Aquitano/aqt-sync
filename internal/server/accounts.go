@@ -397,8 +397,10 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 		nonce     []byte
 		expiresAt int64
 	)
+	// One statement, so two concurrent attaches cannot both read the row before
+	// either deletes it. The row goes whether or not it has expired.
 	err := s.db.QueryRow(
-		`SELECT nonce, expires_at FROM challenges WHERE id = ? AND email = ?`, id, api.NormalizeEmail(email),
+		`DELETE FROM challenges WHERE id = ? AND email = ? RETURNING nonce, expires_at`, id, api.NormalizeEmail(email),
 	).Scan(&nonce, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -406,7 +408,6 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, _ = s.db.Exec(`DELETE FROM challenges WHERE id = ?`, id) // single-use, regardless of validity
 	if time.Now().Unix() > expiresAt {
 		return nil, ErrNotFound
 	}
