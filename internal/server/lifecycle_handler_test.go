@@ -192,3 +192,20 @@ func TestPublicPreflightDoesNotConsumeBurnRead(t *testing.T) {
 		t.Fatalf("preflight after burn = %d", rec.Code)
 	}
 }
+
+// A snapshot request naming a resource the caller does not own is refused, and a
+// refused request must not spend one of the link's reads: only a served read counts.
+func TestForeignSnapshotRequestDoesNotSpendRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	owner, mk := h.signup("burn-owner@example.com", "a passphrase here")
+	other, _ := h.signup("burn-other@example.com", "another passphrase")
+	put := h.putPublicViaAPI(owner, mk, 0, 1)
+
+	if code := h.do(http.MethodPost, "/v1/snapshots", other, api.CreateSnapshotRequest{ResourceID: put.ID}, nil); code != http.StatusNotFound {
+		t.Fatalf("snapshot of another account's link = %d, want 404", code)
+	}
+	if rec := h.get("/v1/resources/" + put.ID); rec.Code != http.StatusOK {
+		t.Fatalf("the link's one read after a refused snapshot = %d, want 200", rec.Code)
+	}
+}

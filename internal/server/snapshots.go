@@ -606,7 +606,10 @@ func (s *Server) handleCreateSnapshot(c *gin.Context) {
 		return
 	}
 	defer s.accountLimits.lock(owner)()
-	resource, err := s.store.GetResource(req.ResourceID, owner)
+	// Uncounted: this read only sizes the quota charge. The id may name another
+	// account's public link, which the store then refuses; a counted read would have
+	// spent one of that link's permits on a request that serves nothing.
+	resource, _, err := s.store.GetResourceUncounted(req.ResourceID, owner)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrNotFound):
