@@ -207,6 +207,8 @@ func TestParseConfigRejectsInvalidValues(t *testing.T) {
 		{"negative watch interval", `{"watch": {"interval": "-2s"}}`},
 		{"wrong value type", `{"chunkProfile": 3}`},
 		{"trailing data", `{"conflicts": "copy"} {"conflicts": "block"}`},
+		{"trailing brace", `{"conflicts": "copy"}}`},
+		{"trailing bracket", `{"conflicts": "copy"}]`},
 	}
 	for _, tc := range bad {
 		t.Run(tc.name, func(t *testing.T) {
