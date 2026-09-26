@@ -12,6 +12,7 @@ import (
 	"math"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -230,6 +231,45 @@ func TestConcurrentPackWritesDoNotError(t *testing.T) {
 		if err != nil {
 			t.Fatalf("concurrent write failed (SQLITE_BUSY without a single writer connection?): %v", err)
 		}
+	}
+}
+
+// Uploads stage their bytes before taking the owner's lock, so two in-flight PUTs
+// of one pack (a client retrying a request it gave up on) write at the same time.
+// Each must stage privately, or one truncates the file the other renames into place.
+func TestConcurrentSamePackUploadsKeepItsBytes(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "samepack@example.com")
+	packID, data, _ := packOf(strings.Repeat("a", 1<<20), strings.Repeat("b", 1<<20))
+
+	const writers = 8
+	errs := make(chan error, writers)
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := s.PutPack(owner, packID, data, 0)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent upload of one pack: %v", err)
+		}
+	}
+	got, err := os.ReadFile(s.packPath(owner, packID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Fatal("stored pack differs from the uploaded bytes")
+	}
+	if n := countFiles(t, filepath.Dir(s.packPath(owner, packID))); n != 1 {
+		t.Fatalf("%d files beside the pack, want just the pack (a staged temp leaked)", n)
 	}
 }
 
