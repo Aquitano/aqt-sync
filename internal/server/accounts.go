@@ -574,6 +574,17 @@ func (s *Store) ResourceStoredBytes(owner, id string) (int64, error) {
 	return info.Size() + int64(len(nonce)) + metaLen + wrappedLen + 256, nil
 }
 
+// ResourceReclaimed reports whether id is one of the owner's reclaimed tombstones,
+// which usage leaves out of its resource count until a content write revives it.
+func (s *Store) ResourceReclaimed(owner, id string) (bool, error) {
+	var reclaimed bool
+	err := s.rdb.QueryRow(`SELECT reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&reclaimed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return reclaimed, err
+}
+
 // ResourceMetaBytes reports the stored size of a live resource's sealed metadata, the
 // term AccountUsage counts for it, so a metadata replace is charged only its growth.
 // A missing row reports 0, which charges the write in full.

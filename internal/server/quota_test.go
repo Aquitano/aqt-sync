@@ -123,6 +123,32 @@ func TestQuotaChargesNewGrants(t *testing.T) {
 	}
 }
 
+// A reclaimed tombstone leaves the resource count, so rewriting one back into a live
+// resource adds a row and must pass the resource cap like a create; otherwise an
+// account could expire links into tombstones and revive them past the cap.
+func TestResurrectedTombstoneCountsAgainstResourceCap(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{MaxResources: 1})
+	token, mk := h.signup("resurrect@example.com", "a passphrase here")
+	owner, err := h.store.OwnerByToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := h.putPublicViaAPI(token, mk, 3600, 0)
+	if err := h.store.SetResourceExpiryForTest(link.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.GC(owner, gcMinAge); err != nil {
+		t.Fatal(err)
+	}
+	if _, code := h.putSized(token, mk, "", 16); code != http.StatusCreated {
+		t.Fatalf("create in the slot the tombstone freed = %d, want 201", code)
+	}
+	if _, code := h.putSized(token, mk, link.ID, 16); code != http.StatusInsufficientStorage {
+		t.Fatalf("reviving the tombstone at the cap = %d, want 507", code)
+	}
+}
+
 // A create replayed under its Idempotency-Key stores nothing new. Charging it as a
 // fresh create answered 507 for a resource that already existed, defeating the retry
 // the key exists for.

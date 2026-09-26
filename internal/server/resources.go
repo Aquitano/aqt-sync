@@ -885,19 +885,28 @@ func (s *Server) handlePutResource(c *gin.Context) {
 	}
 	// An in-place update writes just as many physical bytes as a create, so it is
 	// charged too; it replaces the resource's current bytes rather than adding to
-	// them, so only the difference counts, and it adds no row (no count check).
-	// A replayed create is already stored and must not be charged again.
+	// them, so only the difference counts, and it adds no row (no count check)
+	// unless it rewrites a reclaimed tombstone, which usage does not count, back into
+	// a live resource. A replayed create is already stored and must not be charged
+	// again.
 	if !s.store.ResourceCreateKeyRecorded(owner, req) {
 		defer s.accountLimits.lock(owner)()
 		added, kind := estimatedResourceBytes(req), "resources"
 		if req.ID != "" {
-			kind = ""
 			stored, err := s.store.ResourceStoredBytes(owner, req.ID)
 			if err != nil {
 				abort(c, http.StatusInternalServerError, "usage lookup failed")
 				return
 			}
 			added = max(0, added-stored)
+			reclaimed, err := s.store.ResourceReclaimed(owner, req.ID)
+			if err != nil {
+				abort(c, http.StatusInternalServerError, "usage lookup failed")
+				return
+			}
+			if !reclaimed {
+				kind = ""
+			}
 		}
 		if err := s.checkAccountLimit(owner, kind, added); err != nil {
 			if !abortLimit(c, err) {
