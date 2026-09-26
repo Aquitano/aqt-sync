@@ -4,8 +4,11 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -88,6 +91,27 @@ func TestRunDownloadsPropagatesFetchError(t *testing.T) {
 	}
 	if _, err := runDownloads(cl, nil, t.TempDir(), entries, nil); err == nil {
 		t.Fatal("runDownloads must fail when a pack fetch errors")
+	}
+}
+
+// A hostile tree can name both a symlink "l" -> anywhere and a file "l/x". Written
+// concurrently, the file's parent check could run before the link existed and its
+// write after, landing in the link's target. The race is narrow, so the tree repeats
+// the pair enough times that the unordered pool loses it at least once.
+func TestRunDownloadsNeverWritesThroughASymlinkItCreates(t *testing.T) {
+	outside := t.TempDir()
+	var entries []syncengine.Entry
+	for i := range 150 {
+		link := fmt.Sprintf("l%03d", i)
+		entries = append(entries,
+			syncengine.Entry{Path: link, Link: outside},
+			syncengine.Entry{Path: link + "/x", Mode: 0o600, Inline: []byte("x")},
+		)
+	}
+	noFetch := func(string) ([]byte, error) { return nil, errors.New("inline entries fetch nothing") }
+	_, _ = runDownloadsFrom(noFetch, t.TempDir(), entries, nil)
+	if landed, _ := os.ReadDir(outside); len(landed) > 0 {
+		t.Fatalf("a download wrote %d entries into a symlink target outside the root", len(landed))
 	}
 }
 
