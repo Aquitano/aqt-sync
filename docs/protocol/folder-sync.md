@@ -449,6 +449,9 @@ is a conflict too, even when the two sides touched different paths (`x` against
 `<name>.conflict-<host>-<timestamp>` and a remote directory's entries under
 `<name>.conflict-<host>-<timestamp>/`.
 
+A directory deleted on one side while the other side adds content inside it stays,
+with the adding side's entry and mode; the rest of the delete still applies.
+
 `--conflicts=merge` first attempts a bounded three-way line merge for text files.
 It materializes base, local, and remote text, combines non-overlapping line edits
 without markers, seals the result before the root CAS, then re-hashes the planned
