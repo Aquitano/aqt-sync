@@ -184,6 +184,25 @@ func TestOverCapBodiesAnswer413(t *testing.T) {
 	}
 }
 
+// The blob nonce names the blob file, so a write whose nonce cannot name one is a
+// client error: an empty nonce left the blob behind on delete, and a null or
+// overlong one failed the write with a 500.
+func TestPutResourceRejectsUnusableBlobNonce(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, _ := h.signup("nonce@example.com", "passphrase for the nonce test")
+	for _, nonce := range [][]byte{nil, {}, bytes.Repeat([]byte("n"), 200)} {
+		var e api.ErrorResponse
+		code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
+			Visibility: api.Public, Blob: crypto.SealedBlob{Nonce: nonce, Ciphertext: []byte("ciphertext")},
+			EncryptedMeta: crypto.SealedBlob{Nonce: make([]byte, 24), Ciphertext: []byte("meta")},
+		}, &e)
+		if code != http.StatusBadRequest || e.Code != api.ErrCodeInvalidRequest {
+			t.Errorf("%d-byte nonce: got %d %q, want 400 %q", len(nonce), code, e.Code, api.ErrCodeInvalidRequest)
+		}
+	}
+}
+
 // TestGzipNegotiatesJSON checks that a compressible JSON reply is gzip-encoded only
 // when the client offers it, and decodes cleanly either way.
 func TestGzipNegotiatesJSON(t *testing.T) {

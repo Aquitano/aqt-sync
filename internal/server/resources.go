@@ -862,6 +862,13 @@ func (s *Server) handlePutResource(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "compactAt must be non-negative")
 		return
 	}
+	// The nonce names the blob file (see blobPath). An empty one names the same path
+	// removeStaleBlobs(id, nil) spares, so delete and reclaim would leave the blob on
+	// disk; a long one overruns the filesystem's name limit.
+	if len(req.Blob.Nonce) == 0 || len(req.Blob.Nonce) > maxBlobNonce {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("blob nonce must be 1 to %d bytes", maxBlobNonce))
+		return
+	}
 	switch req.Visibility {
 	case api.Private:
 		if req.WrappedKey == nil {
