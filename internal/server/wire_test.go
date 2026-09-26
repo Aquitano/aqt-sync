@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -156,6 +157,30 @@ func TestRawResourceBodyCapEnforced(t *testing.T) {
 		map[string]string{"Content-Type": api.ResourceEnvelopeMediaType}, over)
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("over-cap raw put: got %d, want 413", rec.Code)
+	}
+}
+
+// TestOverCapBodiesAnswer413 pins the contract the resource route already keeps for
+// the JSON and pack routes: a body past its route's cap is payload_too_large, which
+// tells the caller to send less, not invalid_request.
+func TestOverCapBodiesAnswer413(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, _ := h.signup("cap413@example.com", "passphrase for the 413 test")
+
+	for _, tc := range []struct {
+		method, path string
+		body         []byte
+	}{
+		{http.MethodPost, "/v1/snapshots", append([]byte(`{"resourceId":"`), bytes.Repeat([]byte("a"), maxControlBody)...)},
+		{http.MethodPut, "/v1/packs/" + strings.Repeat("0", 64), make([]byte, maxPackBody+1)},
+	} {
+		rec := h.raw(tc.method, tc.path, token, map[string]string{"Content-Type": "application/json"}, tc.body)
+		var e api.ErrorResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &e)
+		if rec.Code != http.StatusRequestEntityTooLarge || e.Code != api.ErrCodePayloadTooLarge {
+			t.Errorf("%s %s over cap: got %d %q, want 413 %q", tc.method, tc.path, rec.Code, e.Code, api.ErrCodePayloadTooLarge)
+		}
 	}
 }
 

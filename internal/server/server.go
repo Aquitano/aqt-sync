@@ -590,10 +590,21 @@ func (s *Server) StartGC(interval time.Duration, stop <-chan struct{}) {
 
 func bindJSON(c *gin.Context, v any) bool {
 	if err := c.ShouldBindJSON(v); err != nil {
-		abort(c, http.StatusBadRequest, "invalid request body")
+		if bodyTooLarge(err) {
+			abort(c, http.StatusRequestEntityTooLarge, "request body exceeds limit")
+		} else {
+			abort(c, http.StatusBadRequest, "invalid request body")
+		}
 		return false
 	}
 	return true
+}
+
+// bodyTooLarge reports a read that hit the route's limitBody cap, which is the
+// client's to fix by sending less, not a malformed body.
+func bodyTooLarge(err error) bool {
+	var tooLarge *http.MaxBytesError
+	return errors.As(err, &tooLarge)
 }
 
 // abort answers with the status-bucket Code for its HTTP status, so every error

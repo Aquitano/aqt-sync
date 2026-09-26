@@ -98,8 +98,11 @@ func (s *Server) handlePutPack(c *gin.Context) {
 	owner := c.GetString(ownerContextKey)
 	packID := c.Param("id")
 	data, err := io.ReadAll(c.Request.Body)
+	if bodyTooLarge(err) {
+		abort(c, http.StatusRequestEntityTooLarge, "pack exceeds the maximum pack size")
+		return
+	}
 	if err != nil {
-		// The body cap (http.MaxBytesReader) surfaces here when exceeded.
 		abort(c, http.StatusBadRequest, "read pack body failed")
 		return
 	}
