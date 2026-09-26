@@ -198,9 +198,15 @@ func decodeEnvelope(r io.Reader, header any) ([]byte, error) {
 	if n == 0 {
 		return nil, fmt.Errorf("resource envelope: header length %d out of range", n)
 	}
-	hj := make([]byte, n)
-	if _, err := io.ReadFull(r, hj); err != nil {
+	// Grown as bytes arrive rather than allocated at the declared length: the server
+	// sets no body read deadline, so four bytes declaring the cap and then a stall
+	// would otherwise pin 32 MiB per connection.
+	hj, err := io.ReadAll(io.LimitReader(r, int64(n)))
+	if err != nil {
 		return nil, fmt.Errorf("resource envelope: read header: %w", err)
+	}
+	if len(hj) != int(n) {
+		return nil, fmt.Errorf("resource envelope: read header: %w", io.ErrUnexpectedEOF)
 	}
 	if err := json.Unmarshal(hj, header); err != nil {
 		return nil, fmt.Errorf("resource envelope: decode header: %w", err)
