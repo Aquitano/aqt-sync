@@ -246,8 +246,7 @@ func coalesceTreeRenames(added, removed []diffEntry) (renames []Rename, keptAdde
 	}
 	slices.Sort(removedPaths)
 	anyRemovedUnder := func(dir string) bool {
-		lo, hi := sortedSpan(len(removedPaths), func(i int) string { return removedPaths[i] }, dir+"/", dir+"0")
-		return lo < hi
+		return len(sortedSpan(removedPaths, func(p string) string { return p }, dir+"/", dir+"0")) > 0
 	}
 
 	remDir, addDir := soleByHash(removedDirs), soleByHash(addedDirs)

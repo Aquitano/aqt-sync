@@ -191,16 +191,17 @@ func newTreeIndex(m Manifest) treeIndex {
 	return x
 }
 
-// sortedSpan returns the half-open index range of the sorted keys in [lo, hi).
-// Every path strictly below dir lies in [dir+"/", dir+"0"), '0' being the byte
-// after '/', and dir itself is the only string in [dir, dir+"\x00").
-func sortedSpan(n int, key func(int) string, lo, hi string) (int, int) {
-	return sort.Search(n, func(i int) bool { return key(i) >= lo }), sort.Search(n, func(i int) bool { return key(i) >= hi })
+// sortedSpan returns the elements of the sorted xs whose key lies in [lo, hi).
+// Every path strictly below a directory d lies in [d+"/", d+"0"), '0' being the
+// byte after '/', and d itself is the only string in [d, d+"\x00").
+func sortedSpan[T any](xs []T, key func(T) string, lo, hi string) []T {
+	from := sort.Search(len(xs), func(i int) bool { return key(xs[i]) >= lo })
+	to := sort.Search(len(xs), func(i int) bool { return key(xs[i]) >= hi })
+	return xs[from:to]
 }
 
 func (x treeIndex) entriesUnder(dir string) []string {
-	lo, hi := sortedSpan(len(x.entries), func(i int) string { return x.entries[i] }, dir+"/", dir+"0")
-	return x.entries[lo:hi]
+	return sortedSpan(x.entries, func(p string) string { return p }, dir+"/", dir+"0")
 }
 
 func (x treeIndex) hasEntry(p string) bool {
@@ -210,11 +211,9 @@ func (x treeIndex) hasEntry(p string) bool {
 
 // dirsAtOrUnder returns dir and every tracked directory below it, in manifest order.
 func (x treeIndex) dirsAtOrUnder(dir string) []indexedDir {
-	key := func(i int) string { return x.dirs[i].Path }
-	lo, hi := sortedSpan(len(x.dirs), key, dir, dir+"\x00")
-	out := slices.Clone(x.dirs[lo:hi])
-	lo, hi = sortedSpan(len(x.dirs), key, dir+"/", dir+"0")
-	out = append(out, x.dirs[lo:hi]...)
+	key := func(d indexedDir) string { return d.Path }
+	out := slices.Clone(sortedSpan(x.dirs, key, dir, dir+"\x00"))
+	out = append(out, sortedSpan(x.dirs, key, dir+"/", dir+"0")...)
 	slices.SortFunc(out, func(a, b indexedDir) int { return cmp.Compare(a.pos, b.pos) })
 	return out
 }
