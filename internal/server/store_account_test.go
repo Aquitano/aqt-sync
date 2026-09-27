@@ -3,14 +3,56 @@
 package server
 
 import (
+	"crypto/sha256"
 	"errors"
 	"net/http"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
+
+// The cache rule the race below exercises, pinned without timing: a resolution read
+// before an invalidation is refused afterwards, one read after it is kept.
+func TestAuthCacheDropsAPutFromBeforeAnInvalidation(t *testing.T) {
+	t.Parallel()
+	c := newAuthCache()
+	h := sha256.Sum256([]byte("token"))
+	gen := c.generation()
+	c.invalidateDevice("owner", "device")
+	c.put(h, "owner", "device", gen)
+	if _, _, ok := c.get(h); ok {
+		t.Fatal("a resolution read before an invalidation was cached after it")
+	}
+	c.put(h, "owner", "device", c.generation())
+	if _, _, ok := c.get(h); !ok {
+		t.Fatal("a resolution read after the invalidation was not cached")
+	}
+}
+
+// A token lookup that raced a revocation may still answer that one request, but it
+// must not cache the device it read: the revocation's invalidation has already run,
+// so the cached entry would keep the revoked token working until its TTL.
+func TestRevocationRacingAuthDoesNotCacheTheToken(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "revoke-race@example.com")
+	for range 100 {
+		device, token, err := s.CreateDevice(owner, "d", 1, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var wg sync.WaitGroup
+		wg.Go(func() { _, _, _ = s.AuthByToken(token) })
+		wg.Go(func() { _ = s.DeleteDevice(owner, device) })
+		wg.Wait()
+		if _, _, err := s.AuthByToken(token); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("revoked token after a racing lookup: err=%v, want ErrNotFound", err)
+		}
+	}
+}
 
 // A reclaimed tombstone holds no ciphertext, so it must stop counting toward
 // the modeled quota; otherwise a delete-heavy account sits over quota with no

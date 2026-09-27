@@ -21,6 +21,11 @@ const authCacheTTL = 5 * time.Minute
 type authCache struct {
 	mu      sync.Mutex
 	entries map[[sha256.Size]byte]authEntry
+	// gen counts invalidations. A resolution read from the database before an
+	// invalidation must not be cached after it: the revocation's delete may have
+	// committed between that read and the put, and the entry would then keep a
+	// revoked token working until the TTL ran out.
+	gen uint64
 }
 
 type authEntry struct {
@@ -119,9 +124,22 @@ func (c *authCache) get(h [sha256.Size]byte) (owner, deviceID string, ok bool) {
 	return e.owner, e.deviceID, true
 }
 
-func (c *authCache) put(h [sha256.Size]byte, owner, deviceID string) {
+// generation returns the invalidation count, read before the database lookup whose
+// result is later offered to put.
+func (c *authCache) generation() uint64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	return c.gen
+}
+
+// put caches a resolution read at generation gen, unless an invalidation has run
+// since.
+func (c *authCache) put(h [sha256.Size]byte, owner, deviceID string, gen uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if gen != c.gen {
+		return
+	}
 	c.entries[h] = authEntry{owner: owner, deviceID: deviceID, expires: time.Now().Add(authCacheTTL)}
 }
 
@@ -130,6 +148,7 @@ func (c *authCache) put(h [sha256.Size]byte, owner, deviceID string) {
 func (c *authCache) invalidateOwner(owner string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.gen++
 	for h, e := range c.entries {
 		if e.owner == owner {
 			delete(c.entries, h)
@@ -142,6 +161,7 @@ func (c *authCache) invalidateOwner(owner string) {
 func (c *authCache) invalidateDevice(owner, deviceID string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.gen++
 	for h, e := range c.entries {
 		if e.owner == owner && e.deviceID == deviceID {
 			delete(c.entries, h)
