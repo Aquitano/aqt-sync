@@ -568,6 +568,10 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	}
 	defer s.accountLimits.lock(owner)()
 	stored, err := s.store.GrantStoredBytes(owner, c.Param("id"), req.GranteeHandle)
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "usage lookup failed")
 		return

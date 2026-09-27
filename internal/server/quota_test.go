@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -120,6 +121,29 @@ func TestQuotaChargesNewGrants(t *testing.T) {
 	}
 	if code := grant("grantee-0"); code != http.StatusCreated {
 		t.Fatalf("re-wrapping an existing grantee at the quota = %d, want 201", code)
+	}
+}
+
+// A growth charge sizes itself from the resource it would grow. One the account does
+// not hold is not_found, as the write itself would answer, not a 507 about the quota.
+func TestWriteToMissingResourceIsNotFoundBeforeQuota(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{QuotaBytes: 1})
+	token, _ := h.signup("missing-quota@example.com", "a passphrase here")
+	missing := "/v1/resources/" + strings.Repeat("0", 32)
+	for _, tc := range []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodPut, missing + "/metadata", api.UpdateResourceMetadataRequest{
+			EncryptedMeta: crypto.SealedBlob{Nonce: make([]byte, 24), Ciphertext: make([]byte, 64)}, ExpectedVersion: 1,
+		}},
+		{http.MethodPost, missing + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: []byte("wrap")}},
+	} {
+		var e api.ErrorResponse
+		if code := h.do(tc.method, tc.path, token, tc.body, &e); code != http.StatusNotFound || e.Code != api.ErrCodeNotFound {
+			t.Errorf("%s %s: got %d %q, want 404 %q", tc.method, tc.path, code, e.Code, api.ErrCodeNotFound)
+		}
 	}
 }
 

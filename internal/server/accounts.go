@@ -587,29 +587,32 @@ func (s *Store) ResourceReclaimed(owner, id string) (bool, error) {
 
 // ResourceMetaBytes reports the stored size of a live resource's sealed metadata, the
 // term AccountUsage counts for it, so a metadata replace is charged only its growth.
-// A missing row reports 0, which charges the write in full.
+// A resource the owner does not hold live is ErrNotFound, the answer
+// UpdateResourceMetadata would give, so the quota is never consulted about it.
 func (s *Store) ResourceMetaBytes(owner, id string) (int64, error) {
 	var n int64
 	err := s.rdb.QueryRow(
 		`SELECT length(encrypted_meta) FROM resources WHERE id = ? AND owner_handle = ? AND reclaimed = 0`, id, owner,
 	).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return 0, ErrNotFound
 	}
 	return n, err
 }
 
 // GrantStoredBytes reports what an existing grant adds to its owner's usage, the
 // same term AccountUsage sums, so re-posting a grantee (the rotation re-wrap) is
-// charged only its growth. No such grant reports 0.
+// charged only its growth. No such grant reports 0; a resource the owner does not
+// hold is ErrNotFound, the answer PutGrant would give.
 func (s *Store) GrantStoredBytes(owner, resourceID, grantee string) (int64, error) {
 	var n int64
 	err := s.rdb.QueryRow(
-		`SELECT length(wrapped_key) + 128 FROM grants WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
-		resourceID, owner, grantee,
+		`SELECT coalesce((SELECT length(wrapped_key) + 128 FROM grants WHERE resource_id = r.id AND grantee_handle = ?), 0)
+		   FROM resources r WHERE r.id = ? AND r.owner_handle = ?`,
+		grantee, resourceID, owner,
 	).Scan(&n)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return 0, ErrNotFound
 	}
 	return n, err
 }

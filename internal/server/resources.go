@@ -1226,6 +1226,10 @@ func (s *Server) handleUpdateResourceMetadata(c *gin.Context) {
 	capability := requestCapability(c)
 	defer s.accountLimits.lock(owner)()
 	stored, err := s.store.ResourceMetaBytes(owner, c.Param("id"))
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
 	if err != nil {
 		abort(c, http.StatusInternalServerError, "usage lookup failed")
 		return
