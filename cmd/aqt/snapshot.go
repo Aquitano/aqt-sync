@@ -566,10 +566,8 @@ func swapTree(root, staging string) error {
 		movedIn = append(movedIn, e.Name())
 	}
 
-	if !carryUntracked(backup, root) {
-		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s: it holds ignored or special files "+
-			"that could not be moved back without colliding with the restored tree or being synced under its "+
-			".aqtignore; take what you need and delete it\n", backup)
+	if err := carryUntracked(backup, root); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s, take what you need and delete it: %v\n", backup, err)
 		return nil
 	}
 	return os.RemoveAll(backup)
@@ -578,20 +576,28 @@ func swapTree(root, staging string) error {
 // carryUntracked moves every path the pre-restore tree's scan skipped (ignored files
 // and directories such as .git, special files) from backup back into root. A snapshot
 // only holds what synced, so these exist nowhere else and the restore must not take
-// them with the rest of the old tree. It reports whether all of them moved; a path
-// carryPath refuses stays in backup.
-func carryUntracked(backup, root string) bool {
+// them with the rest of the old tree. A path carryPath refuses stays in backup, and
+// the returned error names the first few.
+func carryUntracked(backup, root string) error {
 	paths, err := syncengine.Untracked(backup)
 	if err != nil {
-		return false
+		return err
 	}
-	all := true
+	var kept []string
 	for _, rel := range paths {
-		if carryPath(backup, root, rel) != nil {
-			all = false
+		if err := carryPath(backup, root, rel); err != nil {
+			kept = append(kept, err.Error())
 		}
 	}
-	return all
+	if len(kept) == 0 {
+		return nil
+	}
+	const show = 3
+	suffix := ""
+	if rest := len(kept) - show; rest > 0 {
+		kept, suffix = kept[:show], fmt.Sprintf(" and %d more", rest)
+	}
+	return errors.New(strings.Join(kept, "; ") + suffix)
 }
 
 // carryPath moves backup/rel to root/rel unless something already occupies it or the
@@ -611,7 +617,7 @@ func carryPath(backup, root, rel string) error {
 	}
 	dst := filepath.Join(root, filepath.FromSlash(rel))
 	if _, err := os.Lstat(dst); err == nil {
-		return fmt.Errorf("%s: %w", dst, fs.ErrExist)
+		return fmt.Errorf("%s already exists in the restored tree", rel)
 	}
 	return os.Rename(src, dst)
 }
@@ -630,7 +636,7 @@ func mkdirLike(root, like, rel string) error {
 	dir := filepath.Join(root, rel)
 	if fi, err := os.Lstat(dir); err == nil {
 		if fi.Mode().Type() != fs.ModeDir {
-			return fmt.Errorf("%s is not a directory", dir)
+			return fmt.Errorf("%s is not a directory in the restored tree", filepath.ToSlash(rel))
 		}
 		return nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
