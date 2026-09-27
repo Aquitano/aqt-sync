@@ -184,9 +184,10 @@ type Store struct {
 	// suspended memoizes per-account suspension. It is separate from auth because
 	// an operator writes it from another process, so it needs a much shorter expiry
 	// than a token resolution this process controls. See suspensionTTL.
-	suspended *suspensionCache
-	blobsDir  string
-	packsDir  string
+	suspended  *suspensionCache
+	blobsDir   string
+	packsDir   string
+	stagingDir string
 	// gcLocks serializes the GC/repack sequence per owner. The single DB connection
 	// serializes the transactions, but not the pack-file writes and removes around
 	// them, so two concurrent passes could double-handle a repack candidate; this lock
@@ -204,11 +205,15 @@ type Store struct {
 func OpenStore(dataDir string) (*Store, error) {
 	blobsDir := filepath.Join(dataDir, "blobs")
 	packsDir := filepath.Join(dataDir, "packs")
-	for _, d := range []string{blobsDir, packsDir} {
+	// Inside packs/ so the rename into place never crosses a filesystem. Owner
+	// handles never start with a dot, so it cannot collide with an owner's tree.
+	stagingDir := filepath.Join(packsDir, ".staging")
+	for _, d := range []string{blobsDir, packsDir, stagingDir} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			return nil, fmt.Errorf("create data dir: %w", err)
 		}
 	}
+	sweepStaging(stagingDir)
 	// busy_timeout lets a writer wait out a momentarily-locked database instead
 	// of failing the request with SQLITE_BUSY; WAL keeps readers off the writer's
 	// back; foreign_keys turns on the resource_chunks -> chunks reference so a
@@ -225,7 +230,7 @@ func OpenStore(dataDir string) (*Store, error) {
 	// connection serializes every write in-process. This suits the v1
 	// single-instance server; horizontal scaling would need real row locks.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, auth: newAuthCache(), suspended: newSuspensionCache(), blobsDir: blobsDir, packsDir: packsDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
+	s := &Store{db: db, auth: newAuthCache(), suspended: newSuspensionCache(), blobsDir: blobsDir, packsDir: packsDir, stagingDir: stagingDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
