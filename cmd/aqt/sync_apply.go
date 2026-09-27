@@ -376,6 +376,11 @@ func landCleanMerges(c applyCtx, merges []cleanMerge, newBase map[string]synceng
 		stampMTimes(newBase, map[string]int64{resolution.path: mtime})
 		landed = append(landed, resolution)
 	}
+	if len(landed) > 0 {
+		if err := syncengine.FlushWrites(c.root); err != nil {
+			return nil, nil, err
+		}
+	}
 	return landed, conflicts, nil
 }
 
