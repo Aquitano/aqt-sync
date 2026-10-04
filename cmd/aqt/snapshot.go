@@ -449,6 +449,12 @@ func (app *application) restoreInPlace(cl *client.Client, prof *identity.Profile
 	if err != nil {
 		return err
 	}
+	// WalkDir does not follow a symlink root. Use the real directory for both the
+	// swap's classification and its propagation scan, and stage beside that root.
+	root, err = filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve tracked folder: %w", err)
+	}
 	st, err := folderstate.LoadState(root)
 	if err != nil {
 		return fmt.Errorf("read folder state: %w", err)

@@ -86,6 +86,44 @@ func TestInPlaceRestoreKeepsUntrackedFiles(t *testing.T) {
 	}
 }
 
+func TestInPlaceRestoreThroughRootSymlinkKeepsLocalPaths(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	parent := t.TempDir()
+	src, alias := filepath.Join(parent, "root"), filepath.Join(parent, "alias")
+	if err := os.Mkdir(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h.init(src)
+	writeTree(t, src, ".aqtignore", "local.env\n")
+	writeTree(t, src, "a.txt", "checkpoint contents")
+	h.sync(src)
+	runCmd(t, app.checkpointCmd(), "pin", src)
+	writeTree(t, src, "a.txt", "changed")
+	writeTree(t, src, "local.env", "only copy of secret")
+	writeTree(t, src, ".git/HEAD", "only git metadata")
+	if err := os.Symlink(src, alias); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	runCmd(t, app.restoreCmd(), "pin", alias, "--in-place", "-y")
+	for rel, want := range map[string]string{"local.env": "only copy of secret", ".git/HEAD": "only git metadata"} {
+		if got := readTree(t, src, rel); got != want {
+			t.Fatalf("local %s = %q, want %q", rel, got, want)
+		}
+	}
+	left, err := filepath.Glob(filepath.Join(parent, ".aqt-backup-*"))
+	if err != nil || len(left) != 0 {
+		t.Fatalf("unexpected retained backup: %v, %v", left, err)
+	}
+	replica := t.TempDir()
+	h.clone(h.folderID(src), replica)
+	if got := readTree(t, replica, "a.txt"); got != "checkpoint contents" {
+		t.Fatalf("restored replica = %q, want checkpoint contents", got)
+	}
+	assertAbsent(t, replica, "local.env")
+	assertAbsent(t, replica, ".git")
+}
+
 // A snapshot taken before a file was ignored restores an .aqtignore that tracks it.
 // Moving that file back would let the restore's propagation sync publish it, so it
 // stays in the backup.
