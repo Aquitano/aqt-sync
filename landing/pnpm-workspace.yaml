@@ -6,17 +6,21 @@ allowBuilds:
 # exact reviewed versions here so installs can take the fixes immediately.
 minimumReleaseAgeExclude:
   - postcss@8.5.23
-  - brace-expansion@5.0.9
-  - brace-expansion@1.1.18
-  - js-yaml@4.3.1
+  - brace-expansion@5.0.12
+  - brace-expansion@1.1.21
+  - js-yaml@4.3.2
+  - browserslist@4.28.7
+  - baseline-browser-mapping@2.11.0
   - nanoid@3.3.18
 
 # Keep transitive build dependencies above their patched security floors without
 # forcing dependants on the 1.x and 5.x brace-expansion APIs onto one major line.
 overrides:
-  'brace-expansion@<1.1.18': 1.1.18
-  'brace-expansion@>=4.0.0 <5.0.9': 5.0.9
-  'js-yaml@>=4.0.0 <4.3.1': 4.3.1
+  'brace-expansion@<1.1.21': 1.1.21
+  'brace-expansion@>=4.0.0 <5.0.12': 5.0.12
+  'js-yaml@>=4.0.0 <4.3.2': 4.3.2
+  'browserslist@>=4.0.0 <4.28.7': 4.28.7
+  'baseline-browser-mapping@>=2.0.0 <2.11.0': 2.11.0
   'nanoid@<3.3.18': 3.3.18
   'postcss@<=8.5.22': 8.5.23
   'sharp@<0.35.0': 0.35.0
