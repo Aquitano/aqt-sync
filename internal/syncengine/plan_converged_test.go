@@ -55,7 +55,8 @@ func TestPlanBothSidesDeletedConverges(t *testing.T) {
 // pushed fleet-wide (issue #183).
 func TestScanIgnoresOwnTransientFiles(t *testing.T) {
 	dir := t.TempDir()
-	for _, name := range []string{".aqt-tmp-123456", ".aqt-CaseProbe-42", ".aqt-linkprobe"} {
+	artifacts := []string{".aqt-tmp-123456", ".aqt-CaseProbe-42", ".aqt-linkprobe", ".aqt-stage-123456", ".aqt-restore-123456", ".aqt-backup-123456"}
+	for _, name := range artifacts {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -72,7 +73,7 @@ func TestScanIgnoresOwnTransientFiles(t *testing.T) {
 	if _, ok := byPath["real.txt"]; !ok {
 		t.Fatal("real file missing from scan")
 	}
-	for _, name := range []string{".aqt-tmp-123456", ".aqt-CaseProbe-42", ".aqt-linkprobe"} {
+	for _, name := range artifacts {
 		if _, ok := byPath[name]; ok {
 			t.Fatalf("transient artifact %s scanned as tracked content", name)
 		}
