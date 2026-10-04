@@ -12,6 +12,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +23,7 @@ import (
 	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
+	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/cryptotest"
 	"github.com/aquitano/aqt-sync/internal/identity"
@@ -253,5 +255,126 @@ func TestLoginRefusesToSignAnythingButAChallenge(t *testing.T) {
 	})
 	if signed.Load() {
 		t.Fatal("a signature over the forged challenge reached the server")
+	}
+}
+
+func TestRootRotationRetriesChangedIncomingGrant(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var replace func()
+	var armed atomic.Bool
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if r.Method == http.MethodPut && r.URL.Path == "/v1/account/root-key" && armed.CompareAndSwap(true, false) {
+			replace()
+		}
+		pass(w, r)
+	})
+	const bobPass = "bob horse battery staple"
+	grantSignup(t, h, "bob@example.com", "bob", bobPass)
+	const content = "incoming shares survive a retried root rotation"
+	id := app.pushSecretFile(t, "rotation.txt", content)
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatal(err)
+	}
+	cl, alice, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceMK, err := app.unlockMaster(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer aliceMK.Wipe()
+	res, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(aliceMK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Wipe()
+	keys, err := cl.AccountKeys("bob@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	freshWrap, err := crypto.WrapGrant(ck, keys.EncPublicKey, id, alice.OwnerHandle, keys.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replace = func() {
+		if err := h.store.PutGrant(alice.OwnerHandle, id, keys.Handle, freshWrap, nil); err != nil {
+			t.Error(err)
+		}
+	}
+	armed.Store(true)
+	app.asProfile("bob", func() {
+		withStdin(t, bobPass+"\n")
+		if err := app.runRootKeyRotation(true); err == nil || !strings.Contains(err.Error(), "re-run") {
+			t.Fatalf("stale root rotation = %v, want a retry instruction", err)
+		}
+		if armed.Load() {
+			t.Fatal("the rotation never reached the injected grant replacement")
+		}
+		withStdin(t, bobPass+"\n")
+		if err := app.runRootKeyRotation(true); err != nil {
+			t.Fatalf("retry root rotation: %v", err)
+		}
+		dest := filepath.Join(t.TempDir(), "rotation.txt")
+		if err := app.runPull("aqt://"+id, dest, "", false, false); err != nil {
+			t.Fatalf("pull after root rotation: %v", err)
+		}
+		if got, err := os.ReadFile(dest); err != nil || string(got) != content {
+			t.Fatalf("pulled %q (%v), want %q", got, err, content)
+		}
+	})
+}
+
+func TestShareWithRefusesChangedResourceKey(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var rotate func()
+	var armed atomic.Bool
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if r.URL.Path == "/v1/account/keys" && armed.CompareAndSwap(true, false) {
+			rotate()
+		}
+		pass(w, r)
+	})
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	id := app.pushSecretFile(t, "rotate-during-share.txt", "sharing must use the current content key")
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mk, err := app.unlockMaster(prof)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mk.Wipe()
+	res, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ck.Wipe()
+	rotate = func() {
+		newCK, err := rotateInline(cl, id, res, ck, mk, "")
+		newCK.Wipe()
+		if err != nil {
+			t.Error(err)
+		}
+	}
+	armed.Store(true)
+	if err := app.runShareWith(id, "bob@example.com"); !errors.Is(err, client.ErrConflict) {
+		t.Fatalf("grant prepared before the resource key rotated = %v, want a conflict", err)
+	}
+	if armed.Load() {
+		t.Fatal("sharing never reached the injected resource rotation")
+	}
+	grants, err := cl.ListGrants(id)
+	if err != nil || len(grants) != 0 {
+		t.Fatalf("stale sharing created an unreadable grant: %+v (%v)", grants, err)
 	}
 }

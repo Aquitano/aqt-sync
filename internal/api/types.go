@@ -87,6 +87,10 @@ type CreateGrantRequest struct {
 	GranteeHandle   string `json:"granteeHandle"`
 	WrappedKey      []byte `json:"wrappedKey"`
 	ExpectedVersion int    `json:"expectedVersion,omitempty"`
+	// GranteeEmail and GranteeEncPublicKey, when supplied together, pin the lookup
+	// the sender wrapped to. A key change before the upsert returns 409.
+	GranteeEmail        string `json:"granteeEmail,omitempty"`
+	GranteeEncPublicKey []byte `json:"granteeEncPublicKey,omitempty"`
 	// ChunkRefs refreshes the resource's read scope in the same transaction as the
 	// grant. On a client-GC account private pushes leave the stored refs stale, so
 	// the operation that mints a reader must carry the current set — otherwise the
@@ -221,10 +225,13 @@ type KeyWrapMigration struct {
 
 // GrantKeyMigration replaces an incoming grant's HPKE wrap when the grantee's
 // published enc key changes: with its root key, or on the move to X-Wing.
+// ExpectedWrappedKey is the wrap the client opened, so a concurrent grant replacement
+// cannot be overwritten with a migration of its old content key.
 type GrantKeyMigration struct {
-	ResourceID  string `json:"resourceId"`
-	OwnerHandle string `json:"ownerHandle"`
-	WrappedKey  []byte `json:"wrappedKey"`
+	ResourceID         string `json:"resourceId"`
+	OwnerHandle        string `json:"ownerHandle"`
+	WrappedKey         []byte `json:"wrappedKey"`
+	ExpectedWrappedKey []byte `json:"expectedWrappedKey"`
 }
 
 // EncKeyUpgradeRequest publishes the account's X-Wing enc key in place of a
@@ -242,8 +249,9 @@ type EncKeyUpgradeRequest struct {
 // RootKeyRotationRequest atomically changes the account root key. Every owner
 // resource and snapshot that has a recoverable wrapped key, plus every incoming
 // grant, must be included so the old root is not needed after the account identity
-// switches. The server stores these values opaquely and verifies only membership,
-// versions, the current-passphrase proof, and the new public-key binding.
+// switches. The server stores these values opaquely and verifies membership,
+// resource versions, original grant wraps, the current-passphrase proof, and the
+// new public-key binding.
 type RootKeyRotationRequest struct {
 	Kdf             crypto.KdfParams    `json:"kdf"`
 	WrappedRoot     crypto.SealedBlob   `json:"wrappedRoot"`

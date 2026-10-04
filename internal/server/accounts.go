@@ -347,17 +347,20 @@ func verifyGrantMigrations(tx *sql.Tx, owner string, grants []api.GrantKeyMigrat
 	seen := map[string]bool{}
 	for _, m := range grants {
 		k := m.ResourceID + "\x00" + m.OwnerHandle
-		if m.ResourceID == "" || m.OwnerHandle == "" || len(m.WrappedKey) == 0 || seen[k] {
+		if m.ResourceID == "" || m.OwnerHandle == "" || len(m.WrappedKey) == 0 || len(m.ExpectedWrappedKey) == 0 || seen[k] {
 			return ErrVersionConflict
 		}
 		seen[k] = true
-		var exists int
-		err := tx.QueryRow(`SELECT 1 FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.resource_id=? AND g.owner_handle=? AND g.grantee_handle=? AND r.reclaimed=0`, m.ResourceID, m.OwnerHandle, owner).Scan(&exists)
+		var current []byte
+		err := tx.QueryRow(`SELECT g.wrapped_key FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.resource_id=? AND g.owner_handle=? AND g.grantee_handle=? AND r.reclaimed=0`, m.ResourceID, m.OwnerHandle, owner).Scan(&current)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrVersionConflict
 		}
 		if err != nil {
 			return err
+		}
+		if !bytes.Equal(current, m.ExpectedWrappedKey) {
+			return ErrVersionConflict
 		}
 	}
 	var n int
@@ -370,15 +373,16 @@ func verifyGrantMigrations(tx *sql.Tx, owner string, grants []api.GrantKeyMigrat
 	return nil
 }
 
-// updateIncomingGrants stores the re-wrapped live grants and removes legacy wraps
-// left on reclaimed resources, for both enc-key upgrades and root-key rotations.
+// updateIncomingGrants stores the re-wrapped live grants and removes grants left on
+// reclaimed resources. Those grants are absent from the migration set and would
+// otherwise reappear with an obsolete wrap if their resource is revived.
 func updateIncomingGrants(tx *sql.Tx, owner string, grants []api.GrantKeyMigration) error {
 	for _, m := range grants {
 		if _, err := tx.Exec(`UPDATE grants SET wrapped_key = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`, m.WrappedKey, m.ResourceID, m.OwnerHandle, owner); err != nil {
 			return err
 		}
 	}
-	_, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND length(wrapped_key) <> ?`, owner, crypto.GrantWrapSize)
+	_, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND EXISTS (SELECT 1 FROM resources r WHERE r.id = grants.resource_id AND r.reclaimed = 1)`, owner)
 	return err
 }
 

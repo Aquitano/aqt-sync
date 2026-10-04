@@ -84,13 +84,14 @@ func TestUpgradeEncKeyMovesKeyAndGrantsTogether(t *testing.T) {
 	enc := crypto.DeriveEncKey(bobMK).Public()
 	sig := crypto.SignEncKey(crypto.DeriveSigningKey(bobMK), enc)
 	wrap := bytes.Repeat([]byte{7}, crypto.GrantWrapSize)
-	grants := []api.GrantKeyMigration{{ResourceID: res.ID, OwnerHandle: alice, WrappedKey: wrap}}
+	grants := []api.GrantKeyMigration{{ResourceID: res.ID, OwnerHandle: alice, WrappedKey: wrap, ExpectedWrappedKey: make([]byte, 80)}}
 	refused := []struct {
 		name string
 		req  api.EncKeyUpgradeRequest
 		want int
 	}{
 		{"incomplete grant set", api.EncKeyUpgradeRequest{EncPublicKey: enc, EncKeySig: sig}, http.StatusConflict},
+		{"missing original wrap", api.EncKeyUpgradeRequest{EncPublicKey: enc, EncKeySig: sig, IncomingGrants: []api.GrantKeyMigration{{ResourceID: res.ID, OwnerHandle: alice, WrappedKey: wrap}}}, http.StatusConflict},
 		{"signed by another identity", api.EncKeyUpgradeRequest{EncPublicKey: enc, EncKeySig: crypto.SignEncKey(crypto.DeriveSigningKey(aliceMK), enc), IncomingGrants: grants}, http.StatusBadRequest},
 		{"X25519-sized wrap", api.EncKeyUpgradeRequest{EncPublicKey: enc, EncKeySig: sig, IncomingGrants: []api.GrantKeyMigration{{ResourceID: res.ID, OwnerHandle: alice, WrappedKey: make([]byte, 80)}}}, http.StatusBadRequest},
 	}

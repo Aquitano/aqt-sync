@@ -785,7 +785,10 @@ func rewrapIncomingGrants(cl *client.Client, oldRoot crypto.MasterKey, newEnc []
 		if err != nil {
 			return nil, fmt.Errorf("rewrap incoming grant %s: %w", share.ResourceID, err)
 		}
-		migrations = append(migrations, api.GrantKeyMigration{ResourceID: share.ResourceID, OwnerHandle: share.OwnerHandle, WrappedKey: wrapped})
+		migrations = append(migrations, api.GrantKeyMigration{
+			ResourceID: share.ResourceID, OwnerHandle: share.OwnerHandle,
+			WrappedKey: wrapped, ExpectedWrappedKey: share.WrappedKey,
+		})
 	}
 	return migrations, nil
 }

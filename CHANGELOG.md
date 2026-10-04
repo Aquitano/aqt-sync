@@ -71,8 +71,13 @@ All notable changes to this project are documented in this file.
 - Oversized JSON and pack bodies return `413`, unmatched routes return the JSON
   `not_found` error, and sharing with pruned chunk references returns `missing_chunks`
   instead of `500`. Resource writes reject blob nonces outside the filename bounds.
-- Root-key rotation removes legacy incoming grant wraps on reclaimed resources in
-  the same transaction as the key change, matching the login migration's cleanup.
+- Root-key rotation and login migration remove incoming grants on reclaimed
+  resources in the same transaction as the key change, including X-Wing wraps tied
+  to a discarded root key.
+- Account-key migrations reject incoming grants whose wraps changed while the
+  client prepared the request. Grant writes also check the recipient's current
+  lookup key, and fresh shares pin the resource version they opened, so a stale
+  request cannot replace a working grant with a wrap to an obsolete key.
 
 ### Performance
 

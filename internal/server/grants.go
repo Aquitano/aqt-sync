@@ -3,6 +3,7 @@
 package server
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"database/sql"
 	"encoding/json"
@@ -86,6 +87,37 @@ func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error
 // refs, when non-empty, refreshes the resource's read scope in the same
 // transaction — the client-GC path, where the stored refs may be stale.
 func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, refs []string, expectedVersions ...int) error {
+	version := 0
+	if len(expectedVersions) > 0 {
+		version = expectedVersions[0]
+	}
+	return s.putGrant(owner, resourceID, grantee, wrapped, refs, version, nil)
+}
+
+type grantTarget struct {
+	email        string
+	encPublicKey []byte
+	decoy        api.AccountKeysResponse
+}
+
+// verify checks real and decoy lookup keys alike, so a caller cannot distinguish an
+// unknown email by deliberately posting a mismatched target key.
+func (target *grantTarget) verify(tx *sql.Tx, grantee string) error {
+	var handle string
+	var enc []byte
+	err := tx.QueryRow(`SELECT owner_handle, enc_public_key FROM accounts WHERE email = ? COLLATE NOCASE`, target.email).Scan(&handle, &enc)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && len(enc) != crypto.EncPublicKeySize) {
+		handle, enc = target.decoy.Handle, target.decoy.EncPublicKey
+	} else if err != nil {
+		return err
+	}
+	if grantee != handle || !bytes.Equal(enc, target.encPublicKey) {
+		return ErrVersionConflict
+	}
+	return nil
+}
+
+func (s *Store) putGrant(owner, resourceID, grantee string, wrapped []byte, refs []string, expectedVersion int, target *grantTarget) error {
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -106,8 +138,13 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, refs
 	if compactAt > 0 {
 		return ErrGitRemotePolicy
 	}
-	if len(expectedVersions) > 0 && expectedVersions[0] > 0 && expectedVersions[0] != version {
+	if expectedVersion > 0 && expectedVersion != version {
 		return ErrVersionConflict
+	}
+	if target != nil {
+		if err := target.verify(tx, grantee); err != nil {
+			return err
+		}
 	}
 	var blocked int
 	if err := tx.QueryRow(
@@ -564,6 +601,20 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "cannot grant a resource to its own account")
 		return
 	}
+	var target *grantTarget
+	if req.GranteeEmail != "" || len(req.GranteeEncPublicKey) > 0 {
+		email := api.NormalizeEmail(req.GranteeEmail)
+		if email == "" || len(req.GranteeEncPublicKey) != crypto.EncPublicKeySize {
+			abort(c, http.StatusBadRequest, "granteeEmail and an X-Wing granteeEncPublicKey must be supplied together")
+			return
+		}
+		decoy, err := s.decoyAccountKeys(email)
+		if err != nil {
+			abort(c, http.StatusInternalServerError, "grant target lookup failed")
+			return
+		}
+		target = &grantTarget{email: email, encPublicKey: req.GranteeEncPublicKey, decoy: decoy}
+	}
 	defer s.accountLimits.lock(owner)()
 	stored, err := s.store.GrantStoredBytes(owner, c.Param("id"), req.GranteeHandle)
 	if errors.Is(err, ErrNotFound) {
@@ -578,9 +629,9 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	if !s.chargeGrowth(c, owner, int64(len(req.WrappedKey))+128-stored) {
 		return
 	}
-	err = s.store.PutGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ChunkRefs, req.ExpectedVersion)
+	err = s.store.putGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ChunkRefs, req.ExpectedVersion, target)
 	if errors.Is(err, ErrVersionConflict) {
-		abortCode(c, http.StatusConflict, "resource or grants changed since you last fetched it", api.ErrCodeVersionConflict)
+		abortCode(c, http.StatusConflict, "resource, grants, or recipient keys changed since you last fetched them", api.ErrCodeVersionConflict)
 		return
 	}
 	if errors.Is(err, ErrNotFound) {

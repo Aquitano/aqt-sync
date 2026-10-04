@@ -338,7 +338,10 @@ func (app *application) runShareWith(idArg, email string) error {
 	if err != nil {
 		return err
 	}
-	if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: contact.Handle, WrappedKey: wrap, ChunkRefs: scope}); err != nil {
+	if err := cl.CreateGrant(id, api.CreateGrantRequest{
+		GranteeHandle: contact.Handle, WrappedKey: wrap, ChunkRefs: scope, ExpectedVersion: res.Version,
+		GranteeEmail: contact.Email, GranteeEncPublicKey: contact.EncPublicKey,
+	}); err != nil {
 		if errors.Is(err, client.ErrSenderBlocked) {
 			// A recipient-side block. Nothing about the grant can be fixed to get past it,
 			// so say who declined rather than leaving it as a bare 403.
@@ -786,7 +789,10 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 		}
 		wrap, err := crypto.WrapGrant(newCK, pin.EncPublicKey, id, prof.OwnerHandle, pin.Handle)
 		if err == nil {
-			err = cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: pin.Handle, WrappedKey: wrap})
+			err = cl.CreateGrant(id, api.CreateGrantRequest{
+				GranteeHandle: pin.Handle, WrappedKey: wrap,
+				GranteeEmail: pin.Email, GranteeEncPublicKey: pin.EncPublicKey,
+			})
 		}
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: re-wrapping the grant for %s failed: %v\n", pin.Email, err)

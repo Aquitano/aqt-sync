@@ -42,8 +42,7 @@ format needs: `aqt repo create` declares
 `minClient: 4`, so a client below it receives `426 Upgrade Required` before the server
 serves or overwrites a root it cannot interpret. Capability 3 is a historical rung —
 `rotate-root` used to gate on it, but the only clients that reach the route are
-capability 4, so the gate was removed and the number stays as a record of when
-rotation landed.
+capability 5. The number stays as a record of when rotation landed.
 
 One server-behavior break rides outside the capability ladder because it changes no
 sealed format:

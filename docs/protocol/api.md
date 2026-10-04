@@ -79,6 +79,20 @@ in-place mutations return `200` (or `204` when no response body is defined). The
 exception is the grant upsert: re-posting an existing grantee — the rotation path —
 returns `201` with no body, like the first post.
 
+A grant upsert can include `granteeEmail` and `granteeEncPublicKey` together to
+require that its handle and encryption key still match the lookup the sender used.
+The server checks them inside the write transaction, including deterministic decoys
+for unknown emails and accounts still on X25519. A mismatch is `409 version_conflict`
+in every case. The CLI supplies both fields and pins a fresh share to the resource
+version it opened.
+
+Incoming grant migrations in both account-key endpoints carry `resourceId`,
+`ownerHandle`, `wrappedKey`, and `expectedWrappedKey`. The original wrap must match
+the stored wrap inside the transaction. An absent or changed original wrap is
+`409 version_conflict`; a refused migration changes neither the identity nor the
+grants. Grants on reclaimed resources are removed because they are absent from the
+live migration set.
+
 ## Routes
 
 ```text
@@ -152,7 +166,7 @@ PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root k
 PUT    /v1/account/enc-key           Body: { encPublicKey, encKeySig, incomingGrants }. Moves an account
                                      that still publishes a pre-X-Wing enc key onto its X-Wing key: the
                                      binding must verify against the account's current identity key, and
-                                     incomingGrants must re-wrap every incoming grant (409 otherwise), all
+                                     incomingGrants must re-wrap every live incoming grant (409 otherwise), all
                                      in one transaction → 204. One-shot: once the account is on X-Wing,
                                      its own key again is a 204 no-op and any other key is 409, so a replay
                                      cannot rewrite its grants. `aqt login` sends it when needed.
@@ -184,7 +198,8 @@ GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, e
                                      deterministic, correctly self-signed decoy — no existence oracle.
                                      Signup registers the enc key and root-key rotation replaces it;
                                      PUT /v1/account/enc-key only moves a pre-X-Wing account onto X-Wing.
-POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs? }; wrappedKey
+POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs?, expectedVersion?,
+                                     granteeEmail?, granteeEncPublicKey? }; wrappedKey
                                      is exactly 1168 bytes (X-Wing encapsulation + sealed key), else 400. Upsert
                                      (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
                                      like the visibility flip above, for the same reason. No grantee-
