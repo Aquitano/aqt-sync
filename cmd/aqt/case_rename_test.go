@@ -45,6 +45,23 @@ func TestPlanCaseOnlyRenames(t *testing.T) {
 	}
 }
 
+// APFS resolves a precomposed and a decomposed spelling of one name to the same file,
+// so a rename that only changes normalization must pair like a case-only one. Applied
+// as a download plus a delete, the delete removes the file just downloaded, and the
+// next sync pushes that loss to every device.
+func TestPlanCaseOnlyRenamesFoldsNormalization(t *testing.T) {
+	nfc, nfd := "café/note.txt", "café/note.txt"
+	newBase := map[string]syncengine.Entry{nfd: {Path: nfd}}
+	newBaseDirs := map[string]syncengine.DirEntry{"café": {Path: "café"}}
+
+	renames, kept, keptDirs := planCaseOnlyRenames([]string{nfc}, []string{"café"}, newBase, newBaseDirs)
+
+	want := []caseRename{{from: "café", to: "café"}, {from: nfc, to: nfd}}
+	if !reflect.DeepEqual(renames, want) || len(kept) != 0 || len(keptDirs) != 0 {
+		t.Fatalf("renames = %q, kept = %q, kept dirs = %q; want %q and nothing kept", renames, kept, keptDirs, want)
+	}
+}
+
 // A delete whose path equals a survivor exactly is not a rename (the download
 // replaces it in place); only a case-differing survivor converts.
 func TestPlanCaseOnlyRenamesLeavesExactMatches(t *testing.T) {
