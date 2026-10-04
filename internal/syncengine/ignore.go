@@ -81,15 +81,14 @@ func lastSegment(p string) string {
 	return p
 }
 
-// newIgnore seeds a matcher that always excludes the control directory, .git, and
-// this tool's own transient artifacts: materialize temp files (.aqt-tmp-*, left
-// behind by a crash mid-write) and filesystem probes (.aqt-CaseProbe-*,
-// .aqt-linkprobe). Without these a leftover or a scan racing a probe reads as a
-// local add and is pushed fleet-wide. A later `!` rule may re-include, like any
-// other default.
+// newIgnore seeds the default rules for the control directory, .git, and
+// this tool's own transient artifacts: materialize temp files, restore staging and
+// backups, and filesystem probes. A retained restore backup can sit inside another
+// tracked folder; its old contents must not become additions there. A later `!`
+// rule may re-include, like any other default.
 func newIgnore() *Ignore {
 	return &Ignore{scopes: []ignoreScope{{dir: "", rules: compileRules([]string{
-		ControlDir + "/", ".git/", ".aqt-tmp-*", ".aqt-CaseProbe-*", ".aqt-linkprobe",
+		ControlDir + "/", ".git/", ".aqt-tmp-*", ".aqt-stage-*", ".aqt-restore-*", ".aqt-backup-*", ".aqt-CaseProbe-*", ".aqt-linkprobe",
 	})}}}
 }
 
