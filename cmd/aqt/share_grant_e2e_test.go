@@ -232,7 +232,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		if err := cl.DeleteResourceVersion(id, 1); !errors.Is(err, client.ErrNotFound) {
 			t.Fatalf("grantee delete: got %v, want ErrNotFound", err)
 		}
-		if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: "mallory", WrappedKey: []byte("x")}); !errors.Is(err, client.ErrNotFound) {
+		if err := cl.CreateGrant(id, api.CreateGrantRequest{GranteeHandle: "mallory", WrappedKey: make([]byte, crypto.GrantWrapSize)}); !errors.Is(err, client.ErrNotFound) {
 			t.Fatalf("grantee CreateGrant: got %v, want ErrNotFound", err)
 		}
 	})

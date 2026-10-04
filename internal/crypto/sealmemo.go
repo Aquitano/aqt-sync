@@ -41,7 +41,7 @@ type NodeSealMemo interface {
 // the exact oracle account-keyed convergence exists to prevent), and digests
 // from different accounts can never land in each other's slots.
 func nodeSealDigest(conv ConvergenceKey, plaintext []byte) string {
-	mk := derive(conv[:], nil, "aqt-seal-memo-v1", KeySize)
+	mk := derive(conv[:], nil, "aqt-seal-memo-v1")
 	h := hmac.New(sha256.New, mk)
 	h.Write(plaintext)
 	return hex.EncodeToString(h.Sum(nil))

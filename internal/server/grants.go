@@ -28,11 +28,6 @@ import (
 // the table unboundedly.
 const maxGrantsPerResource = 256
 
-// maxGrantWrapSize bounds a stored wrap. An HPKE X25519+ChaCha20-Poly1305 wrap
-// of a 32-byte key is 80 bytes; the cap leaves format headroom while keeping the
-// column from becoming a blob dump.
-const maxGrantWrapSize = 1024
-
 // maxShareBlocks bounds one account's block list. Blocking needs an incoming
 // grant to remove, so the list cannot grow faster than other accounts grant to
 // this one; the cap only keeps a pathological case from becoming a table dump.
@@ -53,10 +48,11 @@ var ErrBlockLimit = errors.New("block list is full")
 // --- store ---
 
 // AccountKeysByEmail returns the grant-target lookup fields for an email:
-// ErrNotFound both for an unknown email and for a keyless account, so the
-// handler's decoy covers the two cases identically (distinguishing them would be
-// the oracle). Signup registers the enc key, so a keyless row is a defensive case
-// rather than one this deployment produces.
+// ErrNotFound for an unknown email, a keyless account, and an account still
+// publishing a pre-X-Wing key, so the handler's decoy covers all three identically
+// (distinguishing them would be the oracle). Signup registers the enc key, so a
+// keyless row is a defensive case; a pre-X-Wing one lasts until its owner's next
+// login re-publishes (see UpgradeEncKey).
 func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error) {
 	var (
 		out    api.AccountKeysResponse
@@ -72,7 +68,7 @@ func (s *Store) AccountKeysByEmail(email string) (api.AccountKeysResponse, error
 	if err != nil {
 		return api.AccountKeysResponse{}, err
 	}
-	if len(encPub) == 0 {
+	if len(encPub) != crypto.EncPublicKeySize {
 		return api.AccountKeysResponse{}, ErrNotFound
 	}
 	out.EncPublicKey, out.EncKeySig = encPub, encSig
@@ -503,7 +499,7 @@ func (s *Store) ResourceObjectSlices(resourceID, caller string, ids []string) (s
 
 // handleAccountKeys is the grant-target lookup (GET /v1/account/keys?email=...). Like
 // the bootstrap endpoint, an unknown email — or an account that has not published
-// an enc key — gets a deterministic decoy (200, not 404): a real keypair derived
+// an X-Wing enc key — gets a deterministic decoy (200, not 404): a real keypair derived
 // from the server secret, self-signed like a genuine one, so the response is
 // indistinguishable on the wire and a grant wrapped to it simply never decrypts.
 func (s *Server) handleAccountKeys(c *gin.Context) {
@@ -540,7 +536,7 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 	}
 	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	identity := ed25519.NewKeyFromSeed(stream("aqt-decoy-ed25519", ed25519.SeedSize))
-	encPub := crypto.DeriveEncKeyFromSeed(stream("aqt-decoy-x25519", 32)).Public()
+	encPub := crypto.DeriveEncKeyFromSeed(stream("aqt-decoy-xwing", crypto.KeySize)).Public()
 	return api.AccountKeysResponse{
 		Handle:       newIDFrom(stream("aqt-decoy-handle", 12)),
 		PublicKey:    identity.Public().(ed25519.PublicKey),
@@ -558,8 +554,10 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if req.GranteeHandle == "" || len(req.WrappedKey) == 0 || len(req.WrappedKey) > maxGrantWrapSize {
-		abort(c, http.StatusBadRequest, "granteeHandle and a bounded wrappedKey are required")
+	// One exact length is the whole format check the server can make on an opaque
+	// wrap, and it is enough to refuse anything but X-Wing.
+	if req.GranteeHandle == "" || len(req.WrappedKey) != crypto.GrantWrapSize {
+		abort(c, http.StatusBadRequest, "granteeHandle and an X-Wing wrappedKey are required")
 		return
 	}
 	if req.GranteeHandle == owner {

@@ -2,6 +2,44 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Account-to-account grants are post-quantum.** An account's published enc key is
+  now X-Wing (ML-KEM-768 + X25519) and every grant wrap is HPKE over it, so a grant
+  stored on the server stays sealed unless both are broken. The server refuses
+  X25519 keys and wraps, and signup and every grant route answer `426` below client
+  capability 5. Server and clients upgrade together.
+
+### Upgrading
+
+- **Run `aqt login` once per account after upgrading.** It publishes the account's
+  X-Wing key and re-wraps every grant it has received, in one transaction. Until it
+  runs, the account is served as a decoy to anyone sharing with it: a new share to it
+  never opens, and a sharer who pinned it sees a key mismatch. Shares it already
+  holds keep opening meanwhile, unless their owner rotates the key.
+- **Pins follow on their own.** A contact pinned before this release moves to that
+  contact's X-Wing key the first time it is used after the contact has logged in,
+  provided the handle and identity key still match the pin.
+- **Rotate grants you want protected going forward, after their grantees have logged
+  in.** Anyone holding a copy of the database from before the upgrade could, with a
+  quantum computer, recover the content keys those X25519 wraps carried, and a
+  content key opens every later version of its resource. `aqt unshare <id>` rotates a
+  private resource's key and re-wraps it for the remaining grantees. A grantee who
+  has not logged in yet is skipped, and loses access until you share with them again.
+- **Building from source needs Go 1.26.** Grants use the standard library's
+  `crypto/hpke`; the `cloudflare/circl` dependency is gone.
+
+### Security
+
+- **A login no longer signs whatever the server calls a challenge.** The identity
+  key that signs the login challenge also signs the enc-key binding, so a hostile
+  server could hand a logging-in client a "challenge" that was really a binding for a
+  key the server held. That defeated `aqt contacts pin --fingerprint`: the server could
+  present the contact's real identity key with its own enc key. The client now signs
+  only a challenge of exactly 32 bytes, which a binding never is.
+
 ## [v0.10.0] - 2026-09-20
 
 A client-side release. Nothing in it changes a sealed format, the wire protocol, or

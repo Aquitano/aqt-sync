@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -87,6 +88,7 @@ func (h *harness) do(method, path, token string, body, out any) int {
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	req.Header.Set(api.CapabilityHeader, strconv.Itoa(api.ClientCapability))
 	rec := httptest.NewRecorder()
 	h.router.ServeHTTP(rec, req)
 	if out != nil && rec.Body.Len() > 0 {

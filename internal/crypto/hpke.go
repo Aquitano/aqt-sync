@@ -4,33 +4,50 @@ package crypto
 
 import (
 	"bytes"
+	"crypto/ecdh"
 	"crypto/ed25519"
-	"crypto/rand"
+	"crypto/hpke"
+	"crypto/mlkem"
 	"encoding/binary"
 	"errors"
 	"fmt"
 
-	"github.com/cloudflare/circl/hpke"
-	"github.com/cloudflare/circl/kem"
+	"golang.org/x/crypto/chacha20poly1305"
 )
 
-// Account-to-account grants wrap a resource's content key to a grantee's X25519
-// encryption key with HPKE (RFC 9180: X25519-HKDF-SHA256 + ChaCha20-Poly1305,
-// base mode). The HPKE info parameter binds the wrap to (resource id, owner
-// handle, grantee handle), the same discipline as the v2 id-bound AAD: a grant
-// ciphertext replayed onto another resource or grantee fails to open.
+// Account-to-account grants wrap a resource's content key to a grantee's published
+// encryption key with HPKE (RFC 9180, base mode) over X-Wing: ML-KEM-768 combined
+// with X25519, so a wrap stays sealed unless both are broken. A grant row sits on the
+// server indefinitely, which makes it exactly what an adversary would store today
+// and decrypt once a quantum computer can break X25519 alone. The HPKE info binds the
+// wrap to (resource id, owner handle, grantee handle), the same discipline as the v2
+// id-bound AAD: a grant ciphertext replayed onto another resource or grantee fails to
+// open.
+//
+// Grants written before X-Wing used DHKEM(X25519). UnwrapGrant still opens them so
+// the grantee's next login can re-wrap them to X-Wing; nothing seals that format any
+// more, and the server refuses to store it.
 
-// grantSuite is the one HPKE suite this package speaks. The suite id is baked
-// into the wrap by HPKE's key schedule, so a future suite change is a new format,
-// not a downgrade surface.
-func grantSuite() hpke.Suite {
-	return hpke.NewSuite(hpke.KEM_X25519_HKDF_SHA256, hpke.KDF_HKDF_SHA256, hpke.AEAD_ChaCha20Poly1305)
-}
+// grantKDF and grantAEAD complete the suite for both KEMs. The KEM id is part of
+// HPKE's key schedule, so a wrap never opens under the other KEM: a suite change
+// is a new format, not a downgrade surface.
+var (
+	grantKDF  = hpke.HKDFSHA256()
+	grantAEAD = hpke.ChaCha20Poly1305()
+)
 
-func grantKEM() kem.Scheme { return hpke.KEM_X25519_HKDF_SHA256.Scheme() }
+const x25519Size = 32
 
-// EncPublicKeySize is the marshaled X25519 public key length.
-const EncPublicKeySize = 32
+const (
+	// EncPublicKeySize is the X-Wing public key length: the ML-KEM-768
+	// encapsulation key followed by the X25519 key.
+	EncPublicKeySize = mlkem.EncapsulationKeySize768 + x25519Size
+	// GrantWrapSize is the length of every wrap WrapGrant produces: the X-Wing
+	// encapsulation, then the sealed content key and its tag.
+	GrantWrapSize = mlkem.CiphertextSize768 + x25519Size + KeySize + chacha20poly1305.Overhead
+
+	legacyGrantWrapSize = x25519Size + KeySize + chacha20poly1305.Overhead
+)
 
 // aadGrantWrap domain-separates the grant AEAD from every other ciphertext this
 // package mints (the contextual binding itself lives in the HPKE info).
@@ -40,39 +57,43 @@ var aadGrantWrap = []byte("aqt-grantwrap-v1")
 // public key from challenge signatures (which sign server-issued random nonces).
 const encKeyBindingPrefix = "aqt-enc-key-binding-v1\x00"
 
-// EncKeyPair is an account's X25519 encryption keypair, derived from the master
-// key (DeriveEncKey) so any unlocked device can reconstruct it — nothing new to
-// back up, mirroring the Ed25519 signing key.
+// EncKeyPair is an account's X-Wing encryption keypair, derived from the master key
+// (DeriveEncKey) so any unlocked device can reconstruct it — nothing new to back up,
+// mirroring the Ed25519 signing key.
 type EncKeyPair struct {
-	pub  kem.PublicKey
-	priv kem.PrivateKey
+	priv hpke.PrivateKey
 }
 
-// DeriveEncKey derives the account's X25519 encryption keypair from the master
-// key via HKDF, the same construction as DeriveSigningKey. The public half is
-// published on the account; the private half is re-derived on demand and never
-// stored or sent.
+// DeriveEncKey derives the account's X-Wing encryption keypair from the master key
+// via HKDF, the same construction as DeriveSigningKey. The public half is published
+// on the account; the private half is re-derived on demand and never stored or sent.
 func DeriveEncKey(mk MasterKey) EncKeyPair {
-	return DeriveEncKeyFromSeed(derive(mk[:], nil, "aqt-share-x25519-v1", grantKEM().SeedSize()))
+	return DeriveEncKeyFromSeed(derive(mk[:], nil, "aqt-share-xwing-v1"))
 }
 
-// DeriveEncKeyFromSeed deterministically derives an X25519 keypair from a
-// 32-byte seed. Split out of DeriveEncKey so the server can synthesize a valid
+// DeriveEncKeyFromSeed turns a 32-byte seed into an X-Wing keypair. The seed is the
+// X-Wing private key itself, so the published key depends only on the X-Wing
+// specification and not on any library's DeriveKeyPair, whose X-Wing mapping is
+// still a draft that implementations disagree on. The server uses it to synthesize a
 // decoy keypair for unknown-email lookups (see the existence-oracle rule on the
-// account bootstrap): a decoy derived like a real key is indistinguishable on
-// the wire from one.
+// account bootstrap): a decoy derived like a real key is indistinguishable on the
+// wire from one.
 func DeriveEncKeyFromSeed(seed []byte) EncKeyPair {
-	pub, priv := grantKEM().DeriveKeyPair(seed)
-	return EncKeyPair{pub: pub, priv: priv}
+	priv, err := hpke.MLKEM768X25519().NewPrivateKey(seed)
+	if err != nil {
+		panic("x-wing private key: " + err.Error()) // unreachable: every caller passes a 32-byte seed
+	}
+	return EncKeyPair{priv: priv}
 }
 
-// Public returns the marshaled X25519 public key.
+// Public returns the marshaled X-Wing public key.
 func (k EncKeyPair) Public() []byte {
-	b, err := k.pub.MarshalBinary()
-	if err != nil {
-		panic("marshal x25519 public key: " + err.Error()) // unreachable: in-memory marshal
-	}
-	return b
+	return k.priv.PublicKey().Bytes()
+}
+
+// legacyEncKey re-derives the X25519 key grants were wrapped to before X-Wing.
+func legacyEncKey(mk MasterKey) (hpke.PrivateKey, error) {
+	return hpke.DHKEM(ecdh.X25519()).DeriveKeyPair(derive(mk[:], nil, "aqt-share-x25519-v1"))
 }
 
 // SignEncKey self-signs an enc public key with the account's Ed25519 identity
@@ -107,48 +128,50 @@ func grantInfo(resourceID, ownerHandle, granteeHandle string) []byte {
 	return buf.Bytes()
 }
 
-// WrapGrant seals a content key to the grantee's published X25519 key. The
-// result is the KEM encapsulation followed by the AEAD ciphertext, stored
-// server-side as one opaque blob; the server never sees the content key.
+// WrapGrant seals a content key to the grantee's published X-Wing key. The result
+// is the KEM encapsulation followed by the AEAD ciphertext, stored server-side as
+// one opaque blob of GrantWrapSize bytes; the server never sees the content key.
 func WrapGrant(ck ContentKey, granteeEncPub []byte, resourceID, ownerHandle, granteeHandle string) ([]byte, error) {
-	pk, err := grantKEM().UnmarshalBinaryPublicKey(granteeEncPub)
+	pk, err := hpke.MLKEM768X25519().NewPublicKey(granteeEncPub)
 	if err != nil {
 		return nil, fmt.Errorf("grantee enc key: %w", err)
 	}
-	sender, err := grantSuite().NewSender(pk, grantInfo(resourceID, ownerHandle, granteeHandle))
+	enc, sender, err := hpke.NewSender(pk, grantKDF, grantAEAD, grantInfo(resourceID, ownerHandle, granteeHandle))
 	if err != nil {
 		return nil, err
 	}
-	enc, sealer, err := sender.Setup(rand.Reader)
-	if err != nil {
-		return nil, err
-	}
-	ct, err := sealer.Seal(ck[:], aadGrantWrap)
+	ct, err := sender.Seal(aadGrantWrap, ck[:])
 	if err != nil {
 		return nil, err
 	}
 	return append(enc, ct...), nil
 }
 
-// UnwrapGrant reverses WrapGrant with the grantee's derived private key. A wrap
-// bound to a different resource, owner, or grantee fails the HPKE key schedule
-// (wrong info) and returns an error.
+// UnwrapGrant reverses WrapGrant with the grantee's derived private key, and opens
+// a pre-X-Wing X25519 wrap too, told apart by length. A wrap bound to a different
+// resource, owner, or grantee fails the HPKE key schedule (wrong info) and returns an
+// error.
 func UnwrapGrant(wrapped []byte, mk MasterKey, resourceID, ownerHandle, granteeHandle string) (ContentKey, error) {
 	var ck ContentKey
-	encSize := grantKEM().CiphertextSize()
-	if len(wrapped) <= encSize {
-		return ck, errors.New("grant wrap too short")
+	var priv hpke.PrivateKey
+	switch len(wrapped) {
+	case GrantWrapSize:
+		priv = DeriveEncKey(mk).priv
+	case legacyGrantWrapSize:
+		legacy, err := legacyEncKey(mk)
+		if err != nil {
+			return ck, err
+		}
+		priv = legacy
+	default:
+		return ck, fmt.Errorf("grant wrap is %d bytes, not a known format", len(wrapped))
 	}
-	kp := DeriveEncKey(mk)
-	receiver, err := grantSuite().NewReceiver(kp.priv, grantInfo(resourceID, ownerHandle, granteeHandle))
+	encSize := len(wrapped) - KeySize - chacha20poly1305.Overhead
+	recipient, err := hpke.NewRecipient(wrapped[:encSize], priv, grantKDF, grantAEAD, grantInfo(resourceID, ownerHandle, granteeHandle))
 	if err != nil {
 		return ck, err
 	}
-	opener, err := receiver.Setup(wrapped[:encSize])
-	if err != nil {
-		return ck, err
-	}
-	plain, err := opener.Open(wrapped[encSize:], aadGrantWrap)
+	plain, err := recipient.Open(aadGrantWrap, wrapped[encSize:])
 	if err != nil {
 		return ck, fmt.Errorf("open grant: %w", err)
 	}

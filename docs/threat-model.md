@@ -26,9 +26,9 @@ passphrase ──Argon2id(salt)──▶ unlockKey (UK)       (never leaves the 
                                                   │            (public half registered with the
                                                   │             server; logins sign a server
                                                   │             challenge — no secret is sent)
-                                                  └─ HKDF ─▶ X25519 encryption key
-                                                               (HPKE grant wraps; public half
-                                                                published)
+                                                  └─ HKDF ─▶ X-Wing encryption key
+                                                               (ML-KEM-768 + X25519; HPKE grant
+                                                                wraps; public half published)
 file ──encrypt(contentKey)──▶ ciphertext + nonce + AEAD tag  ──▶ server (opaque blob)
 metadata (real name, size…) ──encrypt(contentKey)──▶ sealed metadata ──▶ server
 ```
@@ -244,6 +244,44 @@ exit, including the longest-lived by-value copies in the sync and pack apply
 contexts. Transient by-value copies on intermediate stack frames remain out of
 reach — the inherent Go caveat `Wipe` documents.
 
+## Quantum adversaries
+
+The threat that matters now is *store now, decrypt later*: an adversary keeps
+ciphertext today and breaks it once a quantum computer can. Only public-key
+encryption is exposed to that; symmetric keys at 256 bits keep 128-bit strength
+against Grover's algorithm.
+
+- **Symmetric, so unaffected.** File contents, metadata, every wrapped content key,
+  share-link fragments, gated links (Argon2id), and the convergent chunk keys use
+  XChaCha20-Poly1305, HKDF-SHA256, SHA-256, and Argon2id only.
+- **Grants are hybrid.** An account's published enc key is X-Wing (ML-KEM-768 combined
+  with X25519), and every grant wrap is HPKE over it, so a stored wrap stays sealed
+  unless both are broken. The server stores only X-Wing keys and 1168-byte X-Wing
+  wraps.
+- **Transport.** Go 1.24 and later negotiate the hybrid X25519MLKEM768 TLS key
+  exchange by default, and `aqt-server` does not narrow its curve preferences, so a
+  current client talking to `aqt-server` directly gets it. Behind a reverse proxy, the
+  proxy's key exchange applies. Everything the protocol protects is sealed before it
+  reaches TLS anyway.
+- **Signatures are classical.** Device attach, the enc-key binding, and update
+  manifests are Ed25519. A forgery needs a quantum computer at the time of the attack,
+  so nothing recorded today becomes forgeable later. Device attach also needs the
+  passphrase verifier. A pinned contact's enc key is compared byte for byte, so a
+  forged binding cannot replace it. Only a first-use pin rests on the binding (already
+  trust-on-first-use against the server), and so does the one-time move of a pin
+  made while grants were X25519. The identity key signs nothing a server can choose
+  beyond a 32-byte login challenge, which can never be a binding message. Release signing is the one
+  signature a forger could turn into code execution; see
+  [Still open](#still-open).
+
+Grants wrapped before capability 5 were X25519. The grantee's next `aqt login`
+re-wraps them to X-Wing and publishes the X-Wing key in one transaction, so no X25519
+wrap outlives that account's upgrade. That cannot reach copies taken earlier: whoever
+holds a pre-upgrade database can, with a quantum computer, recover the content keys
+those wraps carried. A content key also opens every later version of its resource
+until the owner rotates it. `aqt unshare <id>` rotates a private resource's key and
+re-wraps it for the remaining grantees.
+
 ## Account enumeration
 
 Unauthenticated auth routes are rate-limited, and `GET /v1/account/salt` returns an
@@ -295,7 +333,7 @@ keychain, or re-derive the machine-bound key.
 
 ## Still open
 
-Everything above ships. These four do not, and each is a deliberate limit rather than
+Everything above ships. These five do not, and each is a deliberate limit rather than
 an unfinished task — they are the honest answer to "what does aqt still not protect
 you from":
 
@@ -332,6 +370,11 @@ you from":
   disk blocks holding the old plaintext are not scrubbed. `aqt sync --reconcile`
   overwrites the file; scrubbing the blocks is the disk's job. Forensic-only, and
   local to that disk.
+- **Classical release signatures.** Update manifests are signed with Ed25519 only, so
+  once a quantum computer exists a forger could sign a release every shipped client
+  accepts. Nothing recorded today helps that forger, and a hybrid Ed25519 + ML-DSA
+  signature, with both required, closes it. It has to reach clients well before such
+  a computer does, because a client only trusts the roots compiled into it.
 
 Nothing here changes an interface, which is why they are recorded as limits rather
 than blocking work.

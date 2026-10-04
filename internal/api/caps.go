@@ -25,8 +25,12 @@ const (
 	// CapabilityGitRemote is the first release that understands sealed Git remote
 	// roots and the server-side policy attached to them.
 	CapabilityGitRemote = 4
+	// CapabilityPQGrants is the first release whose grants are X-Wing (post-quantum)
+	// wraps. The grant routes refuse a client below it: it would publish, wrap to,
+	// or try to open keys in the format the server no longer stores.
+	CapabilityPQGrants = 5
 	// ClientCapability is the highest format this build can read.
-	ClientCapability = CapabilityGitRemote
+	ClientCapability = CapabilityPQGrants
 )
 
 // CapabilityHeader carries a request's client capability. Missing or malformed

@@ -49,19 +49,51 @@ func fetchAccountKeys(cl *client.Client, email string) (api.AccountKeysResponse,
 // errors on any disagreement with the pin before returning, so routing through it
 // would make the check below dead code and report a grantee's own root-key rotation —
 // a routine event on this path — in the words of a server substituting keys.
-func confirmPinnedKeys(cl *client.Client, pin identity.Contact) error {
+//
+// It returns the pin to wrap to, which carryLegacyPin may have moved onto the
+// contact's X-Wing key.
+func confirmPinnedKeys(cl *client.Client, profile string, pin identity.Contact) (identity.Contact, error) {
 	keys, err := fetchAccountKeys(cl, pin.Email)
 	if err != nil {
-		return err
+		return pin, err
+	}
+	pin, err = carryLegacyPin(profile, pin, keys)
+	if err != nil {
+		return pin, err
+	}
+	if len(pin.EncPublicKey) != crypto.EncPublicKeySize {
+		return pin, fmt.Errorf(
+			"%s has not run `aqt login` since shares moved to post-quantum keys, so their grant cannot follow the new key yet; once they have, share it with them again",
+			pin.Email)
 	}
 	if keys.Handle != pin.Handle || !bytes.Equal(keys.PublicKey, pin.PublicKey) ||
 		!bytes.Equal(keys.EncPublicKey, pin.EncPublicKey) {
-		return fmt.Errorf(
+		return pin, fmt.Errorf(
 			"the keys published for %s no longer match the ones pinned here — most often because they rotated their account root key. "+
 				"Compare fingerprints out-of-band with `aqt contacts verify %s`, then `aqt contacts rm %s` and re-share",
 			pin.Email, pin.Email, pin.Email)
 	}
-	return nil
+	return pin, nil
+}
+
+// carryLegacyPin moves a pin made while grants were X25519 onto the X-Wing key its
+// account now publishes, so moving to post-quantum keys does not break every pin at
+// once. The handle and identity key must still match the pin byte for byte, and
+// fetchAccountKeys has already checked that this identity signed the new key: it is
+// the same account, not a substitute. A pin that already holds an X-Wing key is
+// never replaced here, so after the move enc keys are compared byte for byte again,
+// not trusted on an Ed25519 signature a quantum adversary could one day forge.
+func carryLegacyPin(profile string, pin identity.Contact, keys api.AccountKeysResponse) (identity.Contact, error) {
+	if len(pin.EncPublicKey) == crypto.EncPublicKeySize || pin.Handle != keys.Handle || !bytes.Equal(pin.PublicKey, keys.PublicKey) {
+		return pin, nil
+	}
+	pins, err := identity.LoadContacts(profile)
+	if err != nil {
+		return pin, err
+	}
+	pin.EncPublicKey = keys.EncPublicKey
+	pins[pin.Email] = pin
+	return pin, identity.SaveContacts(profile, pins)
 }
 
 // lookupGrantee resolves a grant target with trust-on-first-use pinning: the first
@@ -87,11 +119,15 @@ func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (ide
 		return identity.Contact{}, err
 	}
 	if pin, ok := pins[email]; ok {
+		pin, err := carryLegacyPin(prof.Name, pin, keys)
+		if err != nil {
+			return identity.Contact{}, err
+		}
 		if pin.Handle != keys.Handle ||
 			!bytes.Equal(pin.PublicKey, keys.PublicKey) ||
 			!bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
 			return identity.Contact{}, fmt.Errorf(
-				"the server's keys for %s no longer match the ones pinned on first use. Either they had not registered when you first shared (the pin is a placeholder and any grant made against it never opened), the account was re-created — or the server is substituting keys. "+
+				"the server's keys for %s no longer match the ones pinned on first use. Either they had not registered when you first shared (the pin is a placeholder and any grant made against it never opened), they have not logged in since shares moved to post-quantum keys (ask them to run `aqt login` once), the account was re-created — or the server is substituting keys. "+
 					"Compare fingerprints out-of-band with `aqt contacts verify %s`, then `aqt contacts rm %s` and re-share",
 				email, email, email)
 		}
@@ -167,6 +203,10 @@ func (app *application) contactsPinCmd() *cobra.Command {
 				return err
 			}
 			if pin, ok := pins[email]; ok {
+				pin, err := carryLegacyPin(prof.Name, pin, keys)
+				if err != nil {
+					return err
+				}
 				if pin.Handle == keys.Handle && bytes.Equal(pin.PublicKey, keys.PublicKey) &&
 					bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
 					if app.json {
@@ -321,6 +361,9 @@ func (app *application) contactsCmd() *cobra.Command {
 			if !ok {
 				fmt.Println("not pinned yet; the first `aqt share --with` to this email pins these keys")
 				return nil
+			}
+			if pin, err = carryLegacyPin(prof.Name, pin, keys); err != nil {
+				return err
 			}
 			fmt.Printf("pinned on first use:\n  identity  %s\n  enc key   %s\n",
 				crypto.KeyFingerprint(pin.PublicKey), crypto.KeyFingerprint(pin.EncPublicKey))

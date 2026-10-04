@@ -35,7 +35,7 @@ func (k *ConvergenceKey) Wipe() {
 // It is one-way: a leaked convergence key reveals nothing about the master key.
 func DeriveConvergenceKey(mk MasterKey) ConvergenceKey {
 	var ck ConvergenceKey
-	copy(ck[:], derive(mk[:], nil, "aqt-convergence-v1", KeySize))
+	copy(ck[:], derive(mk[:], nil, "aqt-convergence-v1"))
 	return ck
 }
 
@@ -82,7 +82,7 @@ var aadChunkList = []byte("aqt-chunklist-v1")
 func deriveChunkKey(conv ConvergenceKey, plaintext []byte) [KeySize]byte {
 	salt := sha256.Sum256(plaintext)
 	var key [KeySize]byte
-	copy(key[:], derive(conv[:], salt[:], "aqt-chunk-v1", KeySize))
+	copy(key[:], derive(conv[:], salt[:], "aqt-chunk-v1"))
 	return key
 }
 

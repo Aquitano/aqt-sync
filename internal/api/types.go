@@ -57,7 +57,7 @@ type CreateAccountRequest struct {
 	// InviteToken is required only when the server runs in invite-registration mode;
 	// open servers ignore it. It is a server-issued shared secret, not key material.
 	InviteToken string `json:"inviteToken,omitempty"`
-	// EncPublicKey is the X25519 half of the account's published identity (derived
+	// EncPublicKey is the X-Wing half of the account's published identity (derived
 	// from the master key like the signing key), the target other accounts wrap
 	// grant keys to. EncKeySig is its Ed25519 self-signature (crypto.SignEncKey),
 	// so a client can verify the two halves belong together. Both are required:
@@ -158,6 +158,12 @@ type ChallengeResponse struct {
 	Nonce       []byte `json:"nonce"`
 }
 
+// ChallengeNonceSize is the length of every device-attach challenge, and the client
+// signs nothing else with it. The same identity key signs the enc-key binding, so a
+// server free to pick the "nonce" could have a login sign a binding for a key the
+// server holds; a binding message is never this short.
+const ChallengeNonceSize = 32
+
 // AttachDeviceRequest logs in an additional device. The signature over the
 // challenge nonce proves possession of the account's signing key (so the master
 // key); AuthVerifier proves possession of the current passphrase. The server
@@ -213,12 +219,24 @@ type KeyWrapMigration struct {
 	ExpectedVersion int               `json:"expectedVersion,omitempty"`
 }
 
-// GrantKeyMigration replaces an incoming grant's HPKE wrap after the grantee's
-// derived X25519 identity changes with its root key.
+// GrantKeyMigration replaces an incoming grant's HPKE wrap when the grantee's
+// published enc key changes: with its root key, or on the move to X-Wing.
 type GrantKeyMigration struct {
 	ResourceID  string `json:"resourceId"`
 	OwnerHandle string `json:"ownerHandle"`
 	WrappedKey  []byte `json:"wrappedKey"`
+}
+
+// EncKeyUpgradeRequest publishes the account's X-Wing enc key in place of a
+// pre-X-Wing one, re-wrapping every incoming grant to it in the same transaction so
+// no X25519 wrap outlives the switch. It only ever moves a pre-X-Wing account: once
+// on X-Wing, the same key is a no-op and any other is refused. The identity key does not change: EncKeySig is
+// checked against the one already on the account, which is what lets a contact's
+// pin follow the new key.
+type EncKeyUpgradeRequest struct {
+	EncPublicKey   []byte              `json:"encPublicKey"`
+	EncKeySig      []byte              `json:"encKeySig"`
+	IncomingGrants []GrantKeyMigration `json:"incomingGrants"`
 }
 
 // RootKeyRotationRequest atomically changes the account root key. Every owner

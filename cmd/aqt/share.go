@@ -779,7 +779,8 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 		// share does. Wrapping to the stored pin blindly means a grantee who rotated
 		// their own root key gets their working wrap silently overwritten with a dead
 		// one by an unrelated revocation — permanently, since nothing re-checks later.
-		if err := confirmPinnedKeys(cl, pin); err != nil {
+		pin, err := confirmPinnedKeys(cl, prof.Name, pin)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant for %s: %v\n", pin.Email, err)
 			continue
 		}

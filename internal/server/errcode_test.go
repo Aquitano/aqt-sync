@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -69,7 +70,7 @@ func TestErrorResponsesCarryCodes(t *testing.T) {
 		{
 			name: "malformed body",
 			run: func() (int, api.ErrorResponse) {
-				rec := h.raw(http.MethodPost, "/v1/account", "", nil, []byte(`{"email":`))
+				rec := h.raw(http.MethodPost, "/v1/account", "", map[string]string{api.CapabilityHeader: strconv.Itoa(api.ClientCapability)}, []byte(`{"email":`))
 				var e api.ErrorResponse
 				_ = json.Unmarshal(rec.Body.Bytes(), &e)
 				return rec.Code, e
@@ -156,7 +157,7 @@ func TestShareWithPrunedRefsIsMissingChunks(t *testing.T) {
 		path string
 		body any
 	}{
-		{"/v1/resources/" + res.ID + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: []byte("wrap"), ChunkRefs: pruned}},
+		{"/v1/resources/" + res.ID + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: make([]byte, crypto.GrantWrapSize), ChunkRefs: pruned}},
 		{"/v1/resources/" + res.ID + "/visibility", api.SetVisibilityRequest{Visibility: api.Public, ChunkRefs: pruned}},
 	} {
 		var e api.ErrorResponse

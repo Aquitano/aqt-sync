@@ -467,10 +467,10 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// protected", the same shape of leak as scheduled, while the name stays sealed.
 	// Pre-existing rows default to unanchored.
 	`ALTER TABLE snapshots ADD COLUMN anchored INTEGER NOT NULL DEFAULT 0;`,
-	// 12: account-to-account grants. enc_public_key is the account's published X25519
-	// key (derived client-side from the master key), enc_key_sig its Ed25519
-	// self-signature; signup registers both, and only a row predating this migration
-	// can be NULL. A grant row wraps one resource's content
+	// 12: account-to-account grants. enc_public_key is the account's published enc key
+	// (X25519 then, X-Wing since capability 5; derived client-side from the master
+	// key), enc_key_sig its Ed25519 self-signature; signup registers both, and only a
+	// row predating this migration can be NULL. A grant row wraps one resource's content
 	// key to one grantee (HPKE, client-sealed); the server stores it opaquely. No FK on
 	// grantee_handle: a grant to a decoy handle (unknown-email lookup) must be accepted
 	// indistinguishably from a real one, or grant creation becomes an existence oracle.

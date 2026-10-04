@@ -6,7 +6,7 @@ subsystems at once may sit until there is time to review it properly.
 
 ## Build and test
 
-Building the client and server requires Go 1.25.4 or newer (see `go.mod`).
+Building the client and server requires Go 1.26 or newer (see `go.mod`).
 The share page tests also require Node.js 24 or newer, with no npm dependencies.
 
 ```sh

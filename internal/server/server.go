@@ -257,6 +257,7 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/x-assets/:name", s.handleShareAsset)
 	r.GET("/x/:id", s.handleShareView)
 
+	pqGrants := requireCapability(api.CapabilityPQGrants)
 	v1 := r.Group("/v1")
 	{
 		// Unauthenticated account/auth routes are rate-limited per client: they are
@@ -264,7 +265,7 @@ func (s *Server) Router() *gin.Engine {
 		// pumping.
 		unauth := v1.Group("", s.limiter.middleware, limitBody(maxControlBody))
 		{
-			unauth.POST("/account", s.handleCreateAccount)
+			unauth.POST("/account", pqGrants, s.handleCreateAccount)
 			unauth.GET("/account/salt", s.handleAccountSalt)
 			unauth.POST("/auth/challenge", s.handleAuthChallenge)
 			unauth.POST("/devices", s.handleAttachDevice)
@@ -319,7 +320,10 @@ func (s *Server) Router() *gin.Engine {
 			// Root-key rotation does not — its body carries every re-wrapped
 			// resource, snapshot, and grant key, so it needs the engine-wide cap.
 			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.handleChangePassphrase)
-			authed.PUT("/account/root-key", s.handleRotateRootKey)
+			authed.PUT("/account/root-key", pqGrants, s.handleRotateRootKey)
+			// Moves an account onto an X-Wing enc key; like root-key rotation, its body
+			// carries every incoming grant re-wrapped, so it takes the engine-wide cap.
+			authed.PUT("/account/enc-key", pqGrants, s.handleUpgradeEncKey)
 
 			// Storage summary for the calling account: pack bytes against quota plus
 			// row counts. All plaintext-side metadata the owner already implies.
@@ -334,12 +338,14 @@ func (s *Server) Router() *gin.Engine {
 			// oracle; it still sits behind auth to keep probing costed. Grant rows are
 			// client-sealed HPKE wraps the server stores opaquely. The grant object
 			// read reuses the public endpoint's exact-slice framing with a grant check
-			// in place of public visibility; it shares the chunk body cap.
-			authed.GET("/account/keys", s.handleAccountKeys)
-			authed.POST("/resources/:id/grants", limitBody(maxChunkBody), s.handleCreateGrant)
+			// in place of public visibility; it shares the chunk body cap. Every route
+			// that hands out, accepts, or re-wraps an enc key or a grant wrap requires
+			// the X-Wing grants capability.
+			authed.GET("/account/keys", pqGrants, s.handleAccountKeys)
+			authed.POST("/resources/:id/grants", pqGrants, limitBody(maxChunkBody), s.handleCreateGrant)
 			authed.GET("/resources/:id/grants", s.handleListResourceGrants)
 			authed.DELETE("/resources/:id/grants/:grantee", s.handleDeleteGrant)
-			authed.GET("/shares", s.handleListShares)
+			authed.GET("/shares", pqGrants, s.handleListShares)
 			// The grantee side of revocation: the delete predicate is the caller's own
 			// grantee handle, and an optional block keeps the grantor from re-adding the
 			// row. Blocks live on their own path rather than under /shares/, whose :id
@@ -685,6 +691,16 @@ func requestCapability(c *gin.Context) int {
 	return n
 }
 
+// requireCapability refuses a request below need with the same 426 a resource read
+// gets, for routes whose payload is a format rather than a resource.
+func requireCapability(need int) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if have := requestCapability(c); have < need {
+			abortUpgradeRequired(c, need, have)
+		}
+	}
+}
+
 // abortUpgradeRequired answers 426 with the structured upgrade error. The message is
 // self-contained because the client quotes the server prose verbatim ("server said:
 // %s") and hand-rolled requests see only the body, so it must explain the mismatch on
@@ -692,7 +708,7 @@ func requestCapability(c *gin.Context) int {
 // declared.
 func abortUpgradeRequired(c *gin.Context, need, have int) {
 	c.AbortWithStatusJSON(http.StatusUpgradeRequired, api.ErrorResponse{
-		Error:     fmt.Sprintf("resource requires client capability %d or newer (this client supports %d): upgrade aqt", need, have),
+		Error:     fmt.Sprintf("this request requires client capability %d or newer (this client supports %d): upgrade aqt", need, have),
 		Code:      api.ErrCodeUpgradeRequired,
 		MinClient: need,
 	})
