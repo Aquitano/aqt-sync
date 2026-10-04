@@ -47,6 +47,86 @@ func TestPullEmptyingTrackedDirKeepsIt(t *testing.T) {
 	}
 }
 
+// A file added under a directory another device deleted keeps the directory, with
+// one mode on both devices. Pushing the file without the directory's entry leaves
+// the tree recording the directory with no mode, and every later sync on the adding
+// device stops on a directory conflict it cannot resolve.
+func TestSyncAddIntoDirDeletedElsewhereKeepsDir(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "docs/old.txt", "old")
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	if err := os.RemoveAll(filepath.Join(origin, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	writeTree(t, replica, "docs/new.txt", "new")
+	h.sync(replica)
+	h.sync(replica)
+	h.sync(origin)
+	if got := readTree(t, origin, "docs/new.txt"); got != "new" {
+		t.Fatalf("origin docs/new.txt = %q", got)
+	}
+	assertAbsent(t, origin, "docs/old.txt")
+	o, err := os.Stat(filepath.Join(origin, "docs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.Stat(filepath.Join(replica, "docs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Mode() != r.Mode() {
+		t.Fatalf("docs mode diverged: origin %v, replica %v", o.Mode(), r.Mode())
+	}
+}
+
+// A directory deleted here while another device changed its mode and added a file
+// inside it plans as a directory conflict rather than a delete. Resolving it
+// local-wins would drop the directory's entry from under the incoming file, so the
+// directory is kept with the remote entry instead and both syncs run clean.
+func TestSyncAddIntoDirWithModeChangeDeletedHereKeepsDir(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "docs/old.txt", "old")
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+
+	writeTree(t, origin, "docs/new.txt", "new")
+	if err := os.Chmod(filepath.Join(origin, "docs"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(origin)
+	if err := os.RemoveAll(filepath.Join(replica, "docs")); err != nil {
+		t.Fatal(err)
+	}
+	h.sync(replica)
+	h.sync(replica)
+	if got := readTree(t, replica, "docs/new.txt"); got != "new" {
+		t.Fatalf("replica docs/new.txt = %q", got)
+	}
+	assertAbsent(t, replica, "docs/old.txt")
+	o, err := os.Stat(filepath.Join(origin, "docs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := os.Stat(filepath.Join(replica, "docs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o.Mode() != r.Mode() {
+		t.Fatalf("docs mode diverged: origin %v, replica %v", o.Mode(), r.Mode())
+	}
+}
+
 // EnsureDirs recreates only what is missing: an existing directory keeps its
 // on-disk mode, a missing one is created with its recorded mode.
 func TestEnsureDirsRecreatesOnlyMissing(t *testing.T) {
