@@ -9,9 +9,9 @@ import (
 	"github.com/aquitano/aqt-sync/internal/crypto"
 )
 
-// dirMovesManifests builds a tree of leaves directories holding filesPer files each,
-// and a copy with every fourth leaf renamed: many independent directory moves, the
-// shape a bulk folder rename leaves for status and snapshot diff to explain.
+// dirMovesManifests builds leaves directories holding filesPer files each and a
+// copy with every fourth directory renamed, the shape a bulk folder rename leaves
+// for status and snapshot diff to explain.
 func dirMovesManifests(leaves, filesPer int) (old, cur Manifest) {
 	rng := benchRand()
 	for l := range leaves {
