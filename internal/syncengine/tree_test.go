@@ -3,8 +3,10 @@
 package syncengine
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -55,6 +57,8 @@ func TestSealOpenTreeRoundTrip(t *testing.T) {
 		Version: TreeManifestVersion,
 		Entries: []Entry{
 			{Path: "a.txt", Mode: 0o644, Size: 3, Hash: "ha", Inline: []byte("abc")},
+			{Path: `back\slash.txt`, Mode: 0o644, Size: 1, Hash: "hs", Inline: []byte("s")},
+			{Path: "café.txt", Mode: 0o644, Size: 1, Hash: "hu", Inline: []byte("u")},
 			{Path: "dir/b.bin", Mode: 0o600, Size: 5, Hash: "hb", Chunks: []crypto.Chunk{{ID: "c1", Key: key, Len: 5}}},
 			{Path: "dir/link", Size: 6, Hash: linkHash("target"), Link: "target"},
 			{Path: "dir/sub/c.txt", Mode: 0o644, Size: 1, Hash: "hc", Inline: []byte("x")},
@@ -96,6 +100,39 @@ func TestSealOpenTreeRoundTrip(t *testing.T) {
 	}
 	if !refSet["c1"] {
 		t.Error("file chunk id c1 missing from refs")
+	}
+}
+
+func TestTreeReadersRejectInvalidChildNames(t *testing.T) {
+	t.Parallel()
+	conv := testConv(t)
+	sink := mapSink{}
+	empty, _, err := SealTree(Manifest{Version: TreeManifestVersion}, conv, sink, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", ".", "..", "/evil", "dir/file", "a\x00b"} {
+		for _, typ := range []ChildType{ChildFile, ChildDir, ChildSymlink} {
+			t.Run(fmt.Sprintf("%q/%s", name, typ), func(t *testing.T) {
+				plain, err := json.Marshal(TreeNode{Version: TreeManifestVersion, Children: []TreeChild{{Name: name, Type: typ}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				ct, node, err := crypto.SealNode(plain, conv)
+				if err != nil {
+					t.Fatal(err)
+				}
+				sink[node.ID] = ct
+				root := TreeRoot{Version: TreeManifestVersion, Root: node}
+				fetch := func(ids []string) (map[string][]byte, error) { return sink, nil }
+				if _, err := OpenTreeBatched(root, fetch); err == nil || !strings.Contains(err.Error(), "invalid child name") {
+					t.Fatalf("open tree: %v, want an invalid child name error", err)
+				}
+				if _, err := DiffTreeRoots(empty, root, fetch); err == nil || !strings.Contains(err.Error(), "invalid child name") {
+					t.Fatalf("diff tree: %v, want an invalid child name error", err)
+				}
+			})
+		}
 	}
 }
 

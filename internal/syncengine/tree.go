@@ -376,6 +376,11 @@ func openNodeChildren(node crypto.Chunk, ct []byte) ([]TreeChild, error) {
 	if n.Version > TreeManifestVersion {
 		return nil, fmt.Errorf("tree node %s has version %d, newer than this client supports (%d); upgrade aqt", node.ID, n.Version, TreeManifestVersion)
 	}
+	for _, child := range n.Children {
+		if child.Name == "" || child.Name == "." || child.Name == ".." || strings.ContainsAny(child.Name, "/\x00") {
+			return nil, fmt.Errorf("tree node %s has invalid child name %q: expected a single path segment", node.ID, child.Name)
+		}
+	}
 	return n.Children, nil
 }
 

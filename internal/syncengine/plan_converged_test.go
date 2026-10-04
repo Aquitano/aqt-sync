@@ -6,7 +6,39 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
+
+func TestPlannerAbsolutePathsTerminate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		run  func()
+	}{
+		{"mark downloads", func() {
+			MarkTypeClashes([]Action{{Path: "/evil", Kind: Download}}, nil, Manifest{})
+		}},
+		{"mark kept entries", func() {
+			MarkTypeClashes([]Action{{Path: "/evil", Kind: Upload}}, nil, Manifest{Entries: []Entry{{Path: "/evil"}}})
+		}},
+		{"keep parents", func() {
+			KeepParents([]Action{{Path: "/evil", Kind: Download}}, nil, Manifest{})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			done := make(chan struct{})
+			go func() {
+				tc.run()
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("ancestor walk did not stop at the filesystem root")
+			}
+		})
+	}
+}
 
 // A path deleted on both sides since base has exactly one possible outcome, which
 // both sides already reached: it must plan no action, not a Conflict that wedges
