@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -232,7 +233,7 @@ func ParseConfig(b []byte) (Config, error) {
 	if err := dec.Decode(&c); err != nil {
 		return c, fmt.Errorf("invalid config: %s", strings.TrimPrefix(err.Error(), "json: "))
 	}
-	if dec.More() {
+	if _, err := dec.Token(); err != io.EOF {
 		return c, fmt.Errorf("invalid config: trailing data after the JSON object")
 	}
 	return c, c.Validate()

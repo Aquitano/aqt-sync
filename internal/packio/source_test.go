@@ -3,10 +3,13 @@
 package packio
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -184,6 +187,110 @@ func TestSourceMissingObjectIsNotFound(t *testing.T) {
 	if _, err := src.Get("deadbeef"); !errors.Is(err, client.ErrNotFound) {
 		t.Fatalf("get of an unlocated object = %v, want client.ErrNotFound", err)
 	}
+}
+
+// A locate response the span arithmetic cannot use must fail the pull at Locate,
+// not panic the download worker that later slices its object out of a span.
+func TestSourceRejectsImpossibleLocations(t *testing.T) {
+	cases := map[string][]api.ObjectLocation{
+		"negative length":   {{ID: "a", PackID: "p", Off: 0, Len: -1}},
+		"overflowing range": {{ID: "a", PackID: "p", Off: math.MaxInt64 - 1, Len: 16}},
+		"object in two packs": {
+			{ID: "a", PackID: "p", Off: 0, Len: 16},
+			{ID: "a", PackID: "q", Off: 40, Len: 16},
+		},
+	}
+	for name, locs := range cases {
+		t.Run(name, func(t *testing.T) {
+			mux := http.NewServeMux()
+			mux.HandleFunc("/v1/chunks/locate", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(api.LocateResponse{Locations: locs})
+			})
+			mux.HandleFunc("/v1/packs/", func(w http.ResponseWriter, r *http.Request) {
+				_, _ = w.Write([]byte(strings.Repeat("P", 64)))
+			})
+			srv := httptest.NewServer(mux)
+			t.Cleanup(srv.Close)
+			cl, err := client.New(srv.URL, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			src := NewEmptySource(cl)
+			if err := src.Locate([]string{"a"}); err == nil {
+				_, getErr := src.Get("a")
+				t.Fatalf("Locate accepted %+v (Get: %v)", locs, getErr)
+			}
+		})
+	}
+}
+
+// A tree level with identical subtrees asks for one node id more than once, and the
+// same location coming back twice must not fail the pull.
+func TestSourceAcceptsARepeatedLocation(t *testing.T) {
+	f := &fakePackServer{
+		packs: map[string][]byte{"p1": []byte(strings.Repeat("A", 100))},
+		locs:  map[string]api.ObjectLocation{"a": {ID: "a", PackID: "p1", Off: 0, Len: 100}},
+	}
+	src, err := NewSource(f.client(t), []string{"a", "a"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := src.Get("a"); err != nil || string(got) != strings.Repeat("A", 100) {
+		t.Fatalf("Get(a) = %q, %v", got, err)
+	}
+}
+
+// FuzzLocationSpans decodes arbitrary bytes into one or two locate responses, as a
+// level-by-level walk issues them. Whatever checkLocations accepts, every object must
+// lie inside the span assigned to it and every span inside one pack, because Get
+// slices an object out of its span with no further check.
+func FuzzLocationSpans(f *testing.F) {
+	loc := func(id, pack byte, off, n int64) []byte {
+		b := []byte{id, pack}
+		b = binary.BigEndian.AppendUint64(b, uint64(off))
+		return binary.BigEndian.AppendUint64(b, uint64(n))
+	}
+	f.Add(uint8(1), slices.Concat(loc(0, 0, 0, 100), loc(1, 0, 100, 100), loc(2, 1, 0, 50)))
+	f.Add(uint8(0), loc(0, 0, 0, -1)) // unchecked, a negative length makes Get slice data[0:-1]
+	f.Add(uint8(0), slices.Concat(loc(0, 0, 0, 16), loc(0, 1, 40, 16)))
+	f.Fuzz(func(t *testing.T, split uint8, raw []byte) {
+		var all []api.ObjectLocation
+		for ; len(raw) >= 18; raw = raw[18:] {
+			all = append(all, api.ObjectLocation{
+				ID:     string(rune('a' + raw[0]%8)),
+				PackID: string(rune('p' + raw[1]%3)),
+				Off:    int64(binary.BigEndian.Uint64(raw[2:])),
+				Len:    int64(binary.BigEndian.Uint64(raw[10:])),
+			})
+		}
+		cut := int(split) % (len(all) + 1)
+		s := &Source{locs: map[string]api.ObjectLocation{}, objSpan: map[string]packSpan{}, spans: map[string][]packSpan{}}
+		// The same bookkeeping Locate does with a response, minus the transport.
+		for _, located := range [][]api.ObjectLocation{all[:cut], all[cut:]} {
+			if checkLocations(located) != nil {
+				return
+			}
+			byPack := map[string][]api.ObjectLocation{}
+			for _, l := range located {
+				s.locs[l.ID] = l
+				byPack[l.PackID] = append(byPack[l.PackID], l)
+			}
+			for _, objs := range byPack {
+				s.assignSpans(objs)
+			}
+		}
+		for id, l := range s.locs {
+			sp := s.objSpan[id]
+			if !slices.Contains(s.spans[l.PackID], sp) {
+				t.Fatalf("object %s in pack %s was given a span of another pack", id, l.PackID)
+			}
+			// Get fetches [base,end) and slices [Off-base, Off-base+Len) out of it.
+			inside := 0 <= sp.base && sp.base <= l.Off && l.Off < l.Off+l.Len && l.Off+l.Len <= sp.end && sp.end <= api.MaxPackBytes
+			if !inside {
+				t.Fatalf("object %s at offset %d length %d is not inside its span [%d,%d)", id, l.Off, l.Len, sp.base, sp.end)
+			}
+		}
+	})
 }
 
 var errUnexpectedBytes = errors.New("unexpected object bytes")
