@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
@@ -512,6 +513,9 @@ func (app *application) restoreInPlace(cl *client.Client, prof *identity.Profile
 // rather than left half-replaced. Backup, staging, and root share a parent, so every
 // rename stays on one filesystem (and is atomic).
 func swapTree(root, staging string) error {
+	// Classify while absolute ignore-file symlinks still resolve into the live tree.
+	// After the swap they may point at restored rules and hide local-only paths.
+	untracked, carryErr := syncengine.Untracked(root)
 	backup, err := os.MkdirTemp(filepath.Dir(root), ".aqt-backup-*")
 	if err != nil {
 		return err
@@ -566,21 +570,26 @@ func swapTree(root, staging string) error {
 		movedIn = append(movedIn, e.Name())
 	}
 
-	if err := carryUntracked(backup, root); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s, take what you need and delete it: %v\n", backup, err)
+	if carryErr == nil {
+		carryErr = carryUntracked(backup, root, untracked)
+	}
+	if carryErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s, take what you need and delete it: %v\n", backup, carryErr)
 		return nil
 	}
 	return os.RemoveAll(backup)
 }
 
-// carryUntracked moves every path the pre-restore tree's scan skipped (ignored files
-// and directories such as .git, special files) from backup back into root. A snapshot
-// only holds what synced, so these exist nowhere else and the restore must not take
-// them with the rest of the old tree. A path carryPath refuses stays in backup, and
-// the returned error names the first few.
-func carryUntracked(backup, root string) error {
-	paths, err := syncengine.Untracked(backup)
-	if err != nil {
+// carryUntracked moves paths classified before the swap back into root. A snapshot
+// only holds what synced, so ignored and unsupported paths can exist nowhere else.
+// A path carryPath refuses stays in backup, and the error names the first few.
+// Linked restored ignore files make carrying unsafe because a local path could
+// supply their target, so in that case the entire pre-restore tree stays in backup.
+func carryUntracked(backup, root string, paths []string) error {
+	if len(paths) == 0 {
+		return nil
+	}
+	if err := checkRestoredIgnoreLinks(root); err != nil {
 		return err
 	}
 	var kept []string
@@ -600,24 +609,61 @@ func carryUntracked(backup, root string) error {
 	return errors.New(strings.Join(kept, "; ") + suffix)
 }
 
-// carryPath moves backup/rel to root/rel unless something already occupies it or the
-// restored tree's .aqtignore would sync it. The propagation sync runs right after the
-// swap, so a path the restored rules track would be published to every device.
+func checkRestoredIgnoreLinks(root string) error {
+	return filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel != "." && (rel == syncengine.ControlDir || syncengine.Skips(root, rel, fs.ModeDir)) {
+			return filepath.SkipDir
+		}
+		info, err := os.Lstat(filepath.Join(path, ".aqtignore"))
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if info.Mode()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%q is a symlink; local paths could change its restored ignore rules", filepath.ToSlash(filepath.Join(rel, ".aqtignore")))
+		}
+		return nil
+	})
+}
+
+// carryPath moves backup/rel to root/rel unless something already occupies it, it
+// would change the restored ignore rules, or the restored tree would sync it. The
+// propagation sync runs right after the swap, so a path the restored rules track
+// would be published to every device.
 func carryPath(backup, root, rel string) error {
 	src := filepath.Join(backup, filepath.FromSlash(rel))
 	info, err := os.Lstat(src)
 	if err != nil {
 		return err
 	}
+	if !info.IsDir() && strings.EqualFold(filepath.Base(src), ".aqtignore") {
+		return fmt.Errorf("%q could change the restored ignore rules", rel)
+	}
 	if !syncengine.Skips(root, rel, info.Mode()) {
-		return fmt.Errorf("%s is not ignored in the restored tree", rel)
+		if !utf8.ValidString(rel) {
+			return fmt.Errorf("%q has a non-UTF-8 name that the restored tree cannot sync", rel)
+		}
+		return fmt.Errorf("%q is not ignored in the restored tree", rel)
 	}
 	if err := mkdirLike(root, backup, filepath.Dir(filepath.FromSlash(rel))); err != nil {
 		return err
 	}
 	dst := filepath.Join(root, filepath.FromSlash(rel))
 	if _, err := os.Lstat(dst); err == nil {
-		return fmt.Errorf("%s already exists in the restored tree", rel)
+		return fmt.Errorf("%q already exists in the restored tree", rel)
 	}
 	return os.Rename(src, dst)
 }
@@ -646,7 +692,10 @@ func mkdirLike(root, like, rel string) error {
 	if err != nil {
 		return err
 	}
-	return os.Mkdir(dir, orig.Mode().Perm())
+	if err := os.Mkdir(dir, orig.Mode().Perm()); err != nil {
+		return err
+	}
+	return os.Chmod(dir, orig.Mode().Perm())
 }
 
 // --- diff ---

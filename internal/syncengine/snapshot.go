@@ -366,10 +366,10 @@ func ListPaths(dir string) ([]string, error) {
 	return paths, err
 }
 
-// Untracked returns the relative slash paths under dir that a scan skips: each ignored
-// file, each ignored directory as one path (its subtree is never walked), and each
-// special file. The control directory is left out. They are the parts of a folder
-// that live only on this machine, which a tree-replacing operation must carry over.
+// Untracked returns ignored paths, special files, and paths with non-UTF-8 names.
+// Ignored and non-UTF-8 directories are returned as one path without walking their
+// contents. The control directory is left out. These paths have no copy in a
+// snapshot and must survive a tree replacement.
 func Untracked(dir string) ([]string, error) {
 	ig := newIgnore()
 	var out []string
@@ -387,6 +387,11 @@ func Untracked(dir string) ([]string, error) {
 			ig.loadDir(dir, "")
 		case rel == ControlDir:
 			return filepath.SkipDir
+		case !utf8.ValidString(rel):
+			out = append(out, rel)
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
 		case d.IsDir() && ig.Match(rel, true):
 			out = append(out, rel)
 			return filepath.SkipDir
@@ -401,10 +406,11 @@ func Untracked(dir string) ([]string, error) {
 }
 
 // Skips reports whether a scan of dir leaves out the slash path rel, whose file mode
-// is mode: a special file always does, anything else when it or a directory above it
-// is ignored by the .aqtignore files in effect there.
+// is mode. Special files with valid UTF-8 names are skipped; other paths must be
+// ignored by the .aqtignore files in effect there. An unignored non-UTF-8 name makes
+// the scan fail before its file type is checked.
 func Skips(dir, rel string, mode fs.FileMode) bool {
-	if special(mode) {
+	if special(mode) && utf8.ValidString(rel) {
 		return true
 	}
 	ig := newIgnore()
