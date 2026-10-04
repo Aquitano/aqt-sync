@@ -163,6 +163,42 @@ func testRearmsGCAgeGuard(t *testing.T, email, payload string, touch func(*Store
 	}
 }
 
+// A read that finds its pack re-armed within touchSlack skips the write, and the
+// pack must still outlive a full age guard measured from that read: the GC cutoff
+// adds the slack back. Here the guard is 10s and the pack was re-armed 50s ago, so
+// a prune right after the read must refuse it.
+func TestSkippedTouchStillGuardsFromTheRead(t *testing.T) {
+	t.Parallel()
+	s := newStore(t)
+	owner := s.mustAccount(t, "slack@example.com")
+	packID, data, ids := packOf("recently re-armed")
+	if _, err := s.PutPack(owner, packID, data, 0); err != nil {
+		t.Fatal(err)
+	}
+	armedAt := time.Now().Add(-50 * time.Second).Unix()
+	if _, err := s.db.Exec(
+		`UPDATE packs SET created_at = ? WHERE owner_handle = ? AND pack_id = ?`, armedAt, owner, packID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if missing, err := s.MissingChunks(owner, ids); err != nil || len(missing) != 0 {
+		t.Fatalf("check: missing=%v err=%v, want the object present", missing, err)
+	}
+	var createdAt int64
+	if err := s.db.QueryRow(
+		`SELECT created_at FROM packs WHERE owner_handle = ? AND pack_id = ?`, owner, packID,
+	).Scan(&createdAt); err != nil {
+		t.Fatal(err)
+	}
+	if createdAt != armedAt {
+		t.Fatalf("created_at moved to %d, want the in-slack touch skipped at %d", createdAt, armedAt)
+	}
+	deleted, skipped, _, err := s.DeleteOwnerChunks(owner, ids, 10*time.Second)
+	if err != nil || deleted != 0 || skipped != 1 {
+		t.Fatalf("prune deleted=%d skipped=%d err=%v, want the pack guarded for 10s after the read", deleted, skipped, err)
+	}
+}
+
 // An object that has aged past the guard and lost its last reference must survive a
 // sweep if a concurrent sync checks it (dedup hit) before referencing it: the check
 // re-arms the age guard on the pack holding it.
