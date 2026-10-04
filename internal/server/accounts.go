@@ -397,8 +397,10 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 		nonce     []byte
 		expiresAt int64
 	)
+	// One statement, so two concurrent attaches cannot both read the row before
+	// either deletes it. The row goes whether or not it has expired.
 	err := s.db.QueryRow(
-		`SELECT nonce, expires_at FROM challenges WHERE id = ? AND email = ?`, id, api.NormalizeEmail(email),
+		`DELETE FROM challenges WHERE id = ? AND email = ? RETURNING nonce, expires_at`, id, api.NormalizeEmail(email),
 	).Scan(&nonce, &expiresAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -406,7 +408,6 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	_, _ = s.db.Exec(`DELETE FROM challenges WHERE id = ?`, id) // single-use, regardless of validity
 	if time.Now().Unix() > expiresAt {
 		return nil, ErrNotFound
 	}
@@ -573,6 +574,49 @@ func (s *Store) ResourceStoredBytes(owner, id string) (int64, error) {
 	return info.Size() + int64(len(nonce)) + metaLen + wrappedLen + 256, nil
 }
 
+// ResourceReclaimed reports whether id is one of the owner's reclaimed tombstones,
+// which usage leaves out of its resource count until a content write revives it.
+func (s *Store) ResourceReclaimed(owner, id string) (bool, error) {
+	var reclaimed bool
+	err := s.rdb.QueryRow(`SELECT reclaimed FROM resources WHERE id = ? AND owner_handle = ?`, id, owner).Scan(&reclaimed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return reclaimed, err
+}
+
+// ResourceMetaBytes reports the stored size of a live resource's sealed metadata, the
+// term AccountUsage counts for it, so a metadata replace is charged only its growth.
+// A resource the owner does not hold live is ErrNotFound, the answer
+// UpdateResourceMetadata would give, so the quota is never consulted about it.
+func (s *Store) ResourceMetaBytes(owner, id string) (int64, error) {
+	var n int64
+	err := s.rdb.QueryRow(
+		`SELECT length(encrypted_meta) FROM resources WHERE id = ? AND owner_handle = ? AND reclaimed = 0`, id, owner,
+	).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
+// GrantStoredBytes reports what an existing grant adds to its owner's usage, the
+// same term AccountUsage sums, so re-posting a grantee (the rotation re-wrap) is
+// charged only its growth. No such grant reports 0; a resource the owner does not
+// hold is ErrNotFound, the answer PutGrant would give.
+func (s *Store) GrantStoredBytes(owner, resourceID, grantee string) (int64, error) {
+	var n int64
+	err := s.rdb.QueryRow(
+		`SELECT coalesce((SELECT length(wrapped_key) + 128 FROM grants WHERE resource_id = r.id AND grantee_handle = ?), 0)
+		   FROM resources r WHERE r.id = ? AND r.owner_handle = ?`,
+		grantee, resourceID, owner,
+	).Scan(&n)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return n, err
+}
+
 // ResourceCreateKeyRecorded reports whether req's Idempotency-Key was already
 // recorded for a create. A replay stores nothing new, so charging it against the
 // quota would answer 507 for a resource that exists — defeating the retry the key
@@ -590,13 +634,26 @@ func (s *Store) ResourceStoredBytes(owner, id string) (int64, error) {
 // cannot be swept mid-request; an older row just falls back to the normal
 // quota-checked path (where a genuine replay still replays).
 func (s *Store) ResourceCreateKeyRecorded(owner string, req api.PutResourceRequest) bool {
-	if req.IdempotencyKey == "" || req.ID != "" {
+	if req.ID != "" {
+		return false
+	}
+	return s.createKeyRecorded(owner, "resource.create", req.IdempotencyKey)
+}
+
+// SnapshotCreateKeyRecorded is ResourceCreateKeyRecorded for snapshot creates, and
+// skips the snapshot count and byte checks for the same reason.
+func (s *Store) SnapshotCreateKeyRecorded(owner, key string) bool {
+	return s.createKeyRecorded(owner, "snapshot.create", key)
+}
+
+func (s *Store) createKeyRecorded(owner, kind, key string) bool {
+	if key == "" {
 		return false
 	}
 	minCreatedAt := time.Now().Add(-(idempotencyTTL - time.Hour)).Unix()
 	var one int
 	err := s.rdb.QueryRow(`SELECT 1 FROM idempotency_keys WHERE owner_handle = ? AND kind = ? AND key = ? AND created_at >= ?`,
-		owner, "resource.create", req.IdempotencyKey, minCreatedAt).Scan(&one)
+		owner, kind, key, minCreatedAt).Scan(&one)
 	return err == nil
 }
 
@@ -723,6 +780,7 @@ func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 	h := sha256.Sum256([]byte(token))
 	owner, deviceID, ok := s.auth.get(h)
 	if !ok {
+		gen := s.auth.generation()
 		err = s.rdb.QueryRow(
 			`SELECT d.owner_handle, d.device_id FROM devices d
 			   JOIN accounts a ON a.owner_handle = d.owner_handle
@@ -734,7 +792,7 @@ func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 		if err != nil {
 			return "", "", err
 		}
-		s.auth.put(h, owner, deviceID)
+		s.auth.put(h, owner, deviceID, gen)
 	}
 	disabled, err := s.accountSuspended(owner)
 	if err != nil {

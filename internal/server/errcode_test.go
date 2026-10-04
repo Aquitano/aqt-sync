@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -121,6 +122,46 @@ func TestErrorResponsesCarryCodes(t *testing.T) {
 		status, e := tc.run()
 		if status != tc.wantStatus || e.Code != tc.wantCode {
 			t.Errorf("%s: got status %d code %q, want %d %q (error: %s)", tc.name, status, e.Code, tc.wantStatus, tc.wantCode, e.Error)
+		}
+	}
+}
+
+// TestUnmatchedPathCarriesNotFoundCode covers requests no route matches, such as an
+// id containing a slash or an empty trailing id: they get the same JSON not_found as
+// a missing resource instead of gin's plain-text page.
+func TestUnmatchedPathCarriesNotFoundCode(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	for _, path := range []string{"/v1/resources/a%2Fb", "/v1/snapshots/", "/v1/no-such-route"} {
+		var e api.ErrorResponse
+		if code := h.do(http.MethodGet, path, "", nil, &e); code != http.StatusNotFound || e.Code != api.ErrCodeNotFound {
+			t.Errorf("GET %s: got %d %q, want 404 %q", path, code, e.Code, api.ErrCodeNotFound)
+		}
+	}
+}
+
+// The share paths refresh a resource's chunk refs just as a manifest PUT does, so refs
+// naming objects a prune already removed are the same client-side condition and get
+// the same missing_chunks code, not a 500 a client would retry unchanged.
+func TestShareWithPrunedRefsIsMissingChunks(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("pruned-refs@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	pruned := []string{strings.Repeat("ab", 32)}
+	for _, tc := range []struct {
+		path string
+		body any
+	}{
+		{"/v1/resources/" + res.ID + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: []byte("wrap"), ChunkRefs: pruned}},
+		{"/v1/resources/" + res.ID + "/visibility", api.SetVisibilityRequest{Visibility: api.Public, ChunkRefs: pruned}},
+	} {
+		var e api.ErrorResponse
+		if code := h.do(http.MethodPost, tc.path, token, tc.body, &e); code != http.StatusBadRequest || e.Code != api.ErrCodeMissingChunks {
+			t.Errorf("POST %s with pruned refs: got %d %q, want 400 %q", tc.path, code, e.Code, api.ErrCodeMissingChunks)
 		}
 	}
 }
