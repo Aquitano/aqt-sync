@@ -40,6 +40,58 @@ All notable changes to this project are documented in this file.
   present the contact's real identity key with its own enc key. The client now signs
   only a challenge of exactly 32 bytes, which a binding never is.
 
+### Fixed
+
+- Sync resolves file/directory clashes as conflicts, clears tracked subdirectories
+  before replacing their parent with a file, and keeps a directory while a surviving
+  local change or incoming remote entry needs it. Directories independently created
+  on both sides enter the base without a recurring conflict.
+- On macOS, a rename that changes only Unicode normalization follows the same path
+  as a case-only rename. A remote conflict copy below a retained local file gets its
+  suffix on the blocking ancestor, so it can be written.
+- Sync and tree diffs reject invalid directory-child names before planning. Ancestor
+  walks also stop at `/`, so an absolute path cannot hang `sync --dry-run` or a watch
+  agent. Downloads reject paths naming the tracked root, avoid directory creation
+  through symlinks, and create symlinks after regular files.
+- In-place restore preserves `.git`, ignored files, and other local paths that the
+  restored rules still exclude. Files that would become tracked or collide with the
+  restored tree stay in the backup, with a warning naming them. Folder aliases are
+  resolved before the swap, parent directory modes survive, and staging/backup
+  directories stay out of scans.
+- Pack locations with invalid bounds or contradictory duplicates fail before a
+  download slices them. Exact repeated locations remain valid. Decompression bounds
+  the declared output length before allocating, resource-envelope headers grow only
+  as bytes arrive, and `.aqtconfig` rejects trailing JSON data.
+- Server quotas now charge metadata growth, new grants, and revived resources.
+  Retried pack uploads and snapshot creates remain valid at the quota, and a write
+  to a missing resource returns `not_found` before charging growth.
+- A rejected snapshot create no longer consumes a limited-read public link.
+  Authentication challenges are consumed atomically, and a token lookup racing a
+  revocation cannot repopulate the auth cache with stale access.
+- Oversized JSON and pack bodies return `413`, unmatched routes return the JSON
+  `not_found` error, and sharing with pruned chunk references returns `missing_chunks`
+  instead of `500`. Resource writes reject blob nonces outside the filename bounds.
+- Root-key rotation removes legacy incoming grant wraps on reclaimed resources in
+  the same transaction as the key change, matching the login migration's cleanup.
+
+### Performance
+
+- Pack verification and staging run outside the account's GC lock. Only the final
+  file rename and database commit serialize, and startup sweeps abandoned staging
+  files after their grace period.
+- Chunk checks and location lookups avoid writes for recently touched packs. GC,
+  pruning, and repacking include the touch interval in their grace calculation.
+- Directory rename detection indexes sorted path ranges instead of repeatedly
+  scanning the whole tree. Downloads retain per-file durability on macOS, including
+  across mounted volumes.
+
+### Maintenance
+
+- The landing page uses Next.js 16.3.8 with matching ESLint configuration and
+  refreshed dependency floors.
+- New fuzz targets cover filesystem materialization, folder config parsing, pack
+  location bounds, public download frames, and terminal-safe text.
+
 ## [v0.10.0] - 2026-09-20
 
 A client-side release. Nothing in it changes a sealed format, the wire protocol, or
