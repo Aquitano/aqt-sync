@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -80,6 +82,32 @@ func TestMaterializeDirsAppliesModesLast(t *testing.T) {
 	}
 }
 
+// A tree can list the same name as a symlink and as a directory. The directory's
+// mode must not be applied through the link to whatever it points at.
+func TestMaterializeDirsRefusesASymlinkAtTheDirectoryPath(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows Chmod carries only the write bit")
+	}
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.Chmod(outside, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSymlink(root, Entry{Path: "d", Link: outside}); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := MaterializeDirs(root, []DirEntry{{Path: "d", Mode: 0o755}}); err == nil {
+		t.Error("MaterializeDirs accepted a directory path that is a symlink")
+	}
+	fi, err := os.Stat(outside)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("symlink target mode = %#o, want it left at 0700", got)
+	}
+}
+
 // TestRemoveDirPathBecameFile covers the dir->file type change: when a tracked directory
 // was replaced on disk by a regular file earlier in the same apply (a remote type change),
 // RemoveDir must be a no-op that leaves the replacement file intact rather than failing on
@@ -135,4 +163,71 @@ func TestRemoveDirEmptyAndNonEmpty(t *testing.T) {
 	if _, err := os.Stat(full); err != nil {
 		t.Fatalf("a non-empty directory must not be removed: %v", err)
 	}
+}
+
+// FuzzMaterializeStaysInRoot materializes an arbitrary tree shape in the order a
+// clone does (files, then symlinks, then directories) and checks that nothing outside
+// the root changed. A remote tree's names are chosen by whoever holds its key, which
+// for a share link or a grant is another account. Each spec line is "f <path>",
+// "l <path> <target selector>" or "d <path> <octal mode>"; link targets stay inside a
+// per-run sandbox, so a failure is contained.
+func FuzzMaterializeStaysInRoot(f *testing.F) {
+	f.Add("l d 0\nd d 55") // a symlink and a directory at the same path
+	f.Add("l . 0\nl y 1")  // a symlink at the root's own path, then one inside the root
+	f.Add("f a/x\nl a 0\nd a/b 7")
+	f.Fuzz(func(t *testing.T, spec string) {
+		if runtime.GOOS == "windows" {
+			t.Skip("symlink creation needs a privilege Windows leaves off")
+		}
+		sandbox := t.TempDir()
+		root, outside := filepath.Join(sandbox, "root"), filepath.Join(sandbox, "outside")
+		for _, d := range []string{sandbox, root, outside} {
+			if err := os.MkdirAll(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(d, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		targets := []string{outside, sandbox}
+		var files, links []Entry
+		var dirs []DirEntry
+		for _, line := range strings.Split(spec, "\n") {
+			kind, rest, _ := strings.Cut(line, " ")
+			path, arg, _ := strings.Cut(rest, " ")
+			switch kind {
+			case "f":
+				files = append(files, Entry{Path: path, Mode: 0o600, Inline: []byte("x")})
+			case "l":
+				links = append(links, Entry{Path: path, Link: targets[len(arg)%len(targets)]})
+			case "d":
+				mode, _ := strconv.ParseUint(arg, 8, 32)
+				// Owner rwx always, so the sandbox stays removable; the fuzzed group
+				// and other bits are what a chmod through a link would reveal.
+				dirs = append(dirs, DirEntry{Path: path, Mode: 0o700 | uint32(mode)&0o077})
+			}
+		}
+		for _, e := range files {
+			_, _ = WriteFile(root, e, e.Inline)
+		}
+		for _, e := range links {
+			_ = WriteSymlink(root, e)
+		}
+		_ = MaterializeDirs(root, dirs)
+
+		if fi, err := os.Lstat(root); err != nil || !fi.IsDir() {
+			t.Fatalf("the root is no longer a directory (err %v)", err)
+		}
+		for _, d := range []string{sandbox, outside} {
+			if fi, err := os.Stat(d); err != nil || fi.Mode().Perm() != 0o700 {
+				t.Fatalf("%s changed mode or vanished (err %v)", d, err)
+			}
+		}
+		if got, _ := os.ReadDir(outside); len(got) > 0 {
+			t.Fatalf("%d entries landed outside the root", len(got))
+		}
+		if got, _ := os.ReadDir(sandbox); len(got) != 2 {
+			t.Fatalf("the sandbox holds %d entries, want only root and outside", len(got))
+		}
+	})
 }
