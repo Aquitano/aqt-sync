@@ -324,11 +324,13 @@ them still receives the rest of the folder, skips the links with a named warning
 and keeps their entries in the base so the next sync reads their absence as
 inability rather than a deletion to push; a pack push from such a device carries
 them into the archive from the base for the same reason. Case-colliding paths
-(`Notes.md` and `notes.md`) are refused at push time on every platform — a
+(`Notes.md` and `notes.md`, or `café` spelled precomposed and decomposed, which
+APFS also resolves to one file) are refused at push time on every platform — a
 case-insensitive clone would collapse them into one file, and its next sync would
 then overwrite both remote copies with the survivor's bytes — and a pull or clone
 onto a case-insensitive filesystem refuses such a tree by name before writing
-anything.
+anything. A rename that changes only case or normalization is applied there as a
+rename, not as a download plus a delete of the same file.
 
 **One prologue.** Every sync enters through `syncSession`: it loads `state.json`
 and the last-synced base, refuses a missing base unless `--reconcile`, and acquires

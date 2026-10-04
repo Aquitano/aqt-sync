@@ -50,7 +50,7 @@ func TestPartitionDeletesByDownloadMatchesPairwise(t *testing.T) {
 	pairwise := func(deletes []string, downloads []syncengine.Entry, fold bool) (early, late []string) {
 		key := func(p string) string {
 			if fold {
-				return strings.ToLower(p)
+				return syncengine.FoldName(p)
 			}
 			return p
 		}
