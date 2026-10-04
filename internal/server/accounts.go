@@ -370,15 +370,16 @@ func verifyGrantMigrations(tx *sql.Tx, owner string, grants []api.GrantKeyMigrat
 	return nil
 }
 
-// updateIncomingGrants stores the re-wrapped incoming grants verifyGrantMigrations
-// accepted.
+// updateIncomingGrants stores the re-wrapped live grants and removes legacy wraps
+// left on reclaimed resources, for both enc-key upgrades and root-key rotations.
 func updateIncomingGrants(tx *sql.Tx, owner string, grants []api.GrantKeyMigration) error {
 	for _, m := range grants {
 		if _, err := tx.Exec(`UPDATE grants SET wrapped_key = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`, m.WrappedKey, m.ResourceID, m.OwnerHandle, owner); err != nil {
 			return err
 		}
 	}
-	return nil
+	_, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND length(wrapped_key) <> ?`, owner, crypto.GrantWrapSize)
+	return err
 }
 
 // ErrEncKeyBinding is returned when a published enc key is not signed by the
@@ -418,12 +419,6 @@ func (s *Store) UpgradeEncKey(owner string, req api.EncKeyUpgradeRequest) error 
 		return err
 	}
 	if err := updateIncomingGrants(tx, owner, req.IncomingGrants); err != nil {
-		return err
-	}
-	// What is still not an X-Wing wrap sits on a reclaimed resource, which the
-	// completeness check skips. It opens nothing now, and deleting it keeps a later
-	// re-upload under the same id from serving an X25519 wrap again.
-	if _, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND length(wrapped_key) <> ?`, owner, crypto.GrantWrapSize); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE accounts SET enc_public_key = ?, enc_key_sig = ? WHERE owner_handle = ?`, req.EncPublicKey, req.EncKeySig, owner); err != nil {

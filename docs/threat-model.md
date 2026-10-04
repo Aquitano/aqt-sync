@@ -275,9 +275,11 @@ against Grover's algorithm.
   [Still open](#still-open).
 
 Grants wrapped before capability 5 were X25519. The grantee's next `aqt login`
-re-wraps them to X-Wing and publishes the X-Wing key in one transaction, so no X25519
-wrap outlives that account's upgrade. That cannot reach copies taken earlier: whoever
-holds a pre-upgrade database can, with a quantum computer, recover the content keys
+re-wraps live grants to X-Wing and removes legacy wraps on reclaimed resources in
+the same transaction that publishes the X-Wing key. Root-key rotation applies the
+same cleanup, so no X25519 wrap outlives that account's upgrade. That cannot reach
+copies taken earlier: whoever holds a pre-upgrade database can, with a quantum
+computer, recover the content keys
 those wraps carried. A content key also opens every later version of its resource
 until the owner rotates it. `aqt unshare <id>` rotates a private resource's key and
 re-wraps it for the remaining grantees.
