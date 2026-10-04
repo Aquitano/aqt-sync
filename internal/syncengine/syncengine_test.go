@@ -389,6 +389,28 @@ func TestWriteFileRejectsPathEscape(t *testing.T) {
 	}
 }
 
+// An entry at the root's own path would replace the root, and a symlink there
+// sends every later write of the same materialization to its target.
+func TestEntryAtRootPathIsRefused(t *testing.T) {
+	t.Parallel()
+	root := filepath.Join(t.TempDir(), "root")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	for _, p := range []string{"", ".", "sub/.."} {
+		if err := WriteSymlink(root, Entry{Path: p, Link: outside}); err == nil {
+			t.Errorf("symlink at %q: want an error", p)
+		}
+		if _, err := WriteFile(root, Entry{Path: p, Mode: 0o600}, []byte("x")); err == nil {
+			t.Errorf("file at %q: want an error", p)
+		}
+		if fi, err := os.Lstat(root); err != nil || !fi.IsDir() {
+			t.Fatalf("after an entry at %q the root is no longer a directory (err %v)", p, err)
+		}
+	}
+}
+
 func TestWriteFileReplacesStaleSymlinkInsteadOfFollowing(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()

@@ -130,35 +130,39 @@ func runDownloadsFrom(get func(id string) ([]byte, error), root string, entries 
 	g.SetLimit(syncTransferLimit(downloadConcurrency))
 	var mu sync.Mutex
 	mtimes := make(map[string]int64, len(entries))
-	var skippedLinks []string
+	var links []syncengine.Entry
 	for _, e := range entries {
+		if e.IsSymlink() {
+			links = append(links, e)
+			continue
+		}
 		g.Go(func() error {
-			if e.IsSymlink() {
-				if skipLinks {
-					mu.Lock()
-					skippedLinks = append(skippedLinks, e.Path)
-					mu.Unlock()
-					prog.Add(e.Size)
-					return nil
-				}
-				if err := syncengine.WriteSymlink(root, e); err != nil {
-					return err
-				}
-			} else {
-				mtime, err := syncengine.MaterializeFile(root, e, get)
-				if err != nil {
-					return err
-				}
-				mu.Lock()
-				mtimes[e.Path] = mtime
-				mu.Unlock()
+			mtime, err := syncengine.MaterializeFile(root, e, get)
+			if err != nil {
+				return err
 			}
+			mu.Lock()
+			mtimes[e.Path] = mtime
+			mu.Unlock()
 			prog.Add(e.Size)
 			return nil
 		})
 	}
 	if err := g.Wait(); err != nil {
 		return nil, err
+	}
+	// Symlinks land after every file and one at a time. A write checks its parent
+	// components for symlinks and then descends; a link created by a concurrent worker
+	// between the two would carry that write to the link's target, and a hostile tree
+	// (a share link, a grant) can name both "l" -> anywhere and "l/x".
+	var skippedLinks []string
+	for _, e := range links {
+		if skipLinks {
+			skippedLinks = append(skippedLinks, e.Path)
+		} else if err := syncengine.WriteSymlink(root, e); err != nil {
+			return nil, err
+		}
+		prog.Add(e.Size)
 	}
 	if len(skippedLinks) > 0 {
 		sort.Strings(skippedLinks)
