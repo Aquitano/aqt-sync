@@ -4,6 +4,14 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+## [v0.11.0] - 2026-10-05
+
+Grants between accounts move to X-Wing, which raises the client capability to 5.
+Below it the server answers `426` to signup, root-key rotation, the grant and share
+listing routes, and reads through a grant; syncing your own resources, public links,
+and snapshots keep working. There is no schema migration. The update manifest,
+signature, and trust roots are unchanged, so v0.10.0 clients update as usual.
+
 ### Breaking Changes
 
 - **Account-to-account grants are post-quantum.** An account's published enc key is
