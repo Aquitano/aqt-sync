@@ -10,6 +10,7 @@ import (
 	"crypto/hpke"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -203,4 +204,69 @@ func legacyMigrationWrap(t *testing.T, ck crypto.ContentKey, mk crypto.MasterKey
 		t.Fatal(err)
 	}
 	return append(enc, sealed...)
+}
+
+func TestGrantMigrationAllowsNonGrowingOwnerWrites(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	aliceToken, aliceMK := h.signup("quota-owner@example.com", "alice passphrase here")
+	bobToken, bobMK := h.signup("quota-recipient@example.com", "bob passphrase here")
+	alice, bob := h.handleOf("quota-owner@example.com"), h.handleOf("quota-recipient@example.com")
+	res, code := h.putSized(aliceToken, aliceMK, "", 64)
+	if code != http.StatusCreated {
+		t.Fatal(code)
+	}
+	stored, err := h.store.GetResource(res.ID, alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.UnwrapKey(*stored.WrappedKey, [crypto.KeySize]byte(aliceMK))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldWrap := legacyMigrationWrap(t, ck, bobMK, res.ID, alice, bob)
+	if err := h.store.PutGrant(alice, res.ID, bob, oldWrap, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.db.Exec(`UPDATE accounts SET enc_public_key=? WHERE owner_handle=?`, make([]byte, 32), bob); err != nil {
+		t.Fatal(err)
+	}
+	before, err := h.store.AccountUsage(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.srv.cfg.QuotaBytes = before.StorageBytes + 512
+	h.srv.cfg.MaxResources = 1
+	enc := crypto.DeriveEncKey(bobMK).Public()
+	newWrap, err := crypto.WrapGrant(ck, enc, res.ID, alice, bob)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := api.EncKeyUpgradeRequest{EncPublicKey: enc, EncKeySig: crypto.SignEncKey(crypto.DeriveSigningKey(bobMK), enc), IncomingGrants: []api.GrantKeyMigration{{ResourceID: res.ID, OwnerHandle: alice, WrappedKey: newWrap, ExpectedWrappedKey: oldWrap}}}
+	if code := h.do(http.MethodPut, "/v1/account/enc-key", bobToken, req, nil); code != http.StatusNoContent {
+		t.Fatalf("migration %d", code)
+	}
+	after, err := h.store.AccountUsage(alice)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.StorageBytes <= h.srv.cfg.QuotaBytes {
+		t.Fatal("migration did not exceed the owner quota")
+	}
+	var limit *LimitExceededError
+	if err := h.srv.checkAccountLimit(alice, "resources", 0); !errors.As(err, &limit) || limit.Kind != "resources" {
+		t.Fatalf("zero-byte row addition bypassed the resource cap: %v", err)
+	}
+	if _, code := h.putSized(aliceToken, aliceMK, res.ID, 65); code != http.StatusInsufficientStorage {
+		t.Fatalf("growing update = %d, want 507", code)
+	}
+	if _, code := h.putSized(aliceToken, aliceMK, "", 1); code != http.StatusInsufficientStorage {
+		t.Fatalf("new resource = %d, want 507", code)
+	}
+	if _, code := h.putSized(aliceToken, aliceMK, res.ID, 64); code != http.StatusOK {
+		t.Errorf("same-size content-key rewrite after recipient migration = %d, want 200", code)
+	}
+	if _, code := h.putSized(aliceToken, aliceMK, res.ID, 8); code != http.StatusOK {
+		t.Errorf("shrinking resource after recipient migration = %d, want 200", code)
+	}
 }

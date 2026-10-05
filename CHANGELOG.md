@@ -62,6 +62,8 @@ All notable changes to this project are documented in this file.
   download slices them. Exact repeated locations remain valid. Decompression bounds
   the declared output length before allocating, resource-envelope headers grow only
   as bytes arrive, and `.aqtconfig` rejects trailing JSON data.
+- Accounts pushed over their storage quota by grant migration can still rotate keys
+  and rewrite or shrink existing resources. Growing writes remain quota checked.
 - Server quotas now charge metadata growth, new grants, and revived resources.
   Retried pack uploads and snapshot creates remain valid at the quota, and a write
   to a missing resource returns `not_found` before charging growth.
