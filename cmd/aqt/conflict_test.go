@@ -139,3 +139,94 @@ func TestPlanConflictCopiesAvoidsRemotePaths(t *testing.T) {
 		t.Fatalf("copy path = %q, want %q", got, want)
 	}
 }
+
+func TestConflictCopyPathAvoidsAncestorCollisions(t *testing.T) {
+	ts := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	const base = "x.conflict-host-20261005-120000"
+	for _, tc := range []struct {
+		name, original, want  string
+		files, dirs, reserved []string
+		symlink               bool
+	}{
+		{name: "existing parent file", original: "x/y", files: []string{"x", base}, want: base + "-1/y"},
+		{name: "existing parent symlink", original: "x/y", files: []string{"x"}, symlink: true, want: base + "-1/y"},
+		{name: "existing nested parent file", original: "x/dir/y", files: []string{"x", base + "/dir"}, want: base + "-1/dir/y"},
+		{name: "reserved parent", original: "x/y", files: []string{"x"}, reserved: []string{base}, want: base + "-1/y"},
+		{name: "reserved nested parent", original: "x/dir/y", files: []string{"x"}, reserved: []string{base + "/dir"}, want: base + "-1/dir/y"},
+		{name: "reserved original parent", original: "x/y", dirs: []string{"x"}, reserved: []string{"x"}, want: base + "/y"},
+		{name: "reserved descendant", original: "x", files: []string{"x"}, reserved: []string{base + "/child"}, want: base + "-1"},
+		{name: "reusable directory", original: "x/y", files: []string{"x", base + "/other"}, want: base + "/y"},
+		{name: "similar prefix", original: "x", files: []string{"x"}, reserved: []string{base + "-other/child"}, want: base},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			for _, p := range tc.files {
+				writeTree(t, root, p, "existing bytes")
+			}
+			for _, p := range tc.dirs {
+				if err := os.MkdirAll(filepath.Join(root, p), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			outside := t.TempDir()
+			if tc.symlink {
+				if err := os.Symlink(outside, filepath.Join(root, base)); err != nil {
+					t.Skipf("symlinks unsupported: %v", err)
+				}
+			}
+			taken := map[string]bool{}
+			for _, p := range tc.reserved {
+				taken[p] = true
+			}
+			got := conflictCopyPath(root, tc.original, "host", ts, taken)
+			if got != tc.want {
+				t.Fatalf("copy path = %q, want %q", got, tc.want)
+			}
+			if _, err := syncengine.WriteFile(root, syncengine.Entry{Path: got}, []byte("remote bytes")); err != nil {
+				t.Fatalf("materialize copy at %q: %v", got, err)
+			}
+			if content := readTree(t, root, got); content != "remote bytes" {
+				t.Fatalf("copy = %q", content)
+			}
+			for _, p := range tc.files {
+				if content := readTree(t, root, p); content != "existing bytes" {
+					t.Fatalf("existing %q changed: %q", p, content)
+				}
+			}
+			entries, err := os.ReadDir(outside)
+			if err != nil || len(entries) != 0 {
+				t.Fatalf("copy wrote through a parent symlink: %v, %v", entries, err)
+			}
+		})
+	}
+}
+
+func TestPlanConflictCopiesDoesNotReuseBlockedMemo(t *testing.T) {
+	ts := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+	const base = "x.conflict-host-20261005-120000"
+	for _, tc := range []struct{ name, original, copyPath, reserved string }{
+		{"remote ancestor", "x/y", base + "/y", base},
+		{"remote descendant", "x", base, base + "/child"},
+		{"local ancestor", "x/y", base + "/y", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTree(t, root, "x", "local bytes")
+			if tc.reserved == "" {
+				writeTree(t, root, base, "blocker")
+			}
+			remote := map[string]syncengine.Entry{tc.original: {Path: tc.original, Hash: "remote"}}
+			if tc.reserved != "" {
+				remote[tc.reserved] = syncengine.Entry{Path: tc.reserved, Hash: "new arrival"}
+			}
+			memo := conflictCopyMemo{tc.original: {copyPath: tc.copyPath, remoteHash: "remote"}}
+			copies := planConflictCopies(root, []syncengine.Action{{Path: tc.original, Kind: syncengine.Conflict}}, remote, "host", ts, memo)
+			if len(copies) != 1 || copies[0].entry.Path == tc.copyPath {
+				t.Fatalf("reused blocked copy: %v", copies)
+			}
+			if _, err := syncengine.WriteFile(root, copies[0].entry, []byte("remote bytes")); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
