@@ -104,7 +104,7 @@ func TestQuotaChargesNewGrants(t *testing.T) {
 	}
 	grant := func(grantee string) int {
 		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
-			GranteeHandle: grantee, WrappedKey: make([]byte, maxGrantWrapSize),
+			GranteeHandle: grantee, WrappedKey: make([]byte, crypto.GrantWrapSize),
 		}, nil)
 	}
 	refused := false
@@ -138,7 +138,7 @@ func TestWriteToMissingResourceIsNotFoundBeforeQuota(t *testing.T) {
 		{http.MethodPut, missing + "/metadata", api.UpdateResourceMetadataRequest{
 			EncryptedMeta: crypto.SealedBlob{Nonce: make([]byte, 24), Ciphertext: make([]byte, 64)}, ExpectedVersion: 1,
 		}},
-		{http.MethodPost, missing + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: []byte("wrap")}},
+		{http.MethodPost, missing + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: make([]byte, crypto.GrantWrapSize)}},
 	} {
 		var e api.ErrorResponse
 		if code := h.do(tc.method, tc.path, token, tc.body, &e); code != http.StatusNotFound || e.Code != api.ErrCodeNotFound {

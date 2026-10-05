@@ -85,7 +85,7 @@ func MarkTypeClashes(actions, dirActions []Action, local Manifest) {
 	keptUnder := map[string]bool{}
 	keep := func(set map[string]bool, p string) {
 		set[p] = true
-		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+		for dir := path.Dir(p); dir != "." && dir != "/"; dir = path.Dir(dir) {
 			keptUnder[dir] = true
 		}
 	}
@@ -100,7 +100,7 @@ func MarkTypeClashes(actions, dirActions []Action, local Manifest) {
 		}
 	}
 	underKeptFile := func(p string) bool {
-		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+		for dir := path.Dir(p); dir != "." && dir != "/"; dir = path.Dir(dir) {
 			if keptFiles[dir] {
 				return true
 			}
@@ -131,7 +131,7 @@ func KeepParents(actions, dirActions []Action, local Manifest) {
 	keptUnder := map[string]bool{}
 	incomingUnder := map[string]bool{}
 	mark := func(set map[string]bool, p string) {
-		for dir := path.Dir(p); dir != "."; dir = path.Dir(dir) {
+		for dir := path.Dir(p); dir != "." && dir != "/"; dir = path.Dir(dir) {
 			set[dir] = true
 		}
 	}

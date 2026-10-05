@@ -85,6 +85,15 @@ release each landed in.
   cross-resource dedup. Four bounded caveats are recorded with the mechanism. See
   [domain separation and record binding](threat-model.md#domain-separation-and-record-binding).
 
+- **Post-quantum grants.** Grant wraps are the one stored ciphertext under a
+  public-key primitive, so they moved from X25519 to X-Wing (ML-KEM-768 + X25519)
+  through HPKE from the Go standard library, which also removed the circl dependency.
+  The account's X-Wing private key is its HKDF-derived 32-byte seed, not the output of
+  a library's `DeriveKeyPair`, whose X-Wing mapping is still a draft that
+  implementations disagree on. Signatures stayed Ed25519: a forgery cannot be
+  harvested, and pins compare enc keys byte for byte. See
+  [quantum adversaries](threat-model.md#quantum-adversaries).
+
 - **Session cache at rest.** The cached master key is sealed under a random
   per-profile key held in the OS keychain, with a machine-bound fallback for hosts
   that have no keychain backend. See

@@ -231,10 +231,9 @@ func anchorStrippingProxy(t *testing.T, backend string) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rp := httputil.NewSingleHostReverseProxy(target)
-	base := rp.Director
-	rp.Director = func(req *http.Request) {
-		base(req)
+	rp := &httputil.ReverseProxy{Rewrite: func(pr *httputil.ProxyRequest) {
+		pr.SetURL(target)
+		req := pr.Out
 		if req.Method != http.MethodPost || req.URL.Path != "/v1/snapshots" || req.Body == nil {
 			return
 		}
@@ -251,7 +250,7 @@ func anchorStrippingProxy(t *testing.T, backend string) *httptest.Server {
 		req.Body = io.NopCloser(bytes.NewReader(body))
 		req.ContentLength = int64(len(body))
 		req.Header.Set("Content-Length", strconv.Itoa(len(body)))
-	}
+	}}
 	ts := httptest.NewServer(rp)
 	t.Cleanup(ts.Close)
 	return ts

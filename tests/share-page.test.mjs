@@ -35,7 +35,7 @@ test("preflight authenticates metadata; consent spends one read and decrypts the
   await page.until(() => page.state("state-locked"));
   assert.equal(page.requests.length, 1);
   assert.ok(page.requests[0].url.endsWith("/preflight"));
-  assert.equal(page.requests[0].options.headers["X-Aqt-Capability"], "4");
+  assert.equal(page.requests[0].options.headers["X-Aqt-Capability"], "5");
   assert.match(page.elements.get("policy-note").textContent, /1 read\(s\) remain/);
   page.elements.get("decrypt-btn").click();
   await page.until(() => page.state("state-file"));

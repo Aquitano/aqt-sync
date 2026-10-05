@@ -23,6 +23,7 @@ API layer, *before* any payload is served.
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities — nothing declares or enforces it |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
+| `5` (post-quantum grants) | unreleased | X-Wing (ML-KEM-768 + X25519) enc keys and grant wraps |
 
 The release column names the first version a user could install. Root-key rotation
 appears under `v0.3.0` in the changelog, which was never tagged, and shipped in the
@@ -30,13 +31,18 @@ appears under `v0.3.0` in the changelog, which was never tagged, and shipped in 
 recorded as such in the changelog. Capability 3 therefore first reached clients in
 v0.4.1.
 
-`api.ClientCapability` is `4` today, and every request the deployment makes carries it.
-Capability 4 is what the Git-remote format needs: `aqt repo create` declares
+`api.ClientCapability` is `5` today, and every request the deployment makes carries it.
+Capability 5 gates the grant surface rather than a resource: signup and every route
+that hands out or accepts an enc key or a grant wrap, and a grantee's resource read,
+answer `426` below it, so a capability-4 client is told to upgrade instead of rejecting an X-Wing
+key as a bad binding or failing to open a wrap. An account that signed up before
+capability 5 is moved onto X-Wing by its next `aqt login`; until then key lookups
+serve it as a decoy, like an account with no key. Capability 4 is what the Git-remote
+format needs: `aqt repo create` declares
 `minClient: 4`, so a client below it receives `426 Upgrade Required` before the server
 serves or overwrites a root it cannot interpret. Capability 3 is a historical rung —
 `rotate-root` used to gate on it, but the only clients that reach the route are
-capability 4, so the gate was removed and the number stays as a record of when
-rotation landed.
+capability 5. The number stays as a record of when rotation landed.
 
 One server-behavior break rides outside the capability ladder because it changes no
 sealed format:

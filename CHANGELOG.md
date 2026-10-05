@@ -2,6 +2,101 @@
 
 All notable changes to this project are documented in this file.
 
+## [Unreleased]
+
+### Breaking Changes
+
+- **Account-to-account grants are post-quantum.** An account's published enc key is
+  now X-Wing (ML-KEM-768 + X25519) and every grant wrap is HPKE over it, so a grant
+  stored on the server stays sealed unless both are broken. The server refuses
+  X25519 keys and wraps, and signup and every grant route answer `426` below client
+  capability 5. Server and clients upgrade together.
+
+### Upgrading
+
+- **Run `aqt login` once per account after upgrading.** It publishes the account's
+  X-Wing key and re-wraps every grant it has received, in one transaction. Until it
+  runs, the account is served as a decoy to anyone sharing with it: a new share to it
+  never opens, and a sharer who pinned it sees a key mismatch. Shares it already
+  holds keep opening meanwhile, unless their owner rotates the key.
+- **Pins follow on their own.** A contact pinned before this release moves to that
+  contact's X-Wing key the first time it is used after the contact has logged in,
+  provided the handle and identity key still match the pin.
+- **Rotate grants you want protected going forward, after their grantees have logged
+  in.** Anyone holding a copy of the database from before the upgrade could, with a
+  quantum computer, recover the content keys those X25519 wraps carried, and a
+  content key opens every later version of its resource. `aqt unshare <id>` rotates a
+  private resource's key and re-wraps it for the remaining grantees. A grantee who
+  has not logged in yet is skipped, and loses access until you share with them again.
+- **Building from source needs Go 1.26.** Grants use the standard library's
+  `crypto/hpke`; the `cloudflare/circl` dependency is gone.
+
+### Security
+
+- **A login no longer signs whatever the server calls a challenge.** The identity
+  key that signs the login challenge also signs the enc-key binding, so a hostile
+  server could hand a logging-in client a "challenge" that was really a binding for a
+  key the server held. That defeated `aqt contacts pin --fingerprint`: the server could
+  present the contact's real identity key with its own enc key. The client now signs
+  only a challenge of exactly 32 bytes, which a binding never is.
+
+### Fixed
+
+- Sync resolves file/directory clashes as conflicts, clears tracked subdirectories
+  before replacing their parent with a file, and keeps a directory while a surviving
+  local change or incoming remote entry needs it. Directories independently created
+  on both sides enter the base without a recurring conflict.
+- On macOS, a rename that changes only Unicode normalization follows the same path
+  as a case-only rename. A remote conflict copy below a retained local file gets its
+  suffix on the blocking ancestor, so it can be written.
+- Sync and tree diffs reject invalid directory-child names before planning. Ancestor
+  walks also stop at `/`, so an absolute path cannot hang `sync --dry-run` or a watch
+  agent. Downloads reject paths naming the tracked root, avoid directory creation
+  through symlinks, and create symlinks after regular files.
+- In-place restore preserves `.git`, ignored files, and other local paths that the
+  restored rules still exclude. Files that would become tracked or collide with the
+  restored tree stay in the backup, with a warning naming them. Folder aliases are
+  resolved before the swap, parent directory modes survive, and staging/backup
+  directories stay out of scans.
+- Pack locations with invalid bounds or contradictory duplicates fail before a
+  download slices them. Exact repeated locations remain valid. Decompression bounds
+  the declared output length before allocating, resource-envelope headers grow only
+  as bytes arrive, and `.aqtconfig` rejects trailing JSON data.
+- Server quotas now charge metadata growth, new grants, and revived resources.
+  Retried pack uploads and snapshot creates remain valid at the quota, and a write
+  to a missing resource returns `not_found` before charging growth.
+- A rejected snapshot create no longer consumes a limited-read public link.
+  Authentication challenges are consumed atomically, and a token lookup racing a
+  revocation cannot repopulate the auth cache with stale access.
+- Oversized JSON and pack bodies return `413`, unmatched routes return the JSON
+  `not_found` error, and sharing with pruned chunk references returns `missing_chunks`
+  instead of `500`. Resource writes reject blob nonces outside the filename bounds.
+- Root-key rotation and login migration remove incoming grants on reclaimed
+  resources in the same transaction as the key change, including X-Wing wraps tied
+  to a discarded root key.
+- Account-key migrations reject incoming grants whose wraps changed while the
+  client prepared the request. Grant writes also check the recipient's current
+  lookup key, and fresh shares pin the resource version they opened, so a stale
+  request cannot replace a working grant with a wrap to an obsolete key.
+
+### Performance
+
+- Pack verification and staging run outside the account's GC lock. Only the final
+  file rename and database commit serialize, and startup sweeps abandoned staging
+  files after their grace period.
+- Chunk checks and location lookups avoid writes for recently touched packs. GC,
+  pruning, and repacking include the touch interval in their grace calculation.
+- Directory rename detection indexes sorted path ranges instead of repeatedly
+  scanning the whole tree. Downloads retain per-file durability on macOS, including
+  across mounted volumes.
+
+### Maintenance
+
+- The landing page uses Next.js 16.3.8 with matching ESLint configuration and
+  refreshed dependency floors.
+- New fuzz targets cover filesystem materialization, folder config parsing, pack
+  location bounds, public download frames, and terminal-safe text.
+
 ## [v0.10.0] - 2026-09-20
 
 A client-side release. Nothing in it changes a sealed format, the wire protocol, or

@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
 	"fmt"
@@ -225,6 +226,7 @@ func (app *application) runLogin(email string, ttl time.Duration) error {
 				return err
 			}
 			fmt.Fprintf(os.Stderr, "logged in as %s · reused device %s · %s\n", email, prof.DeviceID, server)
+			warnEncKeyUpgrade(upgradeEncKey(authed, email, prof.OwnerHandle, rk))
 			return nil
 		} else if !errors.Is(err, client.ErrUnauthorized) {
 			return fmt.Errorf("validate existing device: %w", err)
@@ -395,6 +397,9 @@ func (app *application) attachDevice(cl *client.Client, server, email string, bo
 	if err != nil {
 		return err
 	}
+	if len(ch.Nonce) != api.ChallengeNonceSize {
+		return fmt.Errorf("the server sent a %d-byte login challenge instead of %d bytes; refusing to sign it", len(ch.Nonce), api.ChallengeNonceSize)
+	}
 	resp, err := cl.AttachDevice(api.AttachDeviceRequest{
 		Email:        email,
 		ChallengeID:  ch.ChallengeID,
@@ -420,7 +425,16 @@ func (app *application) attachDevice(cl *client.Client, server, email string, bo
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "logged in as %s · attached device %s · %s\n", email, resp.DeviceID, server)
+	warnEncKeyUpgrade(upgradeEncKey(authed, email, resp.OwnerHandle, rk))
 	return nil
+}
+
+// warnEncKeyUpgrade reports a failed enc-key upgrade without failing the login it
+// rides on: the login itself succeeded, and the next one retries the upgrade.
+func warnEncKeyUpgrade(err error) {
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: shares could not be moved to post-quantum keys yet; run `aqt login` again to retry: %v\n", err)
+	}
 }
 
 // cacheSession stores the freshly recovered root key for the active profile.
@@ -723,23 +737,10 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 		}
 		snapshotMigrations = append(snapshotMigrations, api.KeyWrapMigration{ID: snap.ID, WrappedKey: wrapped})
 	}
-	shares, err := cl.ListShares()
+	newEnc := crypto.DeriveEncKey(newRoot).Public()
+	grantMigrations, err := rewrapIncomingGrants(cl, oldRoot, newEnc, prof.OwnerHandle)
 	if err != nil {
 		return err
-	}
-	newEnc := crypto.DeriveEncKey(newRoot).Public()
-	grantMigrations := make([]api.GrantKeyMigration, 0, len(shares))
-	for _, share := range shares {
-		ck, err := crypto.UnwrapGrant(share.WrappedKey, oldRoot, share.ResourceID, share.OwnerHandle, prof.OwnerHandle)
-		if err != nil {
-			return fmt.Errorf("unwrap incoming grant %s: %w", share.ResourceID, err)
-		}
-		wrapped, err := crypto.WrapGrant(ck, newEnc, share.ResourceID, share.OwnerHandle, prof.OwnerHandle)
-		ck.Wipe()
-		if err != nil {
-			return fmt.Errorf("rewrap incoming grant %s: %w", share.ResourceID, err)
-		}
-		grantMigrations = append(grantMigrations, api.GrantKeyMigration{ResourceID: share.ResourceID, OwnerHandle: share.OwnerHandle, WrappedKey: wrapped})
 	}
 	signing := crypto.DeriveSigningKey(newRoot)
 	resp, err := cl.RotateRootKey(api.RootKeyRotationRequest{
@@ -762,6 +763,63 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "account root key rotated; all other devices were revoked and must re-login")
+	return nil
+}
+
+// rewrapIncomingGrants unwraps every grant made to this account with the key derived
+// from oldRoot and re-wraps it to newEnc, for a request that switches the published
+// enc key and the wraps together.
+func rewrapIncomingGrants(cl *client.Client, oldRoot crypto.MasterKey, newEnc []byte, handle string) ([]api.GrantKeyMigration, error) {
+	shares, err := cl.ListShares()
+	if err != nil {
+		return nil, err
+	}
+	migrations := make([]api.GrantKeyMigration, 0, len(shares))
+	for _, share := range shares {
+		ck, err := crypto.UnwrapGrant(share.WrappedKey, oldRoot, share.ResourceID, share.OwnerHandle, handle)
+		if err != nil {
+			return nil, fmt.Errorf("unwrap incoming grant %s (remove it with `aqt shares rm %s` if it never opened): %w", share.ResourceID, share.ResourceID, err)
+		}
+		wrapped, err := crypto.WrapGrant(ck, newEnc, share.ResourceID, share.OwnerHandle, handle)
+		ck.Wipe()
+		if err != nil {
+			return nil, fmt.Errorf("rewrap incoming grant %s: %w", share.ResourceID, err)
+		}
+		migrations = append(migrations, api.GrantKeyMigration{
+			ResourceID: share.ResourceID, OwnerHandle: share.OwnerHandle,
+			WrappedKey: wrapped, ExpectedWrappedKey: share.WrappedKey,
+		})
+	}
+	return migrations, nil
+}
+
+// upgradeEncKey moves an account that still publishes a pre-X-Wing enc key onto the
+// X-Wing key derived from rk, re-wrapping its incoming grants in the same request so
+// no X25519 wrap survives the switch. Login runs it because that is when a device
+// holds both the root key and a client; an account already on X-Wing costs one
+// lookup. The lookup answers a pre-X-Wing account with a decoy, which is simply
+// "not this account's key" here.
+func upgradeEncKey(cl *client.Client, email, handle string, rk crypto.MasterKey) error {
+	enc := crypto.DeriveEncKey(rk).Public()
+	published, err := cl.AccountKeys(email)
+	if err != nil {
+		return err
+	}
+	if bytes.Equal(published.EncPublicKey, enc) {
+		return nil
+	}
+	grants, err := rewrapIncomingGrants(cl, rk, enc, handle)
+	if err != nil {
+		return err
+	}
+	if err := cl.UpgradeEncKey(api.EncKeyUpgradeRequest{
+		EncPublicKey:   enc,
+		EncKeySig:      crypto.SignEncKey(crypto.DeriveSigningKey(rk), enc),
+		IncomingGrants: grants,
+	}); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "moved account-to-account shares to post-quantum keys (%d incoming re-wrapped)\n", len(grants))
 	return nil
 }
 

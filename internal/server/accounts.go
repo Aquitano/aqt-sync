@@ -31,7 +31,7 @@ type Account struct {
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
 // and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
 // already taken. The new account starts at auth epoch 1. encPublicKey/encKeySig are
-// the published X25519 key and its identity self-signature; the handler requires and
+// the published enc key and its identity self-signature; the handler requires and
 // verifies them, and the empty case is stored NULL only for a keyless row a test or
 // a pre-grants dir carries.
 func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier, encPublicKey, encKeySig []byte) (Account, error) {
@@ -264,10 +264,8 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 			return fail(err)
 		}
 	}
-	for _, m := range req.IncomingGrants {
-		if _, err := tx.Exec(`UPDATE grants SET wrapped_key = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`, m.WrappedKey, m.ResourceID, m.OwnerHandle, owner); err != nil {
-			return fail(err)
-		}
+	if err := updateIncomingGrants(tx, owner, req.IncomingGrants); err != nil {
+		return fail(err)
 	}
 	newEpoch := epoch + 1
 	newVerifier := sha256.Sum256(req.NewAuthVerifier)
@@ -340,22 +338,32 @@ func verifyKeyMigrations(tx *sql.Tx, owner string, resources, snapshots []api.Ke
 	if n != len(snapshots) {
 		return ErrVersionConflict
 	}
-	seen = map[string]bool{}
+	return verifyGrantMigrations(tx, owner, grants)
+}
+
+// verifyGrantMigrations checks that grants names every incoming grant on a live
+// resource exactly once, so a key change leaves no wrap behind under the old key.
+func verifyGrantMigrations(tx *sql.Tx, owner string, grants []api.GrantKeyMigration) error {
+	seen := map[string]bool{}
 	for _, m := range grants {
 		k := m.ResourceID + "\x00" + m.OwnerHandle
-		if m.ResourceID == "" || m.OwnerHandle == "" || len(m.WrappedKey) == 0 || seen[k] {
+		if m.ResourceID == "" || m.OwnerHandle == "" || len(m.WrappedKey) == 0 || len(m.ExpectedWrappedKey) == 0 || seen[k] {
 			return ErrVersionConflict
 		}
 		seen[k] = true
-		var exists int
-		err := tx.QueryRow(`SELECT 1 FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.resource_id=? AND g.owner_handle=? AND g.grantee_handle=? AND r.reclaimed=0`, m.ResourceID, m.OwnerHandle, owner).Scan(&exists)
+		var current []byte
+		err := tx.QueryRow(`SELECT g.wrapped_key FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.resource_id=? AND g.owner_handle=? AND g.grantee_handle=? AND r.reclaimed=0`, m.ResourceID, m.OwnerHandle, owner).Scan(&current)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrVersionConflict
 		}
 		if err != nil {
 			return err
 		}
+		if !bytes.Equal(current, m.ExpectedWrappedKey) {
+			return ErrVersionConflict
+		}
 	}
+	var n int
 	if err := tx.QueryRow(`SELECT count(*) FROM grants g JOIN resources r ON r.id = g.resource_id WHERE g.grantee_handle=? AND r.reclaimed=0`, owner).Scan(&n); err != nil {
 		return err
 	}
@@ -363,6 +371,64 @@ func verifyKeyMigrations(tx *sql.Tx, owner string, resources, snapshots []api.Ke
 		return ErrVersionConflict
 	}
 	return nil
+}
+
+// updateIncomingGrants stores the re-wrapped live grants and removes grants left on
+// reclaimed resources. Those grants are absent from the migration set and would
+// otherwise reappear with an obsolete wrap if their resource is revived.
+func updateIncomingGrants(tx *sql.Tx, owner string, grants []api.GrantKeyMigration) error {
+	for _, m := range grants {
+		if _, err := tx.Exec(`UPDATE grants SET wrapped_key = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`, m.WrappedKey, m.ResourceID, m.OwnerHandle, owner); err != nil {
+			return err
+		}
+	}
+	_, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND EXISTS (SELECT 1 FROM resources r WHERE r.id = grants.resource_id AND r.reclaimed = 1)`, owner)
+	return err
+}
+
+// ErrEncKeyBinding is returned when a published enc key is not signed by the
+// account's identity key. Handlers map it to 400.
+var ErrEncKeyBinding = errors.New("enc key is not signed by the account's identity key")
+
+// UpgradeEncKey moves an account still publishing a pre-X-Wing enc key onto an X-Wing
+// one, replacing every incoming grant's wrap in the same transaction. It is one-shot:
+// once the account is on X-Wing, the same key again is a no-op (another device got
+// there first) and any other key is ErrConflict, so a replay can never rewrite an
+// upgraded account's grants. The binding is checked against the identity key the
+// account holds inside the transaction, so a root-key rotation racing this request
+// cannot leave an enc key its identity never signed.
+func (s *Store) UpgradeEncKey(owner string, req api.EncKeyUpgradeRequest) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var identity, current []byte
+	if err := tx.QueryRow(`SELECT public_key, enc_public_key FROM accounts WHERE owner_handle = ?`, owner).Scan(&identity, &current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if bytes.Equal(current, req.EncPublicKey) {
+		return nil
+	}
+	if len(current) == crypto.EncPublicKeySize {
+		return ErrConflict
+	}
+	if !crypto.VerifyEncKey(ed25519.PublicKey(identity), req.EncPublicKey, req.EncKeySig) {
+		return ErrEncKeyBinding
+	}
+	if err := verifyGrantMigrations(tx, owner, req.IncomingGrants); err != nil {
+		return err
+	}
+	if err := updateIncomingGrants(tx, owner, req.IncomingGrants); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE accounts SET enc_public_key = ?, enc_key_sig = ? WHERE owner_handle = ?`, req.EncPublicKey, req.EncKeySig, owner); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // challengeTTL bounds how long an issued nonce remains valid.
@@ -373,7 +439,7 @@ const challengeTTL = 2 * time.Minute
 func (s *Store) CreateChallenge(email string) (id string, nonce []byte, err error) {
 	email = api.NormalizeEmail(email)
 	id = newID(16)
-	nonce = randomBytes(32)
+	nonce = randomBytes(api.ChallengeNonceSize)
 	now := time.Now()
 	// Opportunistic sweep: challenges are deleted on consume, but an unconsumed one
 	// would otherwise linger forever. Reaping expired rows on each issue keeps the
@@ -974,7 +1040,7 @@ func (s *Server) handleCreateAccount(c *gin.Context) {
 	// or a bad key would poison every future grant.
 	if len(req.EncPublicKey) != crypto.EncPublicKeySize ||
 		!crypto.VerifyEncKey(req.PublicKey, req.EncPublicKey, req.EncKeySig) {
-		abort(c, http.StatusBadRequest, "enc public key must be 32 bytes and self-signed by the identity key")
+		abort(c, http.StatusBadRequest, "enc public key must be an X-Wing key self-signed by the identity key")
 		return
 	}
 	acc, err := s.store.CreateAccount(req.Email, req.Kdf, req.PublicKey, req.WrappedRoot, req.AuthVerifier, req.EncPublicKey, req.EncKeySig)
@@ -1209,7 +1275,7 @@ func (s *Server) handleRotateRootKey(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 || len(req.PublicKey) != ed25519.PublicKeySize || len(req.EncPublicKey) != crypto.EncPublicKeySize || !crypto.VerifyEncKey(ed25519.PublicKey(req.PublicKey), req.EncPublicKey, req.EncKeySig) {
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.OldAuthVerifier) == 0 || len(req.NewAuthVerifier) == 0 || len(req.PublicKey) != ed25519.PublicKeySize || len(req.EncPublicKey) != crypto.EncPublicKeySize || !crypto.VerifyEncKey(ed25519.PublicKey(req.PublicKey), req.EncPublicKey, req.EncKeySig) || !grantWrapsAreXWing(req.IncomingGrants) {
 		abort(c, http.StatusBadRequest, "complete, self-consistent new account identity is required")
 		return
 	}
@@ -1227,6 +1293,54 @@ func (s *Server) handleRotateRootKey(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
+}
+
+// handleUpgradeEncKey moves the account onto an X-Wing enc key (PUT
+// /v1/account/enc-key). The client has already re-wrapped every incoming grant to
+// it; the store swaps the key and the wraps together.
+func (s *Server) handleUpgradeEncKey(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.EncKeyUpgradeRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.EncPublicKey) != crypto.EncPublicKeySize || !grantWrapsAreXWing(req.IncomingGrants) {
+		abort(c, http.StatusBadRequest, "an X-Wing enc key and X-Wing grant wraps are required")
+		return
+	}
+	err := s.store.UpgradeEncKey(owner, req)
+	if errors.Is(err, ErrEncKeyBinding) {
+		abort(c, http.StatusBadRequest, ErrEncKeyBinding.Error())
+		return
+	}
+	if errors.Is(err, ErrVersionConflict) {
+		abortCode(c, http.StatusConflict, "incoming grants changed while upgrading the enc key; retry", api.ErrCodeVersionConflict)
+		return
+	}
+	if errors.Is(err, ErrConflict) {
+		abort(c, http.StatusConflict, "the account already publishes a different X-Wing enc key")
+		return
+	}
+	if errors.Is(err, ErrNotFound) {
+		abortNotFound(c)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "enc key upgrade failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
+// grantWrapsAreXWing reports whether every migrated wrap has the one length the
+// server stores.
+func grantWrapsAreXWing(grants []api.GrantKeyMigration) bool {
+	for _, g := range grants {
+		if len(g.WrappedKey) != crypto.GrantWrapSize {
+			return false
+		}
+	}
+	return true
 }
 
 // handleDeleteAccount erases the calling account and everything stored under it. It

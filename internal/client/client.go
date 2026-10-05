@@ -325,6 +325,12 @@ func (c *Client) RotateRootKey(req api.RootKeyRotationRequest) (api.AuthResponse
 	return r, err
 }
 
+// UpgradeEncKey publishes the account's X-Wing enc key together with its incoming
+// grants re-wrapped to it; the server swaps both in one transaction.
+func (c *Client) UpgradeEncKey(req api.EncKeyUpgradeRequest) error {
+	return c.do(http.MethodPut, "/v1/account/enc-key", req, nil)
+}
+
 // PutResource uploads a resource as a raw envelope (JSON header + ciphertext), so the
 // blob never pays the base64-in-JSON tax. A create (empty id) goes to POST
 // /v1/resources so the server assigns the id; an in-place update (id set) goes to PUT.

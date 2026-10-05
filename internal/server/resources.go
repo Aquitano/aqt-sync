@@ -1061,9 +1061,14 @@ func (s *Server) handleGetResource(c *gin.Context) {
 	// client too old to open the sealed format gets an actionable 426 instead of the
 	// bytes and a downstream AEAD failure. This route is public, so the check lives
 	// here rather than in the authed middleware. It precedes the read count for the
-	// same reason the Accept check does.
-	if capability := requestCapability(c); capability < res.MinClient {
-		abortUpgradeRequired(c, res.MinClient, capability)
+	// same reason the Accept check does. A grant wrap is a sealed format of its own,
+	// so a grantee also needs the capability that reads it.
+	need := res.MinClient
+	if res.GrantKey != nil {
+		need = max(need, api.CapabilityPQGrants)
+	}
+	if capability := requestCapability(c); capability < need {
+		abortUpgradeRequired(c, need, capability)
 		return
 	}
 	// Everything that could refuse this read has passed, so the permit is spent now.

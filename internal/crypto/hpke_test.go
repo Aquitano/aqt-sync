@@ -5,6 +5,8 @@ package crypto
 import (
 	"bytes"
 	"crypto/ed25519"
+	"crypto/sha256"
+	"encoding/hex"
 	"testing"
 )
 
@@ -129,5 +131,54 @@ func TestEncKeyBinding(t *testing.T) {
 	otherIdentity := DeriveSigningKey(testMasterKey(t)).Public().(ed25519.PublicKey)
 	if VerifyEncKey(otherIdentity, encPub, sig) {
 		t.Fatal("signature verified under a different identity")
+	}
+}
+
+// TestGrantFormatIsPinned fixes what every stored grant depends on: the X-Wing key a
+// given root derives, and the wrap length. Changing either — a new HKDF label, or a
+// library that generates X-Wing keys differently — would strand every grant already
+// on a server, so it has to fail here first.
+func TestGrantFormatIsPinned(t *testing.T) {
+	var mk MasterKey
+	for i := range mk {
+		mk[i] = byte(i)
+	}
+	pub := DeriveEncKey(mk).Public()
+	sum := sha256.Sum256(pub)
+	if got := hex.EncodeToString(sum[:]); got != "2fade9224633d1e681d7594b96a0d13f55940edbf11e320ce567afd381fefd19" {
+		t.Fatalf("X-Wing key derived from a fixed root changed: sha256 = %s", got)
+	}
+	wrapped, err := WrapGrant(ContentKey{}, pub, "res1", "owner1", "grantee1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(wrapped) != GrantWrapSize {
+		t.Fatalf("wrap is %d bytes, GrantWrapSize is %d", len(wrapped), GrantWrapSize)
+	}
+}
+
+// TestPreXWingGrantStillOpens fixes one wrap made by the X25519 code this package
+// shipped before X-Wing (cloudflare/circl): grants still in that format on a server
+// must keep opening until their grantee's next login re-wraps them.
+func TestPreXWingGrantStillOpens(t *testing.T) {
+	var mk MasterKey
+	var want ContentKey
+	for i := range mk {
+		mk[i] = byte(i)
+		want[i] = byte(0xa0 + i)
+	}
+	wrapped, err := hex.DecodeString("4ce2895d4266e9b353775a79cfdce001e59c3380b4fe79832199a8b2772f73467e106712ee1073827628830a01717a8badd42888d1a23ea342634593c45b28e94b3b9ce53fbeda40503ff86e13b50103")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := UnwrapGrant(wrapped, mk, "res1", "owner1", "grantee1")
+	if err != nil {
+		t.Fatalf("pre-X-Wing grant did not open: %v", err)
+	}
+	if got != want {
+		t.Fatal("pre-X-Wing grant opened to the wrong content key")
+	}
+	if _, err := UnwrapGrant(wrapped, mk, "res1", "owner1", "grantee2"); err == nil {
+		t.Fatal("pre-X-Wing grant opened under another grantee's binding")
 	}
 }
