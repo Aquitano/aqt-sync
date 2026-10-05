@@ -92,9 +92,8 @@ type conflictCopyRecord struct {
 // The memo carries copies materialized by earlier retry attempts. A path already copied
 // for the same remote hash reuses that copy: if it still exists on disk it is skipped
 // entirely, and if it was lost it is rewritten at the same name rather than a bumped one.
-// A memoed name the remote gained between attempts is not reused — it would collide with
-// that download — and a remote hash that changed since the last attempt (the racing
-// device re-edited the file) plans a fresh copy; both fall through to a new name.
+// A memoed name blocked by a new parent or reserved remote path is not reused.
+// A remote hash that changed since the last attempt also plans a fresh copy.
 func planConflictCopies(root string, actions []syncengine.Action, remoteByPath map[string]syncengine.Entry, host string, now time.Time, memo conflictCopyMemo) []conflictCopyItem {
 	taken := takenPaths(remoteByPath)
 	var copies []conflictCopyItem
@@ -107,8 +106,9 @@ func planConflictCopies(root string, actions []syncengine.Action, remoteByPath m
 			continue
 		}
 		e := re
-		if rec, ok := memo[a.Path]; ok && rec.remoteHash == re.Hash && !taken[rec.copyPath] {
+		if rec, ok := memo[a.Path]; ok && rec.remoteHash == re.Hash && conflictCopyPathUsable(root, rec.copyPath, taken) {
 			if pathExists(root, rec.copyPath) {
+				taken[rec.copyPath] = true
 				continue // the earlier attempt's copy is already correct on disk
 			}
 			e.Path = rec.copyPath
@@ -141,7 +141,7 @@ func copyEntries(copies []conflictCopyItem) []syncengine.Entry {
 
 // conflictCopyPath returns the relative path for the remote side of a conflict:
 // <path>.conflict-<host>-<ts>, appended to the whole name (no extension splitting).
-// A numeric suffix is bumped until the name neither exists under root nor is in taken
+// A numeric suffix is bumped past existing leaves, blocked parents, and reserved paths
 // (paths the sync will materialize: remote entries and copies already planned this
 // pass), so a copy never overwrites an existing file and never lands where a download
 // is headed. A remote entry under a path the local side keeps as a file or symlink
@@ -149,29 +149,47 @@ func copyEntries(copies []conflictCopyItem) []syncengine.Entry {
 // x/y beside a local file x is preserved as x.conflict-<host>-<ts>/y.
 func conflictCopyPath(root, path, host string, now time.Time, taken map[string]bool) string {
 	stem, rest := path, ""
-	if a, ok := nonDirAncestor(root, path); ok {
+	if a, ok := clashingAncestor(root, path, taken); ok {
 		stem, rest = a, strings.TrimPrefix(path, a)
 	}
 	base := fmt.Sprintf("%s.conflict-%s-%s", stem, host, now.UTC().Format("20060102-150405"))
 	candidate := base + rest
-	for i := 1; pathExists(root, candidate) || taken[candidate]; i++ {
+	for i := 1; pathExists(root, candidate) || !conflictCopyPathUsable(root, candidate, taken); i++ {
 		candidate = fmt.Sprintf("%s-%d%s", base, i, rest)
 	}
 	return candidate
 }
 
-// nonDirAncestor returns the shallowest proper ancestor of rel that exists under root
-// as something other than a directory.
-func nonDirAncestor(root, rel string) (string, bool) {
+// conflictCopyPathUsable checks parent blockers and reservations without rejecting
+// an existing leaf, which may be a copy from an earlier sync attempt.
+func conflictCopyPathUsable(root, rel string, taken map[string]bool) bool {
+	if taken[rel] {
+		return false
+	}
+	if _, blocked := clashingAncestor(root, rel, taken); blocked {
+		return false
+	}
+	prefix := rel + "/"
+	for p, reserved := range taken {
+		if reserved && strings.HasPrefix(p, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
+// clashingAncestor returns the shallowest proper ancestor reserved for a file or
+// symlink, or already present on disk as something other than a directory.
+func clashingAncestor(root, rel string, taken map[string]bool) (string, bool) {
 	for i := range len(rel) {
 		if rel[i] != '/' {
 			continue
 		}
-		fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel[:i])))
-		if err != nil {
-			return "", false
+		if taken[rel[:i]] {
+			return rel[:i], true
 		}
-		if !fi.IsDir() {
+		fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(rel[:i])))
+		if err == nil && !fi.IsDir() {
 			return rel[:i], true
 		}
 	}

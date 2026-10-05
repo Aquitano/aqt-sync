@@ -48,7 +48,8 @@ All notable changes to this project are documented in this file.
   on both sides enter the base without a recurring conflict.
 - On macOS, a rename that changes only Unicode normalization follows the same path
   as a case-only rename. A remote conflict copy below a retained local file gets its
-  suffix on the blocking ancestor, so it can be written.
+  suffix on the blocking ancestor, so it can be written. Copy names and sync retries
+  also avoid file or symlink parents and reserved remote ancestors or descendants.
 - Sync and tree diffs reject invalid directory-child names before planning. Ancestor
   walks also stop at `/`, so an absolute path cannot hang `sync --dry-run` or a watch
   agent. Downloads reject paths naming the tracked root, avoid directory creation
