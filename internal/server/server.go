@@ -460,6 +460,8 @@ func (s *Server) effectiveQuota(owner string) (int64, error) {
 // checkAccountLimit refuses a write that would push the account past its byte quota
 // or past the row cap for kind ("resources", "snapshots", "objects"). An empty kind
 // checks bytes only, for a write that replaces an existing row rather than adding one.
+// Non-growing writes remain allowed when a migration or quota reduction puts usage
+// over the byte cap; row caps still apply when the write adds a row.
 func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	quota, err := s.effectiveQuota(owner)
 	if err != nil {
@@ -484,7 +486,7 @@ func (s *Server) checkAccountLimit(owner, kind string, addedBytes int64) error {
 	if err != nil {
 		return err
 	}
-	if quota > 0 && u.StorageBytes+addedBytes > quota {
+	if quota > 0 && addedBytes > 0 && u.StorageBytes+addedBytes > quota {
 		return &LimitExceededError{Kind: "storageBytes", Current: u.StorageBytes, Limit: quota}
 	}
 	var current int64
