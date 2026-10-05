@@ -57,7 +57,8 @@ All notable changes to this project are documented in this file.
   restored rules still exclude. Files that would become tracked or collide with the
   restored tree stay in the backup, with a warning naming them. Folder aliases are
   resolved before the swap, parent directory modes survive, and staging/backup
-  directories stay out of scans.
+  directories stay out of scans. Read-only source and restored parents are made
+  writable while ignored paths move, then regain their original permissions.
 - Pack locations with invalid bounds or contradictory duplicates fail before a
   download slices them. Exact repeated locations remain valid. Decompression bounds
   the declared output length before allocating, resource-envelope headers grow only

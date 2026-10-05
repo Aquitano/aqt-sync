@@ -583,7 +583,7 @@ func swapTree(root, staging string) error {
 		fmt.Fprintf(os.Stderr, "warning: kept the pre-restore tree in %s, take what you need and delete it: %v\n", backup, carryErr)
 		return nil
 	}
-	return os.RemoveAll(backup)
+	return removeRestoreBackup(backup)
 }
 
 // carryUntracked moves paths classified before the swap back into root. A snapshot
@@ -591,16 +591,18 @@ func swapTree(root, staging string) error {
 // A path carryPath refuses stays in backup, and the error names the first few.
 // Linked restored ignore files make carrying unsafe because a local path could
 // supply their target, so in that case the entire pre-restore tree stays in backup.
-func carryUntracked(backup, root string, paths []string) error {
+func carryUntracked(backup, root string, paths []string) (carryErr error) {
 	if len(paths) == 0 {
 		return nil
 	}
 	if err := checkRestoredIgnoreLinks(root); err != nil {
 		return err
 	}
+	dirs := &restoreCarryDirs{modes: make(map[string]fs.FileMode)}
+	defer func() { carryErr = errors.Join(carryErr, dirs.restore()) }()
 	var kept []string
 	for _, rel := range paths {
-		if err := carryPath(backup, root, rel); err != nil {
+		if err := carryPath(backup, root, rel, dirs); err != nil {
 			kept = append(kept, err.Error())
 		}
 	}
@@ -649,7 +651,7 @@ func checkRestoredIgnoreLinks(root string) error {
 // would change the restored ignore rules, or the restored tree would sync it. The
 // propagation sync runs right after the swap, so a path the restored rules track
 // would be published to every device.
-func carryPath(backup, root, rel string) error {
+func carryPath(backup, root, rel string, dirs *restoreCarryDirs) error {
 	src := filepath.Join(backup, filepath.FromSlash(rel))
 	info, err := os.Lstat(src)
 	if err != nil {
@@ -664,7 +666,11 @@ func carryPath(backup, root, rel string) error {
 		}
 		return fmt.Errorf("%q is not ignored in the restored tree", rel)
 	}
-	if err := mkdirLike(root, backup, filepath.Dir(filepath.FromSlash(rel))); err != nil {
+	parent := filepath.Dir(filepath.FromSlash(rel))
+	if err := mkdirLike(backup, backup, parent, dirs); err != nil {
+		return err
+	}
+	if err := mkdirLike(root, backup, parent, dirs); err != nil {
 		return err
 	}
 	dst := filepath.Join(root, filepath.FromSlash(rel))
@@ -674,15 +680,15 @@ func carryPath(backup, root, rel string) error {
 	return os.Rename(src, dst)
 }
 
-// mkdirLike makes root/rel a directory, creating each missing component with the
-// mode its counterpart under like has. A component that exists as anything but a
-// real directory is refused, so a symlink the restored tree put there cannot
+// mkdirLike makes root/rel a writable directory, recording each missing component
+// with the mode its counterpart under like originally had. Existing components
+// must be real directories, so a symlink the restored tree put there cannot
 // redirect a move out of root or onto a path its rules would sync.
-func mkdirLike(root, like, rel string) error {
+func mkdirLike(root, like, rel string, dirs *restoreCarryDirs) error {
 	if rel == "." {
 		return nil
 	}
-	if err := mkdirLike(root, like, filepath.Dir(rel)); err != nil {
+	if err := mkdirLike(root, like, filepath.Dir(rel), dirs); err != nil {
 		return err
 	}
 	dir := filepath.Join(root, rel)
@@ -690,18 +696,83 @@ func mkdirLike(root, like, rel string) error {
 		if fi.Mode().Type() != fs.ModeDir {
 			return fmt.Errorf("%s is not a directory in the restored tree", filepath.ToSlash(rel))
 		}
-		return nil
+		return dirs.writable(dir, fi.Mode())
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return err
 	}
-	orig, err := os.Stat(filepath.Join(like, rel))
+	orig, err := os.Lstat(filepath.Join(like, rel))
 	if err != nil {
 		return err
 	}
-	if err := os.Mkdir(dir, orig.Mode().Perm()); err != nil {
+	if !orig.IsDir() {
+		return fmt.Errorf("%s is not a directory in the backup tree", filepath.ToSlash(rel))
+	}
+	if err := os.Mkdir(dir, 0o700); err != nil {
 		return err
 	}
-	return os.Chmod(dir, orig.Mode().Perm())
+	mode := orig.Mode()
+	if original, ok := dirs.modes[filepath.Join(like, rel)]; ok {
+		mode = original
+	}
+	dirs.remember(dir, mode)
+	return os.Chmod(dir, 0o700)
+}
+
+// restoreCarryDirs keeps parents writable until all moves finish, then restores
+// their original modes from children to parents, including when a carry fails.
+type restoreCarryDirs struct {
+	modes map[string]fs.FileMode
+	order []string
+}
+
+func (d *restoreCarryDirs) remember(path string, mode fs.FileMode) {
+	if _, ok := d.modes[path]; !ok {
+		d.modes[path] = mode
+		d.order = append(d.order, path)
+	}
+}
+
+func (d *restoreCarryDirs) writable(path string, mode fs.FileMode) error {
+	if mode.Perm()&0o700 == 0o700 {
+		return nil
+	}
+	d.remember(path, mode)
+	return os.Chmod(path, mode|0o700)
+}
+
+func (d *restoreCarryDirs) restore() error {
+	var errs []error
+	for i := len(d.order) - 1; i >= 0; i-- {
+		path := d.order[i]
+		if err := os.Chmod(path, d.modes[path]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("restore directory permissions for %s: %w", path, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// removeRestoreBackup can delete read-only old directories after a successful
+// carry. WalkDir does not follow symlinks, and a failed cleanup restores the modes
+// of whichever directories remain in the backup.
+func removeRestoreBackup(backup string) (cleanupErr error) {
+	dirs := &restoreCarryDirs{modes: make(map[string]fs.FileMode)}
+	defer func() { cleanupErr = errors.Join(cleanupErr, dirs.restore()) }()
+	if err := filepath.WalkDir(backup, func(path string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		return dirs.writable(path, info.Mode())
+	}); err != nil {
+		return err
+	}
+	return os.RemoveAll(backup)
 }
 
 // --- diff ---
