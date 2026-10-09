@@ -324,19 +324,16 @@ func (app *application) runRecover(email string, ttl time.Duration, kc kdfChoice
 	if err := validateSessionTTL(ttl); err != nil {
 		return err
 	}
-	email, err := readEmail(email)
+	srv, err := app.connectAccountServer()
 	if err != nil {
 		return err
 	}
-	server, err := app.serverURL()
+	server, cl := srv.url, srv.cl
+	email, err = readEmail(email)
 	if err != nil {
 		return err
 	}
 	if err := app.refuseOccupiedProfile(server, email); err != nil {
-		return err
-	}
-	cl, err := app.newBoundClient(server, "")
-	if err != nil {
 		return err
 	}
 	boot, err := cl.Bootstrap(email)

@@ -5,12 +5,45 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aquitano/aqt-sync/internal/client"
 )
+
+func TestRecoveryRefusesBeforeReadingSecrets(t *testing.T) {
+	notAqt := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(notAqt.Close)
+	for _, tc := range []struct {
+		name    string
+		server  string
+		wantErr error
+		want    string
+	}{
+		{name: "missing server", wantErr: errNoServer},
+		{name: "insecure server", server: "http://aqt.example.com", wantErr: client.ErrInsecureScheme},
+		{name: "wrong server", server: notAqt.URL, want: "does not answer like an aqt server"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			isolateConfigEnv(t, t.TempDir())
+			t.Setenv("AQT_SERVER", "")
+			withStdin(t, "unread recovery key\n")
+			app := &application{ctx: context.Background(), server: tc.server}
+			err := app.runRecover("recover@example.com", time.Hour, kdfChoice{})
+			if err == nil || tc.wantErr != nil && !errors.Is(err, tc.wantErr) || tc.want != "" && !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("recover = %v, want %v %q", err, tc.wantErr, tc.want)
+			}
+			if line, _ := stdinReader().ReadString('\n'); line != "unread recovery key\n" {
+				t.Fatalf("recovery consumed input before refusing: %q", line)
+			}
+		})
+	}
+}
 
 // The recovery key alone gets an account back: a fresh machine that never knew the
 // passphrase sets a new one, reads data pushed before, and the old passphrase stops
@@ -35,7 +68,8 @@ func TestRecoveryKeyRestoresForgottenPassphrase(t *testing.T) {
 		}
 	}))
 
-	app.server = h.url
+	app.server = ""
+	t.Setenv("AQT_SERVER", h.url)
 	cheap := kdfChoice{timeCost: 1, memoryMiB: 1, threads: 1}
 	isolateConfigEnv(t, t.TempDir())
 	withStdin(t, key+"\nnew passphrase\n")
