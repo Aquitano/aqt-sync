@@ -90,13 +90,13 @@ func TestLinkServerPrecedence(t *testing.T) {
 }
 
 func TestNormalizeServer(t *testing.T) {
-	for in, want := range map[string]string{
-		"aqt.example.com":            "https://aqt.example.com",
-		" https://aqt.example.com/ ": "https://aqt.example.com",
-		"http://localhost:8080":      "http://localhost:8080",
+	for _, tc := range []struct{ in, want string }{
+		{"aqt.example.com", "https://aqt.example.com"},
+		{" https://aqt.example.com/ ", "https://aqt.example.com"},
+		{"http://localhost:8080", "http://localhost:8080"},
 	} {
-		if got, err := normalizeServer(in); err != nil || got != want {
-			t.Errorf("normalizeServer(%q) = %q, %v; want %q", in, got, err, want)
+		if got, err := normalizeServer(tc.in); err != nil || got != tc.want {
+			t.Errorf("normalizeServer(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
 		}
 	}
 	for _, bad := range []string{"", "ftp://aqt.example.com", "https://"} {
