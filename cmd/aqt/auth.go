@@ -54,10 +54,17 @@ func (app *application) loginCmd() *cobra.Command {
 		Short: "Attach or unlock an existing account on this device",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			var err error
 			if recovery {
-				return app.runRecover(email, ttl, kdfChoice{preset: string(crypto.DefaultPreset)})
+				err = app.runRecover(email, ttl, kdfChoice{preset: string(crypto.DefaultPreset)})
+			} else {
+				err = app.runLogin(email, ttl)
 			}
-			return app.runLogin(email, ttl)
+			if err != nil {
+				return err
+			}
+			app.noticeNewShares()
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "existing account email")

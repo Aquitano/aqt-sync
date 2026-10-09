@@ -186,8 +186,16 @@ noise:
   `aqt shares unblock`.
 - **The sender is named where it can be.** A grant carries an opaque handle. `aqt
   shares` reverse-resolves it against the local contact pins and prints the pinned
-  email and key fingerprint on a match, `unknown sender` otherwise; the fingerprint is
-  the one to compare out-of-band before acting on a share.
+  email and key fingerprint on a match, marked `verified` when the pin was checked
+  against a fingerprint. A pin is the only attribution the client vouches for.
+  Without one, it shows the email and identity-key fingerprint the server reports for
+  the grantor's account as an unverified claim (`a@example.com?`): signup does not
+  verify emails, so open registration lets anyone hold an address that reads like
+  someone else's, and the server can report anything. The fingerprint is the one to
+  compare out-of-band; `aqt contacts pin <email> --fingerprint <fp>` then turns the
+  claim into a verified pin. A server that predates the claim leaves the bare handle,
+  shown as `unknown sender`. The flip side is that sharing shows your account email to
+  every account you share with.
 
 A block is the one place a grant write distinguishes a real account from a decoy, and
 only to the account the recipient deliberately blocked.
@@ -295,8 +303,8 @@ against Grover's algorithm.
   so nothing recorded today becomes forgeable later. Device attach also needs the
   passphrase verifier. A pinned contact's enc key is compared byte for byte, so a
   forged binding cannot replace it. Only a first-use pin rests on the binding (already
-  trust-on-first-use against the server), and so does the one-time move of a pin
-  made while grants were X25519. The identity key signs nothing a server can choose
+  trust-on-first-use against the server), and so do a confirmed re-pin, which is a
+  first use over again, and the one-time move of a pin made while grants were X25519. The identity key signs nothing a server can choose
   beyond a 32-byte login challenge, which can never be a binding message. Release signing is the one
   signature a forger could turn into code execution; see
   [Still open](#still-open).
@@ -392,8 +400,24 @@ you from":
   standing hole — but a first grant to a never-seen address is only as trustworthy as
   that verification. `aqt contacts pin <email> --fingerprint <fp>` closes it for a
   contact who can read their fingerprint out over a separate channel: the pin lands
-  only if the server presents that key, which is a check no decoy passes. Without a
-  fingerprint to check against, the pin is still trust-on-first-use.
+  only if the server presents that key, which is a check no decoy passes, and it is
+  recorded as verified. Without a fingerprint to check against, the pin is still
+  trust-on-first-use.
+
+  An unverified pin may therefore be a decoy, and once its owner registers, the
+  server's keys for that email stop matching it. A share on a terminal then shows
+  both fingerprints and asks before re-pinning. Confirming replaces the pin and
+  re-sends every grant made against the old one; when the handle changed, it deletes
+  the old rows without rotating the content key, since nobody holds a decoy's key.
+  Without a terminal the share refuses, and no flag accepts the change in advance:
+  the question is the out-of-band comparison, and a server presenting its own key
+  looks exactly like a late registration. `aqt contacts pin --fingerprint` replaces an
+  unverified pin without asking, because a matching fingerprint is the stronger
+  evidence, and re-sends the same way. A verified pin is never replaced by either
+  path: a mismatch against it is an error until `aqt contacts rm`. A share does not
+  offer to replace a pin made before grants moved to X-Wing either: the server serves
+  a decoy for its owner until they log in once, and re-pinning would move their
+  working grants onto it. `--fingerprint` still can, since no decoy passes it.
 - **Plaintext base residue.** Refusing an unsealed `.aqt/base.json` stops this build
   from reading one, but it does not erase what an older build already wrote: the file
   sits there until a reconcile replaces it through an atomic rename, and the freed

@@ -222,7 +222,12 @@ GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, cre
                                      Paginated (see below).
 DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
                                      (private resources) and re-wraps surviving grantees.
-GET    /v1/shares                    Grantee-scoped incoming grants (id, ownerHandle, wrap, sealed meta). Paginated.
+GET    /v1/shares                    Grantee-scoped incoming grants: { shares: [{ resourceId, ownerHandle,
+                                     wrappedKey, encryptedMeta, createdAt, ownerEmail?, ownerPublicKey? }],
+                                     nextCursor? }. ownerEmail and ownerPublicKey are the grantor account's
+                                     email and Ed25519 identity key: an unverified claim (emails are not
+                                     verified at signup) the client shows only for grantors it has not
+                                     pinned. Paginated.
 DELETE /v1/shares/:id                Grantee only (predicate: grantee_handle = caller). Declines one incoming
                                      grant → { ownerHandle, removed, blocked }. ?block=true also refuses that
                                      account's future grants (403 sender_blocked) and drops the shares it has

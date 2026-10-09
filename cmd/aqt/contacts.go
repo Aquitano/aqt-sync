@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
@@ -46,9 +48,8 @@ func fetchAccountKeys(cl *client.Client, email string) (api.AccountKeysResponse,
 // re-wrapping to a stale key does not.
 //
 // The comparison runs against a raw lookup, not through lookupGrantee: that one
-// errors on any disagreement with the pin before returning, so routing through it
-// would make the check below dead code and report a grantee's own root-key rotation —
-// a routine event on this path — in the words of a server substituting keys.
+// answers a disagreement by offering to replace the pin, a decision for a share the
+// user asked for, not for a re-wrap that runs as a side effect of a revoke.
 //
 // It returns the pin to wrap to, which carryLegacyPin may have moved onto the
 // contact's X-Wing key.
@@ -66,12 +67,11 @@ func confirmPinnedKeys(cl *client.Client, profile string, pin identity.Contact) 
 			"%s has not run `aqt login` since shares moved to post-quantum keys, so their grant cannot follow the new key yet; once they have, share it with them again",
 			pin.Email)
 	}
-	if keys.Handle != pin.Handle || !bytes.Equal(keys.PublicKey, pin.PublicKey) ||
-		!bytes.Equal(keys.EncPublicKey, pin.EncPublicKey) {
+	if !pinMatches(pin, keys) {
 		return pin, fmt.Errorf(
 			"the keys published for %s no longer match the ones pinned here — most often because they rotated their account root key. "+
-				"Compare fingerprints out-of-band with `aqt contacts verify %s`, then `aqt contacts rm %s` and re-share",
-			pin.Email, pin.Email, pin.Email)
+				"Compare fingerprints out-of-band with `aqt contacts verify %s`, then share with them again to re-pin",
+			pin.Email, pin.Email)
 	}
 	return pin, nil
 }
@@ -96,59 +96,210 @@ func carryLegacyPin(profile string, pin identity.Contact, keys api.AccountKeysRe
 	return pin, identity.SaveContacts(profile, pins)
 }
 
-// lookupGrantee resolves a grant target with trust-on-first-use pinning: the first
-// lookup pins (handle, identity key, enc key) locally; any later lookup that
-// disagrees with the pin is a hard error, since a silently swapped key would
-// re-route every future grant to whoever holds it.
-//
-// A first-use pin cannot tell a real account from the decoy the server returns for an
-// email that has no published key yet (that indistinguishability is the point: the
-// lookup must not become an account-existence oracle). Granting to someone who has not
-// registered therefore pins a key nobody holds — the grant is accepted and simply never
-// opens — and once they do register, the honest key mismatches the pinned decoy and
-// every later share fails as if the server were attacking. So the mismatch is never
-// treated as proof of an attack, and both paths point at `aqt contacts rm`. Pinning
-// deliberately, ahead of the first grant, is `aqt contacts pin`.
-func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (identity.Contact, error) {
-	keys, err := fetchAccountKeys(cl, email)
-	if err != nil {
-		return identity.Contact{}, err
-	}
-	pins, err := identity.LoadContacts(prof.Name)
-	if err != nil {
-		return identity.Contact{}, err
-	}
-	if pin, ok := pins[email]; ok {
-		pin, err := carryLegacyPin(prof.Name, pin, keys)
-		if err != nil {
-			return identity.Contact{}, err
-		}
-		if pin.Handle != keys.Handle ||
-			!bytes.Equal(pin.PublicKey, keys.PublicKey) ||
-			!bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
-			return identity.Contact{}, fmt.Errorf(
-				"the server's keys for %s no longer match the ones pinned on first use. Either they had not registered when you first shared (the pin is a placeholder and any grant made against it never opened), they have not logged in since shares moved to post-quantum keys (ask them to run `aqt login` once), the account was re-created — or the server is substituting keys. "+
-					"Compare fingerprints out-of-band with `aqt contacts verify %s`, then `aqt contacts rm %s` and re-share",
-				email, email, email)
-		}
-		return pin, nil
-	}
-	pin := identity.Contact{
+func pinMatches(pin identity.Contact, keys api.AccountKeysResponse) bool {
+	return pin.Handle == keys.Handle && bytes.Equal(pin.PublicKey, keys.PublicKey) &&
+		bytes.Equal(pin.EncPublicKey, keys.EncPublicKey)
+}
+
+func pinFromKeys(email string, keys api.AccountKeysResponse, verified bool) identity.Contact {
+	return identity.Contact{
 		Email:        email,
 		Handle:       keys.Handle,
 		PublicKey:    keys.PublicKey,
 		EncPublicKey: keys.EncPublicKey,
 		PinnedAt:     time.Now().Unix(),
+		Verified:     verified,
 	}
+}
+
+// lookupGrantee resolves a grant target with trust-on-first-use pinning: the first
+// lookup pins (handle, identity key, enc key) locally, and a later lookup that
+// disagrees with the pin never silently re-routes grants to whoever holds the new key.
+//
+// A first-use pin cannot tell a real account from the decoy the server returns for an
+// email that has no published key yet (that indistinguishability is the point: the
+// lookup must not become an account-existence oracle). Granting to someone who has not
+// registered therefore pins a key nobody holds, and once they register their honest key
+// mismatches it. So an unverified pin that mismatches can be replaced after the user
+// confirms the new key (askRepin); only a pin verified against a fingerprint is refused
+// outright. Pinning deliberately, ahead of the first grant, is `aqt contacts pin`.
+//
+// A replacement is returned unsaved, with the pinRepair that settles it: the caller
+// grants first and then calls repin, so a failed grant leaves the old pin in place and
+// the next attempt asks again.
+func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (identity.Contact, *pinRepair, error) {
+	keys, err := fetchAccountKeys(cl, email)
+	if err != nil {
+		return identity.Contact{}, nil, err
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		return identity.Contact{}, nil, err
+	}
+	if pin, ok := pins[email]; ok {
+		pin, err := carryLegacyPin(prof.Name, pin, keys)
+		if err != nil {
+			return identity.Contact{}, nil, err
+		}
+		if pinMatches(pin, keys) {
+			return pin, nil, nil
+		}
+		repair, err := askRepin(cl, pin, keys)
+		if err != nil {
+			return identity.Contact{}, nil, err
+		}
+		return pinFromKeys(email, keys, false), repair, nil
+	}
+	pin := pinFromKeys(email, keys, false)
 	pins[email] = pin
 	if err := identity.SaveContacts(prof.Name, pins); err != nil {
-		return identity.Contact{}, err
+		return identity.Contact{}, nil, err
 	}
 	fmt.Fprintf(os.Stderr, "pinned %s on first use (%s); confirm out-of-band with `aqt contacts verify %s`\n",
 		email, crypto.KeyFingerprint(pin.PublicKey), email)
-	fmt.Fprintf(os.Stderr, "if %s has not registered on this server yet, this pin is a placeholder and the grant will not open for them: `aqt contacts rm %s` and re-share once they have an account\n",
-		email, email)
-	return pin, nil
+	fmt.Fprintf(os.Stderr, "if %s has not registered on this server yet, this pin is a placeholder and the grant will not open for them; once they have, share with them again to re-pin and re-send it\n",
+		email)
+	return pin, nil, nil
+}
+
+// confirmRepin asks before an unverified pin is replaced; cliutil.ErrNotConfirmable
+// means no terminal can answer. A variable so tests can answer for one.
+var confirmRepin = func(prompt string) error { return confirmDestructive(prompt, false) }
+
+// askRepin decides whether a pin the server's keys disagree with may be replaced, and
+// collects the grants that move with it. Only a person comparing fingerprints can make
+// that call — the new key is exactly what a key-substituting server would present — so
+// a run without a terminal refuses, and no flag accepts the change in advance.
+func askRepin(cl *client.Client, pin identity.Contact, keys api.AccountKeysResponse) (*pinRepair, error) {
+	email := pin.Email
+	pinnedFP, serverFP := crypto.KeyFingerprint(pin.PublicKey), crypto.KeyFingerprint(keys.PublicKey)
+	if pin.Verified {
+		return nil, fmt.Errorf("the server's keys for %s (%s) no longer match the pin you verified against their fingerprint (%s). "+
+			"Do not share with them until the difference is explained: `aqt contacts verify %s` shows both, and if they confirm new keys, `aqt contacts rm %s` and pin again",
+			email, serverFP, pinnedFP, email, email)
+	}
+	// The server answers an account that has not published an X-Wing key with a decoy,
+	// so a pin from before that move mismatches until its owner logs in once. Replacing
+	// it would hand their working grants to the decoy.
+	if len(pin.EncPublicKey) != crypto.EncPublicKeySize {
+		return nil, fmt.Errorf("the server's keys for %s (%s) do not match a pin made before shares moved to post-quantum keys (%s). "+
+			"Most often they have not run `aqt login` since: ask them to, then share again. "+
+			"If they registered only after your first share, compare %s with them and run `aqt contacts pin %s --fingerprint <fingerprint>`",
+			email, serverFP, pinnedFP, serverFP, email)
+	}
+	ids, err := grantedTo(cl, pin.Handle)
+	if err != nil {
+		return nil, err
+	}
+	cause := "most often they registered after your first share: the pin is the placeholder an unknown email gets, and shares made against it never opened"
+	if pin.Handle == keys.Handle {
+		cause = "the same account now publishes new keys, most often because they rotated their account root key"
+	}
+	question := fmt.Sprintf("Re-pin %s to the server's keys? [y/N] ", email)
+	if len(ids) > 0 {
+		question = fmt.Sprintf("Re-pin %s and re-send %d earlier share(s)? [y/N] ", email, len(ids))
+	}
+	prompt := fmt.Sprintf("the server's keys for %s do not match your pin:\n  pinned  %s  (%s, never verified)\n  server  %s\n%s.\ncompare %s with %s over a separate channel before accepting it.\n%s",
+		email, pinnedFP, time.Unix(pin.PinnedAt, 0).Format("2006-01-02"), serverFP, cause, serverFP, email, question)
+	switch err := confirmRepin(prompt); {
+	case errors.Is(err, cliutil.ErrNotConfirmable):
+		return nil, fmt.Errorf("the server's keys for %s (%s) do not match the unverified pin made on %s (%s); "+
+			"re-run on a terminal to re-pin, or compare %s with them and run `aqt contacts pin %s --fingerprint <fingerprint>`",
+			email, serverFP, time.Unix(pin.PinnedAt, 0).Format("2006-01-02"), pinnedFP, serverFP, email)
+	case errors.Is(err, cliutil.ErrAborted):
+		return nil, fmt.Errorf("kept the existing pin for %s; nothing was shared", email)
+	case err != nil:
+		return nil, err
+	}
+	return &pinRepair{old: pin, ids: ids}, nil
+}
+
+// pinRepair is an unverified pin being replaced, and the caller's resources that still
+// hold a grant made against it.
+type pinRepair struct {
+	old identity.Contact
+	ids []string
+}
+
+// grantedTo lists the caller's resources that hold a grant to handle. The listing
+// echoes each resource's grant count, so only granted resources cost a fetch.
+func grantedTo(cl *client.Client, handle string) ([]string, error) {
+	items, err := cl.ListResources()
+	if err != nil {
+		return nil, err
+	}
+	var ids []string
+	for _, it := range items {
+		if it.GrantCount == 0 || it.Reclaimed {
+			continue
+		}
+		grants, err := cl.ListGrants(it.ID)
+		if err != nil {
+			return nil, fmt.Errorf("list grants of %s: %w", it.ID, err)
+		}
+		if slices.ContainsFunc(grants, func(g api.GrantEntry) bool { return g.GranteeHandle == handle }) {
+			ids = append(ids, it.ID)
+		}
+	}
+	return ids, nil
+}
+
+// repin settles a pin replacement: it moves every grant made against the old pin onto
+// next, then saves next. Saving last keeps an interrupted run repeatable, since the
+// next lookup still sees the old pin, asks again, and finds the grants that did not
+// move. done names a resource the caller has already granted to next.
+//
+// When the handle changed, the old grant is wrapped to keys nobody answering to this
+// email holds — most often the decoy an unregistered email gets — so its row is
+// deleted without rotating the content key: there is no reader to cut off. When it did
+// not, the new grant's upsert has already replaced the old row.
+func repin(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, r pinRepair, next identity.Contact, done string) error {
+	moved := 0
+	var repairErr error
+	for _, id := range r.ids {
+		if id != done {
+			if err := regrantOwned(cl, prof, mk, id, next); err != nil {
+				repairErr = errors.Join(repairErr, fmt.Errorf("re-send aqt://%s: %w", id, err))
+				continue
+			}
+		}
+		if r.old.Handle != next.Handle {
+			if err := cl.RevokeGrant(id, r.old.Handle); err != nil && !errors.Is(err, client.ErrNotFound) {
+				repairErr = errors.Join(repairErr, fmt.Errorf("delete the old grant on aqt://%s: %w", id, err))
+				continue
+			}
+		}
+		moved++
+	}
+	if moved > 0 {
+		fmt.Fprintf(os.Stderr, "re-sent %d earlier share(s) to %s\n", moved, next.Email)
+	}
+	if repairErr != nil {
+		return fmt.Errorf("pin repair incomplete; kept the old pin for %s so re-running the command retries the remaining shares: %w", next.Email, repairErr)
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		return err
+	}
+	pins[next.Email] = next
+	return identity.SaveContacts(prof.Name, pins)
+}
+
+// replacePin is repin outside a share. The walk and the unlock run first, so a failure
+// in either leaves the old pin and nothing moved.
+func (app *application) replacePin(cl *client.Client, prof *identity.Profile, old, next identity.Contact) error {
+	ids, err := grantedTo(cl, old.Handle)
+	if err != nil {
+		return err
+	}
+	var mk crypto.MasterKey
+	if len(ids) > 0 {
+		if mk, err = app.unlockMaster(prof); err != nil {
+			return err
+		}
+		defer mk.Wipe()
+	}
+	return repin(cl, prof, mk, pinRepair{old: old, ids: ids}, next, "")
 }
 
 // contactsPinCmd pins a contact's keys before any grant is made. The threat model
@@ -158,7 +309,9 @@ func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (ide
 // first grant — after the moment the mitigation is supposed to precede.
 //
 // --fingerprint is the mitigation proper: the pin only lands if the server presents
-// the key the contact read out to you over a separate channel. Without it the command
+// the key the contact read out to you over a separate channel, and it is recorded as
+// verified. That is stronger evidence than an unverified pin, so it replaces one that
+// disagrees, re-sending the grants made against it. Without --fingerprint the command
 // still pins deliberately, but it can only show you the fingerprint and ask.
 func (app *application) contactsPinCmd() *cobra.Command {
 	var (
@@ -181,11 +334,11 @@ func (app *application) contactsPinCmd() *cobra.Command {
 			}
 			identityFP := crypto.KeyFingerprint(keys.PublicKey)
 			encFP := crypto.KeyFingerprint(keys.EncPublicKey)
-			// Both success paths report the same shape, so re-running a pin is a stable
+			// Every success path reports the same shape, so re-running a pin is a stable
 			// no-op for a script rather than a different document.
-			pinned := func(already bool) error {
+			pinned := func(already, verified bool) error {
 				return printJSON(map[string]any{
-					"email": email, "fingerprint": identityFP, "encFingerprint": encFP, "alreadyPinned": already,
+					"email": email, "fingerprint": identityFP, "encFingerprint": encFP, "alreadyPinned": already, "verified": verified,
 				})
 			}
 
@@ -207,16 +360,41 @@ func (app *application) contactsPinCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if pin.Handle == keys.Handle && bytes.Equal(pin.PublicKey, keys.PublicKey) &&
-					bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
-					if app.json {
-						return pinned(true)
+				pinnedFP := crypto.KeyFingerprint(pin.PublicKey)
+				switch {
+				case pinMatches(pin, keys):
+					newlyVerified := fingerprint != "" && !pin.Verified
+					if newlyVerified {
+						pin.Verified = true
+						pins[email] = pin
+						if err := identity.SaveContacts(prof.Name, pins); err != nil {
+							return err
+						}
 					}
-					fmt.Printf("%s is already pinned to these keys (%s)\n", email, identityFP)
+					if app.json {
+						return pinned(true, pin.Verified)
+					}
+					if newlyVerified {
+						fmt.Printf("%s is already pinned to these keys (%s), now marked verified\n", email, identityFP)
+					} else {
+						fmt.Printf("%s is already pinned to these keys (%s)\n", email, identityFP)
+					}
 					return nil
+				case pin.Verified:
+					return fmt.Errorf("%s is pinned to different keys (%s) that you verified against a fingerprint; compare both with `aqt contacts verify %s`, and if they confirm new keys, `aqt contacts rm %s` and pin again",
+						email, pinnedFP, email, email)
+				case fingerprint == "":
+					return fmt.Errorf("%s is pinned to different keys (%s, never verified); compare the server's %s with them, then re-run with --fingerprint to replace the pin",
+						email, pinnedFP, identityFP)
 				}
-				return fmt.Errorf("%s is already pinned to different keys (%s); compare both with `aqt contacts verify %s`, then `aqt contacts rm %s` if you mean to re-pin",
-					email, crypto.KeyFingerprint(pin.PublicKey), email, email)
+				if err := app.replacePin(cl, prof, pin, pinFromKeys(email, keys, true)); err != nil {
+					return err
+				}
+				if app.json {
+					return pinned(false, true)
+				}
+				fmt.Printf("pinned %s (%s), replacing the unverified pin %s\n", email, identityFP, pinnedFP)
+				return nil
 			}
 			if fingerprint == "" {
 				// Advisory, so stderr: stdout carries the result, and under --json it
@@ -227,24 +405,19 @@ func (app *application) contactsPinCmd() *cobra.Command {
 					return err
 				}
 			}
-			pins[email] = identity.Contact{
-				Email:        email,
-				Handle:       keys.Handle,
-				PublicKey:    keys.PublicKey,
-				EncPublicKey: keys.EncPublicKey,
-				PinnedAt:     time.Now().Unix(),
-			}
+			verified := fingerprint != ""
+			pins[email] = pinFromKeys(email, keys, verified)
 			if err := identity.SaveContacts(prof.Name, pins); err != nil {
 				return err
 			}
 			if app.json {
-				return pinned(false)
+				return pinned(false, verified)
 			}
 			fmt.Printf("pinned %s (%s)\n", email, identityFP)
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "only pin if the server's identity key matches this fingerprint")
+	cmd.Flags().StringVar(&fingerprint, "fingerprint", "", "only pin if the server's identity key matches this fingerprint; replaces an unverified pin")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt asked when no --fingerprint is given")
 	markJSONSupported(cmd)
 	return cmd
@@ -284,6 +457,7 @@ func (app *application) contactsCmd() *cobra.Command {
 					Email       string `json:"email"`
 					Fingerprint string `json:"fingerprint"`
 					PinnedAt    string `json:"pinnedAt"`
+					Verified    bool   `json:"verified"`
 				}
 				rows := make([]contactRow, 0, len(emails))
 				for _, e := range emails {
@@ -292,6 +466,7 @@ func (app *application) contactsCmd() *cobra.Command {
 						Email:       e,
 						Fingerprint: crypto.KeyFingerprint(p.PublicKey),
 						PinnedAt:    time.Unix(p.PinnedAt, 0).Format("2006-01-02"),
+						Verified:    p.Verified,
 					})
 				}
 				return printJSON(rows)
@@ -302,8 +477,12 @@ func (app *application) contactsCmd() *cobra.Command {
 			}
 			for _, e := range emails {
 				p := pins[e]
-				fmt.Printf("%s  %s  pinned %s\n", e, crypto.KeyFingerprint(p.PublicKey),
-					time.Unix(p.PinnedAt, 0).Format("2006-01-02"))
+				state := "never verified"
+				if p.Verified {
+					state = "verified"
+				}
+				fmt.Printf("%s  %s  pinned %s, %s\n", e, crypto.KeyFingerprint(p.PublicKey),
+					time.Unix(p.PinnedAt, 0).Format("2006-01-02"), state)
 			}
 			return nil
 		},
@@ -365,8 +544,12 @@ func (app *application) contactsCmd() *cobra.Command {
 			if pin, err = carryLegacyPin(prof.Name, pin, keys); err != nil {
 				return err
 			}
-			fmt.Printf("pinned on first use:\n  identity  %s\n  enc key   %s\n",
-				crypto.KeyFingerprint(pin.PublicKey), crypto.KeyFingerprint(pin.EncPublicKey))
+			label := "pinned on first use, never verified"
+			if pin.Verified {
+				label = "pinned and verified against a fingerprint"
+			}
+			fmt.Printf("%s:\n  identity  %s\n  enc key   %s\n",
+				label, crypto.KeyFingerprint(pin.PublicKey), crypto.KeyFingerprint(pin.EncPublicKey))
 			if bytes.Equal(pin.PublicKey, keys.PublicKey) && bytes.Equal(pin.EncPublicKey, keys.EncPublicKey) {
 				fmt.Println("MATCH — compare either fingerprint with the contact over a separate channel")
 			} else {

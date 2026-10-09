@@ -323,31 +323,20 @@ func (app *application) runShareWith(idArg, email string) error {
 	if err := checkShareableFolder(keys.meta); err != nil {
 		return err
 	}
-	contact, err := lookupGrantee(cl, prof, email)
+	contact, repair, err := lookupGrantee(cl, prof, email)
 	if err != nil {
 		return err
 	}
 	if contact.Handle == prof.OwnerHandle {
 		return errors.New("cannot grant a resource to your own account")
 	}
-	wrap, err := crypto.WrapGrant(keys.ck, contact.EncPublicKey, id, prof.OwnerHandle, contact.Handle)
-	if err != nil {
+	if err := grantResource(cl, prof, id, res, keys, contact); err != nil {
 		return err
 	}
-	scope, err := shareScopeRefs(cl, res, keys, id)
-	if err != nil {
-		return err
-	}
-	if err := cl.CreateGrant(id, api.CreateGrantRequest{
-		GranteeHandle: contact.Handle, WrappedKey: wrap, ChunkRefs: scope, ExpectedVersion: res.Version,
-		GranteeEmail: contact.Email, GranteeEncPublicKey: contact.EncPublicKey,
-	}); err != nil {
-		if errors.Is(err, client.ErrSenderBlocked) {
-			// A recipient-side block. Nothing about the grant can be fixed to get past it,
-			// so say who declined rather than leaving it as a bare 403.
-			return fmt.Errorf("%s is not accepting shares from your account: %w", email, err)
+	if repair != nil {
+		if err := repin(cl, prof, keys.mk, *repair, contact, id); err != nil {
+			return err
 		}
-		return err
 	}
 	if app.json {
 		return printJSON(map[string]any{"id": id, "granted": email})
@@ -359,6 +348,50 @@ func (app *application) runShareWith(idArg, email string) error {
 	fmt.Printf("granted %s read-only access to aqt://%s\n", email, id)
 	fmt.Fprintln(os.Stderr, "they will see it under `aqt shares` and can pull or clone it; they cannot modify it")
 	return nil
+}
+
+// grantResource wraps a resource's content key to one contact, bound to (resource,
+// owner, grantee), and stores it with the read scope the grantee will fetch through.
+// keys must be the resource's own, opened from res.
+func grantResource(cl *client.Client, prof *identity.Profile, id string, res api.GetResourceResponse, keys *resourceKeys, contact identity.Contact) error {
+	wrap, err := crypto.WrapGrant(keys.ck, contact.EncPublicKey, id, prof.OwnerHandle, contact.Handle)
+	if err != nil {
+		return err
+	}
+	scope, err := shareScopeRefs(cl, res, keys, id)
+	if err != nil {
+		return err
+	}
+	err = cl.CreateGrant(id, api.CreateGrantRequest{
+		GranteeHandle: contact.Handle, WrappedKey: wrap, ChunkRefs: scope, ExpectedVersion: res.Version,
+		GranteeEmail: contact.Email, GranteeEncPublicKey: contact.EncPublicKey,
+	})
+	if errors.Is(err, client.ErrSenderBlocked) {
+		// A recipient-side block. Nothing about the grant can be fixed to get past it,
+		// so say who declined rather than leaving it as a bare 403.
+		return fmt.Errorf("%s is not accepting shares from your account: %w", contact.Email, err)
+	}
+	return err
+}
+
+// regrantOwned is grantResource for a resource the caller has not opened yet, under
+// a master key it already holds.
+func regrantOwned(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, id string, contact identity.Contact) error {
+	res, err := fetchResource(cl, id)
+	if err != nil {
+		return err
+	}
+	owned, err := openOwnedResource(res, mk)
+	if err != nil {
+		return err
+	}
+	defer owned.ck.Wipe()
+	if err := checkShareableFolder(owned.meta); err != nil {
+		return err
+	}
+	// Not closed: mk belongs to the caller.
+	keys := &resourceKeys{mk: mk, ck: owned.ck, meta: owned.meta}
+	return grantResource(cl, prof, id, res, keys, contact)
 }
 
 // runShareRevoke rotates the content key so the revoked wrap opens nothing that changes

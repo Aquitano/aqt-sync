@@ -119,15 +119,30 @@ run `aqt passphrase recovery-key` afterwards to create another.
 
 ## Incoming shares
 
-`aqt shares` lists what other accounts granted this one. `--json` returns
-`[{ ref, name?, kind?, from, fromEmail?, fingerprint?, since, stale? }]`.
+`aqt shares` lists what other accounts granted this one, each row followed by the
+command that fetches it: `aqt pull aqt://<id>` for a file, `aqt clone aqt://<id> <dir>`
+for a folder, with `<dir>` derived from the folder's name. `--json` returns
+`[{ ref, name?, kind?, from, fromEmail?, fingerprint?, claimedEmail?,
+claimedFingerprint?, attribution, since, stale? }]`.
 
 `name` and `kind` are the *grantor's* plaintext, so both are stripped of control
 bytes and bounded before they are printed or returned — a sender cannot emit escape
-sequences into the recipient's terminal. `from` is the sender's opaque account handle;
-`fromEmail` and `fingerprint` appear only when a local contact pin matches that
-handle, and the human output says `unknown sender` when none does. Compare that
-fingerprint out-of-band (`aqt contacts verify <email>`) before acting on a share.
+sequences into the recipient's terminal. `from` is the sender's opaque account handle.
+`attribution` says what names the sender:
+
+- `verified` or `pinned`: a local contact pin matches the handle, and `fromEmail`
+  and `fingerprint` come from it. `verified` means the pin was made against a
+  fingerprint (`aqt contacts pin --fingerprint`).
+- `claimed`: no pin matches, and `claimedEmail` and `claimedFingerprint` are what the
+  server reports for the sender's account. Emails are not verified at signup, so the
+  human output marks it `a@example.com? (unverified, SHA256:…)`.
+- `unknown`: no pin, and a server too old to report the sender; the human output says
+  `unknown sender`.
+
+Compare the fingerprint with the sender out-of-band before acting on a share;
+`aqt contacts pin <email> --fingerprint <fp>` then makes the attribution `verified`.
+A successful listing also marks every share as seen: `aqt login` and `aqt status`
+mention shares that arrived since, on stderr.
 
 Anyone with an account on the server can add a row here, so the recipient can remove
 one:
@@ -141,8 +156,26 @@ one:
   local contact pins.
 
 `aqt contacts pin <email> --fingerprint <fp>` pins a contact's keys *before* the
-first grant and fails closed unless the server presents that fingerprint. Without
-`--fingerprint` it prompts (or takes `-y`) and the pin is only trust-on-first-use.
+first grant and fails closed unless the server presents that fingerprint; the pin is
+recorded as verified. Without `--fingerprint` it prompts (or takes `-y`) and the pin
+is only trust-on-first-use. `--json` returns
+`{ email, fingerprint, encFingerprint, alreadyPinned, verified }`.
+
+A first-use pin made before the contact registered holds the server's placeholder
+key, so their grants never open. Once they have registered, either way out re-sends
+every grant made against the placeholder:
+
+- `aqt share <id> --with <email>` on a terminal shows both fingerprints and asks
+  before re-pinning. Without a terminal it refuses rather than accept a key change
+  nobody compared.
+- `aqt contacts pin <email> --fingerprint <fp>` replaces an unverified pin without
+  asking, since the fingerprint is the stronger evidence.
+
+If a re-send or deletion fails, the command keeps the old pin. Run the same command
+again to retry the remaining shares; completed shares remain usable.
+
+A verified pin is never replaced this way: a mismatch against it is an error until
+`aqt contacts rm <email>`.
 
 ## Four questions, four commands
 

@@ -46,6 +46,9 @@ type Profile struct {
 	// SessionTTLSeconds is the cache lifetime selected at signup/login; zero means
 	// cache until lock or logout.
 	SessionTTLSeconds int64 `json:"sessionTtlSeconds,omitempty"`
+	// SharesSeenAt is the newest incoming-share creation time (server clock) that
+	// `aqt shares` has listed; login and status announce shares newer than it.
+	SharesSeenAt int64 `json:"sharesSeenAt,omitempty"`
 }
 
 // Unlock recovers the account's master (root) key from the passphrase: it derives

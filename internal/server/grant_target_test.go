@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"net/http"
 	"testing"
 
@@ -54,5 +55,34 @@ func TestGrantTargetPreconditionTreatsRealAndDecoyAlike(t *testing.T) {
 				t.Fatalf("%s: incomplete lookup precondition = %d, want 400", email, rec.Code)
 			}
 		}
+	}
+}
+
+// A grantee's share list carries who the server says sent each row: the grantor's
+// email and identity key, joined from the grantor's account rather than the caller's.
+func TestListSharesCarriesTheGrantorsClaim(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	aliceToken, aliceMK := h.signup("alice@example.com", "alice passphrase here")
+	bobToken, _ := h.signup("bob@example.com", "bob passphrase here")
+	res, code := h.putSized(aliceToken, aliceMK, "", 16)
+	if code != http.StatusCreated {
+		t.Fatal(code)
+	}
+	if err := h.store.PutGrant(h.handleOf("alice@example.com"), res.ID, h.handleOf("bob@example.com"), make([]byte, crypto.GrantWrapSize), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	var list api.ListSharesResponse
+	if code := h.do(http.MethodGet, "/v1/shares", bobToken, nil, &list); code != http.StatusOK {
+		t.Fatal(code)
+	}
+	if len(list.Shares) != 1 {
+		t.Fatalf("shares = %+v, want one", list.Shares)
+	}
+	got := list.Shares[0]
+	alicePub := crypto.DeriveSigningKey(aliceMK).Public().(ed25519.PublicKey)
+	if got.OwnerEmail != "alice@example.com" || !bytes.Equal(got.OwnerPublicKey, alicePub) {
+		t.Fatalf("share names %q / %x, want alice's email and identity key", got.OwnerEmail, got.OwnerPublicKey)
 	}
 }

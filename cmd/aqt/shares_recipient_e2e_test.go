@@ -76,7 +76,10 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 		}
 		if r.URL.Path == "/v1/shares" {
 			rows, _ := body["shares"].([]any)
-			body["shares"] = append(rows, map[string]any{"resourceId": hostile, "ownerHandle": hostile, "createdAt": 1})
+			body["shares"] = append(rows, map[string]any{
+				"resourceId": hostile, "ownerHandle": hostile, "createdAt": 1,
+				"ownerEmail": "bob@example.com (SHA256:forged, verified)", "ownerPublicKey": make([]byte, ed25519.PublicKeySize),
+			})
 		} else {
 			rows, _ := body["blocks"].([]any)
 			body["blocks"] = append(rows, map[string]any{"ownerHandle": hostile, "createdAt": 1})
@@ -99,6 +102,9 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 		if strings.ContainsAny(out, "\x1b\r") {
 			t.Fatalf("%s printed raw control bytes from the server: %q", tc.name, out)
 		}
+		if strings.Contains(out, ", verified)") {
+			t.Fatalf("%s let a claimed email spell out a verified attribution: %q", tc.name, out)
+		}
 		// The server's row has to stay one row: a forged second line is how it would
 		// pass off text of its own as ours.
 		lines := 0
@@ -114,8 +120,8 @@ func TestHostileServerCannotForgeShareRows(t *testing.T) {
 }
 
 // TestIncomingShareNamesItsSender pins the attribution half: a share from a pinned
-// contact shows that contact's email and fingerprint, and an unpinned one is called
-// an unknown sender rather than presented as an identity.
+// contact shows that contact's email and fingerprint, and an unpinned one shows only
+// what the server claims, marked as unverified rather than presented as an identity.
 func TestIncomingShareNamesItsSender(t *testing.T) {
 	app := &application{ctx: context.Background()}
 	h := app.newE2E(t)
@@ -126,16 +132,6 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 	}
 
 	app.asProfile("bob", func() {
-		out := captureStdout(t, func() {
-			if err := app.sharesCmd().RunE(nil, nil); err != nil {
-				t.Fatalf("shares: %v", err)
-			}
-		})
-		if !strings.Contains(out, "unknown sender") {
-			t.Fatalf("an unpinned grantor should be marked unknown: %q", out)
-		}
-
-		// Pin the sender the way a recipient would once they know who it is.
 		cl, prof, err := app.authedClient()
 		if err != nil {
 			t.Fatal(err)
@@ -144,6 +140,34 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		senderFP := crypto.KeyFingerprint(keys.PublicKey)
+
+		var doc string
+		app.withJSON(t, func() {
+			doc = captureStdout(t, func() {
+				if err := app.sharesCmd().RunE(nil, nil); err != nil {
+					t.Fatalf("shares --json: %v", err)
+				}
+			})
+		})
+		var rows []map[string]any
+		if err := json.Unmarshal([]byte(doc), &rows); err != nil || len(rows) != 1 {
+			t.Fatalf("shares --json = %q (%v), want one row", doc, err)
+		}
+		if rows[0]["attribution"] != "claimed" || rows[0]["claimedEmail"] != "e2e@example.com" ||
+			rows[0]["claimedFingerprint"] != senderFP || rows[0]["fromEmail"] != nil {
+			t.Fatalf("an unpinned grantor should carry only the server's claim: %v", rows[0])
+		}
+		out := captureStdout(t, func() {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
+				t.Fatalf("shares: %v", err)
+			}
+		})
+		if !strings.Contains(out, "e2e@example.com? (unverified, "+senderFP+")") || !strings.Contains(out, "aqt pull aqt://"+id) {
+			t.Fatalf("want the claim marked unverified and a pull command: %q", out)
+		}
+
+		// Pin the sender the way a recipient would once they know who it is.
 		pins, err := identity.LoadContacts(prof.Name)
 		if err != nil {
 			t.Fatal(err)
@@ -161,13 +185,74 @@ func TestIncomingShareNamesItsSender(t *testing.T) {
 				t.Fatalf("shares: %v", err)
 			}
 		})
-		if !strings.Contains(out, "e2e@example.com") || !strings.Contains(out, crypto.KeyFingerprint(keys.PublicKey)) {
+		if !strings.Contains(out, "e2e@example.com ("+senderFP+")") {
 			t.Fatalf("a pinned grantor should be named with its fingerprint: %q", out)
 		}
-		if strings.Contains(out, "unknown sender") {
-			t.Fatalf("pinned grantor still reported as unknown: %q", out)
+		if strings.Contains(out, "unverified") {
+			t.Fatalf("pinned grantor still reported as unverified: %q", out)
 		}
 	})
+}
+
+// A share that arrives is announced after login until `aqt shares` has listed it.
+func TestNewShareNoticeClearsOnceListed(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	id := app.pushSecretFile(t, "notice.txt", "hello")
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with: %v", err)
+	}
+
+	app.asProfile("bob", func() {
+		login := func() string {
+			withStdin(t, "bob horse battery staple\n")
+			cmd := app.loginCmd()
+			if err := cmd.Flags().Set("email", "bob@example.com"); err != nil {
+				t.Fatal(err)
+			}
+			return captureStderr(t, func() {
+				if err := cmd.RunE(cmd, nil); err != nil {
+					t.Fatalf("login: %v", err)
+				}
+			})
+		}
+		if out := login(); !strings.Contains(out, "1 new share from another account") {
+			t.Fatalf("login did not announce the share: %q", out)
+		}
+		captureStdout(t, func() {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
+				t.Fatalf("shares: %v", err)
+			}
+		})
+		if out := login(); strings.Contains(out, "new share") {
+			t.Fatalf("a listed share was announced again: %q", out)
+		}
+	})
+}
+
+// The commands `aqt shares` prints are meant to be pasted, so neither the grantor's
+// folder name nor the server's id may carry anything a shell would act on.
+func TestShareFetchCommandIsSafeToPaste(t *testing.T) {
+	for name, want := range map[string]string{
+		"Tax Returns (2025)": "Tax-Returns-2025",
+		"../../etc":          "etc",
+		"-rf ~":              "rf",
+		"$(rm -rf ~)":        "rm--rf",
+		"..":                 "",
+	} {
+		if got := localDirName(name); got != want {
+			t.Errorf("localDirName(%q) = %q, want %q", name, got, want)
+		}
+	}
+	folder := shareRow{id: "abc_DEF-123", Ref: "aqt://abc_DEF-123", Kind: api.KindFolder, Name: ".."}
+	if got := folder.fetchCommand(); got != "aqt clone aqt://abc_DEF-123" {
+		t.Errorf("folder with no usable name = %q, want clone's default directory", got)
+	}
+	hostile := shareRow{id: "x;rm -rf ~", Ref: "aqt://x;rm -rf ~"}
+	if got := hostile.fetchCommand(); got != "" {
+		t.Errorf("a non-base64url id produced the command %q", got)
+	}
 }
 
 // TestGranteeRemovesAndBlocksAShare is the recipient-side acceptance test: decline a
@@ -221,7 +306,7 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 		}
 		// Knowing who the sender was is what makes a block manageable; pinning them is
 		// how a handle becomes an address `aqt shares unblock` accepts.
-		if _, err := lookupGrantee(cl, prof, "e2e@example.com"); err != nil {
+		if _, _, err := lookupGrantee(cl, prof, "e2e@example.com"); err != nil {
 			t.Fatalf("pin the sender: %v", err)
 		}
 		listed := captureStdout(t, func() {
@@ -414,7 +499,7 @@ func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pin, err := lookupGrantee(cl, prof, "bob@example.com")
+	pin, _, err := lookupGrantee(cl, prof, "bob@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}

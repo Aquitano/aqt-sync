@@ -284,7 +284,8 @@ func (s *Store) DeleteGrant(owner, resourceID, grantee string, expectedVersions 
 
 // ListShares lists the caller's incoming grants: one row per live resource
 // granted to them, with the sealed metadata so the client can show names after
-// unwrapping. Reclaimed tombstones are skipped (their ciphertext is gone).
+// unwrapping, and the grantor's email and identity key so it can say who claims
+// to have sent it. Reclaimed tombstones are skipped (their ciphertext is gone).
 func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, string, error) {
 	limit := page.effectiveLimit()
 	where := "g.grantee_handle = ? AND r.reclaimed = 0"
@@ -303,8 +304,10 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 	}
 	args = append(args, limit+1)
 	rows, err := s.rdb.Query(
-		`SELECT g.resource_id, g.owner_handle, g.wrapped_key, g.created_at, r.encrypted_meta
+		`SELECT g.resource_id, g.owner_handle, g.wrapped_key, g.created_at, r.encrypted_meta,
+		        COALESCE(a.email, ''), a.public_key
 		 FROM grants g JOIN resources r ON r.id = g.resource_id
+		 LEFT JOIN accounts a ON a.owner_handle = g.owner_handle
 		 WHERE `+where+`
 		 ORDER BY g.created_at, g.resource_id LIMIT ?`,
 		args...,
@@ -319,7 +322,8 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 			item     api.ShareItem
 			metaJSON string
 		)
-		if err := rows.Scan(&item.ResourceID, &item.OwnerHandle, &item.WrappedKey, &item.CreatedAt, &metaJSON); err != nil {
+		if err := rows.Scan(&item.ResourceID, &item.OwnerHandle, &item.WrappedKey, &item.CreatedAt, &metaJSON,
+			&item.OwnerEmail, &item.OwnerPublicKey); err != nil {
 			return nil, "", err
 		}
 		if err := json.Unmarshal([]byte(metaJSON), &item.EncryptedMeta); err != nil {
