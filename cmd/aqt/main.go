@@ -263,6 +263,8 @@ func (app *application) rootCmd() *cobra.Command {
 	group("sharing", "Sharing:", app.shareCmd(), app.unshareCmd(), app.sharesCmd(), app.contactsCmd())
 	group("git", "Git:", app.repoCmd(), app.gitCmd())
 	group("account", "Account and maintenance:", app.lockCmd(), app.logoutCmd(), app.passphraseCmd(), app.accountCmd(), app.devicesCmd(), app.usageCmd(), app.pruneCmd(), app.updateCmd())
+	root.SetHelpCommandGroupID("start")
+	root.SetCompletionCommandGroupID("account")
 	root.AddCommand(app.gitRemoteHelperCmd())
 
 	// root.Version makes cobra print the version when the flag is set; register the

@@ -21,7 +21,17 @@ import (
 // `aqt --help`, away from everything it belongs with.
 func TestEveryVisibleCommandHasAHelpGroup(t *testing.T) {
 	app := &application{ctx: context.Background()}
-	for _, cmd := range app.rootCmd().Commands() {
+	root := app.rootCmd()
+	var out strings.Builder
+	root.SetOut(&out)
+	root.SetArgs([]string{"--help"})
+	if err := root.Execute(); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out.String(), "Additional Commands:") {
+		t.Errorf("help contains ungrouped commands:\n%s", out.String())
+	}
+	for _, cmd := range root.Commands() {
 		if !cmd.Hidden && cmd.GroupID == "" {
 			t.Errorf("%s has no help group", cmd.Name())
 		}
