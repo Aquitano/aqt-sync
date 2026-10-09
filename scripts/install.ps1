@@ -15,6 +15,9 @@ iwr -useb https://web.sync.aquitano.me/install.ps1 | iex
 
 .EXAMPLE
 & ([scriptblock]::Create((iwr -useb https://web.sync.aquitano.me/install.ps1))) -Server
+
+.EXAMPLE
+& ([scriptblock]::Create((iwr -useb https://web.sync.aquitano.me/install.ps1))) -Join https://aqt.example.com
 #>
 [CmdletBinding()]
 param(
@@ -24,6 +27,8 @@ param(
     [string]$Dir = $(if ($env:AQT_INSTALL_DIR) { $env:AQT_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA 'Programs\aqt' }),
     # Install a specific release tag instead of the latest.
     [string]$Version = $env:AQT_VERSION,
+    # The aqt server you will use, so the next steps name it.
+    [string]$Join,
     [string]$Repo = $(if ($env:AQT_REPO) { $env:AQT_REPO } else { 'Aquitano/aqt-sync' })
 )
 
@@ -123,8 +128,16 @@ if (@($entries | ForEach-Object { $_.TrimEnd('\') }) -notcontains $Dir.TrimEnd('
     Write-Host "added $Dir to your user PATH (open a new terminal for it to take effect elsewhere)"
 }
 
+# Mirrors the client's reading of a bare host: https, no trailing slash.
+if (-not $Join) {
+    $Join = 'https://your-server'
+} else {
+    $Join = $Join.TrimEnd('/')
+    if ($Join -notmatch '://') { $Join = "https://$Join" }
+}
+
 Write-Host ''
 Write-Host 'next:'
-Write-Host '  aqt --server https://your-server signup --email you@example.com   # new account'
-Write-Host '  aqt --server https://your-server login --email you@example.com    # account you already have'
+Write-Host "  aqt signup --server $Join   # new account"
+Write-Host "  aqt login --server $Join    # account you already have"
 Write-Host '  aqt git setup    # only if you want encrypted Git remotes'

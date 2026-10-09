@@ -17,6 +17,17 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// A command without a help group lands under "Additional Commands" at the bottom of
+// `aqt --help`, away from everything it belongs with.
+func TestEveryVisibleCommandHasAHelpGroup(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	for _, cmd := range app.rootCmd().Commands() {
+		if !cmd.Hidden && cmd.GroupID == "" {
+			t.Errorf("%s has no help group", cmd.Name())
+		}
+	}
+}
+
 // --json on a command that does not implement it must error, not silently print
 // prose a script would try to parse.
 func TestJSONGateErrorsOnUnsupported(t *testing.T) {

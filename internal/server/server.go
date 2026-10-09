@@ -36,11 +36,11 @@ const (
 	// a 409, so the endpoint is not an existence oracle; the duplicate creates
 	// nothing and the caller's next authenticated call fails, matching the
 	// wrong-passphrase ambiguity the decoy salt already presents.
-	RegistrationOpen RegistrationMode = "open"
+	RegistrationOpen RegistrationMode = api.RegistrationOpen
 	// RegistrationInvite additionally requires a valid server-issued invite token on
 	// every signup, so an attacker cannot squat an unclaimed email. Tokens are
 	// deployment-configured shared secrets, compared in constant time.
-	RegistrationInvite RegistrationMode = "invite"
+	RegistrationInvite RegistrationMode = api.RegistrationInvite
 )
 
 // Config tunes deployment-specific hardening. The zero value is open registration
@@ -86,11 +86,15 @@ func (c Config) sourceURL() string {
 	return c.SourceURL
 }
 
-func (c Config) Validate() error {
-	registration := c.Registration
-	if registration == "" {
-		registration = RegistrationOpen
+func (c Config) registrationMode() RegistrationMode {
+	if c.Registration == "" {
+		return RegistrationOpen
 	}
+	return c.Registration
+}
+
+func (c Config) Validate() error {
+	registration := c.registrationMode()
 	if registration != RegistrationOpen && registration != RegistrationInvite {
 		return fmt.Errorf("registration mode %q must be open or invite", c.Registration)
 	}
@@ -260,6 +264,10 @@ func (s *Server) Router() *gin.Engine {
 	pqGrants := requireCapability(api.CapabilityPQGrants)
 	v1 := r.Group("/v1")
 	{
+		// Read before any prompt, so a wrong URL or an invite-only server is reported
+		// before the user has typed a passphrase. Static, like /livez.
+		v1.GET("/info", s.handleInfo)
+
 		// Unauthenticated account/auth routes are rate-limited per client: they are
 		// the surface for brute-force, account enumeration, and challenge-table
 		// pumping.

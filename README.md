@@ -50,6 +50,7 @@ Windows). Useful options:
 | --- | --- |
 | `--server` / `-Server` | also install `aqt-server` |
 | `--version=vX.Y.Z` / `-Version vX.Y.Z` | pin a release |
+| `--join=URL` / `-Join URL` | name your server in the printed next steps |
 | `AQT_INSTALL_DIR` | install somewhere else |
 
 The install script trusts what the origin serves. Every later `aqt update` verifies the
@@ -77,9 +78,12 @@ A source build calls itself `dev` and is never replaced by `aqt update`.
 Create an account on the first machine, then attach every other machine to it:
 
 ```sh
-aqt --server https://aqt.example.com signup --email you@example.com
-aqt --server https://aqt.example.com login  --email you@example.com
+aqt signup --server https://aqt.example.com --email you@example.com
+aqt login  --server https://aqt.example.com --email you@example.com
 ```
+
+The profile remembers the server, so later commands need no `--server`. Without one,
+`signup` and `login` ask for it; `AQT_SERVER` sets it for scripts.
 
 Push files. Private is the default; `--public` mints a shareable link:
 

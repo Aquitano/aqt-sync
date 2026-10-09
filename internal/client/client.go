@@ -174,11 +174,11 @@ func (c *Client) WithContext(ctx context.Context) *Client {
 	return &c2
 }
 
-// ErrInsecureScheme is returned by New when a bearer token would be sent over a
-// non-HTTPS URL. Loopback hosts (localhost, 127.0.0.1, ::1) are exempted so the
+// ErrInsecureScheme is returned by New and CheckSecure when credentials would cross
+// a non-HTTPS URL. Loopback hosts (localhost, 127.0.0.1, ::1) are exempted so the
 // documented http://localhost:8080 dev workflow keeps working without credentials
 // leaking onto the network.
-var ErrInsecureScheme = errors.New("aqt: refusing to send bearer token over non-HTTPS URL (use https://, or http://localhost for local dev)")
+var ErrInsecureScheme = errors.New("aqt: refusing to send credentials over plain http to a non-local host (use https://, or http://localhost for local dev)")
 
 // New builds a Client. When token is non-empty the base URL must be HTTPS (or a
 // loopback host), since every authenticated request carries the bearer token on
@@ -191,7 +191,7 @@ func New(baseURL, token string) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("aqt: invalid server URL: %w", err)
 	}
-	if token != "" && u.Scheme != "https" && !isLoopbackHost(u.Hostname()) {
+	if token != "" && !secureURL(u) {
 		return nil, ErrInsecureScheme
 	}
 	return &Client{
@@ -236,6 +236,24 @@ func New(baseURL, token string) (*Client, error) {
 // block and ::1; localhost and 0.0.0.0 are added explicitly since the former is a
 // name and the latter (the wildcard bind, which dials to localhost) is not flagged
 // loopback by the stdlib.
+// CheckSecure refuses a base URL that would carry account credentials in the clear.
+// New applies the same rule once a token exists; signup and login apply it before
+// they send the passphrase verifier that earns one.
+func CheckSecure(baseURL string) error {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("aqt: invalid server URL: %w", err)
+	}
+	if !secureURL(u) {
+		return ErrInsecureScheme
+	}
+	return nil
+}
+
+func secureURL(u *url.URL) bool {
+	return u.Scheme == "https" || isLoopbackHost(u.Hostname())
+}
+
 func isLoopbackHost(host string) bool {
 	if host == "localhost" || host == "0.0.0.0" {
 		return true
@@ -296,6 +314,22 @@ func (c *Client) DeleteAccount(req api.DeleteAccountRequest) (api.DeleteAccountR
 	var r api.DeleteAccountResponse
 	err := c.do(http.MethodDelete, "/v1/account", req, &r)
 	return r, err
+}
+
+// ServerInfo describes the server (GET /v1/info). ErrNotFound means it predates the
+// endpoint or is not an aqt server at all; Live tells those two apart.
+func (c *Client) ServerInfo() (api.ServerInfo, error) {
+	var r api.ServerInfo
+	err := c.do(http.MethodGet, "/v1/info", nil, &r)
+	return r, err
+}
+
+// Live reports whether the liveness probe answers the way an aqt server's does.
+func (c *Client) Live() bool {
+	var r struct {
+		Status string `json:"status"`
+	}
+	return c.do(http.MethodGet, "/livez", nil, &r) == nil && r.Status == "ok"
 }
 
 // Bootstrap fetches the new-device bootstrap for an email: the KDF params and the

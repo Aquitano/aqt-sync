@@ -4,6 +4,33 @@ All notable changes to this project are documented in this file.
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- **No more default server.** A client with no profile and no `--server` used
+  `http://localhost:8080`, so a forgotten flag on a new machine talked to whatever
+  else listened there and failed after the passphrase with `error: not found`.
+  Without a server, `signup` and `login` now ask for one on a terminal and refuse
+  otherwise. `AQT_SERVER` sets one for machines and scripts without a profile;
+  set it to `http://localhost:8080` for the old development default.
+
+### Added
+
+- **Signup and login check the server before asking for anything.** They read the
+  new `GET /v1/info` first, so a wrong URL, a plain-HTTP remote, or an invite-only
+  server is reported before the passphrase prompt, and an invite-only server asks
+  for the token up front. A server that predates `/v1/info` is still accepted when
+  its `/livez` answers. A bare host (`aqt.example.com`) means `https://`.
+- Signup ends with what to do next, including the exact `aqt login` line for the
+  account's other machines, and `aqt --help` groups commands by task.
+- `install.sh --join=URL` and `install.ps1 -Join URL` print next steps that name the
+  server, for an operator to hand out one line per user.
+
+### Fixed
+
+- `aqt signup --server http://remote-host` sent the passphrase verifier over plain
+  HTTP, created the account, and then refused to store the token, leaving an account
+  this device could not use. It now refuses before sending anything.
+
 ## [v0.11.0] - 2026-10-05
 
 Grants between accounts move to X-Wing, which raises the client capability to 5.

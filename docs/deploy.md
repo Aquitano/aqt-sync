@@ -49,6 +49,13 @@ environment variables.
 
 Clients refuse to send their bearer token over plain HTTP to any non-loopback host,
 so a server reachable from other machines **must** serve HTTPS (see [TLS](#tls)).
+
+To onboard someone, hand them the install line with your server in it; the next
+steps it prints then name the server instead of a placeholder:
+
+```
+curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --join=https://aqt.example.com
+```
 Plain HTTP is fine for `localhost` and for a server that sits behind a
 TLS-terminating reverse proxy on the same host.
 
@@ -93,7 +100,8 @@ Notes:
   ```
   AQT_REGISTRATION=invite AQT_INVITE_TOKENS=$(openssl rand -hex 16)
   ```
-  Clients pass the token with `aqt signup --invite <token>` or `AQT_INVITE_TOKEN`.
+  Clients pass the token with `aqt signup --invite <token>` or `AQT_INVITE_TOKEN`,
+  or type it when signup asks for it.
 - **Trusted proxies.** Behind a reverse proxy, set `AQT_TRUSTED_PROXIES` to the
   proxy's address/CIDR so the share-page URL honors `X-Forwarded-Proto`. The
   rate-limit bucket keys on the real TCP peer regardless, so this is display-only.

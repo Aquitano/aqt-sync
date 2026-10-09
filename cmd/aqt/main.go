@@ -29,8 +29,6 @@ import (
 	"github.com/aquitano/aqt-sync/internal/update"
 )
 
-const defaultServer = "http://localhost:8080"
-
 // version is reported by `aqt --version` / `-v`, overridable at build time via
 // -ldflags "-X main.version=...". The default names no release on purpose: a
 // hardcoded number goes stale the moment it is tagged, and claiming a version this
@@ -225,6 +223,13 @@ func (app *application) rootCmd() *cobra.Command {
 		// silently printing prose a script would try to parse, or promising a bar it
 		// never draws.
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			if app.server != "" {
+				server, err := normalizeServer(app.server)
+				if err != nil {
+					return fmt.Errorf("--server: %w", err)
+				}
+				app.server = server
+			}
 			if app.json && cmd.Annotations[jsonAnnotation] == "" {
 				return fmt.Errorf("%s does not support --json", cmd.CommandPath())
 			}
@@ -238,19 +243,27 @@ func (app *application) rootCmd() *cobra.Command {
 		},
 		RunE: func(cmd *cobra.Command, args []string) error { return cmd.Help() },
 	}
-	root.PersistentFlags().StringVar(&app.server, "server", "", "server URL override")
+	root.PersistentFlags().StringVar(&app.server, "server", "", "server URL (default: the profile's, then $AQT_SERVER)")
 	root.PersistentFlags().StringVar(&app.profile, "profile", "", "profile name")
 	root.PersistentFlags().BoolVar(&app.json, "json", false, "output as JSON")
 	root.PersistentFlags().BoolVarP(&app.quiet, "quiet", "q", false, "print only essential output")
 	root.PersistentFlags().BoolVar(&app.progress, "progress", false, "show a live transfer progress bar (on a terminal, for pull/sync/clone/watch/restore)")
 
-	root.AddCommand(app.signupCmd(), app.loginCmd(), app.lockCmd(), app.logoutCmd(), app.whoamiCmd(), app.usageCmd(), app.pruneCmd(), app.passphraseCmd(), app.accountCmd(), app.devicesCmd(), app.pushCmd(), app.pullCmd(), app.catCmd(), app.lsCmd(), app.infoCmd(), app.findCmd(), app.shareCmd(), app.unshareCmd(), app.rmCmd(), app.renameCmd())
-	root.AddCommand(app.initCmd(), app.untrackCmd(), app.statusCmd(), app.diffCmd(), app.syncCmd(), app.cloneCmd(), app.watchCmd(), app.agentCmd())
-	root.AddCommand(app.snapshotCmd(), app.checkpointCmd(), app.restoreCmd())
-	root.AddCommand(app.sharesCmd(), app.contactsCmd())
-	root.AddCommand(app.repoCmd(), app.gitCmd())
+	group := func(id, title string, cmds ...*cobra.Command) {
+		root.AddGroup(&cobra.Group{ID: id, Title: title})
+		for _, cmd := range cmds {
+			cmd.GroupID = id
+		}
+		root.AddCommand(cmds...)
+	}
+	group("start", "Get started:", app.signupCmd(), app.loginCmd(), app.whoamiCmd())
+	group("files", "Files:", app.pushCmd(), app.pullCmd(), app.catCmd(), app.lsCmd(), app.infoCmd(), app.findCmd(), app.renameCmd(), app.rmCmd())
+	group("folders", "Folders:", app.initCmd(), app.syncCmd(), app.statusCmd(), app.diffCmd(), app.cloneCmd(), app.watchCmd(), app.agentCmd(), app.untrackCmd(), app.tuiCmd())
+	group("history", "History:", app.snapshotCmd(), app.checkpointCmd(), app.restoreCmd())
+	group("sharing", "Sharing:", app.shareCmd(), app.unshareCmd(), app.sharesCmd(), app.contactsCmd())
+	group("git", "Git:", app.repoCmd(), app.gitCmd())
+	group("account", "Account and maintenance:", app.lockCmd(), app.logoutCmd(), app.passphraseCmd(), app.accountCmd(), app.devicesCmd(), app.usageCmd(), app.pruneCmd(), app.updateCmd())
 	root.AddCommand(app.gitRemoteHelperCmd())
-	root.AddCommand(app.tuiCmd(), app.updateCmd())
 
 	// root.Version makes cobra print the version when the flag is set; register the
 	// flag explicitly so it carries the conventional -v shorthand.
@@ -350,35 +363,74 @@ func (app *application) authedClient() (*client.Client, *identity.Profile, error
 	return c, p, nil
 }
 
-// serverURL resolves a server for commands that may run without a profile (e.g.
-// pulling a public link on a fresh machine).
-func (app *application) serverURL() string {
+// errNoServer means nothing named a server: no --server, no profile, no AQT_SERVER.
+var errNoServer = errors.New("no server configured; pass --server <url> or set AQT_SERVER")
+
+// serverURL resolves the server for a command that may run without a profile:
+// --server, then the profile's, then AQT_SERVER, or "" when none names one.
+func (app *application) serverURL() (string, error) {
 	if app.server != "" {
-		return app.server
+		return app.server, nil
 	}
 	if p, err := identity.Load(app.profile); err == nil && p.Server != "" {
-		return p.Server
+		return p.Server, nil
 	}
-	return defaultServer
+	return envServer()
+}
+
+func envServer() (string, error) {
+	env := os.Getenv("AQT_SERVER")
+	if env == "" {
+		return "", nil
+	}
+	server, err := normalizeServer(env)
+	if err != nil {
+		return "", fmt.Errorf("AQT_SERVER: %w", err)
+	}
+	return server, nil
+}
+
+// normalizeServer turns what a user types for a server into a base URL: a bare host
+// means https, and a trailing slash is dropped so profiles compare equal.
+func normalizeServer(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", errNoServer
+	}
+	if !strings.Contains(raw, "://") {
+		raw = "https://" + raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", fmt.Errorf("invalid server URL %q: %w", raw, err)
+	}
+	if (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return "", fmt.Errorf("invalid server URL %q: want https://host[:port]", raw)
+	}
+	return strings.TrimRight(raw, "/"), nil
 }
 
 // linkServer resolves which server to talk to for a ref that may carry its own
 // host (a share URL), and whether the target is the user's own server. Server
 // precedence: explicit --server > host embedded in the ref > profile server >
-// default. ownServer reports whether the account token may be attached: only when
-// the operator chose the server explicitly (--server) or the resolved host matches
-// the profile's server. A foreign host from a share link is never the own server.
-func (app *application) linkServer(origin string, prof *identity.Profile) (server string, ownServer bool) {
+// AQT_SERVER. ownServer reports whether the account token may be attached: only
+// when the operator chose the server explicitly (--server) or the resolved host
+// matches the profile's server. A foreign host from a share link is never the own
+// server.
+func (app *application) linkServer(origin string, prof *identity.Profile) (server string, ownServer bool, err error) {
 	switch {
 	case app.server != "":
-		return app.server, true
+		return app.server, true, nil
 	case origin != "":
-		return origin, prof != nil && sameServer(origin, prof.Server)
+		return origin, prof != nil && sameServer(origin, prof.Server), nil
 	case prof != nil && prof.Server != "":
-		return prof.Server, true
-	default:
-		return defaultServer, true
+		return prof.Server, true, nil
 	}
+	server, err = envServer()
+	if err == nil && server == "" {
+		err = errNoServer
+	}
+	return server, true, err
 }
 
 // newLinkClient builds a client for a possibly self-contained ref. The account
@@ -388,7 +440,10 @@ func (app *application) linkServer(origin string, prof *identity.Profile) (serve
 // link cannot exfiltrate the device credential to an attacker host. client.New's
 // loopback/HTTPS guard still applies to the resolved host as defense in depth.
 func (app *application) newLinkClient(origin string, prof *identity.Profile) (*client.Client, error) {
-	server, own := app.linkServer(origin, prof)
+	server, own, err := app.linkServer(origin, prof)
+	if err != nil {
+		return nil, err
+	}
 	token := ""
 	if own && prof != nil {
 		token = prof.Token

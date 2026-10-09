@@ -96,6 +96,8 @@ live migration set.
 ## Routes
 
 ```text
+GET    /v1/info                      → { service: "aqt", registration: "open"|"invite", capability }
+                                     Unauthenticated. Clients read it before prompting for anything.
 POST   /v1/account                  Create account. Body: { email, kdf, publicKey, wrappedRoot,
                                      authVerifier, deviceName, encPublicKey, encKeySig, inviteToken? }
                                      encPublicKey/encKeySig are required and must self-verify (400

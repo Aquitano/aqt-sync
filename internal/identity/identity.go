@@ -28,7 +28,7 @@ import (
 const DefaultProfile = "default"
 
 // ErrNoProfile signals that no profile is stored yet.
-var ErrNoProfile = errors.New("no aqt profile found; run `aqt login` first")
+var ErrNoProfile = errors.New("no account on this device; run `aqt signup` to create one, or `aqt login` to use one you have")
 
 type Profile struct {
 	Name        string            `json:"name"`
