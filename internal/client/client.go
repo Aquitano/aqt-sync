@@ -221,8 +221,13 @@ func New(baseURL, token string) (*Client, error) {
 				if len(via) >= 10 {
 					return errors.New("aqt: stopped after 10 redirects")
 				}
-				if req.URL.Scheme != "https" && !isLoopbackHost(req.URL.Hostname()) {
+				if !secureURL(req.URL) {
 					req.Header.Del("Authorization")
+					// A 307/308 replays the body, and account bodies carry
+					// passphrase-derived verifiers.
+					if req.Body != nil && req.Body != http.NoBody {
+						return ErrInsecureScheme
+					}
 				}
 				return nil
 			},
@@ -230,12 +235,6 @@ func New(baseURL, token string) (*Client, error) {
 	}, nil
 }
 
-// isLoopbackHost reports whether host is a loopback or wildcard-bind address, the
-// only non-HTTPS hosts permitted to carry a bearer token: a connection to any of
-// them never leaves the machine. net.IP.IsLoopback covers the whole 127.0.0.0/8
-// block and ::1; localhost and 0.0.0.0 are added explicitly since the former is a
-// name and the latter (the wildcard bind, which dials to localhost) is not flagged
-// loopback by the stdlib.
 // CheckSecure refuses a base URL that would carry account credentials in the clear.
 // New applies the same rule once a token exists; signup and login apply it before
 // they send the passphrase verifier that earns one.
@@ -254,6 +253,12 @@ func secureURL(u *url.URL) bool {
 	return u.Scheme == "https" || isLoopbackHost(u.Hostname())
 }
 
+// isLoopbackHost reports whether host is a loopback or wildcard-bind address, the
+// only non-HTTPS hosts permitted to carry a bearer token: a connection to any of
+// them never leaves the machine. net.IP.IsLoopback covers the whole 127.0.0.0/8
+// block and ::1; localhost and 0.0.0.0 are added explicitly since the former is a
+// name and the latter (the wildcard bind, which dials to localhost) is not flagged
+// loopback by the stdlib.
 func isLoopbackHost(host string) bool {
 	if host == "localhost" || host == "0.0.0.0" {
 		return true

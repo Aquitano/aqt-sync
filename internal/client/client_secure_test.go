@@ -3,7 +3,9 @@
 package client
 
 import (
+	"errors"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +68,16 @@ func TestCheckRedirectDropsAuthOnInsecureTarget(t *testing.T) {
 		}
 		if got := req.Header.Get("Authorization"); got != "" {
 			t.Fatalf("Authorization not dropped on http downgrade: %q", got)
+		}
+	})
+
+	t.Run("http downgrade refuses to replay a body", func(t *testing.T) {
+		req, err := http.NewRequest(http.MethodPost, "http://other.example.com/v1/account", strings.NewReader(`{"authVerifier":"x"}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := check(req, via); !errors.Is(err, ErrInsecureScheme) {
+			t.Fatalf("CheckRedirect replaying a body over http = %v, want ErrInsecureScheme", err)
 		}
 	})
 

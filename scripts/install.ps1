@@ -129,6 +129,7 @@ if (@($entries | ForEach-Object { $_.TrimEnd('\') }) -notcontains $Dir.TrimEnd('
 }
 
 # Mirrors the client's reading of a bare host: https, no trailing slash.
+if ($Join) { $Join = $Join.Trim() }
 if (-not $Join) {
     $Join = 'https://your-server'
 } else {

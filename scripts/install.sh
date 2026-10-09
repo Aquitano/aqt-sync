@@ -172,6 +172,7 @@ case ":$PATH:" in
 esac
 
 # Mirrors the client's reading of a bare host: https, no trailing slash.
+join="$(printf '%s' "$join" | tr -d '[:space:]')"
 case "$join" in
 "") join="https://your-server" ;;
 *://*) join="${join%/}" ;;
