@@ -129,6 +129,9 @@ git push -u origin main
 - `aqt update` installs a newer release after verifying its signed manifest.
   `aqt update policy notify` enables daily release checks and notices; installation
   stays explicit.
+- Signup shows a recovery key once. Keep it offline: `aqt login --recovery-key` is
+  the only way back in after a forgotten passphrase, and `aqt passphrase
+  recovery-key` replaces it.
 - `aqt account delete` erases the account and every byte under it. There is no undo,
   because the server holds no keys.
 

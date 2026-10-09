@@ -21,41 +21,48 @@ import (
 
 func (app *application) signupCmd() *cobra.Command {
 	var (
-		email  string
-		ttl    time.Duration
-		invite string
-		kc     kdfChoice
+		email      string
+		ttl        time.Duration
+		invite     string
+		kc         kdfChoice
+		noRecovery bool
 	)
 	cmd := &cobra.Command{
 		Use:   "signup",
 		Short: "Create a new account and attach this device",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return app.runSignup(email, firstNonEmpty(invite, os.Getenv("AQT_INVITE_TOKEN")), ttl, kc)
+			return app.runSignup(email, firstNonEmpty(invite, os.Getenv("AQT_INVITE_TOKEN")), ttl, kc, !noRecovery)
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "new account email")
 	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until lock or logout)")
 	cmd.Flags().StringVar(&invite, "invite", "", "invite token, if the server requires one to register (or set AQT_INVITE_TOKEN)")
+	cmd.Flags().BoolVar(&noRecovery, "no-recovery-key", false, "do not make a recovery key (a forgotten passphrase then loses everything)")
 	addKdfFlags(cmd, &kc)
 	return cmd
 }
 
 func (app *application) loginCmd() *cobra.Command {
 	var (
-		email string
-		ttl   time.Duration
+		email    string
+		ttl      time.Duration
+		recovery bool
 	)
 	cmd := &cobra.Command{
 		Use:   "login",
 		Short: "Attach or unlock an existing account on this device",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if recovery {
+				return app.runRecover(email, ttl, kdfChoice{preset: string(crypto.DefaultPreset)})
+			}
 			return app.runLogin(email, ttl)
 		},
 	}
 	cmd.Flags().StringVar(&email, "email", "", "existing account email")
 	cmd.Flags().DurationVar(&ttl, "ttl", defaultSessionTTL, "how long to cache the unlocked key (0 = until lock or logout)")
+	cmd.Flags().BoolVar(&recovery, "recovery-key", false, "forgot the passphrase: unlock with the recovery key and set a new passphrase")
 	return cmd
 }
 
@@ -92,7 +99,7 @@ func (k kdfChoice) resolve() (crypto.KdfParams, error) {
 // first case — `login` cannot create an account, and the decoy means the client
 // cannot say which half of the message applies.
 var errNoUnlock = errors.New("could not unlock: no account exists for this email, or the passphrase is wrong; " +
-	"`aqt signup --email <email>` creates a new account")
+	"`aqt signup --email <email>` creates a new account, `aqt login --recovery-key` resets a forgotten passphrase")
 
 func validateSessionTTL(ttl time.Duration) error {
 	if ttl < 0 {
@@ -158,7 +165,7 @@ func (app *application) connectAccountServer() (accountServer, error) {
 	return accountServer{url: server, cl: cl, info: info}, nil
 }
 
-func (app *application) runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
+func (app *application) runSignup(email, invite string, ttl time.Duration, kc kdfChoice, recovery bool) error {
 	if err := validateSessionTTL(ttl); err != nil {
 		return err
 	}
@@ -214,7 +221,7 @@ func (app *application) runSignup(email, invite string, ttl time.Duration, kc kd
 			return errors.New("passphrases do not match")
 		}
 	}
-	if err := app.createAccount(srv.cl, srv.url, email, pass, invite, ttl, kc); err != nil {
+	if err := app.createAccount(srv.cl, srv.url, email, pass, invite, ttl, kc, recovery); err != nil {
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "\nnext:\n"+
@@ -279,7 +286,7 @@ func (app *application) runLogin(email string, ttl time.Duration) error {
 	}
 	defer rk.Wipe()
 
-	if prof, loadErr := identity.Load(name); loadErr == nil &&
+	if prof, loadErr := identity.Load(firstNonEmpty(app.profile, identity.DefaultProfile)); loadErr == nil &&
 		sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email) && prof.Token != "" {
 		authed, newErr := app.newBoundClient(server, prof.Token)
 		if newErr != nil {
@@ -302,6 +309,160 @@ func (app *application) runLogin(email string, ttl time.Duration) error {
 		}
 	}
 	return app.attachDevice(cl, server, email, boot, rk, uk, ttl)
+}
+
+// errNoRecovery is errNoUnlock for the recovery key: the bootstrap's recovery wrap is
+// a decoy both for an unknown email and for an account without a recovery key, so a
+// failed unwrap cannot say which of those, or a wrong key, it was.
+var errNoRecovery = errors.New("could not unlock: no account exists for this email, it has no recovery key, or this recovery key is wrong or was replaced")
+
+// runRecover resets a forgotten passphrase: the recovery key unwraps the root key
+// from the bootstrap's recovery wrap, the root key signs the attach challenge, and
+// the new passphrase's wrap and verifier replace the old ones server-side. Every
+// other device is signed out and logs in again with the new passphrase.
+func (app *application) runRecover(email string, ttl time.Duration, kc kdfChoice) error {
+	if err := validateSessionTTL(ttl); err != nil {
+		return err
+	}
+	srv, err := app.connectAccountServer()
+	if err != nil {
+		return err
+	}
+	server, cl := srv.url, srv.cl
+	email, err = readEmail(email)
+	if err != nil {
+		return err
+	}
+	if err := app.refuseOccupiedProfile(server, email); err != nil {
+		return err
+	}
+	boot, err := cl.Bootstrap(email)
+	if err != nil {
+		return err
+	}
+	if boot.RecoveryWrappedRoot == nil {
+		return errors.New("this server does not support recovery keys; upgrade it")
+	}
+	entered, err := app.promptPassphrase("Recovery key: ")
+	if err != nil {
+		return err
+	}
+	key, err := crypto.ParseRecoveryKey(entered)
+	if err != nil {
+		return err
+	}
+	defer key.Wipe()
+	ruk := key.UnlockKey()
+	defer ruk.Wipe()
+	rk, err := crypto.UnwrapRoot(*boot.RecoveryWrappedRoot, ruk)
+	if err != nil {
+		return errNoRecovery
+	}
+	defer rk.Wipe()
+
+	pass, err := app.promptPassphrase("New passphrase: ")
+	if err != nil {
+		return err
+	}
+	if pass == "" {
+		return errors.New("passphrase must not be empty")
+	}
+	if interactiveStdin() {
+		confirm, err := app.promptPassphrase("Confirm passphrase: ")
+		if err != nil {
+			return err
+		}
+		if confirm != pass {
+			return errors.New("passphrases do not match")
+		}
+	}
+	kdf, err := kc.resolve()
+	if err != nil {
+		return err
+	}
+	uk, err := crypto.DeriveUnlockKey(pass, kdf)
+	if err != nil {
+		return err
+	}
+	defer uk.Wipe()
+	wrapped, err := crypto.WrapRoot(rk, uk)
+	if err != nil {
+		return err
+	}
+	ch, err := cl.Challenge(email)
+	if err != nil {
+		return err
+	}
+	if len(ch.Nonce) != api.ChallengeNonceSize {
+		return fmt.Errorf("the server sent a %d-byte login challenge instead of %d bytes; refusing to sign it", len(ch.Nonce), api.ChallengeNonceSize)
+	}
+	signing := crypto.DeriveSigningKey(rk)
+	resp, err := cl.Recover(api.RecoverRequest{
+		Email:            email,
+		ChallengeID:      ch.ChallengeID,
+		Signature:        ed25519.Sign(signing, ch.Nonce),
+		RecoveryVerifier: crypto.DeriveAuthVerifier(ruk),
+		DeviceName:       deviceName(),
+		Kdf:              kdf,
+		WrappedRoot:      wrapped,
+		AuthVerifier:     crypto.DeriveAuthVerifier(uk),
+	})
+	if errors.Is(err, client.ErrUnauthorized) {
+		return errNoRecovery
+	}
+	if err != nil {
+		return err
+	}
+	authed, err := app.newBoundClient(server, resp.Token)
+	if err != nil {
+		return err
+	}
+	if err := validateAttachedDevice(authed, resp.DeviceID); err != nil {
+		return fmt.Errorf("recovery was not authenticated; no profile was saved: %w", err)
+	}
+	fingerprint := crypto.KeyFingerprint(signing.Public().(ed25519.PublicKey))
+	if err := app.saveProfile(server, email, fingerprint, kdf, wrapped, resp, ttl); err != nil {
+		return err
+	}
+	if err := app.cacheSession(rk, ttl); err != nil {
+		return err
+	}
+	fmt.Fprintf(os.Stderr, "recovered %s · new passphrase set · device %s · %s\n", email, resp.DeviceID, server)
+	fmt.Fprintln(os.Stderr, "every other device was signed out; log in there with the new passphrase. The recovery key still works.")
+	warnEncKeyUpgrade(upgradeEncKey(authed, email, resp.OwnerHandle, rk))
+	return nil
+}
+
+// readEmail prompts for the account email when none was given, and normalizes it.
+func readEmail(email string) (string, error) {
+	if email == "" {
+		entered, err := promptLine("email: ")
+		if err != nil {
+			return "", fmt.Errorf("read email: %w", err)
+		}
+		email = entered
+	}
+	email = api.NormalizeEmail(email)
+	if email == "" {
+		return "", errors.New("email is required")
+	}
+	return email, nil
+}
+
+// refuseOccupiedProfile stops a login from attaching a *different* account into a
+// profile that is logged in: overwriting its token and device id would orphan that
+// device's server-side session with nothing left to revoke it by. `aqt signup`
+// refuses exactly this, and login checks before prompting, so nobody types a secret
+// that was never going to be used. The same account on the same server is the
+// normal refresh path.
+func (app *application) refuseOccupiedProfile(server, email string) error {
+	name := firstNonEmpty(app.profile, identity.DefaultProfile)
+	if prof, err := identity.Load(name); err == nil && prof.Token != "" &&
+		!(sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email)) { //nolint:staticcheck // QF1001: "not the same account on the same server" is the condition being tested; splitting it into two negations reads worse.
+		return fmt.Errorf("profile %q is already logged in as %s on %s; run `aqt logout` first (which revokes that device), or use a different --profile",
+			name, prof.Email, prof.Server)
+	}
+	return nil
 }
 
 func validateAttachedDevice(cl *client.Client, deviceID string) error {
@@ -392,8 +553,12 @@ func (app *application) logoutCmd() *cobra.Command {
 // unlock key, and registers the account with the wrapped root, the verifier, and the
 // signing public key. The root key never leaves this machine; the passphrase change
 // later re-wraps it without touching any data.
-func (app *application) createAccount(cl *client.Client, server, email, pass, invite string, ttl time.Duration, kc kdfChoice) error {
-	fmt.Fprintln(os.Stderr, "Your passphrase wraps your encryption key. We never see it and it CANNOT be reset.")
+func (app *application) createAccount(cl *client.Client, server, email, pass, invite string, ttl time.Duration, kc kdfChoice, recovery bool) error {
+	if recovery {
+		fmt.Fprintln(os.Stderr, "Your passphrase wraps your encryption key. We never see it; only the recovery key shown next can reset it.")
+	} else {
+		fmt.Fprintln(os.Stderr, "Your passphrase wraps your encryption key. We never see it and it CANNOT be reset.")
+	}
 
 	kdf, err := kc.resolve()
 	if err != nil {
@@ -453,6 +618,42 @@ func (app *application) createAccount(cl *client.Client, server, email, pass, in
 		return err
 	}
 	fmt.Fprintf(os.Stderr, "signed up as %s · device %s · %s\n", email, resp.DeviceID, server)
+	if recovery {
+		if err := issueRecoveryKey(authed, rk, uk); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: no recovery key was made (%v); `aqt passphrase recovery-key` makes one\n", err)
+		}
+	}
+	return nil
+}
+
+// issueRecoveryKey mints a recovery key, stores its wrap of rk (proving the current
+// passphrase with uk), and shows it once. The key itself never leaves this machine.
+func issueRecoveryKey(cl *client.Client, rk crypto.MasterKey, uk crypto.UnlockKey) error {
+	key, err := crypto.GenerateRecoveryKey()
+	if err != nil {
+		return err
+	}
+	defer key.Wipe()
+	ruk := key.UnlockKey()
+	defer ruk.Wipe()
+	wrapped, err := crypto.WrapRoot(rk, ruk)
+	if err != nil {
+		return err
+	}
+	err = cl.SetRecoveryKey(api.RecoveryKeyRequest{
+		WrappedRoot:      wrapped,
+		RecoveryVerifier: crypto.DeriveAuthVerifier(ruk),
+		AuthVerifier:     crypto.DeriveAuthVerifier(uk),
+	})
+	if errors.Is(err, client.ErrNotFound) {
+		return errors.New("this server does not support recovery keys; upgrade it")
+	}
+	if err != nil {
+		return err
+	}
+	fmt.Fprintln(os.Stderr, "\nYour recovery key is the only way back in if you forget your passphrase. Store it offline, away from this machine; it is shown once:")
+	fmt.Println(key.Encode())
+	fmt.Fprintln(os.Stderr, "`aqt login --recovery-key` uses it; `aqt passphrase recovery-key` replaces it.")
 	return nil
 }
 
@@ -594,7 +795,36 @@ func (app *application) passphraseCmd() *cobra.Command {
 	rotateRoot.Flags().BoolVarP(&rotateYes, "yes", "y", false, "skip the confirmation prompt")
 	cmd.AddCommand(rotateRoot)
 
+	cmd.AddCommand(&cobra.Command{
+		Use:   "recovery-key",
+		Short: "Make a new recovery key, replacing any earlier one",
+		Args:  cobra.NoArgs,
+		RunE:  func(cmd *cobra.Command, args []string) error { return app.runRecoveryKey() },
+	})
+
 	return cmd
+}
+
+func (app *application) runRecoveryKey() error {
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		return err
+	}
+	pass, err := app.promptPassphrase("Passphrase: ")
+	if err != nil {
+		return err
+	}
+	uk, err := crypto.DeriveUnlockKey(pass, prof.Kdf)
+	if err != nil {
+		return err
+	}
+	defer uk.Wipe()
+	rk, err := crypto.UnwrapRoot(prof.WrappedRoot, uk)
+	if err != nil {
+		return errors.New("passphrase is incorrect")
+	}
+	defer rk.Wipe()
+	return issueRecoveryKey(cl, rk, uk)
 }
 
 // rewrapRoot re-wraps the account root key under newPass with newKdf and uploads
@@ -832,6 +1062,7 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "account root key rotated; all other devices were revoked and must re-login")
+	fmt.Fprintln(os.Stderr, "any recovery key wrapped the old root key and no longer works; `aqt passphrase recovery-key` makes a new one")
 	return nil
 }
 

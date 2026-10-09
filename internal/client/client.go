@@ -288,6 +288,18 @@ func (c *Client) AttachDevice(req api.AttachDeviceRequest) (api.AuthResponse, er
 	return r, err
 }
 
+// Recover attaches this device with the recovery key and sets a new passphrase.
+func (c *Client) Recover(req api.RecoverRequest) (api.AuthResponse, error) {
+	var r api.AuthResponse
+	err := c.do(http.MethodPost, "/v1/account/recover", req, &r)
+	return r, err
+}
+
+// SetRecoveryKey stores the account's recovery wrap, replacing any earlier one.
+func (c *Client) SetRecoveryKey(req api.RecoveryKeyRequest) error {
+	return c.do(http.MethodPut, "/v1/account/recovery", req, nil)
+}
+
 // ListDevices returns the devices attached to the authenticated account, following
 // pagination transparently.
 func (c *Client) ListDevices() ([]api.Device, error) {

@@ -103,9 +103,17 @@ POST   /v1/account                  Create account. Body: { email, kdf, publicKe
                                      encPublicKey/encKeySig are required and must self-verify (400
                                      otherwise): an account without them is not a grant target.
                                      → { ownerHandle, deviceId, token }  (stores kdf + Ed25519 public key)
-GET    /v1/account/salt?email=…      → { kdf, wrappedRoot }  (needed to re-derive on a new machine;
-                                     an unknown email gets an indistinguishable decoy — see the
-                                     threat model's account-enumeration section)
+GET    /v1/account/salt?email=…      → { kdf, wrappedRoot, recoveryWrappedRoot }  (needed to re-derive
+                                     on a new machine; an unknown email gets an indistinguishable
+                                     decoy — see the threat model's account-enumeration section —
+                                     and recoveryWrappedRoot is a decoy too for an account without
+                                     a recovery key)
+POST   /v1/account/recover           Reset a forgotten passphrase. Body: { email, challengeId,
+                                     signature, recoveryVerifier, deviceName, kdf, wrappedRoot,
+                                     authVerifier }. Like attach, but the recovery key's verifier
+                                     stands in for the passphrase's; stores the new passphrase
+                                     wrap, bumps the epoch, removes every other device.
+                                     → { ownerHandle, deviceId, token }; any failure is one 401.
 POST   /v1/auth/challenge            Body: { email } → { challengeId, nonce }  (one-time, short-lived)
 POST   /v1/devices                   Attach device. Body: { email, challengeId, signature,
                                      authVerifier, deviceName }.
@@ -163,8 +171,12 @@ GET    /v1/public/resources/:id/preflight  Unauthenticated, uncounted. → { id,
 # Account maintenance (owner token). None of these re-encrypt a resource:
 PUT    /v1/account/passphrase        Re-wrap the root key under a new passphrase. Bumps the auth epoch
                                      (every other device's token dies) and rotates the stored verifier.
+PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, authVerifier }. Store the
+                                     root key wrapped under the recovery key, replacing any earlier one;
+                                     authVerifier proves the current passphrase (403 otherwise) → 204.
 PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root key with every re-wrapped
                                      key and migrated identity, atomically, keeping only this device.
+                                     Clears the recovery wrap, which holds the old root key.
 PUT    /v1/account/enc-key           Body: { encPublicKey, encKeySig, incomingGrants }. Moves an account
                                      that still publishes a pre-X-Wing enc key onto its X-Wing key: the
                                      binding must verify against the account's current identity key, and

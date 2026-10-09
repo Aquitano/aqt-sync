@@ -100,6 +100,23 @@ Resource results may also include `snapshotsDeleted` or `snapshotsRemaining`.
 On preflight or execution failure the command exits non-zero after writing the full
 report, so scripts can use both the exit status and the per-item results.
 
+## Accounts and recovery keys
+
+`aqt signup` creates an account and attaches this device. `aqt login` attaches an
+existing account or unlocks its existing device. Both check the server before
+reading a passphrase. Server selection uses `--server`, the active profile, then
+`AQT_SERVER`, and prompts on a terminal if none is configured.
+
+Signup prints a recovery key once to stdout. Store it offline. `--no-recovery-key`
+skips creating it. `aqt passphrase recovery-key` creates a key for an existing
+account or replaces its current key, after checking the current passphrase.
+
+`aqt login --recovery-key --email <email>` checks the server, reads the recovery key,
+and asks for a new passphrase. It preserves existing encrypted data and signs out
+every other device. The recovery key remains usable until it is replaced or the
+account root key is rotated. `aqt passphrase rotate-root` clears the recovery key;
+run `aqt passphrase recovery-key` afterwards to create another.
+
 ## Incoming shares
 
 `aqt shares` lists what other accounts granted this one. `--json` returns

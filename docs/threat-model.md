@@ -15,11 +15,13 @@ limits are collected under [Still open](#still-open).
 
 ```text
 passphrase ──Argon2id(salt)──▶ unlockKey (UK)       (never leaves the device)
+recoveryKey ──HKDF──▶ recoveryUnlockKey (RUK)       (random, shown once)
                                   │
-                                  └─ unwraps ─▶ rootKey (RK), the master key
+                                  └─ either unwraps ─▶ rootKey (RK), the master key
                                                   │    (random, minted at signup;
                                                   │     the server stores only
-                                                  │     wrappedRoot = seal(RK, UK))
+                                                  │     wrappedRoot = seal(RK, UK)
+                                                  │     and seal(RK, RUK))
                                                   ├─ wraps ─▶ contentKey (one per resource)
                                                   ├─ HKDF ─▶ convergence key (chunk dedup)
                                                   ├─ HKDF ─▶ Ed25519 signing key
@@ -62,9 +64,34 @@ device and removes every other device; they recover by logging in again with the
 passphrase. Existing convergent objects stay readable because their per-object keys
 are sealed in their roots; future writes derive convergence from the new `RK`.
 
-A typo'd first passphrase is **unrecoverable** — there is nothing server-side to
-reset against — so `signup` on a terminal confirms it and says so explicitly. Without
-a terminal the passphrase is read once and the confirmation is skipped.
+A typo'd first passphrase can only be undone with the [recovery key](#the-recovery-key)
+— there is nothing server-side to reset against — so `signup` on a terminal confirms
+it. Without a terminal the passphrase is read once and the confirmation is skipped.
+
+### The recovery key
+
+Signup mints a second, random 256-bit secret and shows it once; `--no-recovery-key`
+skips it and `aqt passphrase recovery-key` makes a new one, replacing the old. HKDF
+turns it into `RUK`, and the server stores `seal(RK, RUK)` next to `wrappedRoot`,
+plus the hash of a verifier derived from `RUK`. Because the key is random rather than
+chosen, that wrap is as hard to open offline as any 256-bit key: the server learns
+nothing it could not already see.
+
+The recovery key is worth more than the passphrase. `aqt login --recovery-key` unwraps
+`RK` from it, signs the attach challenge with `RK`, presents the recovery verifier, and
+uploads a new passphrase's `wrappedRoot` and verifier; the server bumps the auth epoch
+and removes every other device. Whoever holds the key can therefore take the account
+over, which is why the CLI says to keep it offline and apart from the machine.
+
+- **Setting one needs the current passphrase.** A recovery key can reset the
+  passphrase, so storing one requires the passphrase verifier, not just a device
+  token: a stolen token cannot plant a key of its own.
+- **The bootstrap does not say who has one.** It always carries a recovery wrap,
+  a deterministic decoy for an unknown email and for an account without a key, so
+  neither account existence nor the presence of a recovery key leaks.
+- **It survives use and passphrase changes**, since neither changes `RK`.
+  `rotate-root` does change `RK`, so it clears the wrap; the CLI says to make a new
+  key afterwards.
 
 ### KDF calibration
 

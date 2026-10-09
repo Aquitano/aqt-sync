@@ -15,6 +15,15 @@ All notable changes to this project are documented in this file.
 
 ### Added
 
+- **A forgotten passphrase is no longer the end of an account.** Signup now shows a
+  random recovery key once (`--no-recovery-key` skips it), and `aqt passphrase
+  recovery-key` makes one for an existing account. `aqt login --recovery-key` uses it
+  to set a new passphrase on any machine; every other device is signed out. The
+  server stores only the root key sealed under the recovery key, which is as hard to
+  open as any 256-bit key, and the bootstrap serves a decoy for accounts without
+  one, so it reveals neither account existence nor who has a key. `rotate-root`
+  clears it. Server migration 23 adds the two columns.
+
 - **Signup and login check the server before asking for anything.** They read the
   new `GET /v1/info` first, so a wrong URL, a plain-HTTP remote, or an invite-only
   server is reported before the passphrase prompt, and an invite-only server asks

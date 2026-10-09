@@ -216,6 +216,35 @@ const (
 type SaltResponse struct {
 	Kdf         crypto.KdfParams  `json:"kdf"`
 	WrappedRoot crypto.SealedBlob `json:"wrappedRoot"`
+	// RecoveryWrappedRoot is the root key wrapped under the account's recovery key.
+	// A server that knows recovery keys always sends one — a decoy for an unknown
+	// email and for an account without a recovery key — so it reveals nothing; a
+	// server that predates them omits it.
+	RecoveryWrappedRoot *crypto.SealedBlob `json:"recoveryWrappedRoot,omitempty"`
+}
+
+// RecoveryKeyRequest stores the account's recovery wrap, replacing any earlier one.
+// AuthVerifier proves the current passphrase: a recovery key can reset the
+// passphrase, so a device token alone must not be able to plant one.
+type RecoveryKeyRequest struct {
+	WrappedRoot      crypto.SealedBlob `json:"wrappedRoot"`
+	RecoveryVerifier []byte            `json:"recoveryVerifier"`
+	AuthVerifier     []byte            `json:"authVerifier"`
+}
+
+// RecoverRequest attaches a device with the recovery key in place of the passphrase
+// and sets a new passphrase (Kdf, WrappedRoot, AuthVerifier) in the same step. As in
+// AttachDeviceRequest, Signature over the challenge nonce proves the root key;
+// RecoveryVerifier proves the recovery key.
+type RecoverRequest struct {
+	Email            string            `json:"email"`
+	ChallengeID      string            `json:"challengeId"`
+	Signature        []byte            `json:"signature"`
+	RecoveryVerifier []byte            `json:"recoveryVerifier"`
+	DeviceName       string            `json:"deviceName"`
+	Kdf              crypto.KdfParams  `json:"kdf"`
+	WrappedRoot      crypto.SealedBlob `json:"wrappedRoot"`
+	AuthVerifier     []byte            `json:"authVerifier"`
 }
 
 // PassphraseChangeRequest re-wraps the account's master key under a new passphrase.
