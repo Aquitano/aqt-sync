@@ -277,6 +277,7 @@ func (s *Server) Router() *gin.Engine {
 			unauth.GET("/account/salt", s.handleAccountSalt)
 			unauth.POST("/auth/challenge", s.handleAuthChallenge)
 			unauth.POST("/devices", s.handleAttachDevice)
+			unauth.POST("/account/recover", s.handleRecoverAccount)
 		}
 
 		// Public resource reads need no auth; the id is unguessable and the
@@ -328,6 +329,7 @@ func (s *Server) Router() *gin.Engine {
 			// Root-key rotation does not — its body carries every re-wrapped
 			// resource, snapshot, and grant key, so it needs the engine-wide cap.
 			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.handleChangePassphrase)
+			authed.PUT("/account/recovery", limitBody(maxControlBody), s.handleSetRecoveryKey)
 			authed.PUT("/account/root-key", pqGrants, s.handleRotateRootKey)
 			// Moves an account onto an X-Wing enc key; like root-key rotation, its body
 			// carries every incoming grant re-wrapped, so it takes the engine-wide cap.

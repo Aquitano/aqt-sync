@@ -51,7 +51,7 @@ func TestSignupRefusesBeforeAskingForAPassphrase(t *testing.T) {
 			t.Setenv("AQT_SERVER", "")
 			withStdin(t, "unread passphrase\n")
 			app := &application{ctx: context.Background(), server: tc.server}
-			err := app.runSignup("new@example.com", "", 0, kdfChoice{preset: "interactive"})
+			err := app.runSignup("new@example.com", "", 0, kdfChoice{preset: "interactive"}, false)
 			if err == nil {
 				t.Fatal("signup succeeded")
 			}

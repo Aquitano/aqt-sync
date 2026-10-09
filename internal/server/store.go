@@ -575,6 +575,12 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	`ALTER TABLE accounts ADD COLUMN object_count INTEGER NOT NULL DEFAULT 0;
 	 UPDATE accounts SET object_count =
 	     (SELECT COUNT(*) FROM objects WHERE objects.owner_handle = accounts.owner_handle);`,
+	// 23: recovery key. recovery_wrapped_root is the root key wrapped under a key
+	// derived from the account's random recovery key, and recovery_verifier the hash
+	// of the proof that unlocks the passphrase reset; both are empty for an account
+	// without one.
+	`ALTER TABLE accounts ADD COLUMN recovery_wrapped_root TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE accounts ADD COLUMN recovery_verifier BLOB NOT NULL DEFAULT x'';`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the

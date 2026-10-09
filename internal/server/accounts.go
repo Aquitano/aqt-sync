@@ -26,6 +26,8 @@ type Account struct {
 	Email       string
 	Kdf         crypto.KdfParams
 	WrappedRoot crypto.SealedBlob
+	// RecoveryWrappedRoot is nil for an account without a recovery key.
+	RecoveryWrappedRoot *crypto.SealedBlob
 }
 
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
@@ -74,18 +76,18 @@ func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []by
 	return Account{OwnerHandle: handle, Email: email, Kdf: kdf, WrappedRoot: wrappedRoot}, nil
 }
 
-// AccountByEmail returns the account's bootstrap fields (KDF params + wrapped root)
-// or ErrNotFound.
+// AccountByEmail returns the account's bootstrap fields (KDF params, wrapped root,
+// recovery wrap) or ErrNotFound.
 func (s *Store) AccountByEmail(email string) (Account, error) {
 	var (
-		acc               Account
-		kdfJSON, rootJSON string
+		acc                             Account
+		kdfJSON, rootJSON, recoveryJSON string
 	)
 	// COLLATE NOCASE serves rows written before emails were normalized; new rows
 	// are stored lower-cased, and the unique index keeps twins from being created.
 	err := s.rdb.QueryRow(
-		`SELECT owner_handle, email, kdf, wrapped_root FROM accounts WHERE email = ? COLLATE NOCASE`, api.NormalizeEmail(email),
-	).Scan(&acc.OwnerHandle, &acc.Email, &kdfJSON, &rootJSON)
+		`SELECT owner_handle, email, kdf, wrapped_root, recovery_wrapped_root FROM accounts WHERE email = ? COLLATE NOCASE`, api.NormalizeEmail(email),
+	).Scan(&acc.OwnerHandle, &acc.Email, &kdfJSON, &rootJSON, &recoveryJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Account{}, ErrNotFound
 	}
@@ -100,7 +102,104 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 			return Account{}, err
 		}
 	}
+	if recoveryJSON != "" {
+		acc.RecoveryWrappedRoot = new(crypto.SealedBlob)
+		if err := json.Unmarshal([]byte(recoveryJSON), acc.RecoveryWrappedRoot); err != nil {
+			return Account{}, err
+		}
+	}
 	return acc, nil
+}
+
+// SetRecoveryKey stores the account's recovery wrap and verifier hash, replacing any
+// earlier pair, once authVerifier proves the current passphrase. ErrNotFound if it
+// does not.
+func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, recoveryVerifier, authVerifier []byte) error {
+	rootJSON, err := json.Marshal(wrappedRoot)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var stored []byte
+	if err := tx.QueryRow(`SELECT auth_verifier FROM accounts WHERE owner_handle = ?`, owner).Scan(&stored); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		return err
+	}
+	if !verifierMatches(authVerifier, stored) {
+		return ErrNotFound
+	}
+	rh := sha256.Sum256(recoveryVerifier)
+	if _, err := tx.Exec(
+		`UPDATE accounts SET recovery_wrapped_root = ?, recovery_verifier = ? WHERE owner_handle = ?`,
+		string(rootJSON), rh[:], owner,
+	); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// RecoverAccount resets a passphrase with the recovery key: once recoveryVerifier
+// matches, it stores the new KDF/wrapped-root/verifier, bumps the auth epoch, drops
+// every other device, and attaches a new one, all in one transaction. Dropping the
+// devices is what keeps a device cap from stranding the reset half-done, and someone
+// who lost the passphrase gains nothing from sessions they cannot unlock. ErrNotFound
+// if the account has no recovery key or the proof is wrong.
+func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto.KdfParams, wrappedRoot crypto.SealedBlob, authVerifier []byte, deviceName string) (deviceID, token string, epoch int, err error) {
+	kdfJSON, err := json.Marshal(kdf)
+	if err != nil {
+		return "", "", 0, err
+	}
+	rootJSON, err := json.Marshal(wrappedRoot)
+	if err != nil {
+		return "", "", 0, err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return "", "", 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var stored []byte
+	if err := tx.QueryRow(
+		`SELECT recovery_verifier, auth_epoch FROM accounts WHERE owner_handle = ?`, owner,
+	).Scan(&stored, &epoch); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", "", 0, ErrNotFound
+		}
+		return "", "", 0, err
+	}
+	if !verifierMatches(recoveryVerifier, stored) {
+		return "", "", 0, ErrNotFound
+	}
+	epoch++
+	vh := sha256.Sum256(authVerifier)
+	if _, err := tx.Exec(
+		`UPDATE accounts SET kdf = ?, wrapped_root = ?, auth_verifier = ?, auth_epoch = ? WHERE owner_handle = ?`,
+		string(kdfJSON), string(rootJSON), vh[:], epoch, owner,
+	); err != nil {
+		return "", "", 0, err
+	}
+	if _, err := tx.Exec(`DELETE FROM devices WHERE owner_handle = ?`, owner); err != nil {
+		return "", "", 0, err
+	}
+	deviceID, token = newID(10), newID(32)
+	th := sha256.Sum256([]byte(token))
+	if _, err := tx.Exec(
+		`INSERT INTO devices(device_id, owner_handle, name, token_hash, auth_epoch) VALUES(?,?,?,?,?)`,
+		deviceID, owner, deviceName, th[:], epoch,
+	); err != nil {
+		return "", "", 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", "", 0, err
+	}
+	s.auth.invalidateOwner(owner)
+	return deviceID, token, epoch, nil
 }
 
 // AccountForAuth returns the fields needed to authenticate a device attach: the
@@ -269,7 +368,8 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 	}
 	newEpoch := epoch + 1
 	newVerifier := sha256.Sum256(req.NewAuthVerifier)
-	if _, err := tx.Exec(`UPDATE accounts SET kdf=?, wrapped_root=?, auth_verifier=?, auth_epoch=?, public_key=?, enc_public_key=?, enc_key_sig=? WHERE owner_handle=?`, string(kdfJSON), string(rootJSON), newVerifier[:], newEpoch, req.PublicKey, req.EncPublicKey, req.EncKeySig, owner); err != nil {
+	// The recovery wrap holds the root key this rotation retires, so it goes too.
+	if _, err := tx.Exec(`UPDATE accounts SET kdf=?, wrapped_root=?, auth_verifier=?, auth_epoch=?, public_key=?, enc_public_key=?, enc_key_sig=?, recovery_wrapped_root='', recovery_verifier=x'' WHERE owner_handle=?`, string(kdfJSON), string(rootJSON), newVerifier[:], newEpoch, req.PublicKey, req.EncPublicKey, req.EncKeySig, owner); err != nil {
 		return fail(err)
 	}
 	token := newID(32)
@@ -1134,7 +1234,28 @@ func (s *Server) handleAccountSalt(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "lookup failed")
 		return
 	}
-	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot})
+	recovery := acc.RecoveryWrappedRoot
+	if recovery == nil {
+		secret, err := s.store.ServerSecret()
+		if err != nil {
+			abort(c, http.StatusInternalServerError, "lookup failed")
+			return
+		}
+		recovery = s.decoyRecoveryWrap(secret, acc.Email)
+	}
+	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot, RecoveryWrappedRoot: recovery})
+}
+
+// decoyRecoveryWrap stands in for a recovery wrap that does not exist, for an
+// unknown email or an account without a recovery key, so the bootstrap does not say
+// which accounts have one. Shaped like WrapRoot's output, as decoyBootstrap's
+// wrapped root is.
+func (s *Server) decoyRecoveryWrap(secret []byte, email string) *crypto.SealedBlob {
+	email = api.NormalizeEmail(email)
+	return &crypto.SealedBlob{
+		Nonce:      s.decoyStream(secret, email, "aqt-decoy-recovery-nonce", crypto.NonceSize),
+		Ciphertext: s.decoyStream(secret, email, "aqt-decoy-recovery-ct", crypto.KeySize+16),
+	}
 }
 
 // decoyBootstrap synthesizes a bootstrap response for an unknown email,
@@ -1168,6 +1289,7 @@ func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
 			Nonce:      stream("aqt-decoy-nonce", crypto.NonceSize),
 			Ciphertext: stream("aqt-decoy-ct", crypto.KeySize+16),
 		},
+		RecoveryWrappedRoot: s.decoyRecoveryWrap(secret, email),
 	}, nil
 }
 
@@ -1229,6 +1351,70 @@ func (s *Server) handleAttachDevice(c *gin.Context) {
 		return
 	}
 	abortCode(c, http.StatusUnauthorized, "invalid credentials", api.ErrCodeInvalidCredentials)
+}
+
+// handleRecoverAccount resets a forgotten passphrase with the recovery key (POST
+// /v1/account/recover). Like attach, it needs the root key (the challenge signature)
+// and a verifier, here the recovery key's; every failure is the same 401.
+func (s *Server) handleRecoverAccount(c *gin.Context) {
+	var req api.RecoverRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.AuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "new wrapped root and auth verifier are required")
+		return
+	}
+	nonce, err := s.store.ConsumeChallenge(req.ChallengeID, req.Email)
+	if errors.Is(err, ErrNotFound) {
+		abortCode(c, http.StatusUnauthorized, "invalid or expired challenge", api.ErrCodeInvalidChallenge)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "challenge lookup failed")
+		return
+	}
+	owner, pub, _, _, err := s.store.AccountForAuth(req.Email)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		abort(c, http.StatusInternalServerError, "lookup failed")
+		return
+	}
+	if err == nil && len(pub) == ed25519.PublicKeySize && ed25519.Verify(pub, nonce, req.Signature) {
+		deviceID, token, epoch, err := s.store.RecoverAccount(owner, req.RecoveryVerifier, req.Kdf, req.WrappedRoot, req.AuthVerifier, deviceName(req.DeviceName))
+		if err == nil {
+			c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
+			return
+		}
+		if !errors.Is(err, ErrNotFound) {
+			abort(c, http.StatusInternalServerError, "recovery failed")
+			return
+		}
+	}
+	abortCode(c, http.StatusUnauthorized, "invalid credentials", api.ErrCodeInvalidCredentials)
+}
+
+// handleSetRecoveryKey stores the account's recovery wrap (PUT /v1/account/recovery),
+// replacing any earlier one.
+func (s *Server) handleSetRecoveryKey(c *gin.Context) {
+	owner := c.GetString(ownerContextKey)
+	var req api.RecoveryKeyRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.RecoveryVerifier) == 0 || len(req.AuthVerifier) == 0 {
+		abort(c, http.StatusBadRequest, "wrapped root and both verifiers are required")
+		return
+	}
+	err := s.store.SetRecoveryKey(owner, req.WrappedRoot, req.RecoveryVerifier, req.AuthVerifier)
+	if errors.Is(err, ErrNotFound) {
+		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
+		return
+	}
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "storing the recovery key failed")
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // verifierMatches reports whether the presented auth verifier hashes to the stored
