@@ -3,15 +3,18 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
+	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
@@ -19,10 +22,10 @@ import (
 )
 
 // shareRow is one incoming grant, as shown by `aqt shares`. The strings somebody
-// else authored — Name and Kind by the grantor, Ref and From by the server — are
-// sanitized on the way in (see foreignText); FromEmail and Fingerprint come from
-// this device's own contact pins. The unexported id keeps the resource id exactly
-// as it arrived, since that one is also a value we hand back to the server.
+// else authored — Name and Kind by the grantor, Ref, From and ClaimedEmail by the
+// server — are sanitized on the way in (see foreignText); FromEmail and Fingerprint
+// come from this device's own contact pins. The unexported id keeps the resource id
+// exactly as it arrived, since that one is also a value we hand back to the server.
 type shareRow struct {
 	Ref  string `json:"ref"`
 	Name string `json:"name,omitempty"`
@@ -32,21 +35,91 @@ type shareRow struct {
 	From        string `json:"from"`
 	FromEmail   string `json:"fromEmail,omitempty"`
 	Fingerprint string `json:"fingerprint,omitempty"`
-	Since       string `json:"since"`
-	Stale       bool   `json:"stale,omitempty"` // the wrap no longer opens (owner rotated the key)
+	// ClaimedEmail and ClaimedFingerprint are what the server says about a grantor
+	// with no pin: its account email and the fingerprint of its identity key.
+	ClaimedEmail       string `json:"claimedEmail,omitempty"`
+	ClaimedFingerprint string `json:"claimedFingerprint,omitempty"`
+	Attribution        string `json:"attribution"`
+	Since              string `json:"since"`
+	Stale              bool   `json:"stale,omitempty"` // the wrap no longer opens (owner rotated the key)
 
-	id string
+	id        string
+	createdAt int64
 }
 
-// sender renders who a share came from: the pinned email and key fingerprint when
-// this device has pinned the grantor, and the bare handle otherwise. Anyone with an
-// account on the server can append a row here, so an unpinned handle is called what
-// it is rather than presented as an identity.
+// How a share row names its sender, strongest first. Only a pin attributes a share:
+// signup does not verify emails, so a claim is the server's word, and anyone with an
+// account can append a row here.
+const (
+	attributionVerified = "verified" // a pin checked against a fingerprint
+	attributionPinned   = "pinned"
+	attributionClaimed  = "claimed"
+	attributionUnknown  = "unknown" // a bare handle: the server named no one
+)
+
 func (r shareRow) sender() string {
-	if r.FromEmail == "" {
+	switch r.Attribution {
+	case attributionVerified:
+		return fmt.Sprintf("%s (%s, verified)", r.FromEmail, r.Fingerprint)
+	case attributionPinned:
+		return fmt.Sprintf("%s (%s)", r.FromEmail, r.Fingerprint)
+	case attributionClaimed:
+		return fmt.Sprintf("%s? (unverified, %s)", r.ClaimedEmail, r.ClaimedFingerprint)
+	default:
 		return fmt.Sprintf("%s (unknown sender)", r.From)
 	}
-	return fmt.Sprintf("%s (%s)", r.FromEmail, r.Fingerprint)
+}
+
+// fetchCommand is a ready-to-run command that pulls the share, or "" for a row that
+// cannot be fetched. The id is the server's, so a row whose id is not spelled the way
+// the server mints them (base64url) gets no command a user might paste into a shell.
+func (r shareRow) fetchCommand() string {
+	notBase64URL := func(c rune) bool {
+		return !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_')
+	}
+	if r.Stale || r.id == "" || strings.ContainsFunc(r.id, notBase64URL) {
+		return ""
+	}
+	if r.Kind != api.KindFolder {
+		return "aqt pull " + r.Ref
+	}
+	if dir := localDirName(r.Name); dir != "" {
+		return fmt.Sprintf("aqt clone %s %s", r.Ref, dir)
+	}
+	return "aqt clone " + r.Ref
+}
+
+// localDirName turns a grantor-chosen folder name into a directory name that can be
+// pasted into a shell: every run of other characters folds to one '-', and leading or
+// trailing '-' and '.' go, so the name is neither a flag nor a hidden or parent
+// directory. "" means nothing usable is left, and clone falls back to the id.
+func localDirName(name string) string {
+	var b strings.Builder
+	folded := false
+	for _, c := range name {
+		if isPlainNameRune(c) {
+			b.WriteRune(c)
+			folded = false
+		} else if !folded {
+			b.WriteByte('-')
+			folded = true
+		}
+	}
+	return strings.Trim(b.String(), "-.")
+}
+
+func isPlainNameRune(c rune) bool {
+	return unicode.IsLetter(c) || unicode.IsDigit(c) || c == '-' || c == '_' || c == '.'
+}
+
+// isPlainEmail accepts a claimed email only in the plain local@domain shape. Signup
+// takes any string as an email, and one with spaces or parentheses could spell out a
+// fake "(SHA256:…, verified)" right beside the row's real attribution.
+func isPlainEmail(s string) bool {
+	local, domain, ok := strings.Cut(s, "@")
+	return ok && local != "" && domain != "" && !strings.ContainsFunc(local+domain, func(c rune) bool {
+		return !isPlainNameRune(c) && c != '+'
+	})
 }
 
 // foreignText bounds and strips control bytes from a string this client did not
@@ -73,9 +146,17 @@ func (app *application) sharesCmd() *cobra.Command {
 				return nil
 			}
 			if app.json {
-				return printJSON(rows)
+				if err := printJSON(rows); err != nil {
+					return err
+				}
+				app.markSharesSeen(rows)
+				return nil
 			}
+			unpinned := false
 			for _, r := range rows {
+				if r.Attribution == attributionClaimed || r.Attribution == attributionUnknown {
+					unpinned = true
+				}
 				if r.Stale {
 					fmt.Printf("%s  (stale grant — ask the owner to re-share)  from %s  since %s\n", r.Ref, r.sender(), r.Since)
 					continue
@@ -83,9 +164,15 @@ func (app *application) sharesCmd() *cobra.Command {
 				// The name is quoted so a grantor cannot embed a fake "from …" clause
 				// that reads as this row's real attribution.
 				fmt.Printf("%s  %q  %s  from %s  since %s\n", r.Ref, r.Name, r.Kind, r.sender(), r.Since)
+				if c := r.fetchCommand(); c != "" {
+					fmt.Printf("    %s\n", c)
+				}
 			}
-			fmt.Println("\npull with `aqt pull aqt://<id>`; folders: `aqt clone aqt://<id>` (read-only)")
-			fmt.Println("decline one with `aqt shares rm aqt://<id>`; add --block to refuse that account entirely")
+			fmt.Println("\nshares are read-only; decline one with `aqt shares rm aqt://<id>`, and add --block to refuse that account entirely")
+			if unpinned {
+				fmt.Println("an unverified or unknown sender is only the server's word: compare the fingerprint with them, then `aqt contacts pin <email> --fingerprint <fingerprint>`")
+			}
+			app.markSharesSeen(rows)
 			return nil
 		},
 	}
@@ -95,8 +182,9 @@ func (app *application) sharesCmd() *cobra.Command {
 }
 
 // collectShares decrypts each incoming grant's metadata and attributes it to a
-// pinned contact where one matches. It returns the authed client it built so a
-// caller acting on a row does not construct a second one.
+// pinned contact where one matches, or else to what the server claims. It returns
+// the authed client it built so a caller acting on a row does not construct a second
+// one.
 func (app *application) collectShares() (*client.Client, []shareRow, error) {
 	cl, prof, err := app.authedClient()
 	if err != nil {
@@ -127,13 +215,22 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 	rows := make([]shareRow, 0, len(items))
 	for _, it := range items {
 		row := shareRow{
-			id:    it.ResourceID,
-			Ref:   "aqt://" + foreignText(it.ResourceID),
-			From:  foreignText(it.OwnerHandle),
-			Since: time.Unix(it.CreatedAt, 0).Format("2006-01-02"),
+			id:          it.ResourceID,
+			createdAt:   it.CreatedAt,
+			Ref:         "aqt://" + foreignText(it.ResourceID),
+			From:        foreignText(it.OwnerHandle),
+			Since:       time.Unix(it.CreatedAt, 0).Format("2006-01-02"),
+			Attribution: attributionUnknown,
 		}
 		if pin, ok := pinByHandle[it.OwnerHandle]; ok {
 			row.FromEmail, row.Fingerprint = pin.Email, crypto.KeyFingerprint(pin.PublicKey)
+			row.Attribution = attributionPinned
+			if pin.Verified {
+				row.Attribution = attributionVerified
+			}
+		} else if email := foreignText(it.OwnerEmail); isPlainEmail(email) && len(it.OwnerPublicKey) == ed25519.PublicKeySize {
+			row.ClaimedEmail, row.ClaimedFingerprint = email, crypto.KeyFingerprint(it.OwnerPublicKey)
+			row.Attribution = attributionClaimed
 		}
 		ck, err := crypto.UnwrapGrant(it.WrappedKey, mk, it.ResourceID, it.OwnerHandle, prof.OwnerHandle)
 		if err != nil {
@@ -153,6 +250,49 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 		rows = append(rows, row)
 	}
 	return cl, rows, nil
+}
+
+// markSharesSeen moves the profile's new-share marker past every listed row. The
+// listing has already been shown, so a failure to record it is not worth reporting.
+func (app *application) markSharesSeen(rows []shareRow) {
+	var newest int64
+	for _, r := range rows {
+		newest = max(newest, r.createdAt)
+	}
+	// Loaded raw rather than through loadProfile, whose --server override must not
+	// be written back.
+	prof, err := identity.Load(app.profile)
+	if err != nil || newest <= prof.SharesSeenAt {
+		return
+	}
+	prof.SharesSeenAt = newest
+	_ = identity.Save(prof)
+}
+
+// noticeNewShares prints one line on stderr when shares have arrived since `aqt
+// shares` last listed them. It rides along on commands with a job of their own, so a
+// failure is swallowed rather than allowed to change their output or outcome.
+func (app *application) noticeNewShares() {
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		return
+	}
+	items, err := cl.ListShares()
+	if err != nil {
+		return
+	}
+	n := 0
+	for _, it := range items {
+		if it.CreatedAt > prof.SharesSeenAt {
+			n++
+		}
+	}
+	switch {
+	case n == 1:
+		fmt.Fprintln(os.Stderr, "1 new share from another account — run `aqt shares`")
+	case n > 1:
+		fmt.Fprintf(os.Stderr, "%d new shares from other accounts — run `aqt shares`\n", n)
+	}
 }
 
 // sharesRmCmd is the grantee-side counterpart of `aqt unshare --with`: until it

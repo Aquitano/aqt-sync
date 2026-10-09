@@ -15,12 +15,19 @@ import (
 // Contact is a trust-on-first-use pin of another account's published keys. The
 // server can substitute keys at lookup time; pinning turns that into a one-shot
 // attack window, and `aqt contacts verify` closes it via out-of-band comparison.
+//
+// Verified records that the identity key matched a fingerprint the user supplied
+// (`aqt contacts pin --fingerprint`). A first-use pin is unverified, and so is every
+// pin written before the field existed: an unverified pin may be the decoy an
+// unregistered email gets, so a confirmed lookup may replace it, while a verified one
+// is never replaced that way.
 type Contact struct {
 	Email        string `json:"email"`
 	Handle       string `json:"handle"`
 	PublicKey    []byte `json:"publicKey"`
 	EncPublicKey []byte `json:"encPublicKey"`
 	PinnedAt     int64  `json:"pinnedAt"`
+	Verified     bool   `json:"verified,omitempty"`
 }
 
 func contactsPath(profile string) (string, error) {

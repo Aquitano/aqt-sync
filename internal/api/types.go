@@ -118,6 +118,12 @@ type ShareItem struct {
 	WrappedKey    []byte            `json:"wrappedKey"`
 	EncryptedMeta crypto.SealedBlob `json:"encryptedMeta"`
 	CreatedAt     int64             `json:"createdAt"`
+	// OwnerEmail and OwnerPublicKey are the grantor account's email and Ed25519
+	// identity key as the server records them. Signup does not verify emails, so
+	// both are the server's claim about who sent the share, not an identity; only a
+	// local contact pin attributes a share. Absent from servers that predate them.
+	OwnerEmail     string `json:"ownerEmail,omitempty"`
+	OwnerPublicKey []byte `json:"ownerPublicKey,omitempty"`
 }
 
 type ListSharesResponse struct {

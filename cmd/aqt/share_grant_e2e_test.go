@@ -515,60 +515,195 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 	}
 }
 
-// Sharing with someone who has not registered yet pins the decoy the server returns for
-// an unknown email — it is self-signed and indistinguishable from a real key on purpose,
-// or the lookup would become an account-existence oracle. The grant is accepted and opens
-// for nobody, and once they do register their honest key mismatches the pin, so every
-// later share fails as if the server were substituting keys. `aqt contacts rm` is the
-// way out, and the mismatch error has to say so.
-func TestShareBeforeRegistrationPinsDecoyAndRecovers(t *testing.T) {
-	app := &application{ctx: context.Background()}
-	h := app.newE2E(t)
-	const (
-		email   = "dave@example.com"
-		content = "shared too early"
-	)
-	id := app.pushSecretFile(t, "early.txt", content)
-
-	// Dave has no account yet: this pins a placeholder.
-	if err := app.runShareWith(id, email); err != nil {
-		t.Fatalf("share --with an unregistered email: %v", err)
-	}
-	grantSignup(t, h, email, "dave", "dave horse battery staple")
-
-	err := app.runShareWith(id, email)
-	if err == nil {
-		t.Fatal("re-share after registration should refuse: the real key cannot match the pinned decoy")
-	}
-	if !strings.Contains(err.Error(), "contacts rm") {
-		t.Fatalf("mismatch error = %v, want it to point at `aqt contacts rm`", err)
-	}
-
-	cmd := app.contactsCmd()
-	cmd.SetArgs([]string{"rm", email})
-	captureStdout(t, func() {
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("contacts rm: %v", err)
+// shareBeforeSignup grants each resource to email while it has no account, which pins
+// the decoy the server answers an unknown email with, then registers the account.
+func (app *application) shareBeforeSignup(t *testing.T, h *e2eHarness, email, profile string, ids ...string) {
+	t.Helper()
+	for _, id := range ids {
+		if err := app.runShareWith(id, email); err != nil {
+			t.Fatalf("share %s with the unregistered %s: %v", id, email, err)
 		}
-	})
-
-	// With the placeholder dropped, the share re-pins Dave's real key and reaches him.
-	if err := app.runShareWith(id, email); err != nil {
-		t.Fatalf("re-share after `aqt contacts rm`: %v", err)
 	}
-	app.asProfile("dave", func() {
-		dest := filepath.Join(t.TempDir(), "out.txt")
+	grantSignup(t, h, email, profile, profile+" horse battery staple")
+}
+
+// answerRepin stands in for the terminal lookupGrantee asks before replacing a pin,
+// and counts how often it was asked.
+func answerRepin(t *testing.T, answer error) *int {
+	t.Helper()
+	asked := new(int)
+	orig := confirmRepin
+	confirmRepin = func(string) error {
+		*asked++
+		return answer
+	}
+	t.Cleanup(func() { confirmRepin = orig })
+	return asked
+}
+
+func (app *application) pullAs(t *testing.T, profile, id string) string {
+	t.Helper()
+	var got []byte
+	app.asProfile(profile, func() {
+		dest := filepath.Join(t.TempDir(), "out")
 		if err := app.runPull("aqt://"+id, dest, "", false, false); err != nil {
-			t.Fatalf("grantee pull after recovery: %v", err)
+			t.Fatalf("%s pulling %s: %v", profile, id, err)
 		}
-		got, err := os.ReadFile(dest)
-		if err != nil {
+		var err error
+		if got, err = os.ReadFile(dest); err != nil {
 			t.Fatal(err)
 		}
-		if string(got) != content {
-			t.Fatalf("grantee pulled %q, want %q", got, content)
-		}
 	})
+	return string(got)
+}
+
+// requireOnlyGrantee fails unless handle holds the one grant on id: a row left on the
+// decoy's handle is a grant that will never open, listed as if it were access.
+func requireOnlyGrantee(t *testing.T, cl *client.Client, id, handle string) {
+	t.Helper()
+	grants, err := cl.ListGrants(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(grants) != 1 || grants[0].GranteeHandle != handle {
+		t.Fatalf("grants on %s = %+v, want only %s", id, grants, handle)
+	}
+}
+
+// Sharing with someone who has not registered yet pins the decoy the server returns for
+// an unknown email — it is self-signed and indistinguishable from a real key on purpose,
+// or the lookup would become an account-existence oracle. Once they register, their
+// honest key mismatches the pin: a share without a terminal refuses, and on one the
+// owner re-pins, which also re-sends the grant that never opened.
+func TestShareBeforeRegistrationRepairsThePin(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	const email = "dave@example.com"
+	early := app.pushSecretFile(t, "early.txt", "shared too early")
+	later := app.pushSecretFile(t, "later.txt", "shared after signup")
+	app.shareBeforeSignup(t, h, email, "dave", early)
+
+	err := app.runShareWith(later, email)
+	if err == nil || !strings.Contains(err.Error(), "terminal") || !strings.Contains(err.Error(), "--fingerprint") {
+		t.Fatalf("non-interactive share against a stale unverified pin = %v, want a refusal naming both ways out", err)
+	}
+
+	asked := answerRepin(t, nil)
+	if err := app.runShareWith(later, email); err != nil {
+		t.Fatalf("share with the re-pin confirmed: %v", err)
+	}
+	if *asked != 1 {
+		t.Fatalf("re-pin asked %d times, want once", *asked)
+	}
+	if got := app.pullAs(t, "dave", early); got != "shared too early" {
+		t.Fatalf("the grant made before signup pulled %q", got)
+	}
+	if got := app.pullAs(t, "dave", later); got != "shared after signup" {
+		t.Fatalf("the new grant pulled %q", got)
+	}
+
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := fetchAccountKeys(cl, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin := pins[email]; !pinMatches(pin, keys) || pin.Verified {
+		t.Fatalf("pin after the repair = %+v, want dave's real keys, still unverified", pin)
+	}
+	requireOnlyGrantee(t, cl, early, keys.Handle)
+	requireOnlyGrantee(t, cl, later, keys.Handle)
+}
+
+// A pin verified against a fingerprint is the one thing a key change must not talk its
+// way past, so a mismatch refuses without offering the terminal prompt at all.
+func TestVerifiedPinMismatchIsRefusedEvenOnATerminal(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	id := app.pushSecretFile(t, "secret.env", "TOKEN=1")
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// From this device's side, "the server now presents keys other than the verified
+	// ones" looks the same whoever's keys the pin holds.
+	other, err := fetchAccountKeys(cl, "carol@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := identity.SaveContacts(prof.Name, map[string]identity.Contact{
+		"bob@example.com": pinFromKeys("bob@example.com", other, true),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	asked := answerRepin(t, nil)
+	err = app.runShareWith(id, "bob@example.com")
+	if err == nil || !strings.Contains(err.Error(), "verified") {
+		t.Fatalf("share against a mismatched verified pin = %v, want a refusal", err)
+	}
+	if *asked != 0 {
+		t.Fatal("a verified pin was offered for replacement")
+	}
+	if grants, err := cl.ListGrants(id); err != nil || len(grants) != 0 {
+		t.Fatalf("grants after the refusal = %+v (%v), want none", grants, err)
+	}
+}
+
+// A fingerprint the contact read out is stronger evidence than a first-use pin, so
+// `aqt contacts pin --fingerprint` replaces an unverified one that disagrees, and the
+// grants made against the placeholder follow.
+func TestContactsPinFingerprintReplacesAnUnverifiedPin(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	const email = "carol@example.com"
+	early := app.pushSecretFile(t, "early.txt", "shared too early")
+	app.shareBeforeSignup(t, h, email, "carol", early)
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys, err := fetchAccountKeys(cl, email)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinWith := func(fingerprint string) error {
+		cmd := app.contactsPinCmd()
+		if fingerprint != "" {
+			if err := cmd.Flags().Set("fingerprint", fingerprint); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var err error
+		captureStdout(t, func() { err = cmd.RunE(cmd, []string{email}) })
+		return err
+	}
+
+	if err := pinWith(""); err == nil {
+		t.Fatal("re-pinning to different keys without a fingerprint succeeded")
+	}
+	if err := pinWith(crypto.KeyFingerprint(keys.PublicKey)); err != nil {
+		t.Fatalf("pin --fingerprint over an unverified pin: %v", err)
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pin := pins[email]; !pinMatches(pin, keys) || !pin.Verified {
+		t.Fatalf("pin after --fingerprint = %+v, want carol's real keys, verified", pin)
+	}
+	if got := app.pullAs(t, "carol", early); got != "shared too early" {
+		t.Fatalf("the grant made before signup pulled %q", got)
+	}
+	requireOnlyGrantee(t, cl, early, keys.Handle)
 }
 
 // Revocation rotates the key and re-wraps the surviving grantees, and it must not

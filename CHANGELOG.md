@@ -40,6 +40,30 @@ All notable changes to this project are documented in this file.
   HTTP, created the account, and then refused to store the token, leaving an account
   this device could not use. It now refuses before sending anything.
 
+- **Sharing with someone before they register no longer strands the share.** The
+  server answers an unknown email with a placeholder key, so the first share pinned
+  it, reported success, and never opened. Once the person registered, every later
+  share failed with a key-mismatch error, and the only way out was `aqt contacts rm`
+  and re-sharing each resource by hand. Now a share on a terminal shows the pinned and
+  current fingerprints and asks before re-pinning. Without a terminal it refuses with
+  both fingerprints. `aqt contacts pin <email> --fingerprint <fp>` replaces the old pin
+  without asking. Either way, every earlier grant made against the placeholder is
+  re-sent to the real account and the placeholder's rows are removed. Pins made with
+  `--fingerprint` are now recorded as verified, and a mismatch against a verified pin
+  is still refused.
+
+### Changed
+
+- **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
+  the grantor account's email and identity key. The client shows them as an
+  unverified claim, `a@example.com? (unverified, SHA256:…)`, because signup does not
+  verify emails. Pinned senders read as before, marked `verified` when the pin was made
+  against a fingerprint. `--json` rows gain `claimedEmail`, `claimedFingerprint`, and
+  `attribution`. Each row now ends with the exact `aqt pull` or `aqt clone` command
+  that fetches it. Sharing shows your account email to the accounts you share with.
+- **`aqt login` and `aqt status` mention new incoming shares** on stderr until
+  `aqt shares` has listed them.
+
 ## [v0.11.0] - 2026-10-05
 
 Grants between accounts move to X-Wing, which raises the client capability to 5.

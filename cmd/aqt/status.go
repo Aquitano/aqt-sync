@@ -89,7 +89,13 @@ func (app *application) runStatus(dir string, opts statusOptions) error {
 	if opts.offline {
 		return nil
 	}
-	printIncomingReport(app.collectIncoming(root, base))
+	rep := app.collectIncoming(root, base)
+	printIncomingReport(rep)
+	// Only once the server has answered: when it cannot, collectIncoming has said so,
+	// and a second request would only make status wait out the same failure again.
+	if rep != nil {
+		app.noticeNewShares()
+	}
 	return nil
 }
 
