@@ -191,6 +191,24 @@ type AuthResponse struct {
 	Epoch       int    `json:"epoch,omitempty"`
 }
 
+// ServerInfo is what a client learns about a server before it asks the user for
+// anything: that the URL is an aqt server at all, whether signup needs an invite, and
+// the highest format the server knows. Unauthenticated and account-independent.
+type ServerInfo struct {
+	Service      string `json:"service"`
+	Registration string `json:"registration"`
+	Capability   int    `json:"capability"`
+}
+
+// ServerInfoService is ServerInfo.Service on every aqt server.
+const ServerInfoService = "aqt"
+
+// ServerInfo.Registration values.
+const (
+	RegistrationOpen   = "open"
+	RegistrationInvite = "invite"
+)
+
 // SaltResponse is the new-device bootstrap: the KDF params and the wrapped master
 // key a fresh machine needs to turn the passphrase into the master key. The server
 // returns an indistinguishable decoy for an unknown email, so this endpoint does

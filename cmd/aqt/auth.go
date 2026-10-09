@@ -106,8 +106,70 @@ func validateSessionTTL(ttl time.Duration) error {
 	return nil
 }
 
+// accountServer is the server signup or login talks to, already confirmed to answer
+// as an aqt server.
+type accountServer struct {
+	url  string
+	cl   *client.Client
+	info api.ServerInfo
+}
+
+// connectAccountServer resolves the server for signup or login, asking on a terminal
+// when nothing names one, and checks it before the caller prompts for anything else:
+// a wrong URL, a plain-http remote, or an invite-only server is reported before the
+// user has typed a passphrase.
+func (app *application) connectAccountServer() (accountServer, error) {
+	server, err := app.serverURL()
+	if err != nil {
+		return accountServer{}, err
+	}
+	if server == "" {
+		if !interactiveStdin() {
+			return accountServer{}, errNoServer
+		}
+		entered, err := promptLine("server URL: ")
+		if err != nil {
+			return accountServer{}, fmt.Errorf("read server URL: %w", err)
+		}
+		if server, err = normalizeServer(entered); err != nil {
+			return accountServer{}, err
+		}
+	}
+	if err := client.CheckSecure(server); err != nil {
+		return accountServer{}, err
+	}
+	cl, err := app.newBoundClient(server, "")
+	if err != nil {
+		return accountServer{}, err
+	}
+	info, err := cl.ServerInfo()
+	switch {
+	case err == nil && info.Service == api.ServerInfoService:
+		if info.Capability > api.ClientCapability {
+			fmt.Fprintf(os.Stderr, "warning: %s is newer than aqt %s; if anything fails, %s\n", server, version, upgradeAction(detectedInstall()))
+		}
+	case isNetworkError(err):
+		return accountServer{}, fmt.Errorf("cannot reach %s: %w", server, err)
+	case errors.Is(err, client.ErrNotFound) && cl.Live():
+		// A server that predates /v1/info: nothing to learn up front.
+	default:
+		return accountServer{}, fmt.Errorf("%s does not answer like an aqt server; check the URL", server)
+	}
+	return accountServer{url: server, cl: cl, info: info}, nil
+}
+
 func (app *application) runSignup(email, invite string, ttl time.Duration, kc kdfChoice) error {
 	if err := validateSessionTTL(ttl); err != nil {
+		return err
+	}
+	// Signing up over an existing profile would overwrite its saved token and
+	// orphan that device's server-side session, leaving no way to revoke it.
+	name := firstNonEmpty(app.profile, identity.DefaultProfile)
+	if _, err := identity.Load(name); err == nil {
+		return fmt.Errorf("a local profile %q already exists; run `aqt logout` first or pick a different --profile", name)
+	}
+	srv, err := app.connectAccountServer()
+	if err != nil {
 		return err
 	}
 	if email == "" {
@@ -121,11 +183,15 @@ func (app *application) runSignup(email, invite string, ttl time.Duration, kc kd
 	if email == "" {
 		return errors.New("email is required")
 	}
-	// Signing up over an existing profile would overwrite its saved token and
-	// orphan that device's server-side session, leaving no way to revoke it.
-	name := firstNonEmpty(app.profile, identity.DefaultProfile)
-	if _, err := identity.Load(name); err == nil {
-		return fmt.Errorf("a local profile %q already exists; run `aqt logout` first or pick a different --profile", name)
+	if invite == "" && srv.info.Registration == api.RegistrationInvite {
+		if interactiveStdin() {
+			if invite, err = promptLine("invite token: "); err != nil {
+				return fmt.Errorf("read invite token: %w", err)
+			}
+		}
+		if invite == "" {
+			return fmt.Errorf("%s only accepts signups with an invite; pass --invite <token> or set AQT_INVITE_TOKEN", srv.url)
+		}
 	}
 	pass, err := app.promptPassphrase("New passphrase: ")
 	if err != nil {
@@ -148,18 +214,26 @@ func (app *application) runSignup(email, invite string, ttl time.Duration, kc kd
 			return errors.New("passphrases do not match")
 		}
 	}
-	server := app.serverURL()
-	cl, err := app.newBoundClient(server, "")
-	if err != nil {
+	if err := app.createAccount(srv.cl, srv.url, email, pass, invite, ttl, kc); err != nil {
 		return err
 	}
-	return app.createAccount(cl, server, email, pass, invite, ttl, kc)
+	fmt.Fprintf(os.Stderr, "\nnext:\n"+
+		"  aqt push <file>                    encrypt and upload a file\n"+
+		"  aqt init <dir> && aqt sync <dir>   track a folder and keep it in sync\n"+
+		"\non your other machines:\n"+
+		"  aqt login --server %s --email %s\n", srv.url, email)
+	return nil
 }
 
 func (app *application) runLogin(email string, ttl time.Duration) error {
 	if err := validateSessionTTL(ttl); err != nil {
 		return err
 	}
+	srv, err := app.connectAccountServer()
+	if err != nil {
+		return err
+	}
+	server, cl := srv.url, srv.cl
 	if email == "" {
 		entered, err := promptLine("email: ")
 		if err != nil {
@@ -171,7 +245,6 @@ func (app *application) runLogin(email string, ttl time.Duration) error {
 	if email == "" {
 		return errors.New("email is required")
 	}
-	server := app.serverURL()
 	// Logging a *different* account into an occupied profile would overwrite its token
 	// and device id, orphaning that device's server-side session with nothing left to
 	// revoke it by. `aqt signup` refuses exactly this; login must too — and before
@@ -183,10 +256,6 @@ func (app *application) runLogin(email string, ttl time.Duration) error {
 		!(sameServer(prof.Server, server) && strings.EqualFold(prof.Email, email)) { //nolint:staticcheck // QF1001: "not the same account on the same server" is the condition being tested; splitting it into two negations reads worse.
 		return fmt.Errorf("profile %q is already logged in as %s on %s; run `aqt logout` first (which revokes that device), or use a different --profile",
 			name, prof.Email, prof.Server)
-	}
-	cl, err := app.newBoundClient(server, "")
-	if err != nil {
-		return err
 	}
 	boot, err := cl.Bootstrap(email)
 	if err != nil {

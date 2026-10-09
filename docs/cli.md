@@ -7,8 +7,10 @@ the contracts a script depends on and the behavior `--help` cannot express.
 
 `aqt <command> [args] [flags]`. Upload a file with `aqt push <path>`.
 
-`--server <url>` (default `http://localhost:8080`), `--profile <name>`, and
-`-h/--help` apply to every command. `-v/--version` is registered on the root command
+`--server <url>`, `--profile <name>`, and `-h/--help` apply to every command. The
+server comes from `--server`, then the profile, then `AQT_SERVER`; a bare host means
+`https://`. With none of them, `signup` and `login` ask on a terminal, and anything
+else that needs a server refuses: there is no built-in default. `-v/--version` is registered on the root command
 alone: `aqt --version` prints the build, `aqt ls --version` is an unknown flag — it
 is deliberately not global, because promoting it would spend the `-v` short flag for
 every subcommand that ever wants it. The three output flags apply only where they

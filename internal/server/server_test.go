@@ -115,6 +115,28 @@ func TestLivezIsPublic(t *testing.T) {
 	}
 }
 
+// A client reads /v1/info before prompting for anything, so it must answer without a
+// token and name the registration mode the signup that follows will meet.
+func TestInfoNamesRegistrationMode(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		cfg  Config
+		want string
+	}{
+		{Config{}, api.RegistrationOpen},
+		{Config{Registration: RegistrationInvite, InviteTokens: []string{"tok"}}, api.RegistrationInvite},
+	} {
+		h := newHarnessCfg(t, tc.cfg)
+		var info api.ServerInfo
+		if code := h.do(http.MethodGet, "/v1/info", "", nil, &info); code != http.StatusOK {
+			t.Fatalf("info status = %d, want 200", code)
+		}
+		if info.Service != api.ServerInfoService || info.Registration != tc.want || info.Capability != api.ClientCapability {
+			t.Fatalf("info = %+v, want service %q, registration %q, capability %d", info, api.ServerInfoService, tc.want, api.ClientCapability)
+		}
+	}
+}
+
 // createOrReplace picks the method a resource write takes: POST when the server
 // assigns the id, PUT when the request names the resource it replaces.
 func createOrReplace(id string) string {

@@ -9,6 +9,7 @@
 #
 #   curl -fsSL https://web.sync.aquitano.me/install.sh | sh
 #   curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --server
+#   curl -fsSL https://web.sync.aquitano.me/install.sh | sh -s -- --join=https://aqt.example.com
 #
 # Environment:
 #   AQT_INSTALL_DIR   where to put the binaries (default ~/.local/bin)
@@ -23,12 +24,14 @@ repo="${AQT_REPO:-Aquitano/aqt-sync}"
 install_dir="${AQT_INSTALL_DIR:-$HOME/.local/bin}"
 version="${AQT_VERSION:-}"
 want_server=0
+join=""
 
 for arg in "$@"; do
 	case "$arg" in
 	--server) want_server=1 ;;
 	--dir=*) install_dir="${arg#--dir=}" ;;
 	--version=*) version="${arg#--version=}" ;;
+	--join=*) join="${arg#--join=}" ;;
 	-h | --help)
 		cat <<'USAGE'
 install.sh — install the aqt client from a published GitHub release
@@ -36,6 +39,7 @@ install.sh — install the aqt client from a published GitHub release
   --server           also install aqt-server
   --dir=PATH         install location (default ~/.local/bin)
   --version=TAG      install a specific release instead of the latest
+  --join=URL         the aqt server you will use, so the next steps name it
 
 Environment: AQT_INSTALL_DIR, AQT_VERSION, AQT_REPO
 USAGE
@@ -167,8 +171,16 @@ case ":$PATH:" in
 	;;
 esac
 
+# Mirrors the client's reading of a bare host: https, no trailing slash.
+join="$(printf '%s' "$join" | tr -d '[:space:]')"
+case "$join" in
+"") join="https://your-server" ;;
+*://*) join="${join%/}" ;;
+*) join="https://${join%/}" ;;
+esac
+
 echo
 echo "next:"
-echo "  aqt --server https://your-server signup --email you@example.com   # new account"
-echo "  aqt --server https://your-server login --email you@example.com    # account you already have"
+echo "  aqt signup --server $join   # new account"
+echo "  aqt login --server $join    # account you already have"
 echo "  aqt git setup    # only if you want encrypted Git remotes"

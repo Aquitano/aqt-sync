@@ -66,15 +66,19 @@ func TestLinkServerPrecedence(t *testing.T) {
 		{"ref host matching profile is own server", "", "https://me.example.com", prof, "https://me.example.com", true},
 		{"trailing slash still matches profile", "", "https://me.example.com/", prof, "https://me.example.com/", true},
 		{"no ref host falls back to profile", "", "", prof, "https://me.example.com", true},
-		{"no ref host, no profile falls back to default", "", "", nil, defaultServer, true},
+		{"no ref host, no profile falls back to AQT_SERVER", "", "", nil, "https://env.example.com", true},
 	}
+	t.Setenv("AQT_SERVER", "env.example.com/")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			old := app.server
 			app.server = tc.flagServer
 			defer func() { app.server = old }()
 
-			server, own := app.linkServer(tc.origin, tc.prof)
+			server, own, err := app.linkServer(tc.origin, tc.prof)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if server != tc.wantServer {
 				t.Errorf("server = %q, want %q", server, tc.wantServer)
 			}
@@ -82,6 +86,31 @@ func TestLinkServerPrecedence(t *testing.T) {
 				t.Errorf("ownServer = %v, want %v", own, tc.wantOwn)
 			}
 		})
+	}
+}
+
+func TestNormalizeServer(t *testing.T) {
+	for _, tc := range []struct{ in, want string }{
+		{"aqt.example.com", "https://aqt.example.com"},
+		{" https://aqt.example.com/ ", "https://aqt.example.com"},
+		{"http://localhost:8080", "http://localhost:8080"},
+	} {
+		if got, err := normalizeServer(tc.in); err != nil || got != tc.want {
+			t.Errorf("normalizeServer(%q) = %q, %v; want %q", tc.in, got, err, tc.want)
+		}
+	}
+	for _, bad := range []string{"", "ftp://aqt.example.com", "https://"} {
+		if got, err := normalizeServer(bad); err == nil {
+			t.Errorf("normalizeServer(%q) = %q, want an error", bad, got)
+		}
+	}
+}
+
+func TestLinkServerWithoutAnyServerErrors(t *testing.T) {
+	t.Setenv("AQT_SERVER", "")
+	app := &application{ctx: context.Background()}
+	if _, _, err := app.linkServer("", nil); !errors.Is(err, errNoServer) {
+		t.Fatalf("linkServer with nothing configured = %v, want errNoServer", err)
 	}
 }
 

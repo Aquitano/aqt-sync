@@ -1102,6 +1102,14 @@ func (s *Server) decoyAuthResponse() api.AuthResponse {
 	}
 }
 
+func (s *Server) handleInfo(c *gin.Context) {
+	c.JSON(http.StatusOK, api.ServerInfo{
+		Service:      api.ServerInfoService,
+		Registration: string(s.cfg.registrationMode()),
+		Capability:   api.ClientCapability,
+	})
+}
+
 // handleAccountSalt is the new-device bootstrap: it returns the KDF params and wrapped
 // root key for an email. An unknown email gets a deterministic decoy (200, not 404)
 // so the endpoint does not reveal which emails have accounts; only someone who knows
