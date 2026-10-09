@@ -74,10 +74,10 @@ func (r shareRow) sender() string {
 // cannot be fetched. The id is the server's, so a row whose id is not spelled the way
 // the server mints them (base64url) gets no command a user might paste into a shell.
 func (r shareRow) fetchCommand() string {
-	notBase64URL := func(c rune) bool {
-		return !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_')
+	base64URL := func(c rune) bool {
+		return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_'
 	}
-	if r.Stale || r.id == "" || strings.ContainsFunc(r.id, notBase64URL) {
+	if r.Stale || r.id == "" || strings.ContainsFunc(r.id, func(c rune) bool { return !base64URL(c) }) {
 		return ""
 	}
 	if r.Kind != api.KindFolder {
