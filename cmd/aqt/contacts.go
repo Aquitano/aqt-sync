@@ -255,24 +255,27 @@ func grantedTo(cl *client.Client, handle string) ([]string, error) {
 // not, the new grant's upsert has already replaced the old row.
 func repin(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, r pinRepair, next identity.Contact, done string) error {
 	moved := 0
+	var repairErr error
 	for _, id := range r.ids {
 		if id != done {
 			if err := regrantOwned(cl, prof, mk, id, next); err != nil {
-				fmt.Fprintf(os.Stderr, "warning: re-sending aqt://%s to %s failed: %v; retry with `aqt share %s --with %s`\n",
-					id, next.Email, err, id, next.Email)
+				repairErr = errors.Join(repairErr, fmt.Errorf("re-send aqt://%s: %w", id, err))
 				continue
 			}
 		}
 		if r.old.Handle != next.Handle {
 			if err := cl.RevokeGrant(id, r.old.Handle); err != nil && !errors.Is(err, client.ErrNotFound) {
-				fmt.Fprintf(os.Stderr, "warning: aqt://%s now reaches %s, but deleting the grant made against the old pin failed: %v\n",
-					id, next.Email, err)
+				repairErr = errors.Join(repairErr, fmt.Errorf("delete the old grant on aqt://%s: %w", id, err))
+				continue
 			}
 		}
 		moved++
 	}
 	if moved > 0 {
 		fmt.Fprintf(os.Stderr, "re-sent %d earlier share(s) to %s\n", moved, next.Email)
+	}
+	if repairErr != nil {
+		return fmt.Errorf("pin repair incomplete; kept the old pin for %s so re-running the command retries the remaining shares: %w", next.Email, repairErr)
 	}
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {

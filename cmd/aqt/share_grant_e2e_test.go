@@ -621,6 +621,69 @@ func TestShareBeforeRegistrationRepairsThePin(t *testing.T) {
 	requireOnlyGrantee(t, cl, later, keys.Handle)
 }
 
+func TestPinRepairRetriesAfterPartialFailure(t *testing.T) {
+	for _, method := range []string{http.MethodPost, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			app := &application{ctx: context.Background()}
+			var fail atomic.Bool
+			var missed string
+			h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+				if fail.Load() && r.Method == method && strings.HasPrefix(r.URL.Path, "/v1/resources/"+missed+"/grants") {
+					w.WriteHeader(http.StatusInternalServerError)
+					return
+				}
+				pass(w, r)
+			})
+			const email = "retry@example.com"
+			completed := app.pushSecretFile(t, "completed.txt", "earlier completed share")
+			missed = app.pushSecretFile(t, "missed.txt", "earlier interrupted share")
+			later := app.pushSecretFile(t, "later.txt", "new share")
+			app.shareBeforeSignup(t, h, email, "retry", completed, missed)
+			cl, prof, err := app.authedClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+			pins, err := identity.LoadContacts(prof.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			old := pins[email]
+			asked := answerRepin(t, nil)
+			fail.Store(true)
+			if err := app.runShareWith(later, email); err == nil {
+				t.Fatal("partial repair reported success")
+			}
+			pins, err = identity.LoadContacts(prof.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if pin := pins[email]; pin.Handle != old.Handle || !bytes.Equal(pin.PublicKey, old.PublicKey) {
+				t.Fatal("partial repair replaced the old pin, losing the remaining grants on retry")
+			}
+			if got := app.pullAs(t, "retry", completed); got != "earlier completed share" {
+				t.Fatalf("completed share = %q", got)
+			}
+			fail.Store(false)
+			if err := app.runShareWith(later, email); err != nil {
+				t.Fatalf("retry repair: %v", err)
+			}
+			if *asked != 2 {
+				t.Fatalf("repair confirmations = %d, want 2", *asked)
+			}
+			keys, err := fetchAccountKeys(cl, email)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, id := range []string{completed, missed, later} {
+				requireOnlyGrantee(t, cl, id, keys.Handle)
+			}
+			if got := app.pullAs(t, "retry", missed); got != "earlier interrupted share" {
+				t.Fatalf("repaired share = %q", got)
+			}
+		})
+	}
+}
+
 // A pin verified against a fingerprint is the one thing a key change must not talk its
 // way past, so a mismatch refuses without offering the terminal prompt at all.
 func TestVerifiedPinMismatchIsRefusedEvenOnATerminal(t *testing.T) {

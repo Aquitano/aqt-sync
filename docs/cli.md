@@ -171,6 +171,9 @@ every grant made against the placeholder:
 - `aqt contacts pin <email> --fingerprint <fp>` replaces an unverified pin without
   asking, since the fingerprint is the stronger evidence.
 
+If a re-send or deletion fails, the command keeps the old pin. Run the same command
+again to retry the remaining shares; completed shares remain usable.
+
 A verified pin is never replaced this way: a mismatch against it is an error until
 `aqt contacts rm <email>`.
 
