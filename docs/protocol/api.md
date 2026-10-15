@@ -307,8 +307,8 @@ server could not read one.
 The request carries the passphrase-derived verifier, checked inside the deleting
 transaction, so a device token on its own is not authority to destroy an account and
 a passphrase change cannot land between the proof and the erasure it authorizes. That
-same read re-checks suspension, which the middleware answers from a cache an operator
-in another process cannot invalidate; every other route tolerates that window, and
+same read re-checks suspension, so an operator's hold that lands after the middleware
+checked it still refuses the erasure; every other route tolerates that window, and
 this one cannot.
 
 An operator reaches the same store-level erasure through `aqt-server admin accounts

@@ -198,7 +198,6 @@ func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto
 	if err := tx.Commit(); err != nil {
 		return "", "", 0, err
 	}
-	s.auth.invalidateOwner(owner)
 	return deviceID, token, epoch, nil
 }
 
@@ -297,9 +296,6 @@ func (s *Store) ChangePassphrase(owner, deviceID string, kdf crypto.KdfParams, w
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
-	// Every other device's cached token entry is now stale (its epoch no longer
-	// matches); the calling device re-caches on its next request.
-	s.auth.invalidateOwner(owner)
 	return newEpoch, nil
 }
 
@@ -387,7 +383,6 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 	if err := tx.Commit(); err != nil {
 		return "", 0, err
 	}
-	s.auth.invalidateOwner(owner)
 	return token, newEpoch, nil
 }
 
@@ -931,60 +926,31 @@ func (s *Store) OwnerByToken(token string) (string, error) {
 	return owner, err
 }
 
+const authByTokenQuery = `SELECT d.owner_handle, d.device_id, a.disabled_at FROM devices d
+	JOIN accounts a ON a.owner_handle = d.owner_handle
+	WHERE d.token_hash = ? AND d.auth_epoch = a.auth_epoch`
+
 // AuthByToken resolves a bearer token to its owner handle and device id, enforcing
-// the same epoch check as OwnerByToken. The device id lets a passphrase change keep
-// the calling device's token alive while invalidating the rest.
+// the same epoch check as OwnerByToken and refusing a suspended account with
+// ErrAccountDisabled. The device id lets a passphrase change keep the calling
+// device's token alive while invalidating the rest.
 //
-// Successful resolutions are cached (this SELECT otherwise runs on every request).
-// ChangePassphrase and DeleteDevice invalidate the affected entries, and the TTL
-// bounds the staleness of any path that misses; only positive results are cached, so
-// unauthenticated garbage cannot grow the map.
-// Suspension is checked separately from the memoized resolution: an operator
-// suspends through `aqt-server admin`, a different process, so this server's token
-// cache cannot be invalidated from there. See suspensionTTL.
+// It reads the database on every request rather than memoizing: `aqt-server admin`
+// suspends and deletes accounts from another process, so only the row knows.
 func (s *Store) AuthByToken(token string) (owner, deviceID string, err error) {
 	h := sha256.Sum256([]byte(token))
-	owner, deviceID, ok := s.auth.get(h)
-	if !ok {
-		gen := s.auth.generation()
-		err = s.rdb.QueryRow(
-			`SELECT d.owner_handle, d.device_id FROM devices d
-			   JOIN accounts a ON a.owner_handle = d.owner_handle
-			 WHERE d.token_hash = ? AND d.auth_epoch = a.auth_epoch`, h[:],
-		).Scan(&owner, &deviceID)
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", "", ErrNotFound
-		}
-		if err != nil {
-			return "", "", err
-		}
-		s.auth.put(h, owner, deviceID, gen)
+	var disabledAt int64
+	err = s.authStmt.QueryRow(h[:]).Scan(&owner, &deviceID, &disabledAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", ErrNotFound
 	}
-	disabled, err := s.accountSuspended(owner)
 	if err != nil {
-		// A cached resolution can outlive the account an operator just erased.
-		// ErrNotFound maps to 401, which is the truth: the credential is gone.
 		return "", "", err
 	}
-	if disabled {
+	if disabledAt > 0 {
 		return "", "", ErrAccountDisabled
 	}
 	return owner, deviceID, nil
-}
-
-// accountSuspended answers from a short-lived cache so a sync's request burst does
-// not pay a database round trip per request, while an operator's suspension still
-// lands within suspensionTTL.
-func (s *Store) accountSuspended(owner string) (bool, error) {
-	if disabled, ok := s.suspended.get(owner); ok {
-		return disabled, nil
-	}
-	disabled, err := s.AccountDisabled(owner)
-	if err != nil {
-		return false, err
-	}
-	s.suspended.put(owner, disabled)
-	return disabled, nil
 }
 
 // ListDevices returns the owner's attached devices (id + name). Token hashes never
@@ -1039,7 +1005,6 @@ func (s *Store) DeleteDevice(owner, deviceID string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
-	s.auth.invalidateDevice(owner, deviceID) // a revoked token must stop working now, not at TTL
 	return nil
 }
 
@@ -1565,9 +1530,8 @@ func (s *Server) handleDeleteAccount(c *gin.Context) {
 		abortCode(c, http.StatusForbidden, "passphrase proof did not match", api.ErrCodeProofMismatch)
 		return
 	}
-	// The middleware answered this from a cache an operator suspending in another
-	// process cannot invalidate; the store re-read the row, so a hold that landed
-	// inside that window still holds.
+	// The store re-read the row inside the deleting transaction, so a hold that
+	// landed after the middleware's check still holds.
 	if errors.Is(err, ErrAccountDisabled) {
 		abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
 		return
