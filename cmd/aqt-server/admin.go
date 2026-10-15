@@ -274,7 +274,8 @@ func withStore(cmd *cobra.Command, fn func(*server.Store) error) error {
 		return err
 	}
 	if dir == "" {
-		dir = envOr("AQT_DATA_DIR", "./aqt-data")
+		e, _ := loadEnvironment()
+		dir = e.DataDir
 	}
 	dbPath := filepath.Join(dir, "aqt.db")
 	info, err := os.Stat(dbPath)
@@ -313,11 +314,8 @@ func withAccount(cmd *cobra.Command, ref string, fn func(*server.Store, server.A
 // serverQuotaDefault reads the server-wide cap from the environment, so operator
 // output can distinguish "inherits the default" from the default's current value.
 func serverQuotaDefault() int64 {
-	n, err := strconv.ParseInt(envOr("AQT_QUOTA_BYTES", "0"), 10, 64)
-	if err != nil || n < 0 {
-		return 0
-	}
-	return n
+	e, _ := loadEnvironment()
+	return max(e.QuotaBytes, 0)
 }
 
 // confirm gates a destructive verb, asking on the command's own streams.

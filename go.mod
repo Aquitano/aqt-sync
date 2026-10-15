@@ -6,6 +6,7 @@ toolchain go1.26.6
 
 require (
 	github.com/atotto/clipboard v0.1.4
+	github.com/caarlos0/env/v11 v11.4.1
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/gin-gonic/gin v1.12.0
 	github.com/klauspost/compress v1.19.0
