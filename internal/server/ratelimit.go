@@ -69,8 +69,8 @@ type ipRateLimiter struct {
 // clients a single-instance server sees, but a hard ceiling on the map.
 const maxBuckets = 4096
 
-func newIPRateLimiter(rps, burst float64) *ipRateLimiter {
-	return &ipRateLimiter{buckets: make(map[string]*rate.Limiter), rps: rate.Limit(rps), burst: int(burst), now: time.Now}
+func newIPRateLimiter(rps float64, burst int) *ipRateLimiter {
+	return &ipRateLimiter{buckets: make(map[string]*rate.Limiter), rps: rate.Limit(rps), burst: burst, now: time.Now}
 }
 
 // reserve consumes a token or returns the wait until one becomes available.

@@ -104,7 +104,7 @@ type environment struct {
 	MaxObjects         int                     `env:"AQT_MAX_OBJECTS"`
 	MaxDevices         int                     `env:"AQT_MAX_DEVICES"`
 	AuthRate           float64                 `env:"AQT_AUTH_RATE"`
-	AuthBurst          float64                 `env:"AQT_AUTH_BURST"`
+	AuthBurst          int                     `env:"AQT_AUTH_BURST"`
 	TrustedProxies     string                  `env:"AQT_TRUSTED_PROXIES" envDefault:"127.0.0.1,::1"`
 	SnapshotInterval   time.Duration           `env:"AQT_SNAPSHOT_INTERVAL" envDefault:"24h"`
 	SnapshotKeep       int                     `env:"AQT_SNAPSHOT_KEEP" envDefault:"30"`
@@ -114,9 +114,12 @@ type environment struct {
 	SourceURL          string                  `env:"AQT_SOURCE_URL"`
 }
 
+// On error the result still holds every field that parsed; the admin commands
+// rely on that to tolerate an unrelated malformed variable.
 func loadEnvironment() (environment, error) {
 	return env.ParseAsWithOptions[environment](env.Options{
 		FuncMap: map[reflect.Type]env.ParserFunc{
+			// env parses int as 32-bit, which would reject quotas above 2^31.
 			reflect.TypeFor[int](): func(v string) (any, error) { return strconv.Atoi(v) },
 		},
 	})
