@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/gofrs/flock"
+
 	"github.com/aquitano/aqt-sync/internal/syncengine"
 )
 
@@ -70,27 +72,20 @@ func releaseHeldSyncLock(root string, drop func()) {
 // between two reclaimers. The pid is only used for busyMsg; the OS lock decides
 // ownership.
 func acquirePIDFile(path string, busyMsg func(pid int) error) (release func(), err error) {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	lock := flock.New(path)
+	held, err := lock.TryLock()
 	if err != nil {
-		return nil, err
-	}
-	held, err := tryLockFile(f)
-	if err != nil {
-		_ = f.Close()
 		return nil, err
 	}
 	if !held {
 		pid, _ := readLockPID(path)
-		_ = f.Close()
 		return nil, busyMsg(pid)
 	}
-	if err := f.Truncate(0); err == nil {
-		_, _ = f.WriteAt([]byte(strconv.Itoa(os.Getpid())+"\n"), 0)
-	}
-	// Close drops the lock. The file itself stays: removing it would reopen the
+	_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
+	// Unlock drops the lock. The file itself stays: removing it would reopen the
 	// unlink race (a waiter holding the old inode and a fresh creator would each
 	// hold "the" lock at once).
-	return func() { _ = f.Close() }, nil
+	return func() { _ = lock.Unlock() }, nil
 }
 
 func readLockPID(path string) (int, bool) {
