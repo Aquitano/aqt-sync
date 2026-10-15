@@ -60,7 +60,11 @@ func TestLoadTLSSettings(t *testing.T) {
 			for _, k := range []string{"AQT_TLS_CERT", "AQT_TLS_KEY", "AQT_TLS_AUTOCERT_DOMAINS", "AQT_TLS_AUTOCERT_CACHE", "AQT_TLS_AUTOCERT_EMAIL"} {
 				t.Setenv(k, tc.env[k])
 			}
-			s, err := loadTLSSettings()
+			e, err := loadEnvironment()
+			if err != nil {
+				t.Fatal(err)
+			}
+			s, err := loadTLSSettings(e)
 			if tc.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -112,7 +116,7 @@ func TestServeTLSRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- serveListenerLifecycle(ctx, srv, ln, cfg, shutdownGrace, nil, nil) }()
+	go func() { done <- serveListenerLifecycle(ctx, srv, ln, cfg, 20*time.Second, nil, nil) }()
 
 	pool := x509.NewCertPool()
 	if !pool.AppendCertsFromPEM(certPEM) {
@@ -163,7 +167,7 @@ func TestServeListenerReportsServeError(t *testing.T) {
 
 	srv := &http.Server{Handler: http.NewServeMux()}
 	errCh := make(chan error, 1)
-	go func() { errCh <- serveListenerLifecycle(context.Background(), srv, ln, nil, shutdownGrace, nil, nil) }()
+	go func() { errCh <- serveListenerLifecycle(context.Background(), srv, ln, nil, 20*time.Second, nil, nil) }()
 	select {
 	case err := <-errCh:
 		if err == nil {
@@ -292,24 +296,28 @@ func TestLoadServerConfigRejectsTyposAndNegativeValues(t *testing.T) {
 				t.Setenv(key, "")
 			}
 			t.Setenv(tc.key, tc.value)
-			if _, err := loadServerConfig(); err == nil {
+			e, err := loadEnvironment()
+			if err == nil {
+				_, err = loadServerConfig(e)
+			}
+			if err == nil {
 				t.Fatal("expected actionable config error")
 			}
 		})
 	}
 }
 
-func TestEnvDurationValueRejectsInvalidAndNegative(t *testing.T) {
+func TestLoadRuntimeRejectsInvalidAndNegativeDurations(t *testing.T) {
 	for _, value := range []string{"tomorrow", "-1s"} {
 		t.Run(value, func(t *testing.T) {
-			t.Setenv("AQT_TEST_DURATION", value)
-			if _, err := envDurationValue("AQT_TEST_DURATION", "1s", true); err == nil {
+			t.Setenv("AQT_SNAPSHOT_INTERVAL", value)
+			if _, err := loadRuntime(); err == nil {
 				t.Fatal("expected duration error")
 			}
 		})
 	}
-	t.Setenv("AQT_TEST_DURATION", "0")
-	if _, err := envDurationValue("AQT_TEST_DURATION", "1s", false); err == nil {
+	t.Setenv("AQT_SHUTDOWN_GRACE", "0")
+	if _, err := loadRuntime(); err == nil {
 		t.Fatal("zero shutdown grace was accepted")
 	}
 }
