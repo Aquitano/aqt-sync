@@ -11,11 +11,13 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/caarlos0/env/v11"
 	"github.com/gin-gonic/gin"
 
 	"github.com/aquitano/aqt-sync/internal/server"
@@ -71,57 +73,88 @@ func run() int {
 	// attributable to a build — which release is running is the first question a
 	// lockstep upgrade asks.
 	log.Printf("aqt-server %s", versionString())
-	if os.Getenv("AQT_DEBUG") == "" {
-		gin.SetMode(gin.ReleaseMode)
-	}
 	rt, err := loadRuntime()
 	if err != nil {
 		log.Printf("%v", err)
 		return 1
 	}
+	if rt.Debug == "" {
+		gin.SetMode(gin.ReleaseMode)
+	}
 	return serve(rt)
+}
+
+// environment is every variable the server reads. docs/deploy.md is the reference
+// for each of them.
+type environment struct {
+	DataDir            string                  `env:"AQT_DATA_DIR" envDefault:"./aqt-data"`
+	Addr               string                  `env:"AQT_ADDR" envDefault:"127.0.0.1:8080"`
+	Debug              string                  `env:"AQT_DEBUG"`
+	TLSCert            string                  `env:"AQT_TLS_CERT"`
+	TLSKey             string                  `env:"AQT_TLS_KEY"`
+	TLSAutocertDomains string                  `env:"AQT_TLS_AUTOCERT_DOMAINS"`
+	TLSAutocertCache   string                  `env:"AQT_TLS_AUTOCERT_CACHE"`
+	TLSAutocertEmail   string                  `env:"AQT_TLS_AUTOCERT_EMAIL"`
+	AllowInsecureHTTP  string                  `env:"AQT_ALLOW_INSECURE_HTTP"`
+	Registration       server.RegistrationMode `env:"AQT_REGISTRATION" envDefault:"open"`
+	InviteTokens       string                  `env:"AQT_INVITE_TOKENS"`
+	QuotaBytes         int64                   `env:"AQT_QUOTA_BYTES"`
+	MaxResources       int                     `env:"AQT_MAX_RESOURCES"`
+	MaxSnapshots       int                     `env:"AQT_MAX_SNAPSHOTS"`
+	MaxObjects         int                     `env:"AQT_MAX_OBJECTS"`
+	MaxDevices         int                     `env:"AQT_MAX_DEVICES"`
+	AuthRate           float64                 `env:"AQT_AUTH_RATE"`
+	AuthBurst          int                     `env:"AQT_AUTH_BURST"`
+	TrustedProxies     string                  `env:"AQT_TRUSTED_PROXIES" envDefault:"127.0.0.1,::1"`
+	SnapshotInterval   time.Duration           `env:"AQT_SNAPSHOT_INTERVAL" envDefault:"24h"`
+	SnapshotKeep       int                     `env:"AQT_SNAPSHOT_KEEP" envDefault:"30"`
+	GCInterval         time.Duration           `env:"AQT_GC_INTERVAL" envDefault:"6h"`
+	ShutdownGrace      time.Duration           `env:"AQT_SHUTDOWN_GRACE" envDefault:"20s"`
+	MetricsAddr        string                  `env:"AQT_METRICS_ADDR"`
+	SourceURL          string                  `env:"AQT_SOURCE_URL"`
+}
+
+// On error the result still holds every field that parsed; the admin commands
+// rely on that to tolerate an unrelated malformed variable.
+func loadEnvironment() (environment, error) {
+	return env.ParseAsWithOptions[environment](env.Options{
+		FuncMap: map[reflect.Type]env.ParserFunc{
+			// env parses int as 32-bit, which would reject quotas above 2^31.
+			reflect.TypeFor[int](): func(v string) (any, error) { return strconv.Atoi(v) },
+		},
+	})
 }
 
 // runtimeConfig is everything a server run takes from the environment.
 type runtimeConfig struct {
-	dataDir          string
-	addr             string
-	serverConfig     server.Config
-	snapshotInterval time.Duration
-	snapshotKeep     int
-	gcInterval       time.Duration
-	metricsAddr      string
-	tlsConfig        *tls.Config
-	shutdownGrace    time.Duration
+	environment
+	serverConfig server.Config
+	tlsConfig    *tls.Config
 }
 
 // loadRuntime resolves and validates the environment before anything is opened or
 // bound. Its errors are already phrased for the operator log, so the caller reports
-// them as they are. docs/deploy.md is the reference for every variable read here.
+// them as they are.
 func loadRuntime() (runtimeConfig, error) {
-	rt := runtimeConfig{
-		dataDir: envOr("AQT_DATA_DIR", "./aqt-data"),
-		addr:    envOr("AQT_ADDR", "127.0.0.1:8080"),
-	}
-
-	cfg, err := loadServerConfig()
+	e, err := loadEnvironment()
 	if err != nil {
+		return runtimeConfig{}, err
+	}
+	rt := runtimeConfig{environment: e}
+
+	if rt.serverConfig, err = loadServerConfig(e); err != nil {
 		return runtimeConfig{}, fmt.Errorf("server config: %w", err)
 	}
-	rt.serverConfig = cfg
 
 	// A snapshot is keyless (it copies already-sealed ciphertext), so the server runs
 	// the job itself. AQT_SNAPSHOT_KEEP caps how many scheduled snapshots each resource
 	// retains so storage converges; manual snapshots are never pruned.
-	if rt.snapshotInterval, err = envDurationValue("AQT_SNAPSHOT_INTERVAL", "24h", true); err != nil {
-		return runtimeConfig{}, err
+	if e.SnapshotInterval < 0 {
+		return runtimeConfig{}, fmt.Errorf("invalid AQT_SNAPSHOT_INTERVAL %q: expected a non-negative duration", e.SnapshotInterval)
 	}
-	rawKeep := envOr("AQT_SNAPSHOT_KEEP", "30")
-	keep, err := strconv.Atoi(rawKeep)
-	if err != nil || keep < 0 {
-		return runtimeConfig{}, fmt.Errorf("invalid AQT_SNAPSHOT_KEEP: %s", rawKeep)
+	if e.SnapshotKeep < 0 {
+		return runtimeConfig{}, fmt.Errorf("invalid AQT_SNAPSHOT_KEEP: %d", e.SnapshotKeep)
 	}
-	rt.snapshotKeep = keep
 
 	// Scheduled maintenance: link expiry (retire or reclaim, per the resource's
 	// on_expiry) and pack tidying. Clients trigger the same pass after a sync, and
@@ -129,32 +162,31 @@ func loadRuntime() (runtimeConfig, error) {
 	// own decision; pack tidying is not — it sweeps emptied packs and compacts sparse
 	// ones, but only ever after an `aqt prune` deleted the object rows, since the
 	// server cannot see which objects a resource references.
-	if rt.gcInterval, err = envDurationValue("AQT_GC_INTERVAL", "6h", true); err != nil {
-		return runtimeConfig{}, err
+	if e.GCInterval < 0 {
+		return runtimeConfig{}, fmt.Errorf("invalid AQT_GC_INTERVAL %q: expected a non-negative duration", e.GCInterval)
 	}
 
 	// The metrics enumerate opaque per-account owner handles and storage totals, so
 	// the endpoint belongs on a loopback or private interface, never on AQT_ADDR.
-	if rt.metricsAddr = os.Getenv("AQT_METRICS_ADDR"); rt.metricsAddr != "" {
-		if err := validateListenAddress(rt.metricsAddr, true, true); err != nil {
+	if e.MetricsAddr != "" {
+		if err := validateListenAddress(e.MetricsAddr, true, true); err != nil {
 			return runtimeConfig{}, fmt.Errorf("metrics address: %w", err)
 		}
 	}
 
-	tlsSet, err := loadTLSSettings()
+	tlsSet, err := loadTLSSettings(e)
 	if err != nil {
 		return runtimeConfig{}, fmt.Errorf("tls config: %w", err)
 	}
-	if rt.tlsConfig, err = tlsSet.tlsConfig(rt.dataDir); err != nil {
+	if rt.tlsConfig, err = tlsSet.tlsConfig(e.DataDir); err != nil {
 		return runtimeConfig{}, fmt.Errorf("tls config: %w", err)
 	}
-	allowInsecure := os.Getenv("AQT_ALLOW_INSECURE_HTTP") == "1"
-	if err := validateListenAddress(rt.addr, rt.tlsConfig != nil, allowInsecure); err != nil {
+	if err := validateListenAddress(e.Addr, rt.tlsConfig != nil, e.AllowInsecureHTTP == "1"); err != nil {
 		return runtimeConfig{}, fmt.Errorf("listen address: %w", err)
 	}
 
-	if rt.shutdownGrace, err = envDurationValue("AQT_SHUTDOWN_GRACE", shutdownGrace.String(), false); err != nil {
-		return runtimeConfig{}, err
+	if e.ShutdownGrace <= 0 {
+		return runtimeConfig{}, fmt.Errorf("invalid AQT_SHUTDOWN_GRACE %q: expected a positive duration", e.ShutdownGrace)
 	}
 	return rt, nil
 }
@@ -163,7 +195,7 @@ func loadRuntime() (runtimeConfig, error) {
 // returning the process exit code. Returning rather than calling log.Fatal lets the
 // deferred store.Close run, so the SQLite WAL is checkpointed on the way out.
 func serve(rt runtimeConfig) (code int) {
-	store, err := server.OpenStore(rt.dataDir)
+	store, err := server.OpenStore(rt.DataDir)
 	if err != nil {
 		log.Printf("open store: %v", err)
 		return 1
@@ -182,28 +214,28 @@ func serve(rt runtimeConfig) (code int) {
 
 	api := server.NewWithConfig(store, rt.serverConfig)
 	workerStop := make(chan struct{})
-	if rt.snapshotInterval > 0 {
-		log.Printf("scheduled snapshots every %s (keeping last %d per resource; 0 = all)", rt.snapshotInterval, rt.snapshotKeep)
-		api.StartAutoSnapshot(rt.snapshotInterval, rt.snapshotKeep, workerStop)
+	if rt.SnapshotInterval > 0 {
+		log.Printf("scheduled snapshots every %s (keeping last %d per resource; 0 = all)", rt.SnapshotInterval, rt.SnapshotKeep)
+		api.StartAutoSnapshot(rt.SnapshotInterval, rt.SnapshotKeep, workerStop)
 	}
-	if rt.gcInterval > 0 {
-		log.Printf("scheduled gc every %s", rt.gcInterval)
-		api.StartGC(rt.gcInterval, workerStop)
+	if rt.GCInterval > 0 {
+		log.Printf("scheduled gc every %s", rt.GCInterval)
+		api.StartGC(rt.GCInterval, workerStop)
 	}
 
 	// Keeping the metrics endpoint a separate plain-HTTP server makes its binding
 	// explicit; see loadRuntime for why it must not share AQT_ADDR.
 	var metricsServer *http.Server
-	if rt.metricsAddr != "" {
+	if rt.MetricsAddr != "" {
 		mux := http.NewServeMux()
 		mux.Handle("/metrics", api.MetricsHandler())
 		metricsServer = &http.Server{
-			Addr:              rt.metricsAddr,
+			Addr:              rt.MetricsAddr,
 			Handler:           mux,
 			ReadHeaderTimeout: 10 * time.Second,
 			IdleTimeout:       120 * time.Second,
 		}
-		log.Printf("metrics on http://%s/metrics", rt.metricsAddr)
+		log.Printf("metrics on http://%s/metrics", rt.MetricsAddr)
 		go func() {
 			if err := metricsServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 				log.Printf("metrics server exited: %v", err)
@@ -216,12 +248,12 @@ func serve(rt runtimeConfig) (code int) {
 	// already cap body sizes, ReadHeaderTimeout bounds header slowloris, and
 	// IdleTimeout reaps idle keep-alives.
 	srv := &http.Server{
-		Addr:              rt.addr,
+		Addr:              rt.Addr,
 		Handler:           api.Router(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
-	log.Printf("data dir: %s", rt.dataDir)
+	log.Printf("data dir: %s", rt.DataDir)
 	// serveWithShutdown flips readiness synchronously before closing listeners, then
 	// runs the component drain on the same context as HTTP shutdown. The calls after
 	// it returns are fallbacks for paths that never entered that drain (a listener that
@@ -244,9 +276,9 @@ func serve(rt runtimeConfig) (code int) {
 		})
 		return drainErr
 	}
-	serveErr := serveWithShutdown(srv, rt.tlsConfig, rt.shutdownGrace, beginShutdown, shutdownComponents)
+	serveErr := serveWithShutdown(srv, rt.tlsConfig, rt.ShutdownGrace, beginShutdown, shutdownComponents)
 	beginShutdown()
-	ctx, cancel := context.WithTimeout(context.Background(), rt.shutdownGrace)
+	ctx, cancel := context.WithTimeout(context.Background(), rt.ShutdownGrace)
 	shutdownErr := shutdownComponents(ctx)
 	cancel()
 	if serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
@@ -264,64 +296,21 @@ func serve(rt runtimeConfig) (code int) {
 	return 0
 }
 
-// loadServerConfig builds the hardening config from env vars. Every knob has a safe
-// default: open registration, unlimited storage and devices, and loopback-only
-// trusted proxies.
-//
-//	AQT_REGISTRATION     open (default) | invite
-//	AQT_INVITE_TOKENS    comma-separated invite secrets (invite mode only)
-//	AQT_QUOTA_BYTES      per-owner physical storage cap; 0 (default) = unlimited
-//	AQT_MAX_DEVICES      per-account device cap; 0 (default) = unlimited
-//	AQT_AUTH_RATE        per-token authed requests/sec; 0 = package default
-//	AQT_AUTH_BURST       per-token authed burst; 0 = package default
-//	AQT_TRUSTED_PROXIES  comma-separated proxy CIDRs/hosts whose X-Forwarded-* is
-//	                     trusted; unset = loopback only; "none" = trust none
-//	AQT_SOURCE_URL       source link the share page offers; set it when running
-//	                     modified code
-func loadServerConfig() (server.Config, error) {
-	quota, err := envInt64Value("AQT_QUOTA_BYTES")
-	if err != nil {
-		return server.Config{}, err
-	}
-	maxDevices, err := envIntValue("AQT_MAX_DEVICES")
-	if err != nil {
-		return server.Config{}, err
-	}
-	maxResources, err := envIntValue("AQT_MAX_RESOURCES")
-	if err != nil {
-		return server.Config{}, err
-	}
-	maxSnapshots, err := envIntValue("AQT_MAX_SNAPSHOTS")
-	if err != nil {
-		return server.Config{}, err
-	}
-	maxObjects, err := envIntValue("AQT_MAX_OBJECTS")
-	if err != nil {
-		return server.Config{}, err
-	}
-	rate, err := envFloatValue("AQT_AUTH_RATE")
-	if err != nil {
-		return server.Config{}, err
-	}
-	burst, err := envFloatValue("AQT_AUTH_BURST")
-	if err != nil {
-		return server.Config{}, err
+// loadServerConfig builds the hardening config from the environment. Every knob has
+// a safe default: open registration, unlimited storage and devices, and
+// loopback-only trusted proxies.
+func loadServerConfig(e environment) (server.Config, error) {
+	proxies := splitCSV(e.TrustedProxies)
+	if strings.EqualFold(e.TrustedProxies, "none") {
+		proxies = nil
 	}
 	cfg := server.Config{
-		Registration: server.RegistrationMode(envOr("AQT_REGISTRATION", string(server.RegistrationOpen))),
-		InviteTokens: splitCSV(os.Getenv("AQT_INVITE_TOKENS")), QuotaBytes: quota,
-		MaxDevices: maxDevices, MaxResources: maxResources, MaxSnapshots: maxSnapshots, MaxObjects: maxObjects,
-		AuthedRatePerSec: rate, AuthedBurst: burst,
-		SourceURL: os.Getenv("AQT_SOURCE_URL"),
-	}
-	switch raw := os.Getenv("AQT_TRUSTED_PROXIES"); {
-	case raw == "":
-		cfg = cfg.WithTrustedProxies([]string{"127.0.0.1", "::1"})
-	case strings.EqualFold(raw, "none"):
-		cfg = cfg.WithTrustedProxies(nil)
-	default:
-		cfg = cfg.WithTrustedProxies(splitCSV(raw))
-	}
+		Registration: e.Registration,
+		InviteTokens: splitCSV(e.InviteTokens), QuotaBytes: e.QuotaBytes,
+		MaxDevices: e.MaxDevices, MaxResources: e.MaxResources, MaxSnapshots: e.MaxSnapshots, MaxObjects: e.MaxObjects,
+		AuthedRatePerSec: e.AuthRate, AuthedBurst: e.AuthBurst,
+		SourceURL: e.SourceURL,
+	}.WithTrustedProxies(proxies)
 	if err := cfg.Validate(); err != nil {
 		return server.Config{}, err
 	}
@@ -340,59 +329,4 @@ func splitCSV(v string) []string {
 		}
 	}
 	return out
-}
-
-func envDurationValue(key, fallback string, allowZero bool) (time.Duration, error) {
-	raw := envOr(key, fallback)
-	d, err := time.ParseDuration(raw)
-	if err != nil || d < 0 || (!allowZero && d == 0) {
-		want := "a non-negative duration"
-		if !allowZero {
-			want = "a positive duration"
-		}
-		return 0, fmt.Errorf("invalid %s %q: expected %s", key, raw, want)
-	}
-	return d, nil
-}
-
-func envInt64Value(key string) (int64, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return 0, nil
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s %q: expected an integer", key, v)
-	}
-	return n, nil
-}
-
-func envIntValue(key string) (int, error) {
-	n, err := envInt64Value(key)
-	if err != nil {
-		return 0, err
-	}
-	if int64(int(n)) != n {
-		return 0, fmt.Errorf("invalid %s: value is outside integer range", key)
-	}
-	return int(n), nil
-}
-
-func envFloatValue(key string) (float64, error) {
-	v := os.Getenv(key)
-	if v == "" {
-		return 0, nil
-	}
-	n, err := strconv.ParseFloat(v, 64)
-	if err != nil {
-		return 0, fmt.Errorf("invalid %s %q: expected a number", key, v)
-	}
-	return n, nil
-}
-
-func envOr(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return fallback
 }

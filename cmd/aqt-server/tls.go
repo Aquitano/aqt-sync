@@ -38,17 +38,17 @@ type tlsSettings struct {
 	autocertEmail   string
 }
 
-// loadTLSSettings reads the TLS env vars and validates the combination. A cert
-// without its key (or vice versa) is a misconfiguration, and static certs and
-// autocert are mutually exclusive, so both are hard errors rather than a silent
-// fall back to plaintext.
-func loadTLSSettings() (tlsSettings, error) {
+// loadTLSSettings takes the TLS variables from the environment and validates the
+// combination. A cert without its key (or vice versa) is a misconfiguration, and
+// static certs and autocert are mutually exclusive, so both are hard errors rather
+// than a silent fall back to plaintext.
+func loadTLSSettings(e environment) (tlsSettings, error) {
 	s := tlsSettings{
-		certFile:        os.Getenv("AQT_TLS_CERT"),
-		keyFile:         os.Getenv("AQT_TLS_KEY"),
-		autocertDomains: splitCSV(os.Getenv("AQT_TLS_AUTOCERT_DOMAINS")),
-		autocertCache:   os.Getenv("AQT_TLS_AUTOCERT_CACHE"),
-		autocertEmail:   os.Getenv("AQT_TLS_AUTOCERT_EMAIL"),
+		certFile:        e.TLSCert,
+		keyFile:         e.TLSKey,
+		autocertDomains: splitCSV(e.TLSAutocertDomains),
+		autocertCache:   e.TLSAutocertCache,
+		autocertEmail:   e.TLSAutocertEmail,
 	}
 	if (s.certFile == "") != (s.keyFile == "") {
 		return tlsSettings{}, errors.New("AQT_TLS_CERT and AQT_TLS_KEY must be set together")
@@ -104,11 +104,6 @@ func validateListenAddress(addr string, tlsEnabled, allowInsecure bool) error {
 	}
 	return nil
 }
-
-// shutdownGrace bounds how long a SIGINT/SIGTERM lets in-flight requests drain
-// before the process exits, so a deploy restart neither hangs nor severs an upload
-// mid-write.
-const shutdownGrace = 20 * time.Second
 
 // serveWithShutdown binds srv.Addr and runs the server until a termination signal
 // arrives. It binds the listener up front (so a port-in-use failure is reported before

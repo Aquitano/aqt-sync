@@ -70,7 +70,7 @@ type Config struct {
 	// AuthedRatePerSec and AuthedBurst bound per-device request rates on the
 	// authenticated routes. Zero values pick the package defaults.
 	AuthedRatePerSec float64
-	AuthedBurst      float64
+	AuthedBurst      int
 	// SourceURL is where the share page points for this server's source. The
 	// upstream default is only accurate while the deployment runs unmodified code.
 	SourceURL string
