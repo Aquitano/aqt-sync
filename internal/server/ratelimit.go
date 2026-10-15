@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"golang.org/x/time/rate"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 )
@@ -58,15 +59,10 @@ const (
 // pruned once fully refilled, so the map cannot grow without bound.
 type ipRateLimiter struct {
 	mu      sync.Mutex
-	buckets map[string]*tokenBucket
-	rps     float64
-	burst   float64
+	buckets map[string]*rate.Limiter
+	rps     rate.Limit
+	burst   int
 	now     func() time.Time // overridable in tests
-}
-
-type tokenBucket struct {
-	tokens float64
-	last   time.Time
 }
 
 // maxBuckets triggers a prune sweep; well above the count of real concurrent
@@ -74,7 +70,7 @@ type tokenBucket struct {
 const maxBuckets = 4096
 
 func newIPRateLimiter(rps, burst float64) *ipRateLimiter {
-	return &ipRateLimiter{buckets: make(map[string]*tokenBucket), rps: rps, burst: burst, now: time.Now}
+	return &ipRateLimiter{buckets: make(map[string]*rate.Limiter), rps: rate.Limit(rps), burst: int(burst), now: time.Now}
 }
 
 // reserve consumes a token or returns the wait until one becomes available.
@@ -89,19 +85,13 @@ func (l *ipRateLimiter) reserve(key string) (bool, time.Duration) {
 
 	b, ok := l.buckets[key]
 	if !ok {
-		l.buckets[key] = &tokenBucket{tokens: l.burst - 1, last: now}
+		b = rate.NewLimiter(l.rps, l.burst)
+		l.buckets[key] = b
+	}
+	if b.AllowN(now, 1) {
 		return true, 0
 	}
-	b.tokens += now.Sub(b.last).Seconds() * l.rps
-	if b.tokens > l.burst {
-		b.tokens = l.burst
-	}
-	b.last = now
-	if b.tokens < 1 {
-		return false, retryAfter(1-b.tokens, l.rps)
-	}
-	b.tokens--
-	return true, 0
+	return false, retryAfter(1-b.TokensAt(now), float64(l.rps))
 }
 
 // retryAfter is the wait until deficit tokens have refilled at rps tokens/sec,
@@ -123,7 +113,7 @@ func retryAfter(deficit, rps float64) time.Duration {
 // indistinguishable from a fresh one, so removing it loses no rate state.
 func (l *ipRateLimiter) prune(now time.Time) {
 	for key, b := range l.buckets {
-		if b.tokens+now.Sub(b.last).Seconds()*l.rps >= l.burst {
+		if b.TokensAt(now) >= float64(l.burst) {
 			delete(l.buckets, key)
 		}
 	}
