@@ -82,7 +82,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_MAX_OBJECTS` | `0` | Per-account packed object-row cap. `0` = unlimited. |
 | `AQT_MAX_DEVICES` | `0` | Per-account device cap. `0` = unlimited. |
 | `AQT_AUTH_RATE` | `0` | Authenticated requests/sec per device token. `0` = default (50). |
-| `AQT_AUTH_BURST` | `0` | Authenticated burst per device token. `0` = default (500). |
+| `AQT_AUTH_BURST` | `0` | Authenticated burst per device token, a whole number. `0` = default (500). |
 | `AQT_TRUSTED_PROXIES` | loopback | Comma-separated proxy CIDRs/hosts whose `X-Forwarded-*` is trusted. `none` trusts none. |
 | `AQT_SNAPSHOT_INTERVAL` | `24h` | Scheduled snapshot cadence. `0` disables. |
 | `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. Anchored snapshots (`aqt checkpoint`) are exempt and never pruned. |
