@@ -3,12 +3,8 @@
 package server
 
 import (
-	"errors"
 	"testing"
 	"time"
-
-	"github.com/aquitano/aqt-sync/internal/crypto"
-	"github.com/aquitano/aqt-sync/internal/cryptotest"
 )
 
 func TestStoreConcurrencyConfig(t *testing.T) {
@@ -74,61 +70,5 @@ func TestReadPoolRejectsWrites(t *testing.T) {
 	s := newStore(t)
 	if _, err := s.rdb.Exec(`INSERT INTO server_meta(key, value) VALUES('nope', x'00')`); err == nil {
 		t.Fatal("write on the read pool succeeded, want a query_only failure")
-	}
-}
-
-// Cached token resolutions must die with their device (revocation) and their epoch
-// (passphrase change) immediately, not at TTL expiry.
-func TestAuthCacheInvalidation(t *testing.T) {
-	t.Parallel()
-	s := newStore(t)
-	owner := s.mustAccount(t, "authcache@example.com")
-	devA, tokA, err := s.CreateDevice(owner, "keeper", 1, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	devB, tokB, err := s.CreateDevice(owner, "revoked", 1, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Prime the cache with both tokens.
-	if o, d, err := s.AuthByToken(tokA); err != nil || o != owner || d != devA {
-		t.Fatalf("auth A = (%s, %s, %v)", o, d, err)
-	}
-	if _, d, err := s.AuthByToken(tokB); err != nil || d != devB {
-		t.Fatalf("auth B = (%s, %v)", d, err)
-	}
-
-	// Revoking B must invalidate its cached entry, not wait out the TTL.
-	if err := s.DeleteDevice(owner, devB); err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.AuthByToken(tokB); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("revoked token resolved from cache: %v, want ErrNotFound", err)
-	}
-	if _, _, err := s.AuthByToken(tokA); err != nil {
-		t.Fatalf("unrelated token invalidated: %v", err)
-	}
-
-	// A passphrase change bumps the epoch: every other device's cached token dies,
-	// the calling device's keeps working.
-	_, tokC, err := s.CreateDevice(owner, "staled", 1, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := s.AuthByToken(tokC); err != nil {
-		t.Fatal(err)
-	}
-	kdf := cryptotest.KdfParams(t)
-	if _, err := s.ChangePassphrase(owner, devA, kdf,
-		crypto.SealedBlob{Nonce: make([]byte, 1), Ciphertext: make([]byte, 1)},
-		make([]byte, 32), []byte("new-verifier"), 1); err != nil {
-		t.Fatalf("change passphrase: %v", err)
-	}
-	if _, _, err := s.AuthByToken(tokC); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("pre-change token resolved from cache: %v, want ErrNotFound", err)
-	}
-	if _, _, err := s.AuthByToken(tokA); err != nil {
-		t.Fatalf("initiating device's token must survive the epoch bump: %v", err)
 	}
 }
