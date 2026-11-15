@@ -210,3 +210,85 @@ func TestSyncDirWithEmptySubdirReplacedByFile(t *testing.T) {
 		t.Fatalf("replica d = %q", got)
 	}
 }
+
+// readOnlyDirReplicas syncs d/f and d/g from a 0555 d to a fresh replica, whose d
+// lands read-only too.
+func readOnlyDirReplicas(t *testing.T, h *e2eHarness) (origin, replica string) {
+	t.Helper()
+	if !supportsPOSIXPermissions {
+		t.Skip("POSIX directory write permissions are not enforced on Windows")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("running as root; permission bits do not apply")
+	}
+	origin = t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "d/f", "f")
+	writeTree(t, origin, "d/g", "g")
+	chmodTree(t, origin, "d", 0o555)
+	h.sync(origin)
+	replica = t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	t.Cleanup(func() {
+		_ = os.Chmod(filepath.Join(origin, "d"), 0o755)
+		_ = os.Chmod(filepath.Join(replica, "d"), 0o755)
+	})
+	return origin, replica
+}
+
+func chmodTree(t *testing.T, root, rel string, mode os.FileMode) {
+	t.Helper()
+	if err := os.Chmod(filepath.Join(root, rel), mode); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertDirMode(t *testing.T, root, rel string, want os.FileMode) {
+	t.Helper()
+	fi, err := os.Stat(filepath.Join(root, rel))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", rel, got, want)
+	}
+}
+
+// A pull that makes a read-only directory writable and adds a file in it must
+// write the file, even though the directory's new mode is applied after files land.
+func TestSyncPullIntoDirBecomingWritable(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin, replica := readOnlyDirReplicas(t, h)
+
+	chmodTree(t, origin, "d", 0o755)
+	writeTree(t, origin, "d/new", "new")
+	h.sync(origin)
+	h.sync(replica)
+	if got := readTree(t, replica, "d/new"); got != "new" {
+		t.Fatalf("replica d/new = %q", got)
+	}
+	assertDirMode(t, replica, "d", 0o755)
+}
+
+// A directory that stays read-only still takes the pull's adds and deletes, and
+// keeps its mode afterwards.
+func TestSyncPullIntoDirStayingReadOnly(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin, replica := readOnlyDirReplicas(t, h)
+
+	chmodTree(t, origin, "d", 0o755)
+	writeTree(t, origin, "d/new", "new")
+	if err := os.Remove(filepath.Join(origin, "d/g")); err != nil {
+		t.Fatal(err)
+	}
+	chmodTree(t, origin, "d", 0o555)
+	h.sync(origin)
+	h.sync(replica)
+	if got := readTree(t, replica, "d/new"); got != "new" {
+		t.Fatalf("replica d/new = %q", got)
+	}
+	assertAbsent(t, replica, "d/g")
+	assertDirMode(t, replica, "d", 0o555)
+}

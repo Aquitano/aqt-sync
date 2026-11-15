@@ -57,6 +57,8 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- A pull into a read-only directory no longer fails on every sync. The directory is
+  writable for the pass, then gets its old mode back or the one the remote set.
 - Sync fsyncs the directories it wrote to or removed from before saving the base, so
   a power loss cannot leave a base that records changes the disk lost, which the
   next sync would push as a revert.

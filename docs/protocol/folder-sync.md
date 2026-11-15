@@ -45,7 +45,9 @@ be used to judge whether a restore is really a restore.
 - **POSIX permission bits.** A file's and a directory's `Mode().Perm()` — the low nine
   bits — ride in the manifest and are applied with `chmod` when the entry lands.
   Directory modes are applied deepest-first once the pass finishes, so a directory
-  that ends up read-only does not block writing its own children. An entry carrying no
+  that ends up read-only does not block writing its own children. A pull into a
+  directory that is read-only on disk makes it writable for the pass and then
+  restores its mode, or applies the new one the merge records. An entry carrying no
   recorded mode lands at `0600` for a file and `0700` for a directory.
 - **Symlinks, as targets.** A symlink is stored as its literal target string and
   recreated with `symlink`. It is **never** followed, so a link pointing outside the
