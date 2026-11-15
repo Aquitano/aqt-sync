@@ -236,7 +236,8 @@ func (rs grantedResources) list() string {
 }
 
 // grantedTo lists the caller's resources that hold a grant to handle, counting only a
-// grant this account signed over the resource's current content key. The server
+// grant this account signed over the resource's current content key and this device
+// has not revoked. The server
 // chooses which handles it lists, so a row without that signature may be one it made
 // up to have a resource re-sent to whoever holds handle; a share made before grants
 // were signed looks the same, and is left for its owner to share again. The listing
@@ -246,11 +247,15 @@ func grantedTo(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, h
 	if err != nil {
 		return nil, err
 	}
+	revoked, err := identity.LoadRevokedGrants(prof.Name)
+	if err != nil {
+		return nil, err
+	}
 	self := crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey)
 	var granted grantedResources
 	unsigned := 0
 	for _, it := range items {
-		if it.GrantCount == 0 || it.Reclaimed || it.WrappedKey == nil {
+		if it.GrantCount == 0 || it.Reclaimed || it.WrappedKey == nil || slices.Contains(revoked, identity.RevokedGrant{ResourceID: it.ID, GranteeHandle: handle}) {
 			continue
 		}
 		grants, err := cl.ListGrants(it.ID)

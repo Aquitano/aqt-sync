@@ -207,6 +207,12 @@ rotation picks one up, since its signature covers the replaced key, and `aqt sha
 ls` marks it `(unsigned)`; `aqt share <id> --with <email>` puts its grantee back on
 the current key.
 
+The device that revokes a grant also records it locally, so its later rotations and
+pin repairs list that grantee as `revoked from this device` and never re-wrap for
+them, even if the server serves the resource's key from before the revoke. `aqt share
+<id> --with <email>` from the same device clears the record. Other devices of the
+account do not see it.
+
 ## Four questions, four commands
 
 Comparison commands are easy to confuse, so each one names what it compares:

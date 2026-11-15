@@ -39,7 +39,11 @@ All notable changes to this project are documented in this file.
   folder that cannot rotate yet refuses the revoke until `aqt sync` re-seals it. Every
   rotation lists the grantees it re-wraps and the grants it leaves before asking, and
   afterwards names each grant it could not re-wrap. No later rotation repairs one of
-  those; `aqt share <id> --with <email>` does.
+  those; `aqt share <id> --with <email>` does. The device that revoked a grant also
+  records it locally and never re-wraps for it again, so a server that serves the
+  resource's key from before the revoke cannot revive the grant through that device;
+  sharing with the grantee again from it clears the record. The owner's other devices
+  still trust the server to serve the current key.
 - **A hostile server could forge a verified share.** Grant wraps use HPKE base mode,
   which authenticates no sender, and `aqt shares` took the sender from the owner
   handle the server reported. Anyone holding the recipient's public enc key could wrap

@@ -449,6 +449,79 @@ func TestRevokedGranteeIsNotRewrappedByALaterRotation(t *testing.T) {
 	}
 }
 
+// A rotation follows grants signed over the key it replaces, and the server serves that
+// key. Here it answers a rotation after bob's revoke with the resource as it was before
+// it, under the current version, and lists bob's original grant again: his signature
+// covers that old key. The device that revoked him must not re-wrap the new key for
+// him, until it shares with him again.
+func TestRevokedGranteeIsNotRewrappedWhenTheServerRollsTheKeyBack(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var extra atomic.Pointer[listedGrantee]
+	var rollback atomic.Pointer[grantRead]
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		rewriteGrantRead(&rollback)(w, r, func(w http.ResponseWriter, r *http.Request) {
+			listGrantee(&extra)(w, r, pass)
+		})
+	})
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	const content = "shared, revoked, rolled back"
+	id := app.pushSecretFile(t, "notes.txt", content)
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRevoke, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := cl.ListGrants(id)
+	if err != nil || len(grants) != 1 {
+		t.Fatalf("grants before the revoke = %+v (%v)", grants, err)
+	}
+	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+		t.Fatalf("revoke bob: %v", err)
+	}
+
+	rollback.Store(&grantRead{resourceID: id, rewrite: func(res *api.GetResourceResponse) {
+		version := res.Version
+		*res = beforeRevoke
+		res.Version = version
+	}})
+	extra.Store(&listedGrantee{resourceID: id, entry: grants[0]})
+	listing := captureStderr(t, func() {
+		if err := app.runPrivate(id, true); err != nil {
+			t.Fatalf("rotate from the rolled-back key: %v", err)
+		}
+	})
+	rollback.Store(nil)
+	extra.Store(nil)
+	app.asProfile("bob", func() {
+		bobClient, _, err := app.authedClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bobClient.GetResource(id); !errors.Is(err, client.ErrNotFound) {
+			t.Fatalf("bob reading the resource after a rotation from the rolled-back key = %v, want ErrNotFound", err)
+		}
+	})
+	if _, left, _ := strings.Cut(listing, "stay on the old key"); !strings.Contains(left, "bob@example.com") || !strings.Contains(left, "revoked from this device") {
+		t.Fatalf("the rotation should list bob as revoked from this device:\n%s", listing)
+	}
+
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share with bob again: %v", err)
+	}
+	if err := app.runPrivate(id, true); err != nil {
+		t.Fatalf("rotate after sharing with bob again: %v", err)
+	}
+	if got := app.pullAs(t, "bob", id); got != content {
+		t.Fatalf("bob pulled %q after being shared with again and a rotation", got)
+	}
+}
+
 // A folder whose tree predates a root-key rotation cannot rotate its key until it is
 // re-synced. Revoking a grant on it used to delete the row anyway and leave the grant
 // valid for the key a later rotation replaces; now it refuses and changes nothing, so

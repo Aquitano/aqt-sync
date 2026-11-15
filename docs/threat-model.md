@@ -186,10 +186,18 @@ public resource rotates too, which makes it private and kills its links: the
 grantee could read it through a link anyway. A folder that cannot rotate until it is
 re-synced (after `aqt passphrase rotate-root`) refuses the revoke and changes nothing.
 Only a resource with no owner key revokes without rotating: no device can rotate it,
-so no rotation can follow the grant either. The guarantee assumes the server serves
-the resource's current key. One that rolls a resource back to its key from before the
-revoke also brings back the signatures over that key, and a rotation from it would
-follow them.
+so no rotation can follow the grant either.
+
+A rotation checks signatures against the key the server serves, so a server that rolls
+a resource back to its key from before a revoke also brings back the revoked grant's
+signature over that key. The device that revoked the grant is protected against this:
+it records the resource and the grantee's handle in a local state file, and its
+rotations and pin repairs never follow that grant again, whatever key the server
+serves, until `aqt share <id> --with <email>` from that device grants it again. The
+owner's other devices hold no such record and still assume the server serves the
+resource's current key: a rotation from one of them, against a server that rolled the
+key back, re-wraps the new key for the revoked account, and nothing on those devices
+detects the rollback.
 
 The same rule means no rotation repairs a grant an earlier one did not re-wrap,
 whether its re-wrap failed, its grantee is pinned only on another device, or a lost

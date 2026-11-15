@@ -323,6 +323,9 @@ func (app *application) runShareWith(idArg, email string) error {
 	if err := grantResource(cl, prof, id, res, keys, contact); err != nil {
 		return err
 	}
+	if err := identity.ClearRevokedGrant(prof.Name, id, contact.Handle); err != nil {
+		return fmt.Errorf("granted %s access to aqt://%s, but forgetting the earlier revoke on this device failed, so its rotations still leave them behind: %w", email, id, err)
+	}
 	if repair != nil {
 		if err := repin(cl, prof, keys.mk, *repair, contact, id); err != nil {
 			return err
@@ -443,6 +446,9 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 		if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to aqt://%s? It has no owner key, so its key cannot be rotated. [y/N] ", email, id), yes); err != nil {
 			return err
 		}
+		if err := recordRevoke(prof, id, handle, email); err != nil {
+			return err
+		}
 		if err := cl.RevokeGrant(id, handle); err != nil {
 			return fmt.Errorf("deleting the grant for %s failed: %w", email, err)
 		}
@@ -472,8 +478,14 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 	if err := confirmDestructive(question, yes); err != nil {
 		return err
 	}
+	if err := recordRevoke(prof, id, handle, email); err != nil {
+		return err
+	}
 	newCK, err := rotateResourceKey(cl, id, res, keys.ck, keys.mk, keys.meta, handle)
 	if errors.Is(err, errTreeRootDrift) {
+		if clearErr := identity.ClearRevokedGrant(prof.Name, id, handle); clearErr != nil {
+			err = errors.Join(err, fmt.Errorf("forgetting the revoke this device recorded failed, so its rotations leave %s behind until you share with them again: %w", email, clearErr))
+		}
 		return fmt.Errorf("revoking %s needs the key of aqt://%s rotated, and it cannot be yet (%w). "+
 			"Deleting the grant without rotating would leave it valid for the current key, so a later rotation could hand %s the new one. "+
 			"Nothing was changed: run `aqt sync` in the folder to re-seal it under your current account key, then revoke again", email, id, err, email)
@@ -498,6 +510,16 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 		return nil
 	}
 	fmt.Printf("revoked %s from aqt://%s and rotated the content key\n", email, id)
+	return nil
+}
+
+// recordRevoke notes the revoke on this device before anything reaches the server, so
+// a lost response or a later rollback never leaves a grant this device's rotations
+// would follow again.
+func recordRevoke(prof *identity.Profile, id, handle, email string) error {
+	if err := identity.RecordRevokedGrant(prof.Name, id, handle); err != nil {
+		return fmt.Errorf("recording the revoke of %s on this device failed, so nothing was revoked: %w", email, err)
+	}
 	return nil
 }
 
@@ -791,11 +813,16 @@ type unfollowedGrant struct{ grantee, reason string }
 // planRewrap sorts a resource's listed grants into the ones a rotation away from
 // old.ck re-wraps and the ones it leaves. exclude is a handle being revoked in the same
 // rotation, left out entirely. A grantee pinned on another device is left: only a
-// device that looked them up holds their key.
+// device that looked them up holds their key. So is one this device revoked, even when
+// the key the server served is the one that grant was signed over.
 func planRewrap(cl *client.Client, prof *identity.Profile, id string, old *resourceKeys, grants []api.GrantEntry, exclude string) (rewrapPlan, error) {
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {
 		return rewrapPlan{}, fmt.Errorf("load contacts to re-wrap grants: %w", err)
+	}
+	revoked, err := identity.LoadRevokedGrants(prof.Name)
+	if err != nil {
+		return rewrapPlan{}, fmt.Errorf("load the grants this device revoked: %w", err)
 	}
 	byHandle := make(map[string]identity.Contact, len(pins))
 	for _, c := range pins {
@@ -811,6 +838,10 @@ func planRewrap(cl *client.Client, prof *identity.Profile, id string, old *resou
 		label := foreignText(g.GranteeHandle)
 		if pinned {
 			label = pinnedLabel(pin.Email, crypto.KeyFingerprint(pin.PublicKey), pin.Verified)
+		}
+		if slices.Contains(revoked, identity.RevokedGrant{ResourceID: id, GranteeHandle: g.GranteeHandle}) {
+			plan.left = append(plan.left, unfollowedGrant{label, "revoked from this device"})
+			continue
 		}
 		if !crypto.VerifyGrant(self, g.Signature, old.ck, id, prof.OwnerHandle, g.GranteeHandle) {
 			plan.left = append(plan.left, unfollowedGrant{label, "holds no grant you signed over the current key (made before grants were signed, left on an older key, or added by the server)"})

@@ -123,8 +123,10 @@ release each landed in.
   folder awaiting a re-sync drop the grant at once. But the server can serve an older
   copy of that record as easily as it keeps a deleted row, while undoing a rotation
   means rolling back the resource itself, and the record would need its own root-key
-  migration. Local state on the revoking device does not reach the owner's other
-  devices. So a revoke on a public resource rotates and makes it private, a folder that
+  migration. The revoking device does keep a local record its own rotations never
+  follow, which holds even against a server that rolls the resource's key back, but it
+  does not reach the owner's other devices. So a revoke on a public resource rotates
+  and makes it private, a folder that
   cannot rotate refuses the revoke, and no rotation repairs a grant an earlier one left
   behind: each rotation names those grants, and the owner shares them again. See
   [what revocation guarantees](threat-model.md#what-revocation-actually-guarantees).

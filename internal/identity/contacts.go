@@ -30,30 +30,11 @@ type Contact struct {
 	Verified     bool   `json:"verified,omitempty"`
 }
 
-func contactsPath(profile string) (string, error) {
-	dir, err := configDir()
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(dir, profile+".contacts.json"), nil
-}
-
 // LoadContacts returns the profile's pinned contacts, keyed by email. A missing
 // file is an empty set, not an error.
 func LoadContacts(profile string) (map[string]Contact, error) {
-	path, err := contactsPath(profile)
-	if err != nil {
-		return nil, err
-	}
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return map[string]Contact{}, nil
-	}
-	if err != nil {
-		return nil, err
-	}
 	out := map[string]Contact{}
-	if err := json.Unmarshal(data, &out); err != nil {
+	if err := loadJSON(profile, ".contacts.json", &out); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -62,16 +43,39 @@ func LoadContacts(profile string) (map[string]Contact, error) {
 // SaveContacts persists the profile's pinned contacts atomically, private to the
 // user like the profile itself (emails and key material).
 func SaveContacts(profile string, contacts map[string]Contact) error {
-	path, err := contactsPath(profile)
+	return saveJSON(profile, ".contacts.json", contacts)
+}
+
+// loadJSON decodes the profile's state file with the given suffix into v. A missing
+// file leaves v as it is.
+func loadJSON(profile, suffix string, v any) error {
+	dir, err := configDir()
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	data, err := os.ReadFile(filepath.Join(dir, profile+suffix))
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
 	}
-	data, err := json.MarshalIndent(contacts, "", "  ")
 	if err != nil {
 		return err
 	}
-	return fsatomic.WriteFile(path, data, 0o600)
+	return json.Unmarshal(data, v)
+}
+
+// saveJSON writes the profile's state file with the given suffix atomically, private
+// to the user like the profile itself.
+func saveJSON(profile, suffix string, v any) error {
+	dir, err := configDir()
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return err
+	}
+	return fsatomic.WriteFile(filepath.Join(dir, profile+suffix), data, 0o600)
 }
