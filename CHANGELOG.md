@@ -62,6 +62,9 @@ All notable changes to this project are documented in this file.
   server's error and its documented exit code, and keep that message for a response
   that proves the URL is wrong.
 
+- `aqt update policy <mode> --json` printed prose. It now prints the state as JSON,
+  like `aqt update policy --json`.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries

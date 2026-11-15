@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -133,6 +134,22 @@ func TestUpdatePolicyCommandRoundTrips(t *testing.T) {
 		if st.Policy != want {
 			t.Fatalf("stored policy = %q, want %q", st.Policy, want)
 		}
+	}
+}
+
+func TestUpdatePolicyCommandSetPrintsJSON(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	withUpdateStore(t)
+
+	out := captureStdout(t, func() {
+		runCmd(t, app.rootCmd(), "--json", "update", "policy", string(update.PolicyNotify))
+	})
+	var st update.State
+	if err := json.Unmarshal([]byte(out), &st); err != nil {
+		t.Fatalf("output is not JSON: %v\n%s", err, out)
+	}
+	if st.Policy != update.PolicyNotify {
+		t.Fatalf("policy = %q, want %q", st.Policy, update.PolicyNotify)
 	}
 }
 
