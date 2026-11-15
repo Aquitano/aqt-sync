@@ -59,6 +59,9 @@ All notable changes to this project are documented in this file.
 
 - A pull into a read-only directory no longer fails on every sync. The directory is
   writable for the pass, then gets its old mode back or the one the remote set.
+- A remote file replacing a local directory that holds ignored content (`.git/`,
+  `node_modules/`) is a file/directory conflict instead of failing every sync with
+  "directory not empty". The ignored content stays.
 - Sync fsyncs the directories it wrote to or removed from before saving the base, so
   a power loss cannot leave a base that records changes the disk lost, which the
   next sync would push as a revert.

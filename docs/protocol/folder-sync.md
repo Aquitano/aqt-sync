@@ -466,7 +466,9 @@ A file (or symlink) on one side and a directory on the other claiming the same p
 is a conflict too, even when the two sides touched different paths (`x` against
 `x/y`). Local keeps the path; copy mode preserves a remote file as
 `<name>.conflict-<host>-<timestamp>` and a remote directory's entries under
-`<name>.conflict-<host>-<timestamp>/`.
+`<name>.conflict-<host>-<timestamp>/`. A remote file replacing a local directory that
+still holds untracked content, such as an ignored `.git/` or `node_modules/`, is the
+same conflict: that content is never deleted to make room.
 
 A directory deleted on one side while the other side adds content inside it stays,
 with the adding side's entry and mode; the rest of the delete still applies.
