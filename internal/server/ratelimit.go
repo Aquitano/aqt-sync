@@ -43,12 +43,12 @@ const (
 	gcBurst      = 10
 )
 
-// Rate-limit defaults for POST /v1/public/resources/:id/objects, keyed by peer
-// address (there is no identity on this unauthenticated path). The unauth limiter
-// (1 rps) is tuned for auth brute force and would strangle a legitimate bulk
-// download: a large streamed file pulls hundreds of ~8 MiB object batches. This
-// budget is far looser than the unauth one while still capping one peer's sustained
-// rate against a scraper.
+// Rate-limit defaults for the anonymous public reads (GET /v1/resources/:id and
+// POST /v1/public/resources/:id/objects), keyed by client address (there is no
+// identity on these paths). The unauth limiter (1 rps) is tuned for auth brute force
+// and would strangle a legitimate bulk download: a large streamed file pulls hundreds
+// of ~8 MiB object batches. This budget is far looser than the unauth one while still
+// capping one client's sustained rate against a scraper.
 const (
 	publicObjectsRatePerSec = 10
 	publicObjectsBurst      = 200

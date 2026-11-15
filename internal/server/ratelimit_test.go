@@ -155,3 +155,27 @@ func TestClientKeyTrustsForwardedHeadersOnlyFromProxies(t *testing.T) {
 		}
 	}
 }
+
+// The public resource read draws anonymous callers from the per-client public
+// bucket; an owner's token read at the same address uses its device's bucket.
+func TestPublicResourceReadIsRateLimited(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("public-read-limit@example.com", "passphrase for limits")
+	put, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("put = %d, want 201", code)
+	}
+
+	for i := range publicObjectsBurst {
+		if got := h.get("/v1/resources/" + put.ID); got.Code == http.StatusTooManyRequests {
+			t.Fatalf("anonymous read %d throttled inside the burst", i)
+		}
+	}
+	if got := h.get("/v1/resources/" + put.ID); got.Code != http.StatusTooManyRequests {
+		t.Fatalf("anonymous read past the burst = %d, want 429", got.Code)
+	}
+	if got := h.getCap(put.ID, token, ""); got.Code != http.StatusOK {
+		t.Fatalf("owner read after anonymous burst = %d, want 200", got.Code)
+	}
+}

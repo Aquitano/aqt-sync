@@ -44,6 +44,13 @@ All notable changes to this project are documented in this file.
   `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
   ([deploy.md](docs/deploy.md#3-reverse-proxy)).
 
+- **Public resource downloads are rate-limited and no longer buffered.**
+  `GET /v1/resources/:id` had no limiter and held each blob in memory twice, so slow
+  readers could pin about 128 MiB per request. Anonymous reads now share the public
+  read budget and token reads the device's authed budget, and the envelope form the
+  CLI reads streams from disk. The JSON form the browser share page reads is still
+  buffered.
+
 - `aqt signup --server http://remote-host` sent the passphrase verifier over plain
   HTTP, created the account, and then refused to store the token, leaving an account
   this device could not use. It now refuses before sending anything.

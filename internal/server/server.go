@@ -178,12 +178,12 @@ func (c Config) inviteAccepted(token string) bool {
 type Server struct {
 	store *Store
 	cfg   Config
-	// Four limiters with four keys: unauth routes by peer address (no identity yet),
-	// authed routes by device id (tokens are the identity; a NAT'd office must not
-	// share a bucket), GC by owner (its planning cost scales with the owner's whole
-	// object table, so it gets a far smaller budget), and the public object-read by
-	// peer address but far looser than unauth (a bulk download would trip the 1-rps
-	// brute-force bucket).
+	// Four limiters with four keys: unauth routes by client address (no identity
+	// yet), authed routes by device id (tokens are the identity; a NAT'd office must
+	// not share a bucket), GC by owner (its planning cost scales with the owner's
+	// whole object table, so it gets a far smaller budget), and the anonymous public
+	// reads by client address but far looser than unauth (a bulk download would trip
+	// the 1-rps brute-force bucket).
 	limiter       *ipRateLimiter
 	authLimiter   *ipRateLimiter
 	gcLimiter     *ipRateLimiter
@@ -311,8 +311,9 @@ func (s *Server) Router() *gin.Engine {
 		}
 
 		// Public resource reads need no auth; the id is unguessable and the
-		// decrypt key lives only in the caller's URL fragment.
-		v1.GET("/resources/:id", s.handleGetResource)
+		// decrypt key lives only in the caller's URL fragment. An owner or grantee
+		// reads private ones on the same route, under their device's authed budget.
+		v1.GET("/resources/:id", s.optionalAuthLimit, s.handleGetResource)
 		v1.GET("/public/resources/:id/preflight", s.handlePublicResourcePreflight)
 
 		// Public object read for a streamed (large) share: a link holder has the
@@ -468,6 +469,26 @@ func (s *Server) authMiddleware(c *gin.Context) {
 	}
 	c.Set(ownerContextKey, owner)
 	c.Set(deviceContextKey, deviceID)
+	c.Next()
+}
+
+// optionalAuthLimit rate-limits a route that serves anonymous and authenticated
+// callers alike. A token that resolves sets the owner and device like
+// authMiddleware and draws on that device's authed bucket; anything else, a bad
+// token included, is anonymous and draws on the client address's public bucket.
+func (s *Server) optionalAuthLimit(c *gin.Context) {
+	limiter, key := s.publicLimiter, clientKey(c)
+	if token, ok := bearerToken(c); ok {
+		if owner, deviceID, err := s.store.AuthByToken(token); err == nil {
+			c.Set(ownerContextKey, owner)
+			c.Set(deviceContextKey, deviceID)
+			limiter, key = s.authLimiter, deviceID
+		}
+	}
+	if ok, wait := limiter.reserve(key); !ok {
+		abortRateLimited(c, wait)
+		return
+	}
 	c.Next()
 }
 
