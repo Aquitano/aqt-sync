@@ -198,6 +198,9 @@ type Store struct {
 	// way a manual snapshot is; otherwise it could capture a torn (blob, chunk-roots)
 	// pair from a concurrent sync.
 	resLocks *keyedMutex
+	// decoySecret is read once at open: a decoy served from the writer connection
+	// would queue behind uploads and answer measurably slower than a real account.
+	decoySecret []byte
 }
 
 func OpenStore(dataDir string) (*Store, error) {
@@ -239,6 +242,10 @@ func OpenStore(dataDir string) (*Store, error) {
 	if err := s.backfillBlobSizes(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("backfill blob sizes: %w", err)
+	}
+	if s.decoySecret, err = s.loadServerSecret(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("load server secret: %w", err)
 	}
 	// The read pool. query_only makes a stray write on it fail loudly instead of
 	// racing the writer to SQLITE_BUSY; a fresh read transaction per query sees the

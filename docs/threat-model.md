@@ -327,7 +327,10 @@ indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 4
 The decoy's Argon2id costs are drawn per-email (HKDF over the server secret) from the
 same value set a moderate calibration produces — memory ∈ {64, 128, 256 MiB},
 iterations clustered where a ~1s unlock lands on common hardware — rather than the
-fixed package default, so a decoy's parameters do not stand out.
+fixed package default, so a decoy's parameters do not stand out. The server secret
+behind every decoy is read once at startup, so a decoy is answered from memory like a
+real account is from the read pool, and a busy writer connection cannot time the two
+apart.
 
 `POST /v1/account` does not answer `409` on a duplicate email in the default *open*
 registration mode. It returns the same success shape with a decoy token that grants

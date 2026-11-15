@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -112,6 +113,38 @@ func TestRecoveryWrapDecoys(t *testing.T) {
 		}
 	}
 }
+
+// A real account is served from the read pool, so a decoy must not wait on the
+// writer connection either: with the writer held busy, the difference in latency
+// would say which emails have accounts.
+func TestDecoyBootstrapDoesNotWaitOnTheWriter(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.signup("no-recovery@example.com", "passphrase")
+	tx, err := h.store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	codes := make(chan int, 2)
+	go func() {
+		for _, email := range []string{"no-recovery@example.com", "nobody@example.com"} {
+			codes <- h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, nil)
+		}
+	}()
+	for range 2 {
+		select {
+		case code := <-codes:
+			if code != http.StatusOK {
+				t.Fatalf("bootstrap: status %d", code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a decoy bootstrap waited on the writer connection")
+		}
+	}
+}
+
 
 // Root-key rotation retires the root key a recovery wrap holds, so the wrap must go
 // with it rather than later reset the passphrase onto a dead root.

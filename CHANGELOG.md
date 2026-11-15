@@ -57,6 +57,10 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- The account bootstrap no longer reveals by timing which emails have accounts. Each
+  decoy wrote to the database, so it answered slower than a real account while
+  uploads held the writer. The decoy secret is now read once at startup.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries

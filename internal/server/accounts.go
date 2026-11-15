@@ -219,9 +219,14 @@ func (s *Store) AccountForAuth(email string) (ownerHandle string, publicKey, ver
 }
 
 // ServerSecret returns the persistent per-server secret used to synthesize a decoy
-// bootstrap response for unknown emails, creating it on first use. Stable across
-// restarts so the same unknown email always yields the same decoy.
-func (s *Store) ServerSecret() ([]byte, error) {
+// bootstrap response for unknown emails. Stable across restarts so the same unknown
+// email always yields the same decoy.
+func (s *Store) ServerSecret() []byte {
+	return s.decoySecret
+}
+
+// loadServerSecret reads the server secret, creating it on first open.
+func (s *Store) loadServerSecret() ([]byte, error) {
 	if _, err := s.db.Exec(
 		`INSERT OR IGNORE INTO server_meta(key, value) VALUES('bootstrap-decoy-secret', ?)`,
 		randomBytes(32),
@@ -1201,12 +1206,7 @@ func (s *Server) handleAccountSalt(c *gin.Context) {
 	}
 	recovery := acc.RecoveryWrappedRoot
 	if recovery == nil {
-		secret, err := s.store.ServerSecret()
-		if err != nil {
-			abort(c, http.StatusInternalServerError, "lookup failed")
-			return
-		}
-		recovery = s.decoyRecoveryWrap(secret, acc.Email)
+		recovery = s.decoyRecoveryWrap(s.store.ServerSecret(), acc.Email)
 	}
 	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot, RecoveryWrappedRoot: recovery})
 }
@@ -1230,10 +1230,7 @@ func (s *Server) decoyRecoveryWrap(secret []byte, email string) *crypto.SealedBl
 // identical on the wire.
 func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
 	email = api.NormalizeEmail(email)
-	secret, err := s.store.ServerSecret()
-	if err != nil {
-		return api.SaltResponse{}, err
-	}
+	secret := s.store.ServerSecret()
 	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	// Derive the decoy's Argon2id costs from the same value set a real moderate
 	// calibration produces, seeded deterministically per email. The package-default
