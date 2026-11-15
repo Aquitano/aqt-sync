@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -62,7 +64,7 @@ func (r shareRow) sender() string {
 	case attributionVerified, attributionPinned:
 		return pinnedLabel(r.FromEmail, r.Fingerprint, r.Attribution == attributionVerified)
 	case attributionClaimed:
-		return fmt.Sprintf("%s? (unverified, %s)", r.ClaimedEmail, r.ClaimedFingerprint)
+		return fmt.Sprintf("%s? (unverified, %s)", displayEmail(r.ClaimedEmail), r.ClaimedFingerprint)
 	case attributionUnsigned:
 		return fmt.Sprintf("%s (unsigned, sender unknown)", r.From)
 	default:
@@ -74,9 +76,32 @@ func (r shareRow) sender() string {
 // prints it.
 func pinnedLabel(email, fingerprint string, verified bool) string {
 	if verified {
-		return fmt.Sprintf("%s (%s, verified)", email, fingerprint)
+		return fmt.Sprintf("%s (%s, verified)", displayEmail(email), fingerprint)
 	}
-	return fmt.Sprintf("%s (%s)", email, fingerprint)
+	return fmt.Sprintf("%s (%s)", displayEmail(email), fingerprint)
+}
+
+// displayEmail renders an email for a person to read. Signup takes any string, so an
+// address outside ASCII can imitate one the reader knows, with a Cyrillic U+0435
+// standing in for an e. Such an address is shown quoted with every non-ASCII rune
+// escaped, so it never looks like the address it imitates.
+func displayEmail(email string) string {
+	if isASCII(email) {
+		return email
+	}
+	return strconv.QuoteToASCII(email)
+}
+
+func isASCII(s string) bool {
+	return !strings.ContainsFunc(s, func(c rune) bool { return c > unicode.MaxASCII })
+}
+
+// emailFold is the form two emails are compared in when deciding whether a claim names
+// an address already pinned: the server's normalization plus Unicode compatibility
+// folding, so a fullwidth or differently cased spelling counts as the same address. It
+// cannot catch a homoglyph from another script; displayEmail is what exposes those.
+func emailFold(email string) string {
+	return strings.ToLower(norm.NFKC.String(api.NormalizeEmail(email)))
 }
 
 // fetchCommand is a ready-to-run command that pulls the share, or "" for a row that
@@ -161,7 +186,7 @@ func (app *application) sharesCmd() *cobra.Command {
 				app.markSharesSeen(rows)
 				return nil
 			}
-			unpinned, unsigned := false, false
+			unpinned, unsigned, nonASCII := false, false, false
 			for _, r := range rows {
 				switch r.Attribution {
 				case attributionClaimed, attributionUnknown:
@@ -169,6 +194,7 @@ func (app *application) sharesCmd() *cobra.Command {
 				case attributionUnsigned:
 					unsigned = true
 				}
+				nonASCII = nonASCII || !isASCII(r.ClaimedEmail+r.FromEmail)
 				if r.Stale {
 					fmt.Printf("%s  (stale grant — ask the owner to re-share)  from %s  since %s\n", r.Ref, r.sender(), r.Since)
 					continue
@@ -186,6 +212,9 @@ func (app *application) sharesCmd() *cobra.Command {
 			}
 			if unsigned {
 				fmt.Println("an unsigned share was made before shares were signed, or written by the server; it does not open until its owner shares it again")
+			}
+			if nonASCII {
+				fmt.Println(`an email in quotes holds characters outside ASCII, shown as \u escapes: it can imitate an address you know, so go by its fingerprint`)
 			}
 			app.markSharesSeen(rows)
 			return nil
@@ -515,7 +544,7 @@ func (app *application) sharesUnblockCmd() *cobra.Command {
 			// so unblocking never has to ask the server who an address belongs to.
 			handle := args[0]
 			if pins, err := identity.LoadContacts(prof.Name); err == nil {
-				if pin, ok := pins[args[0]]; ok {
+				if pin, ok := pins[api.NormalizeEmail(args[0])]; ok {
 					handle = pin.Handle
 				}
 			}

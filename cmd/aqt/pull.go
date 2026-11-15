@@ -260,9 +260,14 @@ func grantSender(res api.GetResourceResponse, mk crypto.MasterKey, prof *identit
 // unpinnedOwnerNotice shows the claim a share from an unpinned owner rests on, before
 // anyone is asked to pin that owner.
 func unpinnedOwnerNotice(row shareRow) string {
-	return fmt.Sprintf("%s is shared by an account you have not pinned:\n  claims    %s\n  handle    %s\n  identity  %s\n"+
-		"signup does not verify emails, and the server reports all three; compare %s with %s over a separate channel before trusting it.\n",
-		row.Ref, row.ClaimedEmail, row.From, row.ClaimedFingerprint, row.ClaimedFingerprint, row.ClaimedEmail)
+	email := displayEmail(row.ClaimedEmail)
+	notice := fmt.Sprintf("%s is shared by an account you have not pinned:\n  claims    %s\n  handle    %s\n  identity  %s\n",
+		row.Ref, email, row.From, row.ClaimedFingerprint)
+	if !isASCII(row.ClaimedEmail) {
+		notice += "warning: the claimed email holds characters outside ASCII, shown as \\u escapes, and can imitate an address you know.\n"
+	}
+	return notice + fmt.Sprintf("signup does not verify emails, and the server reports all three; compare %s with %s over a separate channel before trusting it.\n",
+		row.ClaimedFingerprint, email)
 }
 
 func unsignedGrantError(ref string, a grantAttribution) error {
@@ -297,14 +302,16 @@ func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceR
 	if row.Attribution != attributionClaimed {
 		return identity.Contact{}, fmt.Errorf("%s is shared by %s, and the server names no email for that account, so it cannot be pinned and was not opened", row.Ref, row.sender())
 	}
-	email, fp := row.ClaimedEmail, row.ClaimedFingerprint
+	email, fp := api.NormalizeEmail(row.ClaimedEmail), row.ClaimedFingerprint
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {
 		return identity.Contact{}, err
 	}
-	if pin, ok := pins[email]; ok {
-		return identity.Contact{}, fmt.Errorf("%s claims to be shared by %s, but the key you pinned for %s (%s) did not sign it, so it was not opened: the server wrote it or put their name on it",
-			row.Ref, email, email, crypto.KeyFingerprint(pin.PublicKey))
+	for _, pin := range pins {
+		if emailFold(pin.Email) == emailFold(email) {
+			return identity.Contact{}, fmt.Errorf("%s claims to be shared by %s, but the key you pinned for %s (%s) did not sign it, so it was not opened: the server wrote it or put their name on it",
+				row.Ref, displayEmail(email), displayEmail(pin.Email), crypto.KeyFingerprint(pin.PublicKey))
+		}
 	}
 	keys, err := fetchAccountKeys(cl, email)
 	if err != nil {
@@ -319,11 +326,11 @@ func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceR
 				row.Ref, row.sender(), pinOwner)
 		}
 	} else {
-		switch err := confirmOwnerPin(unpinnedOwnerNotice(row) + fmt.Sprintf("Pin %s and open it? [y/N] ", email)); {
+		switch err := confirmOwnerPin(unpinnedOwnerNotice(row) + fmt.Sprintf("Pin %s and open it? [y/N] ", displayEmail(email))); {
 		case errors.Is(err, cliutil.ErrNotConfirmable):
 			return identity.Contact{}, fmt.Errorf("%s is shared by %s, an account you have not pinned, so it was not opened. "+
 				"Compare %s with them over a separate channel, then pass --pin-owner <fingerprint>, or run `aqt contacts pin %s --fingerprint <fingerprint>` and try again",
-				row.Ref, row.sender(), fp, email)
+				row.Ref, row.sender(), fp, displayEmail(email))
 		case errors.Is(err, cliutil.ErrAborted):
 			return identity.Contact{}, fmt.Errorf("did not open %s; nothing was pinned", row.Ref)
 		case err != nil:
@@ -335,7 +342,7 @@ func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceR
 	if err := identity.SaveContacts(prof.Name, pins); err != nil {
 		return identity.Contact{}, err
 	}
-	fmt.Fprintf(os.Stderr, "pinned %s on first use (%s); confirm out-of-band with `aqt contacts verify %s`\n", email, fp, email)
+	fmt.Fprintf(os.Stderr, "pinned %s on first use (%s); confirm out-of-band with `aqt contacts verify %s`\n", displayEmail(email), fp, displayEmail(email))
 	return pin, nil
 }
 

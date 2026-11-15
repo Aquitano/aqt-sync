@@ -289,6 +289,7 @@ func checkShareableFolder(meta api.Metadata) error {
 // grantee), and stored server-side as an opaque blob. Visibility is untouched —
 // a grant is not a link.
 func (app *application) runShareWith(idArg, email string) error {
+	email = api.NormalizeEmail(email)
 	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
@@ -405,6 +406,7 @@ func regrantOwned(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey
 // a stale wrap, and the next rotation's re-wrap hands it the new key. Together, they
 // either both land or neither does, and a failure is a clean no-op the user can re-run.
 func (app *application) runShareRevoke(idArg, email string, yes bool) error {
+	email = api.NormalizeEmail(email)
 	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err

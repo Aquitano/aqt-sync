@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
@@ -30,12 +31,24 @@ type Contact struct {
 	Verified     bool   `json:"verified,omitempty"`
 }
 
-// LoadContacts returns the profile's pinned contacts, keyed by email. A missing
-// file is an empty set, not an error.
+// LoadContacts returns the profile's pinned contacts, keyed by email in the form the
+// server stores it (api.NormalizeEmail), so a pin made under another spelling of the
+// same address is still found by it. A missing file is an empty set, not an error.
+//
+// Two stored pins for one address keep the verified one, then the older one: a later
+// pin under another spelling is the kind of claim the first pin exists to refuse.
 func LoadContacts(profile string) (map[string]Contact, error) {
-	out := map[string]Contact{}
-	if err := loadJSON(profile, ".contacts.json", &out); err != nil {
+	stored := map[string]Contact{}
+	if err := loadJSON(profile, ".contacts.json", &stored); err != nil {
 		return nil, err
+	}
+	out := make(map[string]Contact, len(stored))
+	for _, c := range stored {
+		c.Email = api.NormalizeEmail(c.Email)
+		if kept, ok := out[c.Email]; ok && (kept.Verified && !c.Verified || kept.Verified == c.Verified && kept.PinnedAt <= c.PinnedAt) {
+			continue
+		}
+		out[c.Email] = c
 	}
 	return out, nil
 }

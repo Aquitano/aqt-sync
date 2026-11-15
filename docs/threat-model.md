@@ -263,8 +263,14 @@ noise:
   showing the claimed email, handle, and fingerprint, and without one only with
   `--pin-owner` naming that fingerprint. Either way that is a first-use pin, checked
   against the keys the server publishes for the claimed email. A claim on an email
-  already pinned to another key is refused outright. The Git remote helper never reads through a grant: Git remotes
-  cannot be granted, and it opens only remotes the account owns.
+  already pinned to another key is refused outright, comparing emails after the
+  server's lower-casing and Unicode compatibility folding (NFKC), and pins stored under
+  another spelling are read in that form too. Folding cannot catch a homoglyph from
+  another script, such as a Cyrillic `е` (U+0435) for an `e`, so every email shown
+  to a person, claimed or pinned, that holds a character outside ASCII is quoted with
+  those characters escaped, and the pin prompt warns about it. The Git remote helper never
+  reads through a grant: Git remotes cannot be granted, and it opens only remotes the
+  account owns.
 
 A block is the one place a grant write distinguishes a real account from a decoy, and
 only to the account the recipient deliberately blocked.

@@ -147,6 +147,12 @@ sender:
 - `unknown`: the row is stale, or the server named no sender; the human output says
   `unknown sender`.
 
+Signup takes any string as an email, so one with a character outside ASCII can
+imitate an address you know, such as a Cyrillic `е` (U+0435) for an `e`. Human
+output shows such an email quoted with those characters escaped,
+`"e2\u0435@example.com"`, whether it is a claim or a pin, and `aqt shares` adds a
+warning; `--json` carries it as is.
+
 Compare the fingerprint with the sender out-of-band before acting on a share;
 `aqt contacts pin <email> --fingerprint <fp>` then makes the attribution `verified`.
 A successful listing also marks every share as seen: `aqt login` and `aqt status`
@@ -161,7 +167,10 @@ handle, and fingerprint and pin on yes; without one they refuse and say how to p
 key has that fingerprint (with or without the `SHA256:` prefix, as `aqt contacts pin
 --fingerprint` takes it), and opens the share. Either way the pin is first-use, not
 verified; `aqt contacts pin <email> --fingerprint <fp>` beforehand records a verified
-one. A claim on an email pinned to another key is refused either way. In `aqt tui`, a
+one. A claim on an email pinned to another key is refused either way, comparing the
+two after the server's lower-casing and Unicode compatibility folding, so a
+differently cased or fullwidth spelling of a pinned address counts as that address.
+The prompt shows a claimed email outside ASCII escaped, with a warning. In `aqt tui`, a
 clone refused this way shows the same claim and, on confirm, runs again with
 `--pin-owner` naming the fingerprint it showed.
 
