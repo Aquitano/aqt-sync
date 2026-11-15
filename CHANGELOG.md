@@ -68,6 +68,10 @@ All notable changes to this project are documented in this file.
 - A background update check could undo an `aqt update policy` change made while it
   ran. It now re-reads the state before saving.
 
+- On Windows, an update failed with "Access denied" while an agent that had not
+  restarted since the last update still ran from the previous rollback file. Each
+  update now moves the old binary to a fresh `.aqt-update-previous-*.old` name.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
