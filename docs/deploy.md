@@ -380,9 +380,8 @@ code `account_disabled` — deliberately not `401`, which would send the user in
 re-login loop that cannot succeed. Nothing is deleted and no key is destroyed, so
 `enable` restores access with the account's existing device tokens.
 
-Suspension is written by a different process than the running server, so it cannot
-invalidate that server's caches directly. A running server picks the change up
-within **10 seconds**.
+A running server reads the flag on every authenticated request, so the suspension
+applies from the next request even though `admin` is a separate process.
 
 ### Deleting an account
 
@@ -408,11 +407,9 @@ enough to destroy an account. Operators do not need this route and cannot use it
 the admin path is authorized by filesystem access instead, which is why it needs no
 passphrase. Nothing here gates self-service deletion — an operator who needs to hold
 an account (a legal hold, a billing dispute) suspends it with `disable`, which makes
-every authenticated route including the deletion answer `403`. The suspension a
-running server enforces on other routes can lag `disable` by up to ten seconds
-(`admin` is a separate process, so it cannot invalidate that server's cache); the
-deletion re-reads the flag in the transaction that erases, so a hold takes effect
-against it immediately.
+every authenticated route including the deletion answer `403`. The deletion also
+re-reads the flag in the transaction that erases, so a hold that lands while a
+deletion request is in flight still holds.
 
 ## Privacy boundary
 

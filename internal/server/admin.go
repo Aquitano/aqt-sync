@@ -49,11 +49,6 @@ var ErrAmbiguousAccount = errors.New("account reference is ambiguous")
 // telling the user to log in again would send them in a circle.
 var ErrAccountDisabled = errors.New("account is disabled; contact the server operator")
 
-// SuspensionLag is how long a running server may keep serving an account that
-// another process just suspended. Operator tooling reports it rather than claiming
-// the change is instant.
-func SuspensionLag() time.Duration { return suspensionTTL }
-
 // ListAdminAccounts returns every account with its usage, oldest first. Intended
 // for operator tooling and reporting, never for a request handler: it walks every
 // account's usage, which is O(accounts) usage queries.
@@ -181,31 +176,15 @@ func (s *Store) SetAccountQuota(owner string, quota *int64) error {
 
 // SetAccountDisabled suspends or restores an account. Suspension is a policy flag
 // only: no ciphertext is touched and no key is destroyed, so it is fully
-// reversible. A server running in *another* process picks the change up within
-// suspensionTTL; this process's own cache is invalidated immediately.
+// reversible. AuthByToken reads the flag on every request, so a running server
+// enforces it from its next request even when another process wrote it.
 func (s *Store) SetAccountDisabled(owner string, disabled bool) error {
 	var at int64
 	if disabled {
 		at = time.Now().Unix()
 	}
 	res, err := s.db.Exec(`UPDATE accounts SET disabled_at = ? WHERE owner_handle = ?`, at, owner)
-	if err := affectedOne(res, err); err != nil {
-		return err
-	}
-	s.suspended.invalidate(owner)
-	return nil
-}
-
-// AccountDisabled reports whether the account is suspended. It is on the
-// authenticated hot path, so it reads one indexed column rather than the full
-// admin row.
-func (s *Store) AccountDisabled(owner string) (bool, error) {
-	var at int64
-	err := s.rdb.QueryRow(`SELECT disabled_at FROM accounts WHERE owner_handle = ?`, owner).Scan(&at)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, ErrNotFound
-	}
-	return at > 0, err
+	return affectedOne(res, err)
 }
 
 // AccountQuota returns the per-account byte-cap override, if one is set.
@@ -263,9 +242,9 @@ func (s *Store) DeleteAccountWithProof(owner string, authVerifier []byte) (Delet
 // A non-nil authVerifier marks the self-service path. It is checked against the
 // stored hash inside the same transaction that does the deleting, so a passphrase
 // change cannot land between the proof and the erasure it authorizes, and the same
-// read re-checks the suspension the request already passed at the middleware: that
-// check answers from a cache an operator in another process cannot invalidate, and
-// this is the one operation for which a suspensionTTL-wide window is unrecoverable.
+// read re-checks the suspension the request already passed at the middleware: an
+// operator can suspend between that check and this transaction, and this is the one
+// operation for which that window is unrecoverable.
 // The operator path passes no verifier and deletes a suspended account, which is the
 // usual order of those two commands.
 //
@@ -356,8 +335,6 @@ func (s *Store) deleteAccount(owner string, authVerifier []byte) (DeletedAccount
 	if err := tx.Commit(); err != nil {
 		return acct, err
 	}
-	s.auth.invalidateOwner(owner)
-	s.suspended.invalidate(owner)
 
 	var blobs []string
 	for _, id := range blobIDs {

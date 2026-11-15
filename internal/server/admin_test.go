@@ -8,9 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"testing"
-	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 )
@@ -160,23 +158,6 @@ func TestAdminAccountByRefRefusesAmbiguousPrefix(t *testing.T) {
 	}
 }
 
-func TestSuspensionCachePurgesExpiredEntriesAndStaysBounded(t *testing.T) {
-	t.Parallel()
-	cache := newSuspensionCache()
-	cache.entries["expired"] = suspensionEntry{expires: time.Now().Add(-time.Second)}
-	cache.put("active", false)
-	if _, exists := cache.entries["expired"]; exists {
-		t.Fatal("expired entry survived a subsequent cache write")
-	}
-
-	for i := range suspensionCacheMaxEntries + 1 {
-		cache.put("owner-"+strconv.Itoa(i), false)
-	}
-	if got := len(cache.entries); got > suspensionCacheMaxEntries {
-		t.Fatalf("cache retained %d entries, max is %d", got, suspensionCacheMaxEntries)
-	}
-}
-
 func fmtEmail(i int) string {
 	return "user" + string(rune('a'+i%26)) + string(rune('a'+i/26)) + "@example.com"
 }
@@ -192,9 +173,8 @@ func TestSuspensionIsReversibleAndKeepsData(t *testing.T) {
 	if err := s.SetAccountDisabled(owner, true); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
-	disabled, err := s.AccountDisabled(owner)
-	if err != nil || !disabled {
-		t.Fatalf("AccountDisabled = %v, %v; want true", disabled, err)
+	if a, err := s.AdminAccountByRef(owner); err != nil || !a.Disabled() {
+		t.Fatalf("Disabled after disable = %v, %v; want true", a.Disabled(), err)
 	}
 	if _, err := s.GetResource(id, owner); err != nil {
 		t.Errorf("suspension destroyed data: %v", err)
@@ -203,14 +183,15 @@ func TestSuspensionIsReversibleAndKeepsData(t *testing.T) {
 	if err := s.SetAccountDisabled(owner, false); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
-	if disabled, _ = s.AccountDisabled(owner); disabled {
-		t.Error("account still disabled after enable")
+	if a, err := s.AdminAccountByRef(owner); err != nil || a.Disabled() {
+		t.Errorf("Disabled after enable = %v, %v; want false", a.Disabled(), err)
 	}
 }
 
-// A suspended account's devices must be refused with 403, not 401: the token is
-// valid, so telling the user to re-authenticate would loop them.
-func TestSuspendedAccountIsForbiddenNotUnauthorized(t *testing.T) {
+// An operator suspends through `aqt-server admin`, a separate process over the same
+// data dir, and the very next request must be refused. It is refused with 403, not
+// 401: the token is valid, so telling the user to re-authenticate would loop them.
+func TestAdminSuspensionRefusesTheNextRequest(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
 	token, _ := h.signup("suspended@example.com", "pw-suspended-account")
@@ -223,7 +204,12 @@ func TestSuspendedAccountIsForbiddenNotUnauthorized(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolve owner: %v", err)
 	}
-	if err := h.store.SetAccountDisabled(owner, true); err != nil {
+	admin, err := OpenStore(filepath.Dir(h.store.blobsDir))
+	if err != nil {
+		t.Fatalf("open admin store: %v", err)
+	}
+	t.Cleanup(func() { _ = admin.Close() })
+	if err := admin.SetAccountDisabled(owner, true); err != nil {
 		t.Fatalf("disable: %v", err)
 	}
 
@@ -240,7 +226,7 @@ func TestSuspendedAccountIsForbiddenNotUnauthorized(t *testing.T) {
 	}
 
 	// Restoring must let the same token straight back in, with no re-login.
-	if err := h.store.SetAccountDisabled(owner, false); err != nil {
+	if err := admin.SetAccountDisabled(owner, false); err != nil {
 		t.Fatalf("enable: %v", err)
 	}
 	if code := h.do(http.MethodGet, "/v1/resources", token, nil, nil); code != http.StatusOK {
@@ -373,7 +359,6 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 		t.Fatalf("test setup stored nothing: %+v", before)
 	}
 
-	s.suspended.put(owner, true)
 	deleted, err := s.DeleteAccount(owner)
 	if err != nil {
 		t.Fatalf("delete: %v", err)
@@ -386,9 +371,6 @@ func TestDeleteAccountErasesRowsAndFiles(t *testing.T) {
 	}
 	if len(deleted.FileErrors) != 0 {
 		t.Errorf("file removal errors: %v", deleted.FileErrors)
-	}
-	if _, cached := s.suspended.get(owner); cached {
-		t.Error("deletion retained the owner's suspension cache entry")
 	}
 
 	if _, err := s.AdminAccountByRef("gone@example.com"); !errors.Is(err, ErrNotFound) {

@@ -180,11 +180,9 @@ type Store struct {
 	// re-parsing it per call cost more than executing it on an empty account.
 	usageStmt     *sql.Stmt
 	blobBytesStmt *sql.Stmt
-	auth          *authCache
-	// suspended memoizes per-account suspension. It is separate from auth because
-	// an operator writes it from another process, so it needs a much shorter expiry
-	// than a token resolution this process controls. See suspensionTTL.
-	suspended  *suspensionCache
+	// authStmt is AuthByToken's lookup, prepared once because every authenticated
+	// request runs it.
+	authStmt   *sql.Stmt
 	blobsDir   string
 	packsDir   string
 	stagingDir string
@@ -230,7 +228,7 @@ func OpenStore(dataDir string) (*Store, error) {
 	// connection serializes every write in-process. This suits the v1
 	// single-instance server; horizontal scaling would need real row locks.
 	db.SetMaxOpenConns(1)
-	s := &Store{db: db, auth: newAuthCache(), suspended: newSuspensionCache(), blobsDir: blobsDir, packsDir: packsDir, stagingDir: stagingDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
+	s := &Store{db: db, blobsDir: blobsDir, packsDir: packsDir, stagingDir: stagingDir, gcLocks: newKeyedMutex(), resLocks: newKeyedMutex()}
 	if err := s.migrate(); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -262,6 +260,10 @@ func OpenStore(dataDir string) (*Store, error) {
 		_ = s.Close()
 		return nil, fmt.Errorf("prepare blob-bytes query: %w", err)
 	}
+	if s.authStmt, err = rdb.Prepare(authByTokenQuery); err != nil {
+		_ = s.Close()
+		return nil, fmt.Errorf("prepare auth query: %w", err)
+	}
 	return s, nil
 }
 
@@ -276,6 +278,9 @@ func (s *Store) Close() error {
 	}
 	if s.blobBytesStmt != nil {
 		_ = s.blobBytesStmt.Close()
+	}
+	if s.authStmt != nil {
+		_ = s.authStmt.Close()
 	}
 	rerr := s.rdb.Close()
 	if err := s.db.Close(); err != nil {

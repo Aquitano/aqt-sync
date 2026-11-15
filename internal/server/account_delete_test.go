@@ -92,8 +92,7 @@ func TestAccountDeleteErasesAccountAndRevokesToken(t *testing.T) {
 		t.Fatalf("receipt reports %d file errors on a clean erasure", receipt.FileErrors)
 	}
 
-	// The token authenticated a moment ago and must stop now, not at the auth
-	// cache's TTL.
+	// The token authenticated a moment ago and must stop now.
 	if code := h.do(http.MethodGet, "/v1/account/usage", token, nil, nil); code != http.StatusUnauthorized {
 		t.Fatalf("usage with the deleted account's token = %d, want 401", code)
 	}
@@ -191,14 +190,13 @@ func TestSuspendedAccountCannotSelfDelete(t *testing.T) {
 	}
 }
 
-// The middleware's suspension check answers from a cache an operator suspending in
-// another process cannot invalidate, so for up to suspensionTTL a held account still
-// reaches the handler. Every other route survives that window; an erasure would not,
-// so the store re-reads the flag in the deleting transaction. Calling the store
-// directly is the window: it is what a request that passed a stale cache reaches.
-func TestSuspendedSelfDeleteIsRefusedBelowTheAuthCache(t *testing.T) {
+// An operator can suspend after a request passed the middleware's check. Every other
+// route survives that window; an erasure would not, so the store re-reads the flag
+// in the deleting transaction. Calling the store directly is the window: it is what
+// a request that passed the check before the suspension reaches.
+func TestSuspendedSelfDeleteIsRefusedBelowTheMiddleware(t *testing.T) {
 	t.Parallel()
-	const email, pass = "stale-cache@example.com", "correct horse battery staple"
+	const email, pass = "held-in-flight@example.com", "correct horse battery staple"
 	h := newHarness(t)
 	token, _ := h.signup(email, pass)
 	verifier := h.authVerifier(email, pass)

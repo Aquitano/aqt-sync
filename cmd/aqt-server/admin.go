@@ -30,9 +30,8 @@ import (
 // operator already has filesystem access to the data dir — that is the trust
 // boundary — so an authenticated admin API would add a remotely reachable
 // privileged surface without adding any capability. SQLite's WAL mode lets these
-// commands run against a live server; the two policy changes that a running server
-// caches (suspension, quota) are read per request or invalidated on write, so they
-// take effect without a restart.
+// commands run against a live server, which reads the two policies they change
+// (suspension, quota) per request, so they take effect without a restart.
 // runAdmin takes the full argument list after the program name, `admin` included,
 // so every rendered usage line reads `aqt-server admin ...` and is copy-pasteable.
 func runAdmin(args []string) int {
@@ -188,8 +187,8 @@ func adminAccountsDisableCmd() *cobra.Command {
 				if err := store.SetAccountDisabled(a.OwnerHandle, true); err != nil {
 					return err
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "%s disabled; its %d device(s) are refused within %s\n",
-					a.Email, a.Usage.Devices, server.SuspensionLag())
+				fmt.Fprintf(cmd.OutOrStdout(), "%s disabled; its %d device(s) are refused from the next request\n",
+					a.Email, a.Usage.Devices)
 				return nil
 			})
 		},

@@ -51,6 +51,11 @@ All notable changes to this project are documented in this file.
   re-sent to the real account and the placeholder's rows are removed. Pins made with
   `--fingerprint` are now recorded as verified, and a mismatch against a verified pin
   is still refused.
+- **`aqt-server admin accounts disable` applies from the next request.** The
+  running server cached each account's suspension flag for up to 10 seconds, and the
+  admin command runs in a separate process that cannot clear that cache, so a
+  suspended account kept syncing until the entry expired. The server now reads the
+  flag with the token on every request, so `enable` and `delete` are immediate too.
 
 ### Changed
 
