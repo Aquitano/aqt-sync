@@ -57,6 +57,9 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- A hostile server can no longer crash a download by locating two objects at one
+  pack offset with different lengths. The longer span is fetched on its own.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
