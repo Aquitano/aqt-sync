@@ -332,7 +332,9 @@ case-insensitive clone would collapse them into one file, and its next sync woul
 then overwrite both remote copies with the survivor's bytes — and a pull or clone
 onto a case-insensitive filesystem refuses such a tree by name before writing
 anything. A rename that changes only case or normalization is applied there as a
-rename, not as a download plus a delete of the same file.
+rename, not as a download plus a delete of the same file. A directory junction is
+not followed: a scan skips it with a warning and keeps its last-synced contents,
+and a pull refuses to write through it.
 
 **One prologue.** Every sync enters through `syncSession`: it loads `state.json`
 and the last-synced base, refuses a missing base unless `--reconcile`, and acquires

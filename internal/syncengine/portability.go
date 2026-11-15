@@ -11,6 +11,8 @@ package syncengine
 // callers can refuse or degrade by name instead of losing data.
 
 import (
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -88,4 +90,15 @@ func SymlinkSupport(dir string) bool {
 	}
 	_ = os.Remove(name)
 	return true
+}
+
+// errReparsePoint is the skip cause for a linkLike entry that is not a symlink.
+var errReparsePoint = errors.New("junction or other reparse point, not followed")
+
+// linkLike reports whether mode is an entry a write must never descend through: a
+// symlink, or a Windows junction or mount point, which Go reports as ModeIrregular
+// without ModeDir. A cloud-placeholder directory is ModeDir|ModeIrregular and holds
+// real children, so it does not count.
+func linkLike(mode fs.FileMode) bool {
+	return mode&fs.ModeSymlink != 0 || (mode&fs.ModeIrregular != 0 && !mode.IsDir())
 }

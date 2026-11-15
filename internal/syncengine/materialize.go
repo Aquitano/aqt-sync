@@ -61,8 +61,8 @@ func refuseSymlinkParents(dir, full string) error {
 		if err != nil {
 			return err
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path %q descends through a symlink at %q", rel, cur)
+		if linkLike(fi.Mode()) {
+			return fmt.Errorf("path %q descends through a symlink or junction at %q", rel, cur)
 		}
 	}
 	return nil
@@ -304,8 +304,8 @@ func MaterializeDirs(dir string, dirs []DirEntry) error {
 		}
 		// Unlike a file, which replaces a symlink at its path, a directory is
 		// entered: MkdirAll and the chmod in applyDirModes both follow a link here.
-		if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("directory %q is a symlink on disk", d.Path)
+		if fi, err := os.Lstat(full); err == nil && linkLike(fi.Mode()) {
+			return fmt.Errorf("directory %q is a symlink or junction on disk", d.Path)
 		}
 		if err := os.MkdirAll(full, 0o700); err != nil {
 			return err

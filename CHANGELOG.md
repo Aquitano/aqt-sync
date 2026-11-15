@@ -60,6 +60,11 @@ All notable changes to this project are documented in this file.
 - An `.aqtignore` saved with CRLF line endings ignored nothing, because every rule
   kept its trailing `\r`. Rules now match as they do with LF endings.
 
+- A directory junction in a tracked folder on Windows was not treated as a link. A
+  pull could write through it outside the folder, and the next sync deleted those
+  files everywhere. Pulls now refuse to write through a junction, and a scan reports
+  it as skipped and keeps its last-synced contents.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries

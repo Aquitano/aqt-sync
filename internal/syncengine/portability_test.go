@@ -3,6 +3,7 @@
 package syncengine
 
 import (
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -28,6 +29,28 @@ func TestCaseCollisions(t *testing.T) {
 	}
 	if got := CaseCollisions([]Entry{{Path: "caf\u00e9"}, {Path: "cafe\u0301"}}, nil); len(got) != 1 {
 		t.Errorf("normalization twins reported %v, want one group", got)
+	}
+}
+
+// Go reports a Windows junction as ModeIrregular without ModeDir; the symlink
+// guards must treat it as a link. A cloud-placeholder directory carries ModeDir too
+// and stays an ordinary directory.
+func TestLinkLike(t *testing.T) {
+	cases := []struct {
+		mode fs.FileMode
+		want bool
+	}{
+		{fs.ModeSymlink, true},
+		{fs.ModeIrregular, true},
+		{fs.ModeDir | fs.ModeIrregular, false},
+		{fs.ModeDir, false},
+		{0, false},
+		{fs.ModeNamedPipe, false},
+	}
+	for _, c := range cases {
+		if got := linkLike(c.mode); got != c.want {
+			t.Errorf("linkLike(%v) = %v, want %v", c.mode, got, c.want)
+		}
 	}
 }
 
