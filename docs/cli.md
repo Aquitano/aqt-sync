@@ -191,6 +191,22 @@ again to retry the remaining shares; completed shares remain usable.
 A verified pin is never replaced this way: a mismatch against it is an error until
 `aqt contacts rm <email>`.
 
+## Taking access back
+
+`aqt unshare <id>` and `aqt unshare <id> --with <email>` both rotate the content key.
+Before they do, they list on stderr the grantees the new key will be re-wrapped for,
+named by their pins, and the grants that will stay on the old key, with the reason,
+then ask (`-y` skips the question, not the list). Revoking a grant on a public
+resource also makes it private, so its links stop working: the grantee could read it
+through a link anyway. A folder that cannot rotate until it is re-synced refuses the
+revoke and changes nothing; run `aqt sync` in it, then revoke again. Only a resource
+with no owner key revokes without rotating.
+
+After the rotation, a warning names every grant that was not re-wrapped. No later
+rotation picks one up, since its signature covers the replaced key, and `aqt share
+ls` marks it `(unsigned)`; `aqt share <id> --with <email>` puts its grantee back on
+the current key.
+
 ## Four questions, four commands
 
 Comparison commands are easy to confuse, so each one names what it compares:

@@ -245,7 +245,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		}
 	})
 
-	if err := app.runShareRevoke(id, "bob@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 
@@ -267,7 +267,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 	})
 
 	// Revoking a second time reports the missing grant instead of succeeding.
-	if err := app.runShareRevoke(id, "bob@example.com"); err == nil || !strings.Contains(err.Error(), "no grant") {
+	if err := app.runShareRevoke(id, "bob@example.com", true); err == nil || !strings.Contains(err.Error(), "no grant") {
 		t.Fatalf("second revoke: got %v, want a no-grant error", err)
 	}
 }
@@ -346,7 +346,7 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 		}
 	})
 
-	if err := app.runShareRevoke(id, "carol@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com", true); err != nil {
 		t.Fatalf("revoke carol: %v", err)
 	}
 
@@ -490,14 +490,15 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 	}
 
 	failRotation.Store(true)
-	err = app.runShareRevoke(id, "carol@example.com")
+	err = app.runShareRevoke(id, "carol@example.com", true)
 	if err == nil {
 		t.Fatal("revoke reported success while the key rotation was failing")
 	}
 	// The message must not falsely assert an outcome (the atomic PUT's fate is unknown
-	// under a lost response) and must point at a recovery that reconciles survivors.
-	if !strings.Contains(err.Error(), "may not have taken effect") || !strings.Contains(err.Error(), "aqt unshare") {
-		t.Fatalf("revoke error = %v, want it to admit the uncertain outcome and point at `aqt unshare`", err)
+	// under a lost response) and must point at re-running the revoke itself: a bare
+	// `aqt unshare` would re-wrap a revoke that never landed straight back to carol.
+	if !strings.Contains(err.Error(), "may have applied it") || !strings.Contains(err.Error(), "aqt unshare "+id+" --with carol@example.com") {
+		t.Fatalf("revoke error = %v, want it to admit the uncertain outcome and point at re-running the revoke", err)
 	}
 	// The grant is still there: the retry has something left to find, and the revoked
 	// account's access is unchanged rather than half-removed.
@@ -511,7 +512,7 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 
 	// The recovery the error points at actually works.
 	failRotation.Store(false)
-	if err := app.runShareRevoke(id, "carol@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com", true); err != nil {
 		t.Fatalf("re-run after a failed rotation: %v", err)
 	}
 	grants, err = cl.ListGrants(id)
@@ -850,7 +851,7 @@ func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 	revoked.Store(carolKeys.Handle) // from here the "server" keeps listing carol
 	recording.Store(true)           // and from here we watch which re-wraps the client emits
 
-	if err := app.runShareRevoke(id, "carol@example.com"); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com", true); err != nil {
 		t.Fatalf("revoke carol: %v", err)
 	}
 

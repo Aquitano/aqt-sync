@@ -236,48 +236,19 @@ func (app *application) unshareCmd() *cobra.Command {
 		Short: "Take back access: kill the public link (rotates the key), or revoke one grant (--with)",
 		Long: "Bare `aqt unshare <id>` makes the resource private again and ROTATES its content\n" +
 			"key, so every link ever issued for it stops decrypting. With --with <email> it\n" +
-			"revokes that account's grant instead (also rotating the key on a private resource,\n" +
-			"so the revoked wrap opens nothing that changes from here on).",
+			"revokes that account's grant instead, and rotates the key the same way, so the\n" +
+			"revoked wrap opens nothing that changes from here on. Either way it lists the\n" +
+			"grantees the new key is re-wrapped for, and the grants it leaves behind, before\n" +
+			"asking.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := requireConfirmable(yes); err != nil {
 				return err
 			}
-			// Resolve before confirming, so the prompt names the resource the key
-			// rotation will actually hit rather than echoing the raw argument.
-			cl, prof, err := app.authedClient()
-			if err != nil {
-				return err
-			}
-			mk, err := app.unlockMaster(prof)
-			if err != nil {
-				return err
-			}
-			items, err := cl.ListResources()
-			if err != nil {
-				mk.Wipe()
-				return err
-			}
-			id, ok, err := trackedResourceID(args[0])
-			if !ok {
-				id, err = resolveOwnedResourceIDFromItems(items, mk, args[0])
-			}
-			if err != nil {
-				mk.Wipe()
-				return err
-			}
-			label := resourceLabel(items, mk, id)
-			mk.Wipe()
 			if with != "" {
-				if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to %s? [y/N] ", with, label), yes); err != nil {
-					return err
-				}
-				return app.runShareRevoke(id, with)
+				return app.runShareRevoke(args[0], with, yes)
 			}
-			if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", label), yes); err != nil {
-				return err
-			}
-			return app.runPrivate(id)
+			return app.runPrivate(args[0], yes)
 		},
 	}
 	cmd.Flags().StringVar(&with, "with", "", "revoke this account's grant (by email) instead of the public link")
@@ -416,8 +387,11 @@ func regrantOwned(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey
 
 // runShareRevoke rotates the content key so the revoked wrap opens nothing that changes
 // from here on, dropping the grant in the same transaction, then re-wraps for the
-// remaining grantees. A public resource skips rotation: its key is in a link anyway, and
-// rotating would kill that link as a side effect.
+// remaining grantees. Every revoke rotates, a public resource's included, which makes it
+// private: the revoked grant's signature covers the key it was made over, so a revoke
+// that left that key in place would leave the grant valid for it, and the next rotation,
+// from any device, would follow it and hand the revoked account the new key. Only a
+// resource with no owner key revokes without rotating, since nothing can ever rotate it.
 //
 // The rotation and the delete are one server-side write because every way of splitting
 // them fails badly. Deleting first and then failing to rotate strands the revoked account
@@ -426,7 +400,7 @@ func regrantOwned(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey
 // first and then failing to delete leaves the revoked account listed as a grantee holding
 // a stale wrap, and the next rotation's re-wrap hands it the new key. Together, they
 // either both land or neither does, and a failure is a clean no-op the user can re-run.
-func (app *application) runShareRevoke(idArg, email string) error {
+func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
@@ -465,34 +439,20 @@ func (app *application) runShareRevoke(idArg, email string) error {
 	if err != nil {
 		return err
 	}
-	revoke := func() error {
+	if res.WrappedKey == nil {
+		if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to aqt://%s? It has no owner key, so its key cannot be rotated. [y/N] ", email, id), yes); err != nil {
+			return err
+		}
 		if err := cl.RevokeGrant(id, handle); err != nil {
 			return fmt.Errorf("deleting the grant for %s failed: %w", email, err)
 		}
-		return nil
-	}
-	if res.Visibility == api.Public {
-		// Dropping the grant changes nothing while the resource is public: the link
-		// serves it to anyone unauthenticated, this account included. Say so on stdout —
-		// reporting a bare "revoked" here reads as access removed when it is not.
-		if err := revoke(); err != nil {
-			return err
-		}
 		if app.json {
-			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": false})
-		}
-		fmt.Printf("removed %s's grant on aqt://%s, but did NOT remove their access: the resource is public\n", email, id)
-		fmt.Fprintf(os.Stderr, "anyone with the link can still read it. Run `aqt unshare %s` to make it private and rotate the key.\n", id)
-		return nil
-	}
-	if res.WrappedKey == nil {
-		if err := revoke(); err != nil {
-			return err
-		}
-		if app.json {
-			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false})
+			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": res.Visibility != api.Public})
 		}
 		fmt.Printf("revoked %s from aqt://%s (no owner key; content key not rotated)\n", email, id)
+		if res.Visibility == api.Public {
+			fmt.Fprintln(os.Stderr, "the resource is public, so anyone with its link, them included, can still read it")
+		}
 		return nil
 	}
 	keys, err := app.openResourceKeys(prof, res)
@@ -500,38 +460,42 @@ func (app *application) runShareRevoke(idArg, email string) error {
 		return err
 	}
 	defer keys.close()
+	plan, err := planRewrap(cl, prof, id, keys, grants, handle)
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(os.Stderr, plan.describe())
+	question := fmt.Sprintf("Revoke %s's access to %s and rotate its key? [y/N] ", email, keys.label(id))
+	if res.Visibility == api.Public {
+		question = fmt.Sprintf("Revoke %s's access to %s? It is public, so this also makes it private and rotates its key: every link ever issued for it stops working. [y/N] ", email, keys.label(id))
+	}
+	if err := confirmDestructive(question, yes); err != nil {
+		return err
+	}
 	newCK, err := rotateResourceKey(cl, id, res, keys.ck, keys.mk, keys.meta, handle)
 	if errors.Is(err, errTreeRootDrift) {
-		// The grant delete must still land; it is what actually cuts this grantee off
-		// on a private resource.
-		if visErr := revokeWithoutRotation(cl, id, res.Version, handle); visErr != nil {
-			return fmt.Errorf("revoking %s failed: %w", email, visErr)
-		}
-		if app.json {
-			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": true})
-		}
-		fmt.Printf("revoked %s from aqt://%s\n", email, id)
-		fmt.Fprintf(os.Stderr, "warning: the content key was NOT rotated (%v); %s cannot fetch it again, but can still decrypt bytes they already had\n", err, email)
-		fmt.Fprintf(os.Stderr, "run `aqt sync` in the folder to re-seal it under the current account key, then `aqt unshare %s` to rotate\n", id)
-		return nil
+		return fmt.Errorf("revoking %s needs the key of aqt://%s rotated, and it cannot be yet (%w). "+
+			"Deleting the grant without rotating would leave it valid for the current key, so a later rotation could hand %s the new one. "+
+			"Nothing was changed: run `aqt sync` in the folder to re-seal it under your current account key, then revoke again", email, id, err, email)
 	}
 	if err != nil {
 		// The rotate+revoke is one PUT, but a lost response leaves its outcome unknown:
 		// it may have committed. Do not claim it did not. Forward secrecy is safe either
-		// way — a committed write cut the grantee off, a failed one never rotated — but a
-		// committed-then-lost write can leave the surviving grantees split across two
-		// keys. `aqt unshare` re-rotates and re-wraps every remaining grant, so it
-		// reconciles them whatever happened here.
-		return fmt.Errorf("revoking %s failed (%w); the revoke may not have taken effect — run `aqt unshare %s` to rotate the key and bring the remaining shares onto it", email, err, id)
+		// way: a committed write cut the grantee off, a failed one never rotated. A
+		// committed-then-lost write leaves the remaining grantees on the old key, though,
+		// and no later rotation re-wraps them, since their signatures cover that key.
+		return fmt.Errorf("revoking %s failed (%w), and the server may have applied it anyway. "+
+			"Run `aqt unshare %s --with %s` again: if it finds no grant for them, the revoke went through, and `aqt share ls` marks each grant it did not re-wrap (unsigned); "+
+			"share each of those again with `aqt share %s --with <email>`", email, err, id, email, id)
 	}
 	defer newCK.Wipe()
-	// The same write that rotated the key dropped the grant, but re-wrap from a fresh
-	// list and skip the revoked handle anyway: a hostile server that ignored the delete
-	// and keeps listing it would otherwise get us to hand it a wrap of the NEW key,
-	// undoing the revocation the rotation just enforced.
-	rewrapGrants(cl, prof, id, keys, newCK, handle)
+	reportUnfollowed(id, append(plan.left, plan.rewrap(cl, prof, id, keys, newCK)...))
 	if app.json {
 		return printJSON(map[string]any{"id": id, "revoked": email, "rotated": true})
+	}
+	if res.Visibility == api.Public {
+		fmt.Printf("revoked %s from aqt://%s, made it private, and rotated the content key\n", email, id)
+		return nil
 	}
 	fmt.Printf("revoked %s from aqt://%s and rotated the content key\n", email, id)
 	return nil
@@ -641,7 +605,7 @@ func (app *application) runShare(idArg, password string, noClip bool, policy lin
 	return nil
 }
 
-func (app *application) runPrivate(idArg string) error {
+func (app *application) runPrivate(idArg string, yes bool) error {
 	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
@@ -666,10 +630,22 @@ func (app *application) runPrivate(idArg string) error {
 	if err := checkShareableFolder(keys.meta); err != nil {
 		return err
 	}
+	grants, err := cl.ListGrants(id)
+	if err != nil {
+		return fmt.Errorf("list the grants of aqt://%s to re-wrap them: %w", id, err)
+	}
+	plan, err := planRewrap(cl, prof, id, keys, grants, "")
+	if err != nil {
+		return err
+	}
+	fmt.Fprint(os.Stderr, plan.describe())
+	if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", keys.label(id)), yes); err != nil {
+		return err
+	}
 	newCK, err := rotateResourceKey(cl, id, res, keys.ck, keys.mk, keys.meta, "")
 	if errors.Is(err, errTreeRootDrift) {
 		// Killing the link must not depend on being able to re-seal the tree.
-		if visErr := revokeWithoutRotation(cl, id, res.Version, ""); visErr != nil {
+		if visErr := revokeWithoutRotation(cl, id, res.Version); visErr != nil {
 			return visErr
 		}
 		if app.json {
@@ -685,7 +661,7 @@ func (app *application) runPrivate(idArg string) error {
 		return err
 	}
 	defer newCK.Wipe()
-	rewrapGrants(cl, prof, id, keys, newCK, "")
+	reportUnfollowed(id, append(plan.left, plan.rewrap(cl, prof, id, keys, newCK)...))
 
 	if app.json {
 		return printJSON(map[string]any{"id": id, "ref": "aqt://" + id, "rotated": true})
@@ -699,30 +675,21 @@ func (app *application) runPrivate(idArg string) error {
 // from the account's current convergence key, so its root cannot be re-sealed. The
 // ordinary cause is `aqt passphrase rotate-root`: the convergence key derives from
 // the root key, so every node id a pre-rotation folder stored is unreachable until
-// the next sync re-seals the tree. Revocation must not depend on that having
-// happened — see revokeWithoutRotation.
+// the next sync re-seals the tree. Killing a link must not depend on that having
+// happened (see revokeWithoutRotation); revoking a grant does, since only a rotation
+// stops a later one from following the revoked grant.
 var errTreeRootDrift = errors.New("folder tree cannot be re-sealed under the current account key")
 
 // revokeWithoutRotation is the fallback when the content key cannot be rotated: flip
-// the resource private, which is what actually severs an unauthenticated link, then
-// drop the grant. It leaves anyone who saved the old fragment key able to decrypt
-// bytes they already fetched, so callers say so — but a link that still serves is
-// strictly worse, and refusing outright left one live.
-//
-// The flip goes first deliberately. These are two requests, not one, so either can be
-// the last to land; ending with the resource private and a stale grant row is
-// recoverable by re-running, whereas ending with the grant gone and the resource
-// still public would have handed everyone the access the command was asked to remove.
-func revokeWithoutRotation(cl *client.Client, id string, version int, revoke string) error {
-	if _, err := cl.SetVisibility(id, api.SetVisibilityRequest{
+// the resource private, which is what actually severs an unauthenticated link. It
+// leaves anyone who saved the old fragment key able to decrypt bytes they already
+// fetched, so callers say so, but a link that still serves is strictly worse, and
+// refusing outright left one live.
+func revokeWithoutRotation(cl *client.Client, id string, version int) error {
+	_, err := cl.SetVisibility(id, api.SetVisibilityRequest{
 		Visibility: api.Private, ExpectedVersion: version,
-	}); err != nil {
-		return err
-	}
-	if revoke == "" {
-		return nil
-	}
-	return cl.RevokeGrant(id, revoke)
+	})
+	return err
 }
 
 // fetchResource gets a resource by id, reporting a miss in terms of the id the caller
@@ -746,6 +713,14 @@ type resourceKeys struct {
 func (k *resourceKeys) close() {
 	k.ck.Wipe()
 	k.mk.Wipe()
+}
+
+// label names the resource the keys open the way a prompt shows it.
+func (k *resourceKeys) label(id string) string {
+	if k.meta.Name == "" {
+		return id
+	}
+	return fmt.Sprintf("%s (%s)", k.meta.Name, id)
 }
 
 // openResourceKeys unlocks the profile's master key and opens the resource under it —
@@ -794,70 +769,96 @@ func rotateResourceKey(cl *client.Client, id string, res api.GetResourceResponse
 	return rotateInline(cl, id, res, oldCK, mk, revoke)
 }
 
-// rewrapGrants re-wraps a just-rotated content key for the resource's surviving
-// grantees, so a rotation (privatize, or revoking someone else) does not silently
-// break them. Best effort: a grantee pinned on another device cannot be re-wrapped
-// here — warn, since only a device that has looked the grantee up holds their key.
+// rewrapPlan is who a rotation re-wraps the new key for, worked out before the key is
+// replaced so the owner sees it first. follow holds the grantees this account signed a
+// grant to over the key being replaced, pinned on this device with keys the server
+// still publishes; left holds every other listed grant, with why it is not followed.
 //
-// The server chooses which handles it lists, so only a grant this account signed over
-// the key being replaced (old.ck) is followed. Otherwise a hostile server could list
-// any pinned contact on any resource and have the new key handed to them; a signature
-// over an earlier key, such as one left on a grant revoked by an earlier rotation, does
-// not count either. A grant from before grants were signed is skipped the same way and
-// needs its owner to share it again.
-//
-// exclude is a grantee handle to never re-wrap, even if the server lists it: a revoke's
-// rotation drops the grant server-side, but its signature still covers the old key, so a
-// hostile server that ignores the delete and keeps returning the handle would otherwise
-// get us to hand it a wrap of the new key, undoing the revocation. Empty excludes nobody
-// (a plain privatize revokes no one).
-func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, old *resourceKeys, newCK crypto.ContentKey, exclude string) {
-	grants, err := cl.ListGrants(id)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot list grants to re-wrap them for the new key: %v\n", err)
-		fmt.Fprintf(os.Stderr, "warning: any grantee of %s now holds a wrap of the old key; re-run `aqt share %s --with <email>` for each\n", id, id)
-		return
-	}
-	if len(grants) == 0 {
-		return
-	}
+// The server chooses which grants it lists, so a signature over the replaced key is
+// what lets one through. Otherwise a hostile server could list any pinned contact on
+// any resource and have the new key handed to them. A signature over an earlier key
+// does not count either: that grant was revoked, or an earlier rotation could not
+// re-wrap it, and both cases are left for the owner to share again.
+type rewrapPlan struct {
+	follow []identity.Contact
+	left   []unfollowedGrant
+}
+
+// unfollowedGrant is a listed grant a rotation leaves on the old key, so that it stops
+// opening, and why.
+type unfollowedGrant struct{ grantee, reason string }
+
+// planRewrap sorts a resource's listed grants into the ones a rotation away from
+// old.ck re-wraps and the ones it leaves. exclude is a handle being revoked in the same
+// rotation, left out entirely. A grantee pinned on another device is left: only a
+// device that looked them up holds their key.
+func planRewrap(cl *client.Client, prof *identity.Profile, id string, old *resourceKeys, grants []api.GrantEntry, exclude string) (rewrapPlan, error) {
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: cannot load contacts to re-wrap grants: %v\n", err)
-		return
+		return rewrapPlan{}, fmt.Errorf("load contacts to re-wrap grants: %w", err)
 	}
 	byHandle := make(map[string]identity.Contact, len(pins))
 	for _, c := range pins {
 		byHandle[c.Handle] = c
 	}
-	signing := crypto.DeriveSigningKey(old.mk)
-	self := signing.Public().(ed25519.PublicKey)
+	self := crypto.DeriveSigningKey(old.mk).Public().(ed25519.PublicKey)
+	var plan rewrapPlan
 	for _, g := range grants {
 		if g.GranteeHandle == exclude {
 			continue
 		}
-		pin, ok := byHandle[g.GranteeHandle]
+		pin, pinned := byHandle[g.GranteeHandle]
+		label := foreignText(g.GranteeHandle)
+		if pinned {
+			label = pinnedLabel(pin.Email, crypto.KeyFingerprint(pin.PublicKey), pin.Verified)
+		}
 		if !crypto.VerifyGrant(self, g.Signature, old.ck, id, prof.OwnerHandle, g.GranteeHandle) {
-			label := foreignText(g.GranteeHandle)
-			if ok {
-				label = pin.Email
-			}
-			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant listed for %s: it carries no signature of yours over the replaced key, so it is a share from before grants were signed, one an earlier rotation left behind, or a row the server added; if you did share aqt://%s with them, share it again\n", label, id)
+			plan.left = append(plan.left, unfollowedGrant{label, "holds no grant you signed over the current key (made before grants were signed, left on an older key, or added by the server)"})
 			continue
 		}
-		if !ok {
-			fmt.Fprintf(os.Stderr, "warning: grant for %s cannot be re-wrapped from this device (no pinned contact); re-run `aqt share --with` where it was granted\n", g.GranteeHandle)
+		if !pinned {
+			plan.left = append(plan.left, unfollowedGrant{label, "not pinned on this device"})
 			continue
 		}
 		// Re-verify the pin against the server's current keys, exactly as a fresh
 		// share does. Wrapping to the stored pin blindly means a grantee who rotated
 		// their own root key gets their working wrap silently overwritten with a dead
 		// one by an unrelated revocation — permanently, since nothing re-checks later.
-		pin, err := confirmPinnedKeys(cl, prof.Name, pin)
+		current, err := confirmPinnedKeys(cl, prof.Name, pin)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant for %s: %v\n", pin.Email, err)
+			plan.left = append(plan.left, unfollowedGrant{label, err.Error()})
 			continue
 		}
+		plan.follow = append(plan.follow, current)
+	}
+	return plan, nil
+}
+
+// describe lists who the plan re-wraps the new key for and which grants it leaves, for
+// the owner to read before confirming the rotation.
+func (p rewrapPlan) describe() string {
+	var b strings.Builder
+	if len(p.follow) > 0 {
+		b.WriteString("the new key will be re-wrapped for:\n")
+		for _, c := range p.follow {
+			fmt.Fprintf(&b, "  %s\n", pinnedLabel(c.Email, crypto.KeyFingerprint(c.PublicKey), c.Verified))
+		}
+	}
+	if len(p.left) > 0 {
+		b.WriteString("these grants stay on the old key and stop opening:\n")
+		for _, g := range p.left {
+			fmt.Fprintf(&b, "  %s: %s\n", g.grantee, g.reason)
+		}
+	}
+	return b.String()
+}
+
+// rewrap wraps newCK to every grantee the plan follows and signs each grant over it,
+// returning the ones it could not write.
+func (p rewrapPlan) rewrap(cl *client.Client, prof *identity.Profile, id string, old *resourceKeys, newCK crypto.ContentKey) []unfollowedGrant {
+	signing := crypto.DeriveSigningKey(old.mk)
+	var failed []unfollowedGrant
+	for _, pin := range p.follow {
 		wrap, err := crypto.WrapGrant(newCK, pin.EncPublicKey, id, prof.OwnerHandle, pin.Handle)
 		if err == nil {
 			err = cl.CreateGrant(id, api.CreateGrantRequest{
@@ -867,9 +868,25 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, old *res
 			})
 		}
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: re-wrapping the grant for %s failed: %v\n", pin.Email, err)
+			label := pinnedLabel(pin.Email, crypto.KeyFingerprint(pin.PublicKey), pin.Verified)
+			failed = append(failed, unfollowedGrant{label, fmt.Sprintf("re-wrapping failed: %v", err)})
 		}
 	}
+	return failed
+}
+
+// reportUnfollowed names each grant a rotation left on the old key. Nothing re-wraps
+// one later: its signature covers the replaced key, so the next rotation does not
+// follow it either, and only sharing again puts its grantee on the new key.
+func reportUnfollowed(id string, left []unfollowedGrant) {
+	if len(left) == 0 {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: these grants on aqt://%s were not re-wrapped and no longer open it:\n", id)
+	for _, g := range left {
+		fmt.Fprintf(os.Stderr, "  %s: %s\n", g.grantee, g.reason)
+	}
+	fmt.Fprintf(os.Stderr, "no later rotation re-wraps them; for each you meant to keep, run `aqt share %s --with <email>`\n", id)
 }
 
 // resealed is a resource's root re-sealed under a fresh content key, plus the GC

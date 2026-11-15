@@ -95,7 +95,7 @@ func TestRotationDoesNotRewrapAGranteeTheServerAdded(t *testing.T) {
 	}
 	extra.Store(&listedGrantee{resourceID: private, entry: grants[0]})
 
-	if err := app.runPrivate(private); err != nil {
+	if err := app.runPrivate(private, true); err != nil {
 		t.Fatalf("rotate the never-shared resource: %v", err)
 	}
 	app.asProfile("bob", func() {
@@ -109,7 +109,7 @@ func TestRotationDoesNotRewrapAGranteeTheServerAdded(t *testing.T) {
 	})
 
 	extra.Store(nil)
-	if err := app.runPrivate(shared); err != nil {
+	if err := app.runPrivate(shared, true); err != nil {
 		t.Fatalf("rotate the shared resource: %v", err)
 	}
 	if got := app.pullAs(t, "bob", shared); got != "for bob" {
@@ -378,6 +378,149 @@ func TestVerifiedPinOnAServerChosenHandleAttributesNothing(t *testing.T) {
 			t.Fatalf("pulling mallory's share under alice's pin = %v, want a refusal", err)
 		}
 	})
+}
+
+// A revoke used to leave a public resource's key alone, deleting bob's grant row but
+// not the signature on it, which still covered the key the resource kept. It then told
+// the owner to run `aqt unshare <id>`, whose rotation re-wrapped every grant signed over
+// that key, so a server that kept listing the deleted row handed bob the new key. The
+// rotation also lists, before it runs, who it re-wraps and which grants it leaves.
+func TestRevokedGranteeIsNotRewrappedByALaterRotation(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var extra atomic.Pointer[listedGrantee]
+	h := app.newE2EWithProxy(t, listGrantee(&extra))
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	const content = "public, and granted to two accounts"
+	id := app.pushSecretFile(t, "public.txt", content)
+	captureStdout(t, func() {
+		if err := app.runShare(id, "", true, linkPolicy{}); err != nil {
+			t.Fatalf("make it public: %v", err)
+		}
+	})
+	for _, email := range []string{"bob@example.com", "carol@example.com"} {
+		if err := app.runShareWith(id, email); err != nil {
+			t.Fatalf("share --with %s: %v", email, err)
+		}
+	}
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobKeys, err := fetchAccountKeys(cl, "bob@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := cl.ListGrants(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bobGrant api.GrantEntry
+	for _, g := range grants {
+		if g.GranteeHandle == bobKeys.Handle {
+			bobGrant = g
+		}
+	}
+
+	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+		t.Fatalf("revoke bob: %v", err)
+	}
+	extra.Store(&listedGrantee{resourceID: id, entry: bobGrant})
+	listing := captureStderr(t, func() {
+		if err := app.runPrivate(id, true); err != nil {
+			t.Fatalf("rotate after the revoke: %v", err)
+		}
+	})
+	app.asProfile("bob", func() {
+		bobClient, _, err := app.authedClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bobClient.GetResource(id); !errors.Is(err, client.ErrNotFound) {
+			t.Fatalf("bob reading the resource after his revoke and a later rotation = %v, want ErrNotFound", err)
+		}
+	})
+	if got := app.pullAs(t, "carol", id); got != content {
+		t.Fatalf("carol pulled %q after both rotations", got)
+	}
+	rewrapped, left, _ := strings.Cut(listing, "these grants stay on the old key")
+	if !strings.Contains(rewrapped, "re-wrapped for:\n  carol@example.com (SHA256:") || !strings.Contains(left, "bob@example.com (SHA256:") {
+		t.Fatalf("the rotation should list carol as re-wrapped and bob as left behind:\n%s", listing)
+	}
+}
+
+// A folder whose tree predates a root-key rotation cannot rotate its key until it is
+// re-synced. Revoking a grant on it used to delete the row anyway and leave the grant
+// valid for the key a later rotation replaces; now it refuses and changes nothing, so
+// the same revoke runs again once the folder is re-sealed.
+func TestRevokeOnAFolderThatCannotRotateChangesNothing(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	id, _ := pushSharedFolder(t, h)
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+	withStdin(t, "correct horse battery staple\n")
+	if err := app.runRootKeyRotation(true); err != nil {
+		t.Fatalf("rotate the owner's root key: %v", err)
+	}
+	if err := app.runShareRevoke(id, "bob@example.com", true); err == nil || !strings.Contains(err.Error(), "aqt sync") {
+		t.Fatalf("revoke on a folder that cannot rotate = %v, want a refusal pointing at `aqt sync`", err)
+	}
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grants, err := cl.ListGrants(id); err != nil || len(grants) != 1 {
+		t.Fatalf("grants after the refused revoke = %+v (%v), want bob's left in place", grants, err)
+	}
+}
+
+// A grant whose re-wrap failed keeps a signature over the replaced key, so no later
+// rotation follows it. Each rotation names it with the reason, and sharing again is
+// what puts the grantee back on the current key.
+func TestRotationReportsGrantsItCouldNotRewrap(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var failGrants atomic.Bool
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if failGrants.Load() && r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/grants") {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		pass(w, r)
+	})
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	const content = "rotated twice"
+	id := app.pushSecretFile(t, "rewrap.txt", content)
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
+		t.Fatalf("share --with carol: %v", err)
+	}
+
+	failGrants.Store(true)
+	first := captureStderr(t, func() {
+		if err := app.runPrivate(id, true); err != nil {
+			t.Fatalf("rotate with the re-wrap failing: %v", err)
+		}
+	})
+	failGrants.Store(false)
+	second := captureStderr(t, func() {
+		if err := app.runPrivate(id, true); err != nil {
+			t.Fatalf("rotate again: %v", err)
+		}
+	})
+	for _, want := range []struct{ out, reason string }{{first, "re-wrapping failed"}, {second, "no grant you signed over the current key"}} {
+		_, report, _ := strings.Cut(want.out, "were not re-wrapped")
+		if !strings.Contains(report, "carol@example.com") || !strings.Contains(report, want.reason) || !strings.Contains(report, "aqt share "+id+" --with <email>") {
+			t.Fatalf("the rotation should report carol (%s) and how to share again:\n%s", want.reason, want.out)
+		}
+	}
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
+		t.Fatalf("share with carol again: %v", err)
+	}
+	if got := app.pullAs(t, "carol", id); got != content {
+		t.Fatalf("carol pulled %q after the re-share", got)
+	}
 }
 
 // grantRead is a grantee's read of one resource that a hostile server rewrites.
@@ -651,7 +794,7 @@ func TestRootRotationResignsOutgoingGrants(t *testing.T) {
 	if got := app.pullAs(t, "bob", id); got != content {
 		t.Fatalf("bob pulled %q after the owner's root rotation", got)
 	}
-	if err := app.runPrivate(id); err != nil {
+	if err := app.runPrivate(id, true); err != nil {
 		t.Fatalf("rotate the content key: %v", err)
 	}
 	if got := app.pullAs(t, "bob", id); got != content {

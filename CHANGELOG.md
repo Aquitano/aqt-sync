@@ -30,7 +30,14 @@ All notable changes to this project are documented in this file.
   resource that was never shared with them, and they received its key. Pin repair
   trusted the same listings to decide which resources to re-send. Both now follow
   only grants this account signed over the key being replaced, and repair lists the
-  resources it re-sends.
+  resources it re-sends. A revoke that left the key alone, on a public resource or a
+  folder awaiting a re-sync, kept the revoked grant valid for that key, so the `aqt
+  unshare` it recommended next re-wrapped to the revoked account. A revoke now always
+  rotates: on a public resource that also makes it private and kills its links, and a
+  folder that cannot rotate yet refuses the revoke until `aqt sync` re-seals it. Every
+  rotation lists the grantees it re-wraps and the grants it leaves before asking, and
+  afterwards names each grant it could not re-wrap. No later rotation repairs one of
+  those; `aqt share <id> --with <email>` does.
 - **A hostile server could forge a verified share.** Grant wraps use HPKE base mode,
   which authenticates no sender, and `aqt shares` took the sender from the owner
   handle the server reported. Anyone holding the recipient's public enc key could wrap

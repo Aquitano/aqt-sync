@@ -171,13 +171,29 @@ them. A grantee revoked by an earlier rotation is skipped the same way, since th
 grant's signature covers a key the rotation replaced; the revoke itself skips the
 revoked handle by name. Pin repair applies the same rule to the resources it
 re-sends. A grant stored before grants were signed fails the check too, so it is
-never re-wrapped; its owner shares it again to sign it.
+never re-wrapped; its owner shares it again to sign it. Before it rotates, `aqt
+unshare` lists the grantees it will re-wrap, named by their pins, and the listed
+grants it will leave behind, and asks on a terminal.
 
-One case is bounded rather than closed. A revoke that cannot rotate (the resource is
-public, or a folder that must be re-synced first) deletes the grant but leaves its
-signature valid for the current key, so a server that kept the row can list it again
-at the next `aqt unshare`, which then re-wraps to the revoked account. Both revokes
-already say that they did not rotate the key.
+Every revoke rotates the key, because deleting the grant row is not what stops a
+later rotation from following it; the signature over a replaced key is. A revoke that
+only deleted the row would leave its signature valid for the current key, and a
+server that kept the row could list it at the next rotation, from any of the owner's
+devices, which would re-wrap the new key to the revoked account. So a revoke on a
+public resource rotates too, which makes it private and kills its links: the
+grantee could read it through a link anyway. A folder that cannot rotate until it is
+re-synced (after `aqt passphrase rotate-root`) refuses the revoke and changes nothing.
+Only a resource with no owner key revokes without rotating: no device can rotate it,
+so no rotation can follow the grant either. The guarantee assumes the server serves
+the resource's current key. One that rolls a resource back to its key from before the
+revoke also brings back the signatures over that key, and a rotation from it would
+follow them.
+
+The same rule means no rotation repairs a grant an earlier one did not re-wrap,
+whether its re-wrap failed, its grantee is pinned only on another device, or a lost
+response left a revoke's outcome unknown: that grant's signature covers the key the
+earlier rotation replaced. Each rotation names every such grant and why, `aqt share
+ls` marks it `(unsigned)`, and sharing it again signs it over the current key.
 
 An expiring link is a different operation from revoking one. Expiry can either
 `reclaim` (destroy the content) or `retire` (take only the link down); a retired

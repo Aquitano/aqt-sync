@@ -115,6 +115,20 @@ release each landed in.
   because the contact's key never signs a grant under it. See
   [incoming shares](threat-model.md#incoming-shares-are-attacker-appendable).
 
+- **Every revoke rotates.** A revoked grant stops counting only once its signature
+  covers a replaced key, so a revoke that just deleted the row left it valid, and a
+  server that kept the row could have the next rotation re-wrap to the revoked account.
+  A record of revoked or authorized grantees, sealed under a key derived from the root
+  key and stored on the server, would have let a public resource keep its link and a
+  folder awaiting a re-sync drop the grant at once. But the server can serve an older
+  copy of that record as easily as it keeps a deleted row, while undoing a rotation
+  means rolling back the resource itself, and the record would need its own root-key
+  migration. Local state on the revoking device does not reach the owner's other
+  devices. So a revoke on a public resource rotates and makes it private, a folder that
+  cannot rotate refuses the revoke, and no rotation repairs a grant an earlier one left
+  behind: each rotation names those grants, and the owner shares them again. See
+  [what revocation guarantees](threat-model.md#what-revocation-actually-guarantees).
+
 - **A share from an unpinned owner asks before it opens.** A grant signed by the key
   the server reports for an owner nobody pinned is the server's word, so opening it
   silently let a server answer a pull with a share of its own under the id of one a

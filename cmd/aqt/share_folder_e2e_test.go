@@ -146,7 +146,7 @@ func TestPrivateRotatesFolderLink(t *testing.T) {
 		}
 	})
 
-	if err := app.runPrivate(id); err != nil {
+	if err := app.runPrivate(id, true); err != nil {
 		t.Fatalf("private: %v", err)
 	}
 	rootObjID := app.ownerTreeRootID(t, id)
