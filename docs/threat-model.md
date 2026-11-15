@@ -60,7 +60,9 @@ stale passphrase or a cached root key alone cannot re-attach after a change.
 `aqt passphrase rotate-root` is the compromise-recovery operation: it mints a fresh
 `RK`, re-wraps every recoverable resource and snapshot content key plus incoming
 grant, migrates the derived signing and encryption identities, re-signs the outgoing
-grants the old identity signed, and atomically switches the account record. A
+grants the old identity signed, and atomically switches the account record. The
+request names every outgoing grant, and the server refuses one that misses a grant
+created meanwhile, which would otherwise keep the retired identity's signature. A
 recipient who pinned the old identity key sees those grants as unsigned until they
 compare fingerprints and pin the new one. The server issues a fresh token only to the
 initiating device and removes every other device; they recover by logging in again

@@ -178,9 +178,11 @@ PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, auth
                                      authVerifier proves the current passphrase (403 otherwise) → 204.
 PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root key with every re-wrapped
                                      key and migrated identity, atomically, keeping only this device.
-                                     outgoingGrants re-signs the caller's grants under the new identity
-                                     key, each replacing the signature the client verified (409 if it
-                                     changed). Clears the recovery wrap, which holds the old root key.
+                                     outgoingGrants names every grant the caller made on a live resource
+                                     with an owner key exactly once, with the signature the client listed
+                                     (409 if one is missing or changed). An entry with a signature re-signs
+                                     that grant under the new identity key; one without keeps the stored
+                                     signature. Clears the recovery wrap, which holds the old root key.
 PUT    /v1/account/enc-key           Body: { encPublicKey, encKeySig, incomingGrants }. Moves an account
                                      that still publishes a pre-X-Wing enc key onto its X-Wing key: the
                                      binding must verify against the account's current identity key, and

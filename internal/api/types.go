@@ -307,7 +307,9 @@ type EncKeyUpgradeRequest struct {
 
 // GrantSignatureMigration re-signs one outgoing grant under the account's new
 // identity key during a root-key rotation. ExpectedSignature is the signature the
-// client verified under the old key, so a grant replaced concurrently keeps its own.
+// client listed, so a grant replaced concurrently keeps its own. An empty Signature
+// keeps the stored one: the client lists every outgoing grant, including those the old
+// identity did not sign over the current key, which it has no business re-signing.
 type GrantSignatureMigration struct {
 	ResourceID        string `json:"resourceId"`
 	GranteeHandle     string `json:"granteeHandle"`
@@ -318,10 +320,12 @@ type GrantSignatureMigration struct {
 // RootKeyRotationRequest atomically changes the account root key. Every owner
 // resource and snapshot that has a recoverable wrapped key, plus every incoming
 // grant, must be included so the old root is not needed after the account identity
-// switches. OutgoingGrants re-signs the grants the old identity signed; a grant it
-// leaves out keeps a signature recipients will no longer accept. The server stores
-// these values opaquely and verifies membership, resource versions, original grant
-// wraps and signatures, the current-passphrase proof, and the new public-key binding.
+// switches. OutgoingGrants names every grant the account made on those resources and
+// re-signs the ones the old identity signed; a grant it left out would keep a signature
+// recipients no longer accept, so the server refuses an incomplete set. The server
+// stores these values opaquely and verifies membership, resource versions, original
+// grant wraps and signatures, the current-passphrase proof, and the new public-key
+// binding.
 type RootKeyRotationRequest struct {
 	Kdf             crypto.KdfParams          `json:"kdf"`
 	WrappedRoot     crypto.SealedBlob         `json:"wrappedRoot"`

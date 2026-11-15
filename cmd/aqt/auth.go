@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -1077,7 +1078,7 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "account root key rotated; all other devices were revoked and must re-login")
-	if len(outgoing) > 0 {
+	if slices.ContainsFunc(outgoing, func(m api.GrantSignatureMigration) bool { return m.Signature != nil }) {
 		fmt.Fprintln(os.Stderr, "your shares are now signed by your new identity key: anyone who pinned your old one will see them as unsigned until they compare fingerprints and pin the new one")
 	}
 	fmt.Fprintln(os.Stderr, "any recovery key wrapped the old root key and no longer works; `aqt passphrase recovery-key` makes a new one")
@@ -1085,8 +1086,10 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 }
 
 // resignGrants re-signs a resource's grants under a new identity key for a root-key
-// rotation, keeping only the ones the old identity signed over ck; the rest were never
-// this account's to vouch for, and stay unsigned.
+// rotation. Only the ones the old identity signed over ck are re-signed; the rest were
+// never this account's to vouch for, and are listed with no new signature so the
+// server keeps theirs. Listing every grant lets the server refuse a rotation that
+// missed one created since, which would keep a signature recipients no longer accept.
 func resignGrants(cl *client.Client, r api.ResourceListItem, ck crypto.ContentKey, oldIdentity ed25519.PublicKey, signing ed25519.PrivateKey, handle string) ([]api.GrantSignatureMigration, error) {
 	if r.GrantCount == 0 || r.Reclaimed {
 		return nil, nil
@@ -1095,16 +1098,13 @@ func resignGrants(cl *client.Client, r api.ResourceListItem, ck crypto.ContentKe
 	if err != nil {
 		return nil, fmt.Errorf("list grants of %s: %w", r.ID, err)
 	}
-	var out []api.GrantSignatureMigration
+	out := make([]api.GrantSignatureMigration, 0, len(grants))
 	for _, g := range grants {
-		if !crypto.VerifyGrant(oldIdentity, g.Signature, ck, r.ID, handle, g.GranteeHandle) {
-			continue
+		m := api.GrantSignatureMigration{ResourceID: r.ID, GranteeHandle: g.GranteeHandle, ExpectedSignature: g.Signature}
+		if crypto.VerifyGrant(oldIdentity, g.Signature, ck, r.ID, handle, g.GranteeHandle) {
+			m.Signature = crypto.SignGrant(signing, ck, r.ID, handle, g.GranteeHandle)
 		}
-		out = append(out, api.GrantSignatureMigration{
-			ResourceID: r.ID, GranteeHandle: g.GranteeHandle,
-			Signature:         crypto.SignGrant(signing, ck, r.ID, handle, g.GranteeHandle),
-			ExpectedSignature: g.Signature,
-		})
+		out = append(out, m)
 	}
 	return out, nil
 }

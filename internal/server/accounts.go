@@ -484,26 +484,52 @@ func updateIncomingGrants(tx *sql.Tx, owner string, grants []api.GrantKeyMigrati
 	return err
 }
 
-// resignOutgoingGrants stores the owner's new-identity signatures on its grants. Each
-// must replace the signature the client verified under the old identity, so a grant
-// rewritten since the client listed it fails the rotation instead of taking a
-// signature over a content key it no longer carries.
+// resignOutgoingGrants stores the owner's new-identity signatures on its grants. grants
+// must name every grant the owner made on a live resource with an owner key exactly
+// once, as the incoming grants must, so a grant created since the client listed them
+// fails the rotation instead of keeping a signature under the identity it retires.
+// Each must carry the signature the client listed, so a grant rewritten since then
+// fails it too instead of taking a signature over a content key it no longer carries.
+// An entry with no new signature keeps the stored one: a grant the old identity never
+// signed over the current key is not the owner's to vouch for.
 func resignOutgoingGrants(tx *sql.Tx, owner string, grants []api.GrantSignatureMigration) error {
 	seen := map[string]bool{}
 	for _, m := range grants {
 		k := m.ResourceID + "\x00" + m.GranteeHandle
-		if m.ResourceID == "" || m.GranteeHandle == "" || len(m.Signature) != ed25519.SignatureSize || len(m.ExpectedSignature) == 0 || seen[k] {
+		resign := len(m.Signature) > 0
+		if m.ResourceID == "" || m.GranteeHandle == "" || seen[k] ||
+			resign && (len(m.Signature) != ed25519.SignatureSize || len(m.ExpectedSignature) == 0) {
 			return ErrVersionConflict
 		}
 		seen[k] = true
-		res, err := tx.Exec(`UPDATE grants SET signature = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ? AND signature = ?`,
-			m.Signature, m.ResourceID, owner, m.GranteeHandle, m.ExpectedSignature)
+		var current []byte
+		err := tx.QueryRow(`SELECT g.signature FROM grants g JOIN resources r ON r.id = g.resource_id
+			WHERE g.resource_id = ? AND g.owner_handle = ? AND g.grantee_handle = ? AND r.wrapped_key IS NOT NULL AND r.reclaimed = 0`,
+			m.ResourceID, owner, m.GranteeHandle).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrVersionConflict
+		}
 		if err != nil {
 			return err
 		}
-		if n, _ := res.RowsAffected(); n != 1 {
+		if !bytes.Equal(current, m.ExpectedSignature) {
 			return ErrVersionConflict
 		}
+		if !resign {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE grants SET signature = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
+			m.Signature, m.ResourceID, owner, m.GranteeHandle); err != nil {
+			return err
+		}
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM grants g JOIN resources r ON r.id = g.resource_id
+		WHERE g.owner_handle = ? AND r.wrapped_key IS NOT NULL AND r.reclaimed = 0`, owner).Scan(&n); err != nil {
+		return err
+	}
+	if n != len(grants) {
+		return ErrVersionConflict
 	}
 	return nil
 }
