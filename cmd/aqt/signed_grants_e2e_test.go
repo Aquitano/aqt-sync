@@ -637,6 +637,54 @@ func TestRotationReportsGrantsItCouldNotRewrap(t *testing.T) {
 	}
 }
 
+// A bare `aqt unshare` whose response is lost may still have rotated the key, and a
+// committed rotation that never got to re-wrap leaves carol on the old key. The error
+// must say so and how to get her back, rather than pass on the transport error.
+func TestUnshareWithALostResponseSaysHowToRecover(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var loseResponse atomic.Bool
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		if loseResponse.Load() && r.Method == http.MethodPut && r.URL.Path == "/v1/resources" {
+			pass(httptest.NewRecorder(), r)
+			w.WriteHeader(http.StatusBadGateway)
+			return
+		}
+		pass(w, r)
+	})
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	const content = "rotated without an answer"
+	id := app.pushSecretFile(t, "lost.txt", content)
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
+		t.Fatalf("share --with carol: %v", err)
+	}
+
+	loseResponse.Store(true)
+	err := app.runPrivate(id, true)
+	loseResponse.Store(false)
+	if err == nil {
+		t.Fatal("unshare reported success with its response lost")
+	}
+	for _, want := range []string{"may have applied it anyway", "`aqt unshare " + id + "` again", "`aqt share ls " + id + "`", "`aqt share " + id + " --with <email>`"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("unshare error = %v, want it to mention %s", err, want)
+		}
+	}
+	listing := captureStdout(t, func() {
+		if err := app.runShareList(id); err != nil {
+			t.Fatalf("share ls: %v", err)
+		}
+	})
+	if !strings.Contains(listing, "carol@example.com (unsigned)") {
+		t.Fatalf("share ls after the committed rotation should mark carol (unsigned):\n%s", listing)
+	}
+	if err := app.runShareWith(id, "carol@example.com"); err != nil {
+		t.Fatalf("share with carol again: %v", err)
+	}
+	if got := app.pullAs(t, "carol", id); got != content {
+		t.Fatalf("carol pulled %q after being shared with again", got)
+	}
+}
+
 // grantRead is a grantee's read of one resource that a hostile server rewrites.
 type grantRead struct {
 	resourceID string

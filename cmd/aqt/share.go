@@ -687,7 +687,11 @@ func (app *application) runPrivate(idArg string, yes bool) error {
 		return nil
 	}
 	if err != nil {
-		return err
+		// As in a revoke, a lost response leaves the rotation's outcome unknown, and a
+		// committed one left every grant on the old key, where no later rotation finds it.
+		return fmt.Errorf("rotating the key of aqt://%s failed (%w), and the server may have applied it anyway. "+
+			"Run `aqt unshare %s` again, which is safe either way. If the first rotation went through, it left its grants on the old key, and `aqt share ls %s` marks them (unsigned): "+
+			"share each one you meant to keep again with `aqt share %s --with <email>`", id, err, id, id, id)
 	}
 	defer newCK.Wipe()
 	reportUnfollowed(id, append(plan.left, plan.rewrap(cl, prof, id, keys, newCK)...))

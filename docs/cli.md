@@ -206,7 +206,9 @@ reports without one is refused, since the server never stores one that way.
 After the rotation, a warning names every grant that was not re-wrapped. No later
 rotation picks one up, since its signature covers the replaced key, and `aqt share
 ls` marks it `(unsigned)`; `aqt share <id> --with <email>` puts its grantee back on
-the current key.
+the current key. If the response to a rotation is lost, the error says it may have
+gone through anyway: running bare `aqt unshare <id>` again is safe either way, and
+`aqt share ls <id>` marks `(unsigned)` the grants a committed rotation left behind.
 
 The device that revokes a grant also records it locally, so its later rotations and
 pin repairs list that grantee as `revoked from this device` and never re-wrap for
