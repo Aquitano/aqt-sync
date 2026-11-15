@@ -98,16 +98,16 @@ const workflow = [
   {
     verb: "Recover",
     title: "Prove the restore works.",
-    body: "Clone on a clean machine or roll a tracked folder back to an anchored checkpoint.",
-    command: "aqt restore pre-release",
-    output: "restored ~/vault",
+    body: "Clone on a clean machine or restore a checkpoint beside the folder. Add --in-place to roll the folder back.",
+    command: "aqt restore pre-release --out ~/check",
+    output: 'restored "vault" (version 12) into ~/check',
   },
 ];
 
 const keyChain = [
   { term: "Passphrase", detail: "Your input." },
   { term: "Argon2id", detail: "Memory-hard KDF, calibrated on your device." },
-  { term: "Root key", detail: "Unlocked locally, never transmitted." },
+  { term: "Root key", detail: "Unlocked locally, stored only encrypted." },
   { term: "XChaCha20-Poly1305", detail: "Seals every resource with role-separated AADs." },
 ];
 
@@ -118,6 +118,7 @@ const specGroups = [
       { term: "Cipher", detail: "XChaCha20-Poly1305" },
       { term: "KDF", detail: "Argon2id" },
       { term: "Keys", detail: "Derived locally" },
+      { term: "Grants", detail: "X-Wing (ML-KEM-768 + X25519)" },
     ],
   },
   {
@@ -190,7 +191,7 @@ export default function Home() {
           <div className="manifesto-copy" data-reveal>
             <h2 id="manifesto-title">The storage provider is no longer a trusted party.</h2>
             <p>
-              aqt encrypts locally with XChaCha20-Poly1305. Your root key never leaves your device, and your server only coordinates opaque objects.
+              aqt encrypts locally with XChaCha20-Poly1305. Your root key reaches the server only in encrypted form, and the server only coordinates opaque objects.
             </p>
           </div>
           <div className="knowledge-grid" data-reveal>
@@ -237,7 +238,7 @@ export default function Home() {
               <p className="feature-label">aqt share</p>
               <div className="feature-screen" aria-hidden="true">
                 <p className="link-anatomy">
-                  <span>aqt.sh/x/9fK2qd</span>
+                  <span>aqt.example/x/9fK2qd</span>
                   <span className="link-fragment">#k.Hs7nT4</span>
                   <span className="screen-caption">expiry / burn / account grants</span>
                 </p>
@@ -371,7 +372,7 @@ export default function Home() {
               </div>
               <div className="security-proof">
                 <p>Share links place the content key in the browser fragment. It never appears in the HTTP request.</p>
-                <code>https://aqt.sh/x/9fK2qd<span>#k.Hs7nT4…</span></code>
+                <code>https://aqt.example/x/9fK2qd<span>#k.Hs7nT4…</span></code>
               </div>
             </div>
           </div>
