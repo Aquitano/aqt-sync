@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"time"
@@ -579,7 +580,7 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 	identity := ed25519.NewKeyFromSeed(stream("aqt-decoy-ed25519", ed25519.SeedSize))
 	encPub := crypto.DeriveEncKeyFromSeed(stream("aqt-decoy-xwing", crypto.KeySize)).Public()
 	return api.AccountKeysResponse{
-		Handle:       newIDFrom(stream("aqt-decoy-handle", 12)),
+		Handle:       newIDFrom(stream("aqt-decoy-handle", handleBytes)),
 		PublicKey:    identity.Public().(ed25519.PublicKey),
 		EncPublicKey: encPub,
 		EncKeySig:    crypto.SignEncKey(identity, encPub),
@@ -599,6 +600,10 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	// wrap, and it is enough to refuse anything but X-Wing.
 	if req.GranteeHandle == "" || len(req.WrappedKey) != crypto.GrantWrapSize {
 		abort(c, http.StatusBadRequest, "granteeHandle and an X-Wing wrappedKey are required")
+		return
+	}
+	if len(req.GranteeHandle) > maxHandleLen {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("granteeHandle exceeds %d bytes, longer than any account handle", maxHandleLen))
 		return
 	}
 	if req.GranteeHandle == owner {

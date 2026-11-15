@@ -36,6 +36,11 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- The server stored a grantee handle of any length up to the 32 MiB grant body but
+  charged quota a fixed 128 bytes per grant, so one account could store gigabytes
+  past its quota. A grant now refuses a handle longer than the 16 bytes every handle
+  has, and signup, attach, and recover refuse a device name over 255 bytes.
+
 - `aqt signup --server http://remote-host` sent the passphrase verifier over plain
   HTTP, created the account, and then refused to store the token, leaving an account
   this device could not use. It now refuses before sending anything.

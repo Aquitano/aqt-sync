@@ -123,7 +123,8 @@ GET    /v1/devices                   List the account's attached devices (owner 
                                      → { devices: [{ id, name }], nextCursor? }
                                      The server never marks a device; `current` is a client-side
                                      annotation the CLI adds for its own device. Names are
-                                     client-supplied labels, not secrets.
+                                     client-supplied labels, not secrets, of at most 255 bytes:
+                                     signup, attach, and recover answer a longer one with 400.
 DELETE /v1/devices/:id               Revoke a device.
 DELETE /v1/account                   Erase the account and everything under it. Body: { authVerifier }
                                      — the passphrase proof, so a device token alone cannot destroy an
@@ -214,7 +215,8 @@ GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, e
                                      PUT /v1/account/enc-key only moves a pre-X-Wing account onto X-Wing.
 POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs?, expectedVersion?,
                                      granteeEmail?, granteeEncPublicKey? }; wrappedKey
-                                     is exactly 1168 bytes (X-Wing encapsulation + sealed key), else 400. Upsert
+                                     is exactly 1168 bytes (X-Wing encapsulation + sealed key), and
+                                     granteeHandle at most 16 bytes (a minted handle's length), else 400. Upsert
                                      (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
                                      like the visibility flip above, for the same reason. No grantee-
                                      existence check (decoy handles must be accepted indistinguishably).
