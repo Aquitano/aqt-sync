@@ -36,6 +36,14 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Behind a reverse proxy, one client could lock everyone out of login.** Rate
+  limits keyed on the TCP peer, which is the proxy, so all clients shared one
+  bucket. A peer listed in `AQT_TRUSTED_PROXIES` now has its clients keyed by the
+  right-most untrusted `X-Forwarded-For` hop. The share page honors
+  `X-Forwarded-Proto` only from a trusted proxy too. nginx setups need
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  ([deploy.md](docs/deploy.md#3-reverse-proxy)).
+
 - `aqt signup --server http://remote-host` sent the passphrase verifier over plain
   HTTP, created the account, and then refused to store the token, leaving an account
   this device could not use. It now refuses before sending anything.

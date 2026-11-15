@@ -4,7 +4,6 @@ package server
 
 import (
 	"math"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -158,15 +157,11 @@ func abortRateLimited(c *gin.Context, wait time.Duration) {
 func deviceKey(c *gin.Context) string { return c.GetString(deviceContextKey) }
 func ownerKey(c *gin.Context) string  { return c.GetString(ownerContextKey) }
 
-// clientKey is the rate-limit bucket key: the TCP peer address, not a forwarded
-// header. The header is client-controlled and would let an attacker mint a fresh
-// bucket per request; the peer cannot be spoofed over an established TCP
-// connection. Behind a trusted reverse proxy this would instead read the proxy's
-// forwarded client header (with trusted-proxy config).
+// clientKey is the rate-limit bucket key: the client address gin resolves from the
+// TCP peer and, only when that peer is a trusted proxy, the right-most untrusted hop
+// of X-Forwarded-For (see Router). Behind a proxy the peer is the proxy itself, so
+// keying on it would put every client in one bucket; a client-supplied hop left of
+// the proxy's own entry is never read, so a spoofed header cannot mint fresh buckets.
 func clientKey(c *gin.Context) string {
-	host, _, err := net.SplitHostPort(c.Request.RemoteAddr)
-	if err != nil {
-		return c.Request.RemoteAddr
-	}
-	return host
+	return c.ClientIP()
 }

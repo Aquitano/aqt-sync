@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -61,7 +62,8 @@ type Config struct {
 	MaxSnapshots int
 	MaxObjects   int
 	// TrustedProxies is passed to gin.SetTrustedProxies, but only when set through
-	// WithTrustedProxies: the CIDRs/hosts whose X-Forwarded-* headers are believed.
+	// WithTrustedProxies: the CIDRs/hosts whose X-Forwarded-* headers are believed,
+	// both for the share-page scheme and for the client address rate limits key on.
 	// Left unset (the zero value), gin's own default — which trusts every proxy —
 	// applies, so the binary always sets it; an explicit empty slice trusts none
 	// (RemoteAddr is used verbatim).
@@ -132,6 +134,32 @@ func (c Config) WithTrustedProxies(proxies []string) Config {
 	c.TrustedProxies = proxies
 	c.trustedProxiesSet = true
 	return c
+}
+
+// trustsPeer reports whether a request from remoteIP may set X-Forwarded-*, by
+// the same rule gin.SetTrustedProxies applies to X-Forwarded-For (gin does not
+// expose its own check).
+func (c Config) trustsPeer(remoteIP string) bool {
+	if !c.trustedProxiesSet {
+		return true
+	}
+	ip, err := netip.ParseAddr(remoteIP)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, proxy := range c.TrustedProxies {
+		if addr, err := netip.ParseAddr(proxy); err == nil {
+			if addr.Unmap() == ip {
+				return true
+			}
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(proxy); err == nil && prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // inviteAccepted reports whether token matches a configured invite secret, in
@@ -228,8 +256,10 @@ func (s *Server) Router() *gin.Engine {
 	// Trust only the configured reverse proxies for X-Forwarded-*. Without a call to
 	// SetTrustedProxies gin trusts every proxy, so an attacker could spoof
 	// X-Forwarded-Proto/For; the aqt-server binary always sets a list (loopback when
-	// AQT_TRUSTED_PROXIES is unset). The rate-limit bucket key deliberately stays on the
-	// TCP peer regardless. An explicit empty list trusts none.
+	// AQT_TRUSTED_PROXIES is unset). An explicit empty list trusts none. Only
+	// X-Forwarded-For names the client: X-Real-IP is not appended hop by hop, so a
+	// proxy that passes the client's copy through would let it pick its own bucket.
+	r.RemoteIPHeaders = []string{"X-Forwarded-For"}
 	if s.cfg.trustedProxiesSet {
 		if err := r.SetTrustedProxies(s.cfg.TrustedProxies); err != nil {
 			log.Printf("trusted proxies: %v", err)

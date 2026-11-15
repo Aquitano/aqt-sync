@@ -102,9 +102,14 @@ Notes:
   ```
   Clients pass the token with `aqt signup --invite <token>` or `AQT_INVITE_TOKEN`,
   or type it when signup asks for it.
-- **Trusted proxies.** Behind a reverse proxy, set `AQT_TRUSTED_PROXIES` to the
-  proxy's address/CIDR so the share-page URL honors `X-Forwarded-Proto`. The
-  rate-limit bucket keys on the real TCP peer regardless, so this is display-only.
+- **Trusted proxies.** Behind a reverse proxy, `AQT_TRUSTED_PROXIES` must cover the
+  proxy's address/CIDR (the loopback default already covers a proxy on the same
+  host). Rate limits then key on the client the proxy names in `X-Forwarded-For`
+  (the right-most hop outside the trusted list, so a value the client sent itself
+  is ignored), and the share-page URL honors `X-Forwarded-Proto`. If the proxy is
+  not trusted, every client behind it shares one rate-limit bucket, and one busy
+  client can lock everyone out of login. The proxy must set `X-Forwarded-For`;
+  `X-Real-IP` is not read.
 - <a id="source-offer"></a>**Source offer.** aqt is AGPL-3.0-or-later. The share page
   links to the upstream repository, which is accurate for a stock release. If you run
   a patched build that anyone else can reach, publish that build's source and point
@@ -173,13 +178,15 @@ aqt.example.com {
 (The committed `deploy/Caddyfile` targets the compose service `aqt-server:8080`
 instead; see [Docker](#docker).)
 
-Run the server with `AQT_ADDR=127.0.0.1:8080` and set
-`AQT_TRUSTED_PROXIES` to the proxy's address. An equivalent nginx location:
+Run the server with `AQT_ADDR=127.0.0.1:8080`. A proxy on the same host is
+trusted by default; for one elsewhere, set `AQT_TRUSTED_PROXIES` to its address.
+Caddy sets `X-Forwarded-For` on its own. An equivalent nginx location:
 
 ```
 location / {
     proxy_pass http://127.0.0.1:8080;
     proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     proxy_set_header X-Forwarded-Proto $scheme;
     client_max_body_size 64m;   # resource blobs / packs can reach ~32-64 MiB
 }
@@ -256,7 +263,8 @@ docker compose up -d
 
 The Compose stack deliberately refuses to start without all three values. Edit the
 `Caddyfile` hostname and set `AQT_TRUSTED_PROXIES` to the compose network subnet
-before exposing it.
+before exposing it; otherwise every client shares the Caddy container's rate-limit
+bucket.
 
 ## Backup and restore
 
