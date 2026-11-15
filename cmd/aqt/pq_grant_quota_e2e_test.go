@@ -100,9 +100,9 @@ func TestGrantMigrationAllowsOwnerKeyRotationOverQuota(t *testing.T) {
 				t.Fatalf("re-share over quota: %v", err)
 			}
 			if operation == "unshare" {
-				err = app.runPrivate(id, true)
+				err = app.runPrivate(id, true, false)
 			} else {
-				err = app.runShareRevoke(id, bob.Email, true)
+				err = app.runShareRevoke(id, bob.Email, true, false)
 			}
 			if err != nil {
 				t.Fatalf("%s after recipient migration: %v", operation, err)

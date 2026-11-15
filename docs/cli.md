@@ -220,6 +220,11 @@ revoke and changes nothing; run `aqt sync` in it, then revoke again. Only a publ
 resource with no owner key revokes without rotating; a private resource the server
 reports without one is refused, since the server never stores one that way.
 
+`--dry-run` prints the same list on stdout, after a line saying what else the
+rotation does (a public resource goes private and its links stop working), and
+changes nothing. `aqt tui` runs it first when you revoke a grant or make a resource
+private, and asks over its output before running the command with `--yes`.
+
 After the rotation, a warning names every grant that was not re-wrapped. No later
 rotation picks one up, since its signature covers the replaced key, and `aqt share
 ls` marks it `(unsigned)`; `aqt share <id> --with <email>` puts its grantee back on

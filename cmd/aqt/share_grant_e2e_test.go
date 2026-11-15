@@ -246,7 +246,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		}
 	})
 
-	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "bob@example.com", true, false); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 
@@ -268,7 +268,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 	})
 
 	// Revoking a second time reports the missing grant instead of succeeding.
-	if err := app.runShareRevoke(id, "bob@example.com", true); err == nil || !strings.Contains(err.Error(), "no grant") {
+	if err := app.runShareRevoke(id, "bob@example.com", true, false); err == nil || !strings.Contains(err.Error(), "no grant") {
 		t.Fatalf("second revoke: got %v, want a no-grant error", err)
 	}
 }
@@ -347,7 +347,7 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 		}
 	})
 
-	if err := app.runShareRevoke(id, "carol@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com", true, false); err != nil {
 		t.Fatalf("revoke carol: %v", err)
 	}
 
@@ -491,7 +491,7 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 	}
 
 	failRotation.Store(true)
-	err = app.runShareRevoke(id, "carol@example.com", true)
+	err = app.runShareRevoke(id, "carol@example.com", true, false)
 	if err == nil {
 		t.Fatal("revoke reported success while the key rotation was failing")
 	}
@@ -513,7 +513,7 @@ func TestRevokeRetriesAfterFailedRotation(t *testing.T) {
 
 	// The recovery the error points at actually works.
 	failRotation.Store(false)
-	if err := app.runShareRevoke(id, "carol@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com", true, false); err != nil {
 		t.Fatalf("re-run after a failed rotation: %v", err)
 	}
 	grants, err = cl.ListGrants(id)
@@ -852,7 +852,7 @@ func TestRevokeDoesNotRewrapRevokedGranteeAgainstHostileServer(t *testing.T) {
 	revoked.Store(carolKeys.Handle) // from here the "server" keeps listing carol
 	recording.Store(true)           // and from here we watch which re-wraps the client emits
 
-	if err := app.runShareRevoke(id, "carol@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "carol@example.com", true, false); err != nil {
 		t.Fatalf("revoke carol: %v", err)
 	}
 

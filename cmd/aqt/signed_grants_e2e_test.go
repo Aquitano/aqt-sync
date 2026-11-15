@@ -99,7 +99,7 @@ func TestRotationDoesNotRewrapAGranteeTheServerAdded(t *testing.T) {
 	}
 	extra.Store(&listedGrantee{resourceID: private, entry: grants[0]})
 
-	if err := app.runPrivate(private, true); err != nil {
+	if err := app.runPrivate(private, true, false); err != nil {
 		t.Fatalf("rotate the never-shared resource: %v", err)
 	}
 	app.asProfile("bob", func() {
@@ -113,7 +113,7 @@ func TestRotationDoesNotRewrapAGranteeTheServerAdded(t *testing.T) {
 	})
 
 	extra.Store(nil)
-	if err := app.runPrivate(shared, true); err != nil {
+	if err := app.runPrivate(shared, true, false); err != nil {
 		t.Fatalf("rotate the shared resource: %v", err)
 	}
 	if got := app.pullAs(t, "bob", shared); got != "for bob" {
@@ -426,12 +426,12 @@ func TestRevokedGranteeIsNotRewrappedByALaterRotation(t *testing.T) {
 		}
 	}
 
-	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "bob@example.com", true, false); err != nil {
 		t.Fatalf("revoke bob: %v", err)
 	}
 	extra.Store(&listedGrantee{resourceID: id, entry: bobGrant})
 	listing := captureStderr(t, func() {
-		if err := app.runPrivate(id, true); err != nil {
+		if err := app.runPrivate(id, true, false); err != nil {
 			t.Fatalf("rotate after the revoke: %v", err)
 		}
 	})
@@ -485,7 +485,7 @@ func TestRevokedGranteeIsNotRewrappedWhenTheServerRollsTheKeyBack(t *testing.T) 
 	if err != nil || len(grants) != 1 {
 		t.Fatalf("grants before the revoke = %+v (%v)", grants, err)
 	}
-	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "bob@example.com", true, false); err != nil {
 		t.Fatalf("revoke bob: %v", err)
 	}
 
@@ -496,7 +496,7 @@ func TestRevokedGranteeIsNotRewrappedWhenTheServerRollsTheKeyBack(t *testing.T) 
 	}})
 	extra.Store(&listedGrantee{resourceID: id, entry: grants[0]})
 	listing := captureStderr(t, func() {
-		if err := app.runPrivate(id, true); err != nil {
+		if err := app.runPrivate(id, true, false); err != nil {
 			t.Fatalf("rotate from the rolled-back key: %v", err)
 		}
 	})
@@ -518,7 +518,7 @@ func TestRevokedGranteeIsNotRewrappedWhenTheServerRollsTheKeyBack(t *testing.T) 
 	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("share with bob again: %v", err)
 	}
-	if err := app.runPrivate(id, true); err != nil {
+	if err := app.runPrivate(id, true, false); err != nil {
 		t.Fatalf("rotate after sharing with bob again: %v", err)
 	}
 	if got := app.pullAs(t, "bob", id); got != content {
@@ -541,7 +541,7 @@ func TestRevokeRefusesAPrivateResourceReportedWithoutAnOwnerKey(t *testing.T) {
 	}
 
 	dropKey.Store(&grantRead{resourceID: id, rewrite: func(res *api.GetResourceResponse) { res.WrappedKey = nil }})
-	err := app.runShareRevoke(id, "bob@example.com", true)
+	err := app.runShareRevoke(id, "bob@example.com", true, false)
 	dropKey.Store(nil)
 	if err == nil || !strings.Contains(err.Error(), "was not revoked") {
 		t.Fatalf("revoke with the owner key dropped from the read = %v, want a refusal", err)
@@ -553,7 +553,7 @@ func TestRevokeRefusesAPrivateResourceReportedWithoutAnOwnerKey(t *testing.T) {
 	if grants, err := cl.ListGrants(id); err != nil || len(grants) != 1 {
 		t.Fatalf("grants after the refused revoke = %+v (%v), want bob's left in place", grants, err)
 	}
-	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+	if err := app.runShareRevoke(id, "bob@example.com", true, false); err != nil {
 		t.Fatalf("revoke again with the owner key served: %v", err)
 	}
 	app.asProfile("bob", func() {
@@ -565,6 +565,58 @@ func TestRevokeRefusesAPrivateResourceReportedWithoutAnOwnerKey(t *testing.T) {
 			t.Fatalf("bob reading the resource after the revoke = %v, want ErrNotFound", err)
 		}
 	})
+}
+
+// The TUI confirms a revoke over what `aqt unshare --dry-run` prints, so the dry run
+// has to say everything the revoke would do, and do none of it.
+func TestUnshareDryRunPrintsThePlanAndChangesNothing(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "carol@example.com", "carol", "carol horse battery staple")
+	id := app.pushSecretFile(t, "public.txt", "public, and granted to two accounts")
+	captureStdout(t, func() {
+		if err := app.runShare(id, "", true, linkPolicy{}); err != nil {
+			t.Fatalf("make it public: %v", err)
+		}
+	})
+	for _, email := range []string{"bob@example.com", "carol@example.com"} {
+		if err := app.runShareWith(id, email); err != nil {
+			t.Fatalf("share --with %s: %v", email, err)
+		}
+	}
+	cl, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	plan := captureStdout(t, func() {
+		if err := app.runShareRevoke(id, "bob@example.com", false, true); err != nil {
+			t.Fatalf("revoke --dry-run: %v", err)
+		}
+	})
+	if !strings.Contains(plan, "makes it private") || !strings.Contains(plan, "re-wrapped for:\n  carol@example.com (SHA256:") || strings.Contains(plan, "  bob@example.com") {
+		t.Fatalf("the dry run should say the revoke makes it private and re-wraps only carol:\n%s", plan)
+	}
+	after, err := cl.GetResource(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	grants, err := cl.ListGrants(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revoked, err := identity.LoadRevokedGrants(prof.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Version != before.Version || after.Visibility != api.Public || len(grants) != 2 || len(revoked) != 0 {
+		t.Fatalf("the dry run changed something: version %d→%d, %s, %d grants, revoked %+v", before.Version, after.Version, after.Visibility, len(grants), revoked)
+	}
 }
 
 // A folder whose tree predates a root-key rotation cannot rotate its key until it is
@@ -583,7 +635,7 @@ func TestRevokeOnAFolderThatCannotRotateChangesNothing(t *testing.T) {
 	if err := app.runRootKeyRotation(true); err != nil {
 		t.Fatalf("rotate the owner's root key: %v", err)
 	}
-	if err := app.runShareRevoke(id, "bob@example.com", true); err == nil || !strings.Contains(err.Error(), "aqt sync") {
+	if err := app.runShareRevoke(id, "bob@example.com", true, false); err == nil || !strings.Contains(err.Error(), "aqt sync") {
 		t.Fatalf("revoke on a folder that cannot rotate = %v, want a refusal pointing at `aqt sync`", err)
 	}
 	cl, _, err := app.authedClient()
@@ -617,13 +669,13 @@ func TestRotationReportsGrantsItCouldNotRewrap(t *testing.T) {
 
 	failGrants.Store(true)
 	first := captureStderr(t, func() {
-		if err := app.runPrivate(id, true); err != nil {
+		if err := app.runPrivate(id, true, false); err != nil {
 			t.Fatalf("rotate with the re-wrap failing: %v", err)
 		}
 	})
 	failGrants.Store(false)
 	second := captureStderr(t, func() {
-		if err := app.runPrivate(id, true); err != nil {
+		if err := app.runPrivate(id, true, false); err != nil {
 			t.Fatalf("rotate again: %v", err)
 		}
 	})
@@ -663,7 +715,7 @@ func TestUnshareWithALostResponseSaysHowToRecover(t *testing.T) {
 	}
 
 	loseResponse.Store(true)
-	err := app.runPrivate(id, true)
+	err := app.runPrivate(id, true, false)
 	loseResponse.Store(false)
 	if err == nil {
 		t.Fatal("unshare reported success with its response lost")
@@ -1212,7 +1264,7 @@ func TestRootRotationResignsOutgoingGrants(t *testing.T) {
 	if got := app.pullAs(t, "bob", id); got != content {
 		t.Fatalf("bob pulled %q after the owner's root rotation", got)
 	}
-	if err := app.runPrivate(id, true); err != nil {
+	if err := app.runPrivate(id, true, false); err != nil {
 		t.Fatalf("rotate the content key: %v", err)
 	}
 	if got := app.pullAs(t, "bob", id); got != content {

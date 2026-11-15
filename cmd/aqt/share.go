@@ -228,8 +228,9 @@ func linkPolicySummary(it api.ResourceListItem) string {
 
 func (app *application) unshareCmd() *cobra.Command {
 	var (
-		with string
-		yes  bool
+		with   string
+		yes    bool
+		dryRun bool
 	)
 	cmd := &cobra.Command{
 		Use:   "unshare <name-or-id|tracked-path>",
@@ -239,20 +240,27 @@ func (app *application) unshareCmd() *cobra.Command {
 			"revokes that account's grant instead, and rotates the key the same way, so the\n" +
 			"revoked wrap opens nothing that changes from here on. Either way it lists the\n" +
 			"grantees the new key is re-wrapped for, and the grants it leaves behind, before\n" +
-			"asking.",
+			"asking. --dry-run prints that, and what else the rotation does, on stdout and\n" +
+			"changes nothing.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if err := requireConfirmable(yes); err != nil {
-				return err
+			if dryRun && app.json {
+				return errors.New("--dry-run prints a plan for a person to read and has no --json form")
+			}
+			if !dryRun {
+				if err := requireConfirmable(yes); err != nil {
+					return err
+				}
 			}
 			if with != "" {
-				return app.runShareRevoke(args[0], with, yes)
+				return app.runShareRevoke(args[0], with, yes, dryRun)
 			}
-			return app.runPrivate(args[0], yes)
+			return app.runPrivate(args[0], yes, dryRun)
 		},
 	}
 	cmd.Flags().StringVar(&with, "with", "", "revoke this account's grant (by email) instead of the public link")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "skip the confirmation prompt")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print what the rotation would do, and to whom, without changing anything")
 	markJSONSupported(cmd)
 	return cmd
 }
@@ -405,7 +413,7 @@ func regrantOwned(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey
 // first and then failing to delete leaves the revoked account listed as a grantee holding
 // a stale wrap, and the next rotation's re-wrap hands it the new key. Together, they
 // either both land or neither does, and a failure is a clean no-op the user can re-run.
-func (app *application) runShareRevoke(idArg, email string, yes bool) error {
+func (app *application) runShareRevoke(idArg, email string, yes, dryRun bool) error {
 	email = api.NormalizeEmail(email)
 	cl, prof, err := app.authedClient()
 	if err != nil {
@@ -454,6 +462,10 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 			return fmt.Errorf("the server reports no owner key for the private resource aqt://%s, which it never stores, so %s was not revoked: "+
 				"deleting the grant without rotating the key would leave it valid for a later rotation to follow. Run the revoke again; if this persists, the server is misreporting the resource", id, email)
 		}
+		if dryRun {
+			fmt.Printf("revoking %s from aqt://%s deletes the grant without rotating the key, since it has no owner key; it is public, so anyone with its link, them included, can still read it\n", email, id)
+			return nil
+		}
 		if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to aqt://%s? It has no owner key, so its key cannot be rotated. [y/N] ", email, id), yes); err != nil {
 			return err
 		}
@@ -478,6 +490,14 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 	plan, err := planRewrap(cl, prof, id, keys, grants, handle)
 	if err != nil {
 		return err
+	}
+	if dryRun {
+		consequence := fmt.Sprintf("revoking %s's access to %s rotates its key", email, keys.label(id))
+		if res.Visibility == api.Public {
+			consequence += " and makes it private: every link ever issued for it stops working"
+		}
+		fmt.Print(consequence + "\n" + plan.describe())
+		return nil
 	}
 	fmt.Fprint(os.Stderr, plan.describe())
 	question := fmt.Sprintf("Revoke %s's access to %s and rotate its key? [y/N] ", email, keys.label(id))
@@ -636,7 +656,7 @@ func (app *application) runShare(idArg, password string, noClip bool, policy lin
 	return nil
 }
 
-func (app *application) runPrivate(idArg string, yes bool) error {
+func (app *application) runPrivate(idArg string, yes, dryRun bool) error {
 	cl, prof, err := app.authedClient()
 	if err != nil {
 		return err
@@ -668,6 +688,10 @@ func (app *application) runPrivate(idArg string, yes bool) error {
 	plan, err := planRewrap(cl, prof, id, keys, grants, "")
 	if err != nil {
 		return err
+	}
+	if dryRun {
+		fmt.Printf("making %s private rotates its key: every link ever issued for it stops working\n%s", keys.label(id), plan.describe())
+		return nil
 	}
 	fmt.Fprint(os.Stderr, plan.describe())
 	if err := confirmDestructive(fmt.Sprintf("Make %s private and rotate its key? Every link ever issued for it stops working. [y/N] ", keys.label(id)), yes); err != nil {

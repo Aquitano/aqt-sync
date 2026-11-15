@@ -970,7 +970,7 @@ func (m *tuiModel) resourcesActions() []tuiMenuOption {
 		opts = append(opts, tuiMenuOption{key: "c", label: "clone into a new directory…", dialog: resourceCloneDialog(*res, false)}, tuiMenuOption{key: "C", label: "clone and adopt an existing directory…", dialog: resourceCloneDialog(*res, true)})
 	}
 	if res.Visibility == string(api.Public) {
-		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", dialog: m.makePrivateDialog(*res)})
+		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", cmd: makePrivateCmd(*res)})
 	}
 	opts = append(opts,
 		tuiMenuOption{key: "x", label: "delete (keep snapshots)", dialog: m.deleteResourceDialog(*res)},
@@ -1008,14 +1008,6 @@ func (m *tuiModel) shareDialog(res lsRow) tuiDialog {
 				return tuiRequestExecStdin(pw+"\n", "share", id, "--password-stdin")
 			})},
 	}}
-}
-
-func (m *tuiModel) makePrivateDialog(res lsRow) tuiDialog {
-	return &tuiConfirm{
-		title:   "Make private",
-		body:    fmt.Sprintf("Rotate %q's content key? Existing share links stop working.", res.Name),
-		confirm: tuiRequestExec("unshare", res.ID, "-y"),
-	}
 }
 
 func (m *tuiModel) deleteResourceDialog(res lsRow) tuiDialog {

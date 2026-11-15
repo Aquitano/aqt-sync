@@ -192,6 +192,58 @@ func TestTUIIssue92ResourceActions(t *testing.T) {
 	}
 }
 
+// A revoke from the TUI rotates the key, which on a public resource also makes it
+// private, and re-wraps it for some grantees and not others. The CLI decides all of
+// that, so the confirmation has to show the plan its dry run printed, and only a dry
+// run that succeeded may lead to the real revoke.
+func TestTUIRevokeConfirmsTheDryRunPlan(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	m := app.testModel(t)
+	m.setFocus(tuiPanelResources)
+	m.panels[tuiPanelResources].list.move(1)
+	res := *m.selectedResource()
+
+	revoke := func(exit int, plan ...string) *tuiConfirm {
+		t.Helper()
+		in := revokeGrantDialog(res).(*tuiInput)
+		in.input.SetValue("bob@example.com")
+		cmd, _ := in.Update(key("enter"))
+		req := cmd().(tuiExecRequestMsg)
+		if got := strings.Join(req.sub, " "); got != "unshare r2 --with bob@example.com --dry-run" {
+			t.Fatalf("the revoke starts with %q, want its dry run", got)
+		}
+		m.Update(req)
+		for _, line := range plan {
+			m.Update(tuiExecOutMsg{line: line})
+		}
+		_, done := m.Update(tuiExecDoneMsg{exit: exit})
+		for _, cmd := range done().(tea.BatchMsg) {
+			if opened, ok := cmd().(tuiOpenDialogMsg); ok {
+				return opened.dialog.(*tuiConfirm)
+			}
+		}
+		return nil
+	}
+	plan := []string{
+		"revoking bob@example.com's access to deploy.log (r2) rotates its key and makes it private: every link ever issued for it stops working",
+		"the new key will be re-wrapped for:",
+		"  carol@example.com (SHA256:abc)",
+	}
+	confirm := revoke(0, plan...)
+	if confirm == nil {
+		t.Fatal("a successful dry run opened no confirmation")
+	}
+	if confirm.body != strings.Join(plan, "\n") {
+		t.Fatalf("the confirmation shows %q, want the dry run's plan", confirm.body)
+	}
+	if got := strings.Join(tuiRequestArgs(t, confirm.confirm), " "); got != "unshare r2 --with bob@example.com --yes" {
+		t.Fatalf("confirming runs %q", got)
+	}
+	if revoke(1, "error: no grant for bob@example.com on aqt://r2") != nil {
+		t.Fatal("a failed dry run opened a confirmation")
+	}
+}
+
 func TestTUIIssue92SnapshotActions(t *testing.T) {
 	app := &application{ctx: context.Background()}
 	m := app.testModel(t)
