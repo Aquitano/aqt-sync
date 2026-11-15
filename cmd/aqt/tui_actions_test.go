@@ -245,7 +245,7 @@ func TestTUIIssue92AccountMenu(t *testing.T) {
 		t.Fatalf("clone args = %q", got)
 	}
 
-	adopt := tuiCloneDestinationDialog("aqt://folder", true).(*tuiInput)
+	adopt := tuiCloneDestinationDialog("aqt://folder", true, tuiRequestExec).(*tuiInput)
 	adopt.input.SetValue("/tmp/existing")
 	cmd, _ = adopt.Update(key("enter"))
 	if got := strings.Join(tuiRequestArgs(t, cmd), " "); got != "clone aqt://folder /tmp/existing --adopt" {

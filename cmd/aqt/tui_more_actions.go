@@ -21,7 +21,7 @@ func (m *tuiModel) pullDialog(res lsRow) tuiDialog {
 }
 
 func resourceCloneDialog(res lsRow, adopt bool) tuiDialog {
-	return tuiCloneDestinationDialog("aqt://"+res.ID, adopt)
+	return tuiCloneDestinationDialog("aqt://"+res.ID, adopt, tuiRequestExec)
 }
 
 func shareExpiryDialog(res lsRow) tuiDialog {

@@ -64,7 +64,7 @@ type application struct {
 	json     bool
 	quiet    bool
 	progress bool
-	pinOwner bool
+	pinOwner string
 	ctx      context.Context
 }
 

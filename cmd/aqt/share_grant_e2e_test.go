@@ -81,11 +81,12 @@ func (app *application) asProfile(name string, fn func()) {
 	fn()
 }
 
-// asGrantee is asProfile for a recipient reading its shares with --yes, so a read
-// through a grant pins an owner it has not pinned instead of asking.
+// asGrantee is asProfile for a recipient on a terminal who answers yes when a read
+// through a grant asks to pin an owner it has not pinned.
 func (app *application) asGrantee(name string, fn func()) {
-	app.pinOwner = true
-	defer func() { app.pinOwner = false }()
+	orig := confirmOwnerPin
+	confirmOwnerPin = func(string) error { return nil }
+	defer func() { confirmOwnerPin = orig }()
 	app.asProfile(name, fn)
 }
 

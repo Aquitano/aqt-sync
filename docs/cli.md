@@ -33,8 +33,11 @@ accepting it and behaving identically:
 
 Every prompt has a flag that answers it ahead of time, so a scripted run neither
 blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive
-confirmation or for pinning the owner of a share on first use, `--git/--no-git` for whether `aqt init` syncs a git repository inside
-the folder, and `-P/--password` with a value instead of the bare form that prompts.
+confirmation, `--pin-owner <fingerprint>` for opening a share from an owner not yet
+pinned, `--git/--no-git` for whether `aqt init` syncs a git repository inside the
+folder, and `-P/--password` with a value instead of the bare form that prompts. `-y`
+never decides whom to trust: the commands that read through a grant do not take it,
+and `--pin-owner` names the identity key it accepts.
 
 Everyday resource arguments accept a unique name, an id, or a tracked path:
 `info`, `pull`, `cat`, `clone`, `ls <folder>`, `rm`, `mv`, `share`, and `unshare`
@@ -153,9 +156,14 @@ mention shares that arrived since, on stderr.
 from what the server returns for the read itself, and print it on stderr as
 `aqt://<id> is shared by <sender>`. They refuse an `unsigned` grant. A `claimed` one
 opens only once its owner is pinned: on a terminal they show the claimed email,
-handle, and fingerprint and pin on yes; without one they refuse and say how to pin,
-unless `-y/--yes` pins it on first use. A claim on an email pinned to another key is
-refused either way.
+handle, and fingerprint and pin on yes; without one they refuse and say how to pin.
+`--pin-owner <fingerprint>` pins the owner without asking, but only if their identity
+key has that fingerprint (with or without the `SHA256:` prefix, as `aqt contacts pin
+--fingerprint` takes it), and opens the share. Either way the pin is first-use, not
+verified; `aqt contacts pin <email> --fingerprint <fp>` beforehand records a verified
+one. A claim on an email pinned to another key is refused either way. In `aqt tui`, a
+clone refused this way shows the same claim and, on confirm, runs again with
+`--pin-owner` naming the fingerprint it showed.
 
 Anyone with an account on the server can add a row here, so the recipient can remove
 one:

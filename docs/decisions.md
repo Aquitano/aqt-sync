@@ -136,8 +136,10 @@ release each landed in.
   silently let a server answer a pull with a share of its own under the id of one a
   verified contact made. Refusing it outright would make every first share unusable
   until the recipient ran `aqt contacts pin`. So `pull`, `clone`, and `info` show the
-  claim and pin on a yes, and take `--yes`, the flag every other confirmation uses,
-  for a run without a terminal.
+  claim and pin on a yes. A run without a terminal passes `--pin-owner <fingerprint>`
+  rather than `--yes`: everywhere else `-y` only skips a prompt, so a script that adds
+  it by habit would pin whatever key the server reports, while the fingerprint makes
+  the script state which key it trusts.
 
 ## Server exposure
 

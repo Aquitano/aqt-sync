@@ -261,9 +261,9 @@ noise:
   answer a pull of a share `aqt shares` named as a verified contact's with that one
   under the same id. So it opens only once its owner is pinned: on a terminal after
   showing the claimed email, handle, and fingerprint, and without one only with
-  `--yes`. Either way that is a first-use pin, checked against the keys the server
-  publishes for the claimed email. A claim on an email already pinned to another key
-  is refused outright. The Git remote helper never reads through a grant: Git remotes
+  `--pin-owner` naming that fingerprint. Either way that is a first-use pin, checked
+  against the keys the server publishes for the claimed email. A claim on an email
+  already pinned to another key is refused outright. The Git remote helper never reads through a grant: Git remotes
   cannot be granted, and it opens only remotes the account owns.
 
 A block is the one place a grant write distinguishes a real account from a decoy, and

@@ -55,10 +55,13 @@ All notable changes to this project are documented in this file.
   valid signature. They also print the sender the way `aqt shares` does, and open a
   share signed by the key the server reports for an owner you have not pinned only
   once you pin that owner: on a terminal after seeing the claimed email, handle, and
-  fingerprint, or with `--yes`. Before, the server could answer a pull of a verified
-  contact's share with one of its own under the same id, and it opened without a word.
-  A script that reads from a sender it has not pinned now needs `--yes`, or a pin made
-  beforehand with `aqt contacts pin`. A verified pin to which the server attached the
+  fingerprint, or with `--pin-owner <fingerprint>` naming that owner's identity key.
+  Before, the server could answer a pull of a verified contact's share with one of its
+  own under the same id, and it opened without a word. A script that reads from a
+  sender it has not pinned now needs `--pin-owner`, or a pin made beforehand with `aqt
+  contacts pin`; `-y` is not accepted there, since it would pin whatever key the server
+  reports. In `aqt tui`, a clone refused for an unpinned owner shows the claim and runs
+  again with `--pin-owner` on confirm. A verified pin to which the server attached the
   wrong handle names nothing, for the same reason, and neither does a pinned key that
   signed under a handle its pin does not hold.
 

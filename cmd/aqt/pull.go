@@ -69,10 +69,12 @@ func (app *application) catCmd() *cobra.Command {
 	return cmd
 }
 
-// bindPinOwner adds --yes to a command that can read through a grant, accepting the
-// question openGrant asks before it opens a share from an owner nobody pinned.
+// bindPinOwner adds --pin-owner to a command that can read through a grant. It answers
+// the question openGrant asks before it opens a share from an owner nobody pinned, but
+// only for the identity key it names, so a script states which key it trusts. -y would
+// trust whatever key the server reports.
 func (app *application) bindPinOwner(cmd *cobra.Command) {
-	cmd.Flags().BoolVarP(&app.pinOwner, "yes", "y", false, "open a share from an owner you have not pinned, pinning them on first use, without asking")
+	cmd.Flags().StringVar(&app.pinOwner, "pin-owner", "", "open a share from an owner you have not pinned if their identity key has this fingerprint, pinning them on first use")
 }
 
 func (app *application) runPull(ref, out, password string, toStdout, force bool) error {
@@ -214,20 +216,12 @@ func (app *application) contentKeyWithMaster(cl *client.Client, res api.GetResou
 // of their choosing, and the server can list it under any owner. A grant without a
 // signature from the key it is attributed to is refused. One signed by the key the
 // server reports for an owner nobody pinned opens only once that owner is pinned
-// (askPinOwner); pinOwner pins them without asking.
-func openGrant(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterKey, prof *identity.Profile, pinOwner bool) (crypto.ContentKey, error) {
-	ck, err := crypto.UnwrapGrant(res.GrantKey, mk, res.ID, res.Owner, prof.OwnerHandle)
+// (askPinOwner); pinOwner, a fingerprint, pins them without asking if it matches.
+func openGrant(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterKey, prof *identity.Profile, pinOwner string) (crypto.ContentKey, error) {
+	ck, a, row, err := grantSender(res, mk, prof)
 	if err != nil {
-		return ck, err
-	}
-	pins, err := identity.LoadContacts(prof.Name)
-	if err != nil {
-		ck.Wipe()
 		return crypto.ContentKey{}, err
 	}
-	a := attributeGrant(pins, res.Owner, res.OwnerPublicKey, res.GrantSig, ck, res.ID, prof.OwnerHandle)
-	row := shareRow{Ref: "aqt://" + foreignText(res.ID), From: foreignText(res.Owner), Attribution: attributionUnknown}
-	row.attribute(a, res.OwnerEmail, res.OwnerPublicKey)
 	switch {
 	case a.signed && a.pin != nil:
 	case a.signed:
@@ -243,6 +237,32 @@ func openGrant(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterK
 	}
 	fmt.Fprintf(os.Stderr, "%s is shared by %s\n", row.Ref, row.sender())
 	return ck, nil
+}
+
+// grantSender unwraps a grant read's content key and works out who the grant names as
+// its sender, the way `aqt shares` does. The caller wipes the key.
+func grantSender(res api.GetResourceResponse, mk crypto.MasterKey, prof *identity.Profile) (crypto.ContentKey, grantAttribution, shareRow, error) {
+	ck, err := crypto.UnwrapGrant(res.GrantKey, mk, res.ID, res.Owner, prof.OwnerHandle)
+	if err != nil {
+		return crypto.ContentKey{}, grantAttribution{}, shareRow{}, err
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		ck.Wipe()
+		return crypto.ContentKey{}, grantAttribution{}, shareRow{}, err
+	}
+	a := attributeGrant(pins, res.Owner, res.OwnerPublicKey, res.GrantSig, ck, res.ID, prof.OwnerHandle)
+	row := shareRow{Ref: "aqt://" + foreignText(res.ID), From: foreignText(res.Owner), Attribution: attributionUnknown}
+	row.attribute(a, res.OwnerEmail, res.OwnerPublicKey)
+	return ck, a, row, nil
+}
+
+// unpinnedOwnerNotice shows the claim a share from an unpinned owner rests on, before
+// anyone is asked to pin that owner.
+func unpinnedOwnerNotice(row shareRow) string {
+	return fmt.Sprintf("%s is shared by an account you have not pinned:\n  claims    %s\n  handle    %s\n  identity  %s\n"+
+		"signup does not verify emails, and the server reports all three; compare %s with %s over a separate channel before trusting it.\n",
+		row.Ref, row.ClaimedEmail, row.From, row.ClaimedFingerprint, row.ClaimedFingerprint, row.ClaimedEmail)
 }
 
 func unsignedGrantError(ref string, a grantAttribution) error {
@@ -264,15 +284,16 @@ func unsignedGrantError(ref string, a grantAttribution) error {
 // confirmOwnerPin asks before a share from an owner nobody pinned is opened and that
 // owner pinned; cliutil.ErrNotConfirmable means no terminal can answer. A variable so
 // tests can answer for one.
-var confirmOwnerPin = confirmDestructive
+var confirmOwnerPin = func(prompt string) error { return confirmDestructive(prompt, false) }
 
 // askPinOwner settles a grant signed by the key the server reports for an owner this
 // account has not pinned. That key and the email beside it are the server's word: a
 // server can wrap a key of its own to this account and sign it with a key it made up,
 // so the grant opens only once the user pins that owner, on a terminal after seeing the
-// claim and its fingerprint, or up front with --yes. Either way it is the first-use pin
-// a share makes. A claim on an email already pinned to another account is refused.
-func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceResponse, row shareRow, assumeYes bool) (identity.Contact, error) {
+// claim and its fingerprint, or up front with --pin-owner naming that fingerprint.
+// Either way it is the first-use pin a share makes. A claim on an email already pinned
+// to another account is refused.
+func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceResponse, row shareRow, pinOwner string) (identity.Contact, error) {
 	if row.Attribution != attributionClaimed {
 		return identity.Contact{}, fmt.Errorf("%s is shared by %s, and the server names no email for that account, so it cannot be pinned and was not opened", row.Ref, row.sender())
 	}
@@ -292,18 +313,22 @@ func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceR
 	if keys.Handle != res.Owner || !bytes.Equal(keys.PublicKey, res.OwnerPublicKey) {
 		return identity.Contact{}, fmt.Errorf("the server's keys for %s do not belong to the account that signed %s, so it was not opened and nothing was pinned", email, row.Ref)
 	}
-	prompt := fmt.Sprintf("%s is shared by an account you have not pinned:\n  claims    %s\n  handle    %s\n  identity  %s\n"+
-		"signup does not verify emails, and the server reports all three; compare %s with %s over a separate channel before trusting it.\n"+
-		"Pin %s and open it? [y/N] ", row.Ref, email, row.From, fp, fp, email, email)
-	switch err := confirmOwnerPin(prompt, assumeYes); {
-	case errors.Is(err, cliutil.ErrNotConfirmable):
-		return identity.Contact{}, fmt.Errorf("%s is shared by %s, an account you have not pinned, so it was not opened. "+
-			"Compare %s with them over a separate channel and run `aqt contacts pin %s --fingerprint <fingerprint>`, then try again; or pass --yes to pin them on first use",
-			row.Ref, row.sender(), fp, email)
-	case errors.Is(err, cliutil.ErrAborted):
-		return identity.Contact{}, fmt.Errorf("did not open %s; nothing was pinned", row.Ref)
-	case err != nil:
-		return identity.Contact{}, err
+	if pinOwner != "" {
+		if !fingerprintMatches(pinOwner, fp) {
+			return identity.Contact{}, fmt.Errorf("%s is shared by %s, whose identity key is not the %s that --pin-owner names, so it was not opened and nothing was pinned",
+				row.Ref, row.sender(), pinOwner)
+		}
+	} else {
+		switch err := confirmOwnerPin(unpinnedOwnerNotice(row) + fmt.Sprintf("Pin %s and open it? [y/N] ", email)); {
+		case errors.Is(err, cliutil.ErrNotConfirmable):
+			return identity.Contact{}, fmt.Errorf("%s is shared by %s, an account you have not pinned, so it was not opened. "+
+				"Compare %s with them over a separate channel, then pass --pin-owner <fingerprint>, or run `aqt contacts pin %s --fingerprint <fingerprint>` and try again",
+				row.Ref, row.sender(), fp, email)
+		case errors.Is(err, cliutil.ErrAborted):
+			return identity.Contact{}, fmt.Errorf("did not open %s; nothing was pinned", row.Ref)
+		case err != nil:
+			return identity.Contact{}, err
+		}
 	}
 	pin := pinFromKeys(email, keys, false)
 	pins[email] = pin

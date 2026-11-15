@@ -16,6 +16,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
+
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
 	"github.com/aquitano/aqt-sync/internal/cliutil"
@@ -850,7 +853,7 @@ func TestPullAsksBeforeOpeningAShareFromAnUnpinnedOwner(t *testing.T) {
 		var prompt string
 		answer := cliutil.ErrAborted
 		orig := confirmOwnerPin
-		confirmOwnerPin = func(p string, _ bool) error {
+		confirmOwnerPin = func(p string) error {
 			prompt = p
 			return answer
 		}
@@ -879,7 +882,7 @@ func TestPullAsksBeforeOpeningAShareFromAnUnpinnedOwner(t *testing.T) {
 			t.Fatalf("accepting pinned %+v, want mallory's keys, unverified", pin)
 		}
 
-		confirmOwnerPin = func(string, bool) error {
+		confirmOwnerPin = func(string) error {
 			t.Error("asked again about an owner already pinned")
 			return nil
 		}
@@ -895,6 +898,135 @@ func TestPullAsksBeforeOpeningAShareFromAnUnpinnedOwner(t *testing.T) {
 		sender := pinnedLabel("mallory@example.com", fp, false)
 		if !strings.Contains(stderr, "aqt://"+id+" is shared by "+sender) || !strings.Contains(shares, "from "+sender) {
 			t.Fatalf("pull and shares disagree on the sender %q:\npull: %s\nshares: %s", sender, stderr, shares)
+		}
+	})
+}
+
+// -y skips prompts everywhere else, so on the commands that read through a grant it
+// must not decide whom to trust. --pin-owner pins without a terminal, but only the
+// identity key it names.
+func TestPinOwnerOpensAShareOnlyForTheNamedKey(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "mallory@example.com", "mallory", "mallory horse battery staple")
+	for _, cmd := range []*cobra.Command{app.pullCmd(), app.catCmd(), app.cloneCmd(), app.infoCmd()} {
+		if cmd.Flags().Lookup("yes") != nil || cmd.Flags().ShorthandLookup("y") != nil {
+			t.Fatalf("`aqt %s` takes -y/--yes, which would pin whatever key the server reports", cmd.Name())
+		}
+	}
+	var id string
+	app.asProfile("mallory", func() {
+		id = app.pushSecretFile(t, "notes.txt", "from mallory")
+		if err := app.runShareWith(id, "bob@example.com"); err != nil {
+			t.Fatalf("mallory shares with bob: %v", err)
+		}
+	})
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	malloryKeys, err := fetchAccountKeys(cl, "mallory@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := crypto.KeyFingerprint(malloryKeys.PublicKey)
+
+	app.asProfile("bob", func() {
+		pull := func(pinOwner string) error {
+			app.pinOwner = pinOwner
+			defer func() { app.pinOwner = "" }()
+			var err error
+			captureStderr(t, func() { err = app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "notes.txt"), "", false, false) })
+			return err
+		}
+		pinned := func() bool {
+			_, prof, err := app.authedClient()
+			if err != nil {
+				t.Fatal(err)
+			}
+			pins, err := identity.LoadContacts(prof.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, ok := pins["mallory@example.com"]
+			return ok
+		}
+		if err := pull(""); err == nil || !strings.Contains(err.Error(), "--pin-owner <fingerprint>") {
+			t.Fatalf("pull without a terminal or --pin-owner = %v, want a refusal naming --pin-owner", err)
+		}
+		if err := pull("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"); err == nil || !strings.Contains(err.Error(), "not the") || pinned() {
+			t.Fatalf("pull with --pin-owner naming another key = %v (pinned: %v), want a refusal that pins nothing", err, pinned())
+		}
+		orig := confirmOwnerPin
+		confirmOwnerPin = func(string) error {
+			t.Error("--pin-owner asked anyway")
+			return nil
+		}
+		defer func() { confirmOwnerPin = orig }()
+		if err := pull(strings.TrimPrefix(fp, "SHA256:")); err != nil || !pinned() {
+			t.Fatalf("pull with --pin-owner naming mallory's key = %v (pinned: %v), want it opened and pinned", err, pinned())
+		}
+	})
+}
+
+// The TUI's child has no terminal, so a clone of a share from an unpinned owner fails.
+// The TUI then shows the claim itself and, on confirm, runs the clone again with
+// --pin-owner naming the key it showed.
+func TestTUIOffersToPinTheOwnerOfARefusedClone(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "mallory@example.com", "mallory", "mallory horse battery staple")
+	var id string
+	app.asProfile("mallory", func() {
+		id = app.pushSecretFile(t, "notes.txt", "from mallory")
+		if err := app.runShareWith(id, "bob@example.com"); err != nil {
+			t.Fatalf("mallory shares with bob: %v", err)
+		}
+	})
+	owned := app.pushSecretFile(t, "mine.txt", "alice's own")
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	malloryKeys, err := fetchAccountKeys(cl, "mallory@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := crypto.KeyFingerprint(malloryKeys.PublicKey)
+
+	afterClone := func(ref string, exit int) tea.Msg {
+		cl, prof, err := app.authedClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		mk, _ := identity.LoadSession(prof.Name)
+		ctx := &tuiCtx{app: app, prof: prof, cl: cl, mk: mk, unlocked: true}
+		req := ctx.execPinningOwner(ref)("clone", ref, "/tmp/clone")().(tuiExecRequestMsg)
+		if next := req.then(exit, nil); next != nil {
+			return next()
+		}
+		return nil
+	}
+	if msg := afterClone("aqt://"+owned, 1); msg != nil {
+		t.Fatalf("a failed clone of an owned resource opened %#v", msg)
+	}
+	app.asProfile("bob", func() {
+		if msg := afterClone("aqt://"+id, 0); msg != nil {
+			t.Fatalf("a clone that succeeded opened %#v", msg)
+		}
+		confirm, ok := afterClone("aqt://"+id, 1).(tuiOpenDialogMsg).dialog.(*tuiConfirm)
+		if !ok {
+			t.Fatal("a clone refused for an unpinned owner opened no confirmation")
+		}
+		for _, want := range []string{"mallory@example.com", malloryKeys.Handle, fp} {
+			if !strings.Contains(confirm.body, want) {
+				t.Fatalf("the confirmation does not show %q:\n%s", want, confirm.body)
+			}
+		}
+		if got := strings.Join(tuiRequestArgs(t, confirm.confirm), " "); got != "clone aqt://"+id+" /tmp/clone --pin-owner "+fp {
+			t.Fatalf("confirming runs %q", got)
 		}
 	})
 }

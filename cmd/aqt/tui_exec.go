@@ -34,11 +34,19 @@ type tuiExecRequestMsg struct {
 	// which is the whole point: an argv password is world-readable in ps for as long
 	// as the command runs.
 	stdin string
+	// then, when set, receives the action's exit code and output once it finishes,
+	// unless it was canceled, and returns the next step of a multi-step action.
+	then func(exit int, out []string) tea.Cmd
 }
 
 // tuiRequestExec is what action keys and dialogs resolve to.
 func tuiRequestExec(sub ...string) tea.Cmd {
 	return func() tea.Msg { return tuiExecRequestMsg{sub: sub} }
+}
+
+// tuiRequestExecThen is tuiRequestExec for the first step of a multi-step action.
+func tuiRequestExecThen(then func(exit int, out []string) tea.Cmd, sub ...string) tea.Cmd {
+	return func() tea.Msg { return tuiExecRequestMsg{sub: sub, then: then} }
 }
 
 // tuiRequestExecStdin is tuiRequestExec for an action whose secret must stay out of
