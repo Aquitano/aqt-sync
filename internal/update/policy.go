@@ -193,6 +193,17 @@ func (s Store) Save(st State) error {
 	return fsatomic.WriteFile(s.path(), append(b, '\n'), 0o600)
 }
 
+// Update re-reads the state, applies fn and saves the result, with the same
+// fresh-read discipline as RaiseCeiling. A load failure skips fn and the write.
+func (s Store) Update(fn func(*State)) error {
+	st, err := s.Load()
+	if err != nil {
+		return err
+	}
+	fn(&st)
+	return s.Save(st)
+}
+
 // SetPolicy persists a new policy, leaving the rest of the state alone.
 func (s Store) SetPolicy(p Policy) error {
 	st, err := s.Load()

@@ -65,6 +65,9 @@ All notable changes to this project are documented in this file.
 - `aqt update policy <mode> --json` printed prose. It now prints the state as JSON,
   like `aqt update policy --json`.
 
+- A background update check could undo an `aqt update policy` change made while it
+  ran. It now re-reads the state before saving.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries

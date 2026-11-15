@@ -5,6 +5,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -223,5 +225,35 @@ func TestBackgroundNotificationsRespectIntervalAndVersion(t *testing.T) {
 	checked, err := store.Load()
 	if err != nil || checked.LastCheckAt == st.LastCheckAt {
 		t.Fatalf("due check did not run: %+v, %v", checked, err)
+	}
+}
+
+// A policy change made while a background check is in flight survives the check's
+// own write of the state.
+func TestBackgroundCheckKeepsAConcurrentPolicyChange(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	store := withUpdateStore(t)
+	withTerminal(t, true)
+	withBuild(t, "v0.3.0", update.KindRelease)
+	if err := store.SetPolicy(update.PolicyNotify); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := store.SetPolicy(update.PolicyOff); err != nil {
+			t.Error(err)
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv(updateBaseURLEnv, srv.URL)
+
+	app.maybeBackgroundUpdate(subcommand(t, app.rootCmd(), "status"))
+
+	st, err := store.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Policy != update.PolicyOff || st.LastCheckAt == "" {
+		t.Fatalf("state after the check: %+v", st)
 	}
 }

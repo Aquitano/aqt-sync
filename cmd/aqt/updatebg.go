@@ -55,22 +55,22 @@ func (app *application) maybeBackgroundUpdate(cmd *cobra.Command) {
 		Roots:   updateTrustRoots(),
 		Floor:   st.Ceiling(update.ChannelStable),
 	})
-	// A failed check still counts as a check. Otherwise an unreachable network
-	// turns "once a day" into "on every command".
-	st.MarkChecked(time.Now())
-	// A version only reaches the result after full manifest authentication, so it
-	// raises the freshness ceiling. The background path never lowers it: accepting
-	// an upstream retraction is an explicit `aqt update --accept-rollback`.
-	if checkErr == nil && res.AvailableVersion != "" {
-		st.RaiseCeiling(update.ChannelStable, res.AvailableVersion)
-	}
-	if checkErr != nil || res.Status != update.StatusUpdateAvailable {
-		_ = store.Save(st)
-		return
-	}
-
-	notify(&st, res)
-	_ = store.Save(st)
+	// The check can take seconds, so the state loaded above may be stale by now;
+	// writing it back would undo a concurrent `aqt update policy`.
+	_ = store.Update(func(st *update.State) {
+		// A failed check still counts as a check. Otherwise an unreachable network
+		// turns "once a day" into "on every command".
+		st.MarkChecked(time.Now())
+		// A version only reaches the result after full manifest authentication, so it
+		// raises the freshness ceiling. The background path never lowers it: accepting
+		// an upstream retraction is an explicit `aqt update --accept-rollback`.
+		if checkErr == nil && res.AvailableVersion != "" {
+			st.RaiseCeiling(update.ChannelStable, res.AvailableVersion)
+		}
+		if checkErr == nil && res.Status == update.StatusUpdateAvailable {
+			notify(st, res)
+		}
+	})
 }
 
 // notify prints one line about an available release, once per version. Repeating
