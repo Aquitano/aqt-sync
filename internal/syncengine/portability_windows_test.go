@@ -103,3 +103,16 @@ func TestJunctionIsNeitherFollowedNorDeleted(t *testing.T) {
 		t.Fatalf("file landed outside the tracked root: %v", err)
 	}
 }
+
+// A backslash is a separator on Windows: a\b must be refused, not written as b
+// inside a new directory a.
+func TestSafeJoinRefusesBackslash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := WriteFile(dir, Entry{Path: `a\b`}, []byte("x")); err == nil {
+		t.Fatal("a backslash name must be refused")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "a")); !os.IsNotExist(err) {
+		t.Fatalf("a backslash name was split into a path: %v", err)
+	}
+}

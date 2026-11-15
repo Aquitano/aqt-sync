@@ -27,17 +27,32 @@ import (
 // accent name one file there, exactly as Notes.md and notes.md do.
 func FoldName(p string) string { return strings.ToLower(norm.NFC.String(p)) }
 
+// collisionKey is FoldName with each segment's trailing dots and spaces dropped,
+// because Win32 drops them too: notes and notes. are one file on Windows. It stays
+// out of FoldName, which also keys case-only renames on APFS, where the two are
+// distinct files.
+func collisionKey(p string) string {
+	segs := strings.Split(FoldName(p), "/")
+	for i, s := range segs {
+		if t := strings.TrimRight(s, ". "); t != "" {
+			segs[i] = t
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
 // CaseCollisions groups the manifest paths (files, symlinks, and directories)
-// that a case-insensitive filesystem would resolve to the same name (see FoldName).
+// that a case-insensitive filesystem would resolve to the same name (see FoldName),
+// including names Windows resolves alike after dropping trailing dots and spaces.
 // Groups and their members come back sorted, for stable messages.
 func CaseCollisions(entries []Entry, dirs []DirEntry) [][]string {
 	byFold := map[string][]string{}
 	for _, e := range entries {
-		k := FoldName(e.Path)
+		k := collisionKey(e.Path)
 		byFold[k] = append(byFold[k], e.Path)
 	}
 	for _, d := range dirs {
-		k := FoldName(d.Path)
+		k := collisionKey(d.Path)
 		byFold[k] = append(byFold[k], d.Path)
 	}
 	var groups [][]string
@@ -49,6 +64,25 @@ func CaseCollisions(entries []Entry, dirs []DirEntry) [][]string {
 	}
 	sort.Slice(groups, func(i, j int) bool { return groups[i][0] < groups[j][0] })
 	return groups
+}
+
+// BackslashPaths returns the manifest paths containing a backslash, sorted. Windows
+// reads one as a path separator, so a\b would land there as file b in directory a
+// and the next scan would delete a\b everywhere.
+func BackslashPaths(entries []Entry, dirs []DirEntry) []string {
+	var out []string
+	for _, e := range entries {
+		if strings.ContainsRune(e.Path, '\\') {
+			out = append(out, e.Path)
+		}
+	}
+	for _, d := range dirs {
+		if strings.ContainsRune(d.Path, '\\') {
+			out = append(out, d.Path)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // CaseInsensitiveDir reports whether the filesystem at dir folds case, probed by

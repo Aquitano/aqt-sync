@@ -65,6 +65,11 @@ All notable changes to this project are documented in this file.
   files everywhere. Pulls now refuse to write through a junction, and a scan reports
   it as skipped and keeps its last-synced contents.
 
+- `notes` and `notes.` synced from Linux landed on one file on Windows, and the next
+  sync lost one of them everywhere. Names that differ only by trailing dots or spaces
+  are now refused like case collisions. A Windows device also refuses names
+  containing a backslash, which it would otherwise write as nested paths.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries

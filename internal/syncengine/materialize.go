@@ -25,8 +25,12 @@ import (
 // root's own path, and one written there would replace the root with a symlink that
 // every later write, whose parent checks start below the root, resolves through. It
 // is purely lexical: it guards the entry's own final path, not intermediate
-// components that may be symlinks — refuseSymlinkParents covers those.
+// components that may be symlinks — refuseSymlinkParents covers those. On Windows
+// it refuses a backslash, which would otherwise split one name into nested paths.
 func safeJoin(dir, relPath string) (string, error) {
+	if filepath.Separator == '\\' && strings.ContainsRune(relPath, '\\') {
+		return "", fmt.Errorf("path %q contains a backslash, which Windows reads as a path separator", relPath)
+	}
 	full := filepath.Join(dir, filepath.FromSlash(relPath))
 	rel, err := filepath.Rel(dir, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
