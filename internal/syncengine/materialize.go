@@ -451,6 +451,9 @@ func RemoveFile(dir, relPath string) error {
 	if err != nil {
 		return err
 	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
+		return err
+	}
 	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {
 		return err
 	}
