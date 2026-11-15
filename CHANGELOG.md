@@ -57,6 +57,11 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- Signup and login reported a 5xx from the server or an exhausted rate limit as "does
+  not answer like an aqt server; check the URL" and exited 1. They now show the
+  server's error and its documented exit code, and keep that message for a response
+  that proves the URL is wrong.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
