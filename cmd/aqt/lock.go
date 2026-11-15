@@ -81,6 +81,8 @@ func acquirePIDFile(path string, busyMsg func(pid int) error) (release func(), e
 		pid, _ := readLockPID(path)
 		return nil, busyMsg(pid)
 	}
+	// Best effort: on Windows the region lock refuses this write from a second
+	// handle, and failing here would make the lock impossible to take there.
 	_ = os.WriteFile(path, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
 	// Unlock drops the lock. The file itself stays: removing it would reopen the
 	// unlink race (a waiter holding the old inode and a fresh creator would each
