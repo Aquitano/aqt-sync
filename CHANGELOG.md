@@ -57,6 +57,9 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- An `.aqtignore` saved with CRLF line endings ignored nothing, because every rule
+  kept its trailing `\r`. Rules now match as they do with LF endings.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
