@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -311,8 +312,9 @@ func TestLoadRuntimeRejectsInvalidAndNegativeDurations(t *testing.T) {
 	for _, value := range []string{"tomorrow", "-1s"} {
 		t.Run(value, func(t *testing.T) {
 			t.Setenv("AQT_SNAPSHOT_INTERVAL", value)
-			if _, err := loadRuntime(); err == nil {
-				t.Fatal("expected duration error")
+			_, err := loadRuntime()
+			if err == nil || !strings.Contains(err.Error(), "AQT_SNAPSHOT_INTERVAL") {
+				t.Fatalf("err = %v, want one naming AQT_SNAPSHOT_INTERVAL", err)
 			}
 		})
 	}

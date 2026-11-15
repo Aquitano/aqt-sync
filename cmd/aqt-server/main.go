@@ -117,12 +117,32 @@ type environment struct {
 // On error the result still holds every field that parsed; the admin commands
 // rely on that to tolerate an unrelated malformed variable.
 func loadEnvironment() (environment, error) {
-	return env.ParseAsWithOptions[environment](env.Options{
+	e, err := env.ParseAsWithOptions[environment](env.Options{
 		FuncMap: map[reflect.Type]env.ParserFunc{
 			// env parses int as 32-bit, which would reject quotas above 2^31.
 			reflect.TypeFor[int](): func(v string) (any, error) { return strconv.Atoi(v) },
 		},
 	})
+	return e, nameEnvVariables(err)
+}
+
+// nameEnvVariables rewrites each parse failure to name the variable the operator
+// set; the library names the Go field, which appears nowhere in their config.
+func nameEnvVariables(err error) error {
+	var agg env.AggregateError
+	if !errors.As(err, &agg) {
+		return err
+	}
+	for i, e := range agg.Errors {
+		var pe env.ParseError
+		if !errors.As(e, &pe) {
+			continue
+		}
+		if f, ok := reflect.TypeFor[environment]().FieldByName(pe.Name); ok {
+			agg.Errors[i] = fmt.Errorf("invalid %s: %w", f.Tag.Get("env"), pe.Err)
+		}
+	}
+	return agg
 }
 
 // runtimeConfig is everything a server run takes from the environment.
