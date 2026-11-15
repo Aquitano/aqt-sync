@@ -23,7 +23,8 @@ API layer, *before* any payload is served.
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities — nothing declares or enforces it |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
-| `5` (post-quantum grants) | unreleased | X-Wing (ML-KEM-768 + X25519) enc keys and grant wraps |
+| `5` (post-quantum grants) | v0.11.0 | X-Wing (ML-KEM-768 + X25519) enc keys and grant wraps |
+| `6` (signed grants) | unreleased | grants carrying the owner's Ed25519 signature |
 
 The release column names the first version a user could install. Root-key rotation
 appears under `v0.3.0` in the changelog, which was never tagged, and shipped in the
@@ -31,13 +32,18 @@ appears under `v0.3.0` in the changelog, which was never tagged, and shipped in 
 recorded as such in the changelog. Capability 3 therefore first reached clients in
 v0.4.1.
 
-`api.ClientCapability` is `5` today, and every request the deployment makes carries it.
+`api.ClientCapability` is `6` today, and every request the deployment makes carries it.
 Capability 5 gates the grant surface rather than a resource: signup and every route
-that hands out or accepts an enc key or a grant wrap, and a grantee's resource read,
-answer `426` below it, so a capability-4 client is told to upgrade instead of rejecting an X-Wing
-key as a bad binding or failing to open a wrap. An account that signed up before
-capability 5 is moved onto X-Wing by its next `aqt login`; until then key lookups
-serve it as a decoy, like an account with no key. Capability 4 is what the Git-remote
+that hands out or accepts an enc key or a grant wrap answer `426` below it, so a
+capability-4 client is told to upgrade instead of rejecting an X-Wing key as a bad
+binding or failing to open a wrap. An account that signed up before capability 5 is
+moved onto X-Wing by its next `aqt login`; until then key lookups serve it as a decoy,
+like an account with no key. Capability 6 gates the routes that write or hand out a
+grant: a grant write, the owner's grant listing, `GET /v1/shares`, a grantee's
+resource read, and root-key rotation. A capability-5 client would write a grant no
+recipient accepts, or list and re-wrap grants without checking who signed them.
+Grants stored before capability 6 carry no signature; no client opens or re-wraps
+one, and its owner signs it again by sharing it again. Capability 4 is what the Git-remote
 format needs: `aqt repo create` declares
 `minClient: 4`, so a client below it receives `426 Upgrade Required` before the server
 serves or overwrites a root it cannot interpret. Capability 3 is a historical rung —

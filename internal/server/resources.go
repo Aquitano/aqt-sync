@@ -378,17 +378,17 @@ func (s *Store) getResourceUncounted(id, requireOwner string) (api.GetResourceRe
 	// stays owner-scoped). The lookup runs for public resources too, so a grantee can
 	// decrypt without a link fragment; a private id without a grant stays ErrNotFound,
 	// indistinguishable from a missing one.
-	var grantKey []byte
+	var grant storedGrant
 	if !isOwner && requireOwner != "" {
-		w, ok, err := s.grantWrappedKey(id, requireOwner)
+		g, ok, err := s.grantFor(id, requireOwner)
 		if err != nil {
 			return out, false, err
 		}
 		if ok {
-			grantKey = w
+			grant = g
 		}
 	}
-	isGrantee := grantKey != nil
+	isGrantee := grant.wrapped != nil
 	if vis == api.Private && !isOwner && !isGrantee {
 		return out, false, ErrNotFound
 	}
@@ -447,10 +447,13 @@ func (s *Store) getResourceUncounted(id, requireOwner string) (api.GetResourceRe
 		out.WrappedKey = &wk
 	}
 	// A grantee gets the grant wrap instead, plus the owner handle its HPKE info
-	// binding needs (a wrong handle from a hostile server just fails the unwrap).
+	// binding needs (a wrong handle from a hostile server just fails the unwrap), and
+	// the owner's signature with the identity key to check it against.
 	if isGrantee {
-		out.GrantKey = grantKey
+		out.GrantKey = grant.wrapped
+		out.GrantSig = grant.signature
 		out.Owner = owner
+		out.OwnerPublicKey = grant.ownerPublicKey
 	}
 	return out, countRead, nil
 }
@@ -1061,11 +1064,11 @@ func (s *Server) handleGetResource(c *gin.Context) {
 	// client too old to open the sealed format gets an actionable 426 instead of the
 	// bytes and a downstream AEAD failure. This route is public, so the check lives
 	// here rather than in the authed middleware. It precedes the read count for the
-	// same reason the Accept check does. A grant wrap is a sealed format of its own,
-	// so a grantee also needs the capability that reads it.
+	// same reason the Accept check does. A grant is a format of its own, so a grantee
+	// also needs the capability that checks its signature before opening it.
 	need := res.MinClient
 	if res.GrantKey != nil {
-		need = max(need, api.CapabilityPQGrants)
+		need = max(need, api.CapabilitySignedGrants)
 	}
 	if capability := requestCapability(c); capability < need {
 		abortUpgradeRequired(c, need, capability)

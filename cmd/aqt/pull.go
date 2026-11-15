@@ -179,7 +179,7 @@ func (app *application) contentKeyWithMaster(res api.GetResourceResponse, fragme
 		if owned {
 			defer mk.Wipe()
 		}
-		return crypto.UnwrapGrant(res.GrantKey, mk, res.ID, res.Owner, prof.OwnerHandle)
+		return openGrant(res, mk, prof)
 	}
 	if res.WrappedKey == nil {
 		return crypto.ContentKey{}, errors.New("no decryption key: this looks like a public resource but the link had no #key")
@@ -195,6 +195,34 @@ func (app *application) contentKeyWithMaster(res api.GetResourceResponse, fragme
 		defer mk.Wipe()
 	}
 	return crypto.UnwrapKey(*res.WrappedKey, [crypto.KeySize]byte(mk))
+}
+
+// openGrant unwraps a grant read's content key and checks the owner's signature over
+// it. The wrap alone proves nothing about who made it: anyone with this account's
+// public enc key can wrap a key of their choosing, and the server can list it under
+// any owner. A grant without a signature from the key it is attributed to is refused.
+func openGrant(res api.GetResourceResponse, mk crypto.MasterKey, prof *identity.Profile) (crypto.ContentKey, error) {
+	ck, err := crypto.UnwrapGrant(res.GrantKey, mk, res.ID, res.Owner, prof.OwnerHandle)
+	if err != nil {
+		return ck, err
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		ck.Wipe()
+		return crypto.ContentKey{}, err
+	}
+	a := attributeGrant(pins, res.Owner, res.OwnerPublicKey, res.GrantSig, ck, res.ID, prof.OwnerHandle)
+	if a.signed {
+		return ck, nil
+	}
+	ck.Wipe()
+	if a.pin != nil {
+		return crypto.ContentKey{}, fmt.Errorf("aqt://%s is listed as shared by %s, but the key you pinned for them did not sign it, so it was not opened. "+
+			"They may have shared it before shares were signed (ask them to share it again) or rotated their account key (compare with `aqt contacts verify %s`); otherwise the server wrote it",
+			res.ID, a.pin.Email, a.pin.Email)
+	}
+	return crypto.ContentKey{}, fmt.Errorf("aqt://%s carries no valid signature from the account it is listed under, so it was not opened: "+
+		"it was shared before shares were signed (ask the owner to share it again), or the server wrote it", res.ID)
 }
 
 // borrowMaster returns the caller's already-unlocked master key when non-nil (owned is

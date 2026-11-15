@@ -362,6 +362,9 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 	if err := updateIncomingGrants(tx, owner, req.IncomingGrants); err != nil {
 		return fail(err)
 	}
+	if err := resignOutgoingGrants(tx, owner, req.OutgoingGrants); err != nil {
+		return fail(err)
+	}
 	newEpoch := epoch + 1
 	newVerifier := sha256.Sum256(req.NewAuthVerifier)
 	// The recovery wrap holds the root key this rotation retires, so it goes too.
@@ -479,6 +482,30 @@ func updateIncomingGrants(tx *sql.Tx, owner string, grants []api.GrantKeyMigrati
 	}
 	_, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND EXISTS (SELECT 1 FROM resources r WHERE r.id = grants.resource_id AND r.reclaimed = 1)`, owner)
 	return err
+}
+
+// resignOutgoingGrants stores the owner's new-identity signatures on its grants. Each
+// must replace the signature the client verified under the old identity, so a grant
+// rewritten since the client listed it fails the rotation instead of taking a
+// signature over a content key it no longer carries.
+func resignOutgoingGrants(tx *sql.Tx, owner string, grants []api.GrantSignatureMigration) error {
+	seen := map[string]bool{}
+	for _, m := range grants {
+		k := m.ResourceID + "\x00" + m.GranteeHandle
+		if m.ResourceID == "" || m.GranteeHandle == "" || len(m.Signature) != ed25519.SignatureSize || len(m.ExpectedSignature) == 0 || seen[k] {
+			return ErrVersionConflict
+		}
+		seen[k] = true
+		res, err := tx.Exec(`UPDATE grants SET signature = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ? AND signature = ?`,
+			m.Signature, m.ResourceID, owner, m.GranteeHandle, m.ExpectedSignature)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			return ErrVersionConflict
+		}
+	}
+	return nil
 }
 
 // ErrEncKeyBinding is returned when a published enc key is not signed by the

@@ -91,7 +91,7 @@ func (s *Store) PutGrant(owner, resourceID, grantee string, wrapped []byte, refs
 	if len(expectedVersions) > 0 {
 		version = expectedVersions[0]
 	}
-	return s.putGrant(owner, resourceID, grantee, wrapped, refs, version, nil)
+	return s.putGrant(owner, resourceID, grantee, wrapped, nil, refs, version, nil)
 }
 
 type grantTarget struct {
@@ -117,7 +117,7 @@ func (target *grantTarget) verify(tx *sql.Tx, grantee string) error {
 	return nil
 }
 
-func (s *Store) putGrant(owner, resourceID, grantee string, wrapped []byte, refs []string, expectedVersion int, target *grantTarget) error {
+func (s *Store) putGrant(owner, resourceID, grantee string, wrapped, signature []byte, refs []string, expectedVersion int, target *grantTarget) error {
 	defer s.resLocks.lock(resourceID)()
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -172,10 +172,10 @@ func (s *Store) putGrant(owner, resourceID, grantee string, wrapped []byte, refs
 		}
 	}
 	if _, err := tx.Exec(
-		`INSERT INTO grants(resource_id, owner_handle, grantee_handle, wrapped_key, created_at)
-		 VALUES(?,?,?,?,?)
-		 ON CONFLICT(resource_id, grantee_handle) DO UPDATE SET wrapped_key = excluded.wrapped_key`,
-		resourceID, owner, grantee, wrapped, time.Now().Unix(),
+		`INSERT INTO grants(resource_id, owner_handle, grantee_handle, wrapped_key, signature, created_at)
+		 VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(resource_id, grantee_handle) DO UPDATE SET wrapped_key = excluded.wrapped_key, signature = excluded.signature`,
+		resourceID, owner, grantee, wrapped, signature, time.Now().Unix(),
 	); err != nil {
 		return err
 	}
@@ -218,7 +218,7 @@ func (s *Store) ListResourceGrants(owner, resourceID string, page pageParams) ([
 	}
 	args = append(args, limit+1)
 	rows, err := s.rdb.Query(
-		`SELECT grantee_handle, created_at FROM grants WHERE `+where+` ORDER BY created_at, grantee_handle LIMIT ?`,
+		`SELECT grantee_handle, signature, created_at FROM grants WHERE `+where+` ORDER BY created_at, grantee_handle LIMIT ?`,
 		args...,
 	)
 	if err != nil {
@@ -228,7 +228,7 @@ func (s *Store) ListResourceGrants(owner, resourceID string, page pageParams) ([
 	var out []api.GrantEntry
 	for rows.Next() {
 		var g api.GrantEntry
-		if err := rows.Scan(&g.GranteeHandle, &g.CreatedAt); err != nil {
+		if err := rows.Scan(&g.GranteeHandle, &g.Signature, &g.CreatedAt); err != nil {
 			return nil, "", err
 		}
 		out = append(out, g)
@@ -304,7 +304,7 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 	}
 	args = append(args, limit+1)
 	rows, err := s.rdb.Query(
-		`SELECT g.resource_id, g.owner_handle, g.wrapped_key, g.created_at, r.encrypted_meta,
+		`SELECT g.resource_id, g.owner_handle, g.wrapped_key, g.signature, g.created_at, r.encrypted_meta,
 		        COALESCE(a.email, ''), a.public_key
 		 FROM grants g JOIN resources r ON r.id = g.resource_id
 		 LEFT JOIN accounts a ON a.owner_handle = g.owner_handle
@@ -322,7 +322,7 @@ func (s *Store) ListShares(grantee string, page pageParams) ([]api.ShareItem, st
 			item     api.ShareItem
 			metaJSON string
 		)
-		if err := rows.Scan(&item.ResourceID, &item.OwnerHandle, &item.WrappedKey, &item.CreatedAt, &metaJSON,
+		if err := rows.Scan(&item.ResourceID, &item.OwnerHandle, &item.WrappedKey, &item.Signature, &item.CreatedAt, &metaJSON,
 			&item.OwnerEmail, &item.OwnerPublicKey); err != nil {
 			return nil, "", err
 		}
@@ -497,6 +497,31 @@ func (s *Store) grantWrappedKey(resourceID, grantee string) ([]byte, bool, error
 	return wrapped, true, nil
 }
 
+// storedGrant is what a grantee's read needs from its grant row: the wrap, the
+// owner's signature over it, and the identity key the server holds for that owner.
+type storedGrant struct {
+	wrapped, signature, ownerPublicKey []byte
+}
+
+// grantFor returns the grant on (resource, grantee), if one exists, with what a
+// grantee's read needs beyond the wrap.
+func (s *Store) grantFor(resourceID, grantee string) (storedGrant, bool, error) {
+	var g storedGrant
+	err := s.rdb.QueryRow(
+		`SELECT g.wrapped_key, g.signature, a.public_key FROM grants g
+		 LEFT JOIN accounts a ON a.owner_handle = g.owner_handle
+		 WHERE g.resource_id = ? AND g.grantee_handle = ?`,
+		resourceID, grantee,
+	).Scan(&g.wrapped, &g.signature, &g.ownerPublicKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		return g, false, nil
+	}
+	if err != nil {
+		return g, false, err
+	}
+	return g, true, nil
+}
+
 // ResourceObjectSlices is the grant-read counterpart of PublicObjectSlices: exact
 // per-object slices for the resource's referenced set, served to its owner or a
 // grantee. A grantee must never get raw pack ranges — packs interleave the owner's
@@ -596,9 +621,10 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 		return
 	}
 	// One exact length is the whole format check the server can make on an opaque
-	// wrap, and it is enough to refuse anything but X-Wing.
-	if req.GranteeHandle == "" || len(req.WrappedKey) != crypto.GrantWrapSize {
-		abort(c, http.StatusBadRequest, "granteeHandle and an X-Wing wrappedKey are required")
+	// wrap, and it is enough to refuse anything but X-Wing. The signature commits to
+	// the content key, which the server never holds, so its length is all it can check.
+	if req.GranteeHandle == "" || len(req.WrappedKey) != crypto.GrantWrapSize || len(req.Signature) != ed25519.SignatureSize {
+		abort(c, http.StatusBadRequest, "granteeHandle, an X-Wing wrappedKey, and the owner's signature are required")
 		return
 	}
 	if req.GranteeHandle == owner {
@@ -633,7 +659,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 	if !s.chargeGrowth(c, owner, int64(len(req.WrappedKey))+128-stored) {
 		return
 	}
-	err = s.store.putGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.ChunkRefs, req.ExpectedVersion, target)
+	err = s.store.putGrant(owner, c.Param("id"), req.GranteeHandle, req.WrappedKey, req.Signature, req.ChunkRefs, req.ExpectedVersion, target)
 	if errors.Is(err, ErrVersionConflict) {
 		abortCode(c, http.StatusConflict, "resource, grants, or recipient keys changed since you last fetched them", api.ErrCodeVersionConflict)
 		return

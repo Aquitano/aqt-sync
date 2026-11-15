@@ -165,18 +165,23 @@ func loginMovesPreXWingShares(t *testing.T, newDevice bool) {
 		if len(shares) != 1 || len(shares[0].WrappedKey) != crypto.GrantWrapSize {
 			t.Fatalf("bob's incoming grant was not re-wrapped to X-Wing: %+v", shares)
 		}
-		dest := filepath.Join(t.TempDir(), "legacy.txt")
-		if err := app.runPull("aqt://"+id, dest, "", false, false); err != nil {
-			t.Fatalf("bob pull after the move: %v", err)
+		if moved, err := crypto.UnwrapGrant(shares[0].WrappedKey, bobMK, id, alice.OwnerHandle, bob.OwnerHandle); err != nil || moved != ck {
+			t.Fatalf("the moved wrap does not open the content key: %v", err)
 		}
-		if got, err := os.ReadFile(dest); err != nil || string(got) != content {
-			t.Fatalf("bob pulled %q (%v), want %q", got, err, content)
+		// A grant from before grants were signed carries no signature, so it stays
+		// closed until its owner shares it again.
+		err = app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "legacy.txt"), "", false, false)
+		if err == nil || !strings.Contains(err.Error(), "share it again") {
+			t.Fatalf("bob pull of an unsigned grant = %v, want a refusal asking for a re-share", err)
 		}
 	})
 	app.server = ""
 
 	if err := app.runShareWith(id, "bob@example.com"); err != nil {
 		t.Fatalf("re-share to bob with his pre-X-Wing pin: %v", err)
+	}
+	if got := app.pullAs(t, "bob", id); got != content {
+		t.Fatalf("bob pulled %q after the re-share, want %q", got, content)
 	}
 	pins, err := identity.LoadContacts(alice.Name)
 	if err != nil {
@@ -302,7 +307,10 @@ func TestRootRotationRetriesChangedIncomingGrant(t *testing.T) {
 		t.Fatal(err)
 	}
 	replace = func() {
-		if err := h.store.PutGrant(alice.OwnerHandle, id, keys.Handle, freshWrap, nil); err != nil {
+		if err := cl.CreateGrant(id, api.CreateGrantRequest{
+			GranteeHandle: keys.Handle, WrappedKey: freshWrap,
+			Signature: crypto.SignGrant(crypto.DeriveSigningKey(aliceMK), ck, id, alice.OwnerHandle, keys.Handle),
+		}); err != nil {
 			t.Error(err)
 		}
 	}

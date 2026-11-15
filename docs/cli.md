@@ -128,15 +128,20 @@ claimedFingerprint?, attribution, since, stale? }]`.
 `name` and `kind` are the *grantor's* plaintext, so both are stripped of control
 bytes and bounded before they are printed or returned — a sender cannot emit escape
 sequences into the recipient's terminal. `from` is the sender's opaque account handle.
-`attribution` says what names the sender:
+Every grant carries its owner's signature, and `attribution` says what names the
+sender:
 
-- `verified` or `pinned`: a local contact pin matches the handle, and `fromEmail`
-  and `fingerprint` come from it. `verified` means the pin was made against a
-  fingerprint (`aqt contacts pin --fingerprint`).
-- `claimed`: no pin matches, and `claimedEmail` and `claimedFingerprint` are what the
-  server reports for the sender's account. Emails are not verified at signup, so the
-  human output marks it `a@example.com? (unverified, SHA256:…)`.
-- `unknown`: no pin, and a server too old to report the sender; the human output says
+- `verified` or `pinned`: a local contact pin matches the handle and its identity key
+  signed the grant, and `fromEmail` and `fingerprint` come from the pin. `verified`
+  means the pin was made against a fingerprint (`aqt contacts pin --fingerprint`).
+- `claimed`: no pin matches, the identity key the server reports for the sender's
+  account signed the grant, and `claimedEmail` and `claimedFingerprint` are what the
+  server reports for it. Emails are not verified at signup, so the human output marks
+  it `a@example.com? (unverified, SHA256:…)`.
+- `unsigned`: the key the row would be attributed to did not sign it. It is a grant
+  from before grants were signed, or one the server wrote; it gets no fetch command,
+  `aqt pull` and `aqt clone` refuse it, and it opens once its owner shares it again.
+- `unknown`: the row is stale, or the server named no sender; the human output says
   `unknown sender`.
 
 Compare the fingerprint with the sender out-of-band before acting on a share;
@@ -162,8 +167,9 @@ is only trust-on-first-use. `--json` returns
 `{ email, fingerprint, encFingerprint, alreadyPinned, verified }`.
 
 A first-use pin made before the contact registered holds the server's placeholder
-key, so their grants never open. Once they have registered, either way out re-sends
-every grant made against the placeholder:
+key, so their grants never open. Once they have registered, either way out lists and
+re-sends every grant you signed against the placeholder. A grant the server lists for
+the placeholder without your signature is left alone and counted in a warning:
 
 - `aqt share <id> --with <email>` on a terminal shows both fingerprints and asks
   before re-pinning. Without a terminal it refuses rather than accept a key change

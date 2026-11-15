@@ -4,6 +4,7 @@ package server
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -166,7 +167,7 @@ func TestGrantSurfaceRefusesPreXWingClients(t *testing.T) {
 		t.Errorf("the owner's own read at capability %d = %d, want 200: only grant wraps moved", old, rec.Code)
 	}
 
-	legacy := api.CreateGrantRequest{GranteeHandle: h.handleOf("bob@example.com"), WrappedKey: make([]byte, 80)}
+	legacy := api.CreateGrantRequest{GranteeHandle: h.handleOf("bob@example.com"), WrappedKey: make([]byte, 80), Signature: make([]byte, ed25519.SignatureSize)}
 	if rec := h.doAt(api.ClientCapability, http.MethodPost, "/v1/resources/"+res.ID+"/grants", aliceToken, legacy); rec.Code != http.StatusBadRequest {
 		t.Errorf("X25519-sized grant wrap = %d, want 400", rec.Code)
 	}

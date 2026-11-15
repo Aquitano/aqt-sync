@@ -1007,7 +1007,10 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 	if err != nil {
 		return err
 	}
+	signing := crypto.DeriveSigningKey(newRoot)
+	oldSigning := crypto.DeriveSigningKey(oldRoot).Public().(ed25519.PublicKey)
 	resourceMigrations := make([]api.KeyWrapMigration, 0, len(resources))
+	var outgoing []api.GrantSignatureMigration
 	for _, r := range resources {
 		if r.WrappedKey == nil {
 			continue
@@ -1016,6 +1019,12 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 		if err != nil {
 			return fmt.Errorf("unwrap resource %s: %w", r.ID, err)
 		}
+		resigned, err := resignGrants(cl, r, ck, oldSigning, signing, prof.OwnerHandle)
+		if err != nil {
+			ck.Wipe()
+			return err
+		}
+		outgoing = append(outgoing, resigned...)
 		wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(newRoot))
 		ck.Wipe()
 		if err != nil {
@@ -1048,11 +1057,10 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 	if err != nil {
 		return err
 	}
-	signing := crypto.DeriveSigningKey(newRoot)
 	resp, err := cl.RotateRootKey(api.RootKeyRotationRequest{
 		Kdf: prof.Kdf, WrappedRoot: newWrapped, OldAuthVerifier: crypto.DeriveAuthVerifier(uk), NewAuthVerifier: crypto.DeriveAuthVerifier(uk), ExpectedEpoch: prof.AuthEpoch,
 		PublicKey: signing.Public().(ed25519.PublicKey), EncPublicKey: newEnc, EncKeySig: crypto.SignEncKey(signing, newEnc),
-		Resources: resourceMigrations, Snapshots: snapshotMigrations, IncomingGrants: grantMigrations,
+		Resources: resourceMigrations, Snapshots: snapshotMigrations, IncomingGrants: grantMigrations, OutgoingGrants: outgoing,
 	})
 	if errors.Is(err, client.ErrConflict) {
 		return errors.New("account data changed while preparing root-key rotation; re-run it")
@@ -1069,8 +1077,36 @@ func (app *application) runRootKeyRotation(assumeYes bool) error {
 		return err
 	}
 	fmt.Fprintln(os.Stderr, "account root key rotated; all other devices were revoked and must re-login")
+	if len(outgoing) > 0 {
+		fmt.Fprintln(os.Stderr, "your shares are now signed by your new identity key: anyone who pinned your old one will see them as unsigned until they compare fingerprints and pin the new one")
+	}
 	fmt.Fprintln(os.Stderr, "any recovery key wrapped the old root key and no longer works; `aqt passphrase recovery-key` makes a new one")
 	return nil
+}
+
+// resignGrants re-signs a resource's grants under a new identity key for a root-key
+// rotation, keeping only the ones the old identity signed over ck; the rest were never
+// this account's to vouch for, and stay unsigned.
+func resignGrants(cl *client.Client, r api.ResourceListItem, ck crypto.ContentKey, oldIdentity ed25519.PublicKey, signing ed25519.PrivateKey, handle string) ([]api.GrantSignatureMigration, error) {
+	if r.GrantCount == 0 || r.Reclaimed {
+		return nil, nil
+	}
+	grants, err := cl.ListGrants(r.ID)
+	if err != nil {
+		return nil, fmt.Errorf("list grants of %s: %w", r.ID, err)
+	}
+	var out []api.GrantSignatureMigration
+	for _, g := range grants {
+		if !crypto.VerifyGrant(oldIdentity, g.Signature, ck, r.ID, handle, g.GranteeHandle) {
+			continue
+		}
+		out = append(out, api.GrantSignatureMigration{
+			ResourceID: r.ID, GranteeHandle: g.GranteeHandle,
+			Signature:         crypto.SignGrant(signing, ck, r.ID, handle, g.GranteeHandle),
+			ExpectedSignature: g.Signature,
+		})
+	}
+	return out, nil
 }
 
 // rewrapIncomingGrants unwraps every grant made to this account with the key derived

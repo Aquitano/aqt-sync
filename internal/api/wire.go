@@ -64,21 +64,23 @@ type resourceUploadHeader struct {
 // resourceDownloadHeader is the JSON header of a GET /v1/resources/:id
 // response; the blob ciphertext follows as the rest of the body.
 type resourceDownloadHeader struct {
-	ID            string             `json:"id"`
-	Visibility    Visibility         `json:"visibility"`
-	BlobNonce     []byte             `json:"blobNonce"`
-	EncryptedMeta crypto.SealedBlob  `json:"encryptedMeta"`
-	WrappedKey    *crypto.WrappedKey `json:"wrappedKey,omitempty"`
-	GrantKey      []byte             `json:"grantKey,omitempty"`
-	Owner         string             `json:"owner,omitempty"`
-	Version       int                `json:"version"`
-	MinClient     int                `json:"minClient,omitempty"`
-	CompactAt     int                `json:"compactAt,omitempty"`
-	ExpiresAt     int64              `json:"expiresAt,omitempty"`
-	MaxReads      int64              `json:"maxReads,omitempty"`
-	Reads         int64              `json:"reads,omitempty"`
-	CreatedAt     int64              `json:"createdAt,omitempty"`
-	UpdatedAt     int64              `json:"updatedAt,omitempty"`
+	ID             string             `json:"id"`
+	Visibility     Visibility         `json:"visibility"`
+	BlobNonce      []byte             `json:"blobNonce"`
+	EncryptedMeta  crypto.SealedBlob  `json:"encryptedMeta"`
+	WrappedKey     *crypto.WrappedKey `json:"wrappedKey,omitempty"`
+	GrantKey       []byte             `json:"grantKey,omitempty"`
+	GrantSig       []byte             `json:"grantSig,omitempty"`
+	Owner          string             `json:"owner,omitempty"`
+	OwnerPublicKey []byte             `json:"ownerPublicKey,omitempty"`
+	Version        int                `json:"version"`
+	MinClient      int                `json:"minClient,omitempty"`
+	CompactAt      int                `json:"compactAt,omitempty"`
+	ExpiresAt      int64              `json:"expiresAt,omitempty"`
+	MaxReads       int64              `json:"maxReads,omitempty"`
+	Reads          int64              `json:"reads,omitempty"`
+	CreatedAt      int64              `json:"createdAt,omitempty"`
+	UpdatedAt      int64              `json:"updatedAt,omitempty"`
 }
 
 // EncodeResourceUpload encodes req as a raw upload body: length-prefixed JSON
@@ -130,21 +132,23 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 // JSON header, then the blob ciphertext.
 func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 	return encodeEnvelope(resourceDownloadHeader{
-		ID:            res.ID,
-		Visibility:    res.Visibility,
-		BlobNonce:     res.Blob.Nonce,
-		EncryptedMeta: res.EncryptedMeta,
-		WrappedKey:    res.WrappedKey,
-		GrantKey:      res.GrantKey,
-		Owner:         res.Owner,
-		Version:       res.Version,
-		MinClient:     res.MinClient,
-		CompactAt:     res.CompactAt,
-		ExpiresAt:     res.ExpiresAt,
-		MaxReads:      res.MaxReads,
-		Reads:         res.Reads,
-		CreatedAt:     res.CreatedAt,
-		UpdatedAt:     res.UpdatedAt,
+		ID:             res.ID,
+		Visibility:     res.Visibility,
+		BlobNonce:      res.Blob.Nonce,
+		EncryptedMeta:  res.EncryptedMeta,
+		WrappedKey:     res.WrappedKey,
+		GrantKey:       res.GrantKey,
+		GrantSig:       res.GrantSig,
+		Owner:          res.Owner,
+		OwnerPublicKey: res.OwnerPublicKey,
+		Version:        res.Version,
+		MinClient:      res.MinClient,
+		CompactAt:      res.CompactAt,
+		ExpiresAt:      res.ExpiresAt,
+		MaxReads:       res.MaxReads,
+		Reads:          res.Reads,
+		CreatedAt:      res.CreatedAt,
+		UpdatedAt:      res.UpdatedAt,
 	}, res.Blob.Ciphertext)
 }
 
@@ -156,21 +160,23 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		return GetResourceResponse{}, err
 	}
 	return GetResourceResponse{
-		ID:            h.ID,
-		Visibility:    h.Visibility,
-		Blob:          crypto.SealedBlob{Nonce: h.BlobNonce, Ciphertext: ct},
-		EncryptedMeta: h.EncryptedMeta,
-		WrappedKey:    h.WrappedKey,
-		GrantKey:      h.GrantKey,
-		Owner:         h.Owner,
-		Version:       h.Version,
-		MinClient:     h.MinClient,
-		CompactAt:     h.CompactAt,
-		ExpiresAt:     h.ExpiresAt,
-		MaxReads:      h.MaxReads,
-		Reads:         h.Reads,
-		CreatedAt:     h.CreatedAt,
-		UpdatedAt:     h.UpdatedAt,
+		ID:             h.ID,
+		Visibility:     h.Visibility,
+		Blob:           crypto.SealedBlob{Nonce: h.BlobNonce, Ciphertext: ct},
+		EncryptedMeta:  h.EncryptedMeta,
+		WrappedKey:     h.WrappedKey,
+		GrantKey:       h.GrantKey,
+		GrantSig:       h.GrantSig,
+		Owner:          h.Owner,
+		OwnerPublicKey: h.OwnerPublicKey,
+		Version:        h.Version,
+		MinClient:      h.MinClient,
+		CompactAt:      h.CompactAt,
+		ExpiresAt:      h.ExpiresAt,
+		MaxReads:       h.MaxReads,
+		Reads:          h.Reads,
+		CreatedAt:      h.CreatedAt,
+		UpdatedAt:      h.UpdatedAt,
 	}, nil
 }
 

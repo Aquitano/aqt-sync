@@ -12,6 +12,33 @@ All notable changes to this project are documented in this file.
   Without a server, `signup` and `login` now ask for one on a terminal and refuse
   otherwise. `AQT_SERVER` sets one for machines and scripts without a profile;
   set it to `http://localhost:8080` for the old development default.
+- **Grants are signed, which raises the client capability to 6.** Every grant now
+  carries the owner's Ed25519 signature over the resource, both account handles, and
+  a commitment to the content key it wraps. The client checks it before naming a
+  sender, opening a share, or re-wrapping a rotated key. Grant writes, both grant
+  listings, reads through a grant, and root-key rotation answer `426` below
+  capability 6. Upgrade the server first (migration 24 adds the column), then every
+  client. Grants made before this release carry no signature: recipients see them as
+  `unsigned` and cannot open them, and a rotation never re-wraps them. `aqt share ls`
+  marks them `(unsigned)`; `aqt share <id> --with <email>` signs each one again.
+
+### Security
+
+- **A hostile server could have a rotated key re-wrapped to any pinned contact.**
+  `aqt unshare` and a revoke re-wrapped the new content key for every grantee the
+  server listed that matched a local pin, so the server could list a contact on a
+  resource that was never shared with them, and they received its key. Pin repair
+  trusted the same listings to decide which resources to re-send. Both now follow
+  only grants this account signed over the key being replaced, and repair lists the
+  resources it re-sends.
+- **A hostile server could forge a verified share.** Grant wraps use HPKE base mode,
+  which authenticates no sender, and `aqt shares` took the sender from the owner
+  handle the server reported. Anyone holding the recipient's public enc key could wrap
+  a key of their choosing, so the server could list its own file as
+  `from <contact> (SHA256:…, verified)`. A share is now named after a pin only when
+  the pinned key signed it, and `pull`, `clone` and `info` refuse a grant without a
+  valid signature. A verified pin to which the server attached the wrong handle names
+  nothing, for the same reason.
 
 ### Added
 
@@ -47,8 +74,8 @@ All notable changes to this project are documented in this file.
   and re-sharing each resource by hand. Now a share on a terminal shows the pinned and
   current fingerprints and asks before re-pinning. Without a terminal it refuses with
   both fingerprints. `aqt contacts pin <email> --fingerprint <fp>` replaces the old pin
-  without asking. Either way, every earlier grant made against the placeholder is
-  re-sent to the real account and the placeholder's rows are removed. Pins made with
+  without asking. Either way, every earlier grant you signed against the placeholder
+  is re-sent to the real account and the placeholder's rows are removed. Pins made with
   `--fingerprint` are now recorded as verified, and a mismatch against a verified pin
   is still refused.
 - **`aqt-server admin accounts disable` applies from the next request.** The
@@ -62,8 +89,8 @@ All notable changes to this project are documented in this file.
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
   the grantor account's email and identity key. The client shows them as an
   unverified claim, `a@example.com? (unverified, SHA256:…)`, because signup does not
-  verify emails. Pinned senders read as before, marked `verified` when the pin was made
-  against a fingerprint. `--json` rows gain `claimedEmail`, `claimedFingerprint`, and
+  verify emails. A share from a pinned sender is named after the pin when the pinned
+  key signed it, marked `verified` when the pin was made against a fingerprint. `--json` rows gain `claimedEmail`, `claimedFingerprint`, and
   `attribution`. Each row now ends with the exact `aqt pull` or `aqt clone` command
   that fetches it. Sharing shows your account email to the accounts you share with.
 - **`aqt login` and `aqt status` mention new incoming shares** on stderr until

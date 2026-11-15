@@ -80,12 +80,14 @@ type AccountKeysResponse struct {
 
 // CreateGrantRequest grants one account read access to a resource the caller
 // owns: the resource's content key HPKE-wrapped to the grantee's enc key
-// (crypto.WrapGrant, bound to resource id + owner handle + grantee handle).
-// The server stores the wrap opaquely; re-granting an existing grantee
-// replaces the wrap (the rotation path re-wraps for remaining grantees).
+// (crypto.WrapGrant, bound to resource id + owner handle + grantee handle), and the
+// owner's Ed25519 signature over the grant (crypto.SignGrant). The server stores both
+// opaquely; re-granting an existing grantee replaces them (the rotation path re-wraps
+// for remaining grantees).
 type CreateGrantRequest struct {
 	GranteeHandle   string `json:"granteeHandle"`
 	WrappedKey      []byte `json:"wrappedKey"`
+	Signature       []byte `json:"signature"`
 	ExpectedVersion int    `json:"expectedVersion,omitempty"`
 	// GranteeEmail and GranteeEncPublicKey, when supplied together, pin the lookup
 	// the sender wrapped to. A key change before the upsert returns 409.
@@ -98,9 +100,12 @@ type CreateGrantRequest struct {
 	ChunkRefs []string `json:"chunkRefs,omitempty"`
 }
 
-// GrantEntry is one grant on a resource, as listed for its owner.
+// GrantEntry is one grant on a resource, as listed for its owner. Signature is the
+// owner's crypto.SignGrant signature, empty on a grant stored before grants were
+// signed; the owner checks it before re-wrapping a rotated key to the grantee.
 type GrantEntry struct {
 	GranteeHandle string `json:"granteeHandle"`
+	Signature     []byte `json:"signature,omitempty"`
 	CreatedAt     int64  `json:"createdAt"`
 }
 
@@ -116,6 +121,7 @@ type ShareItem struct {
 	ResourceID    string            `json:"resourceId"`
 	OwnerHandle   string            `json:"ownerHandle"`
 	WrappedKey    []byte            `json:"wrappedKey"`
+	Signature     []byte            `json:"signature,omitempty"`
 	EncryptedMeta crypto.SealedBlob `json:"encryptedMeta"`
 	CreatedAt     int64             `json:"createdAt"`
 	// OwnerEmail and OwnerPublicKey are the grantor account's email and Ed25519
@@ -299,24 +305,36 @@ type EncKeyUpgradeRequest struct {
 	IncomingGrants []GrantKeyMigration `json:"incomingGrants"`
 }
 
+// GrantSignatureMigration re-signs one outgoing grant under the account's new
+// identity key during a root-key rotation. ExpectedSignature is the signature the
+// client verified under the old key, so a grant replaced concurrently keeps its own.
+type GrantSignatureMigration struct {
+	ResourceID        string `json:"resourceId"`
+	GranteeHandle     string `json:"granteeHandle"`
+	Signature         []byte `json:"signature"`
+	ExpectedSignature []byte `json:"expectedSignature"`
+}
+
 // RootKeyRotationRequest atomically changes the account root key. Every owner
 // resource and snapshot that has a recoverable wrapped key, plus every incoming
 // grant, must be included so the old root is not needed after the account identity
-// switches. The server stores these values opaquely and verifies membership,
-// resource versions, original grant wraps, the current-passphrase proof, and the
-// new public-key binding.
+// switches. OutgoingGrants re-signs the grants the old identity signed; a grant it
+// leaves out keeps a signature recipients will no longer accept. The server stores
+// these values opaquely and verifies membership, resource versions, original grant
+// wraps and signatures, the current-passphrase proof, and the new public-key binding.
 type RootKeyRotationRequest struct {
-	Kdf             crypto.KdfParams    `json:"kdf"`
-	WrappedRoot     crypto.SealedBlob   `json:"wrappedRoot"`
-	OldAuthVerifier []byte              `json:"oldAuthVerifier"`
-	NewAuthVerifier []byte              `json:"newAuthVerifier"`
-	ExpectedEpoch   int                 `json:"expectedEpoch"`
-	PublicKey       []byte              `json:"publicKey"`
-	EncPublicKey    []byte              `json:"encPublicKey"`
-	EncKeySig       []byte              `json:"encKeySig"`
-	Resources       []KeyWrapMigration  `json:"resources"`
-	Snapshots       []KeyWrapMigration  `json:"snapshots"`
-	IncomingGrants  []GrantKeyMigration `json:"incomingGrants"`
+	Kdf             crypto.KdfParams          `json:"kdf"`
+	WrappedRoot     crypto.SealedBlob         `json:"wrappedRoot"`
+	OldAuthVerifier []byte                    `json:"oldAuthVerifier"`
+	NewAuthVerifier []byte                    `json:"newAuthVerifier"`
+	ExpectedEpoch   int                       `json:"expectedEpoch"`
+	PublicKey       []byte                    `json:"publicKey"`
+	EncPublicKey    []byte                    `json:"encPublicKey"`
+	EncKeySig       []byte                    `json:"encKeySig"`
+	Resources       []KeyWrapMigration        `json:"resources"`
+	Snapshots       []KeyWrapMigration        `json:"snapshots"`
+	IncomingGrants  []GrantKeyMigration       `json:"incomingGrants"`
+	OutgoingGrants  []GrantSignatureMigration `json:"outgoingGrants,omitempty"`
 }
 
 // DeleteAccountRequest erases the calling account and everything stored under it.
@@ -577,10 +595,14 @@ type GetResourceResponse struct {
 	// account grant: the content key HPKE-wrapped to the caller (crypto.UnwrapGrant
 	// opens it). Owner carries the resource owner's opaque handle on those reads,
 	// which the grantee needs for the wrap's info binding; a wrong value from a
-	// hostile server just fails the unwrap.
-	GrantKey []byte `json:"grantKey,omitempty"`
-	Owner    string `json:"owner,omitempty"`
-	Version  int    `json:"version"`
+	// hostile server just fails the unwrap. GrantSig is the owner's signature over the
+	// grant, and OwnerPublicKey the identity key the server reports for the owner,
+	// which the grantee checks it against when it has not pinned the owner.
+	GrantKey       []byte `json:"grantKey,omitempty"`
+	GrantSig       []byte `json:"grantSig,omitempty"`
+	Owner          string `json:"owner,omitempty"`
+	OwnerPublicKey []byte `json:"ownerPublicKey,omitempty"`
+	Version        int    `json:"version"`
 	// MinClient is the lowest client capability that can read this resource's sealed
 	// formats, so a client can explain an unreadable resource instead of failing to
 	// decrypt. An absent value reads as 0 and is treated as baseline.

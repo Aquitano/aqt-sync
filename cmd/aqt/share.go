@@ -3,6 +3,7 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -122,6 +123,7 @@ func (app *application) runShareList(ref string) error {
 		return err
 	}
 	defer mk.Wipe()
+	self := crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey)
 	// Grantee handles are opaque; the contact pins map them back to emails where
 	// this device knows them.
 	emailByHandle := map[string]string{}
@@ -132,6 +134,7 @@ func (app *application) runShareList(ref string) error {
 	}
 
 	var rows []shareListRow
+	anyUnsigned := false
 	for _, it := range items {
 		// The list endpoint echoes each resource's grant count, so the common
 		// case — a private resource never shared — costs no grant fetch.
@@ -157,13 +160,22 @@ func (app *application) runShareList(ref string) error {
 		if row.Public {
 			row.Policy = linkPolicySummary(it)
 		}
+		var ck crypto.ContentKey
+		if it.WrappedKey != nil {
+			ck, _ = crypto.UnwrapKey(*it.WrappedKey, [crypto.KeySize]byte(mk))
+		}
 		for _, g := range grants {
 			label := g.GranteeHandle
 			if email, ok := emailByHandle[g.GranteeHandle]; ok {
 				label = email
 			}
+			if !crypto.VerifyGrant(self, g.Signature, ck, it.ID, prof.OwnerHandle, g.GranteeHandle) {
+				label += " (unsigned)"
+				anyUnsigned = true
+			}
 			row.Grantees = append(row.Grantees, label)
 		}
+		ck.Wipe()
 		rows = append(rows, row)
 	}
 	if app.json {
@@ -191,7 +203,14 @@ func (app *application) runShareList(ref string) error {
 		}
 		cells = append(cells, []string{r.Name, access, grantees, r.ID})
 	}
-	return printTable(os.Stdout, []string{"NAME", "ACCESS", "GRANTED-TO", "ID"}, cells)
+	if err := printTable(os.Stdout, []string{"NAME", "ACCESS", "GRANTED-TO", "ID"}, cells); err != nil {
+		return err
+	}
+	if anyUnsigned {
+		fmt.Fprintln(os.Stderr, "an (unsigned) grantee holds no grant you signed for the current key: a share from before grants were signed, one left on an older key, or a row the server added. "+
+			"It does not open for them; if you meant to share it, run `aqt share <id> --with <email>` again")
+	}
+	return nil
 }
 
 // linkPolicySummary renders the server-reported link lifecycle for one listed
@@ -323,7 +342,7 @@ func (app *application) runShareWith(idArg, email string) error {
 	if err := checkShareableFolder(keys.meta); err != nil {
 		return err
 	}
-	contact, repair, err := lookupGrantee(cl, prof, email)
+	contact, repair, err := lookupGrantee(cl, prof, keys.mk, email)
 	if err != nil {
 		return err
 	}
@@ -351,8 +370,8 @@ func (app *application) runShareWith(idArg, email string) error {
 }
 
 // grantResource wraps a resource's content key to one contact, bound to (resource,
-// owner, grantee), and stores it with the read scope the grantee will fetch through.
-// keys must be the resource's own, opened from res.
+// owner, grantee), signs the grant, and stores both with the read scope the grantee
+// will fetch through. keys must be the resource's own, opened from res.
 func grantResource(cl *client.Client, prof *identity.Profile, id string, res api.GetResourceResponse, keys *resourceKeys, contact identity.Contact) error {
 	wrap, err := crypto.WrapGrant(keys.ck, contact.EncPublicKey, id, prof.OwnerHandle, contact.Handle)
 	if err != nil {
@@ -364,6 +383,7 @@ func grantResource(cl *client.Client, prof *identity.Profile, id string, res api
 	}
 	err = cl.CreateGrant(id, api.CreateGrantRequest{
 		GranteeHandle: contact.Handle, WrappedKey: wrap, ChunkRefs: scope, ExpectedVersion: res.Version,
+		Signature:    crypto.SignGrant(crypto.DeriveSigningKey(keys.mk), keys.ck, id, prof.OwnerHandle, contact.Handle),
 		GranteeEmail: contact.Email, GranteeEncPublicKey: contact.EncPublicKey,
 	})
 	if errors.Is(err, client.ErrSenderBlocked) {
@@ -509,7 +529,7 @@ func (app *application) runShareRevoke(idArg, email string) error {
 	// list and skip the revoked handle anyway: a hostile server that ignored the delete
 	// and keeps listing it would otherwise get us to hand it a wrap of the NEW key,
 	// undoing the revocation the rotation just enforced.
-	rewrapGrants(cl, prof, id, newCK, handle)
+	rewrapGrants(cl, prof, id, keys, newCK, handle)
 	if app.json {
 		return printJSON(map[string]any{"id": id, "revoked": email, "rotated": true})
 	}
@@ -665,7 +685,7 @@ func (app *application) runPrivate(idArg string) error {
 		return err
 	}
 	defer newCK.Wipe()
-	rewrapGrants(cl, prof, id, newCK, "")
+	rewrapGrants(cl, prof, id, keys, newCK, "")
 
 	if app.json {
 		return printJSON(map[string]any{"id": id, "ref": "aqt://" + id, "rotated": true})
@@ -779,11 +799,19 @@ func rotateResourceKey(cl *client.Client, id string, res api.GetResourceResponse
 // break them. Best effort: a grantee pinned on another device cannot be re-wrapped
 // here — warn, since only a device that has looked the grantee up holds their key.
 //
+// The server chooses which handles it lists, so only a grant this account signed over
+// the key being replaced (old.ck) is followed. Otherwise a hostile server could list
+// any pinned contact on any resource and have the new key handed to them; a signature
+// over an earlier key, such as one left on a grant revoked by an earlier rotation, does
+// not count either. A grant from before grants were signed is skipped the same way and
+// needs its owner to share it again.
+//
 // exclude is a grantee handle to never re-wrap, even if the server lists it: a revoke's
-// rotation drops the grant server-side, but a hostile server that ignores the delete and
-// keeps returning the handle would otherwise get us to hand it a wrap of the new key,
-// undoing the revocation. Empty excludes nobody (a plain privatize revokes no one).
-func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK crypto.ContentKey, exclude string) {
+// rotation drops the grant server-side, but its signature still covers the old key, so a
+// hostile server that ignores the delete and keeps returning the handle would otherwise
+// get us to hand it a wrap of the new key, undoing the revocation. Empty excludes nobody
+// (a plain privatize revokes no one).
+func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, old *resourceKeys, newCK crypto.ContentKey, exclude string) {
 	grants, err := cl.ListGrants(id)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: cannot list grants to re-wrap them for the new key: %v\n", err)
@@ -802,11 +830,21 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 	for _, c := range pins {
 		byHandle[c.Handle] = c
 	}
+	signing := crypto.DeriveSigningKey(old.mk)
+	self := signing.Public().(ed25519.PublicKey)
 	for _, g := range grants {
 		if g.GranteeHandle == exclude {
 			continue
 		}
 		pin, ok := byHandle[g.GranteeHandle]
+		if !crypto.VerifyGrant(self, g.Signature, old.ck, id, prof.OwnerHandle, g.GranteeHandle) {
+			label := foreignText(g.GranteeHandle)
+			if ok {
+				label = pin.Email
+			}
+			fmt.Fprintf(os.Stderr, "warning: not re-wrapping the grant listed for %s: it carries no signature of yours over the replaced key, so it is a share from before grants were signed, one an earlier rotation left behind, or a row the server added; if you did share aqt://%s with them, share it again\n", label, id)
+			continue
+		}
 		if !ok {
 			fmt.Fprintf(os.Stderr, "warning: grant for %s cannot be re-wrapped from this device (no pinned contact); re-run `aqt share --with` where it was granted\n", g.GranteeHandle)
 			continue
@@ -824,6 +862,7 @@ func rewrapGrants(cl *client.Client, prof *identity.Profile, id string, newCK cr
 		if err == nil {
 			err = cl.CreateGrant(id, api.CreateGrantRequest{
 				GranteeHandle: pin.Handle, WrappedKey: wrap,
+				Signature:    crypto.SignGrant(signing, newCK, id, prof.OwnerHandle, pin.Handle),
 				GranteeEmail: pin.Email, GranteeEncPublicKey: pin.EncPublicKey,
 			})
 		}

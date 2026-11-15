@@ -29,8 +29,13 @@ const (
 	// wraps. The grant routes refuse a client below it: it would publish, wrap to,
 	// or try to open keys in the format the server no longer stores.
 	CapabilityPQGrants = 5
+	// CapabilitySignedGrants is the first release that signs the grants it makes and
+	// checks the signature before trusting one. The routes that write or hand out a
+	// grant refuse a client below it: it would write a grant no recipient accepts, or
+	// show and re-wrap grants a hostile server made up.
+	CapabilitySignedGrants = 6
 	// ClientCapability is the highest format this build can read.
-	ClientCapability = CapabilityPQGrants
+	ClientCapability = CapabilitySignedGrants
 )
 
 // CapabilityHeader carries a request's client capability. Missing or malformed

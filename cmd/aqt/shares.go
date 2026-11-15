@@ -3,7 +3,6 @@
 package main
 
 import (
-	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -47,14 +46,15 @@ type shareRow struct {
 	createdAt int64
 }
 
-// How a share row names its sender, strongest first. Only a pin attributes a share:
-// signup does not verify emails, so a claim is the server's word, and anyone with an
-// account can append a row here.
+// How a share row names its sender, strongest first. Only a pin attributes a share,
+// and only when the pinned key signed it: signup does not verify emails, so a claim is
+// the server's word, and anyone with an account can append a row here.
 const (
-	attributionVerified = "verified" // a pin checked against a fingerprint
+	attributionVerified = "verified" // signed by a pin checked against a fingerprint
 	attributionPinned   = "pinned"
 	attributionClaimed  = "claimed"
-	attributionUnknown  = "unknown" // a bare handle: the server named no one
+	attributionUnknown  = "unknown"  // a bare handle: the server named no one, or the row did not open
+	attributionUnsigned = "unsigned" // no valid signature from the key the row is attributed to
 )
 
 func (r shareRow) sender() string {
@@ -65,6 +65,8 @@ func (r shareRow) sender() string {
 		return fmt.Sprintf("%s (%s)", r.FromEmail, r.Fingerprint)
 	case attributionClaimed:
 		return fmt.Sprintf("%s? (unverified, %s)", r.ClaimedEmail, r.ClaimedFingerprint)
+	case attributionUnsigned:
+		return fmt.Sprintf("%s (unsigned, sender unknown)", r.From)
 	default:
 		return fmt.Sprintf("%s (unknown sender)", r.From)
 	}
@@ -77,7 +79,7 @@ func (r shareRow) fetchCommand() string {
 	base64URL := func(c rune) bool {
 		return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' || c == '_'
 	}
-	if r.Stale || r.id == "" || strings.ContainsFunc(r.id, func(c rune) bool { return !base64URL(c) }) {
+	if r.Stale || r.Attribution == attributionUnsigned || r.id == "" || strings.ContainsFunc(r.id, func(c rune) bool { return !base64URL(c) }) {
 		return ""
 	}
 	if r.Kind != api.KindFolder {
@@ -152,10 +154,13 @@ func (app *application) sharesCmd() *cobra.Command {
 				app.markSharesSeen(rows)
 				return nil
 			}
-			unpinned := false
+			unpinned, unsigned := false, false
 			for _, r := range rows {
-				if r.Attribution == attributionClaimed || r.Attribution == attributionUnknown {
+				switch r.Attribution {
+				case attributionClaimed, attributionUnknown:
 					unpinned = true
+				case attributionUnsigned:
+					unsigned = true
 				}
 				if r.Stale {
 					fmt.Printf("%s  (stale grant — ask the owner to re-share)  from %s  since %s\n", r.Ref, r.sender(), r.Since)
@@ -172,6 +177,9 @@ func (app *application) sharesCmd() *cobra.Command {
 			if unpinned {
 				fmt.Println("an unverified or unknown sender is only the server's word: compare the fingerprint with them, then `aqt contacts pin <email> --fingerprint <fingerprint>`")
 			}
+			if unsigned {
+				fmt.Println("an unsigned share was made before shares were signed, or written by the server; it does not open until its owner shares it again")
+			}
 			app.markSharesSeen(rows)
 			return nil
 		},
@@ -181,10 +189,10 @@ func (app *application) sharesCmd() *cobra.Command {
 	return cmd
 }
 
-// collectShares decrypts each incoming grant's metadata and attributes it to a
-// pinned contact where one matches, or else to what the server claims. It returns
-// the authed client it built so a caller acting on a row does not construct a second
-// one.
+// collectShares decrypts each incoming grant's metadata and attributes it to the
+// pinned contact whose key signed it, or else to what the server claims when the
+// server's key for the owner signed it. It returns the authed client it built so a
+// caller acting on a row does not construct a second one.
 func (app *application) collectShares() (*client.Client, []shareRow, error) {
 	cl, prof, err := app.authedClient()
 	if err != nil {
@@ -202,15 +210,12 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 		return nil, nil, err
 	}
 	defer mk.Wipe()
-	// A grant names its owner by opaque handle. `aqt contacts verify` protects the
-	// grant direction only, so reverse-resolving the handle against the same pins is
-	// what lets a recipient check an incoming share against a fingerprint they have
+	// A grant names its owner by opaque handle. Checking its signature against the
+	// pins is what lets a recipient tie an incoming share to a fingerprint they have
 	// compared out-of-band.
-	pinByHandle := map[string]identity.Contact{}
-	if pins, err := identity.LoadContacts(prof.Name); err == nil {
-		for _, c := range pins {
-			pinByHandle[c.Handle] = c
-		}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		return nil, nil, err
 	}
 	rows := make([]shareRow, 0, len(items))
 	for _, it := range items {
@@ -222,23 +227,29 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 			Since:       time.Unix(it.CreatedAt, 0).Format("2006-01-02"),
 			Attribution: attributionUnknown,
 		}
-		if pin, ok := pinByHandle[it.OwnerHandle]; ok {
-			row.FromEmail, row.Fingerprint = pin.Email, crypto.KeyFingerprint(pin.PublicKey)
-			row.Attribution = attributionPinned
-			if pin.Verified {
-				row.Attribution = attributionVerified
-			}
-		} else if email := foreignText(it.OwnerEmail); isPlainEmail(email) && len(it.OwnerPublicKey) == ed25519.PublicKeySize {
-			row.ClaimedEmail, row.ClaimedFingerprint = email, crypto.KeyFingerprint(it.OwnerPublicKey)
-			row.Attribution = attributionClaimed
-		}
 		ck, err := crypto.UnwrapGrant(it.WrappedKey, mk, it.ResourceID, it.OwnerHandle, prof.OwnerHandle)
 		if err != nil {
 			// The owner rotated the key after granting (or the wrap is bound to
-			// someone else); the grant row exists but no longer opens anything.
+			// someone else); the grant row exists but no longer opens anything, and a
+			// signature over a key we cannot read names no one.
 			row.Stale = true
 			rows = append(rows, row)
 			continue
+		}
+		switch a := attributeGrant(pins, it.OwnerHandle, it.OwnerPublicKey, it.Signature, ck, it.ResourceID, prof.OwnerHandle); {
+		case a.signed && a.pin != nil:
+			row.FromEmail, row.Fingerprint = a.pin.Email, crypto.KeyFingerprint(a.pin.PublicKey)
+			row.Attribution = attributionPinned
+			if a.pin.Verified {
+				row.Attribution = attributionVerified
+			}
+		case !a.signed:
+			row.Attribution = attributionUnsigned
+		default:
+			if email := foreignText(it.OwnerEmail); isPlainEmail(email) {
+				row.ClaimedEmail, row.ClaimedFingerprint = email, crypto.KeyFingerprint(it.OwnerPublicKey)
+				row.Attribution = attributionClaimed
+			}
 		}
 		meta, err := decodeMeta(it.EncryptedMeta, ck, it.ResourceID)
 		ck.Wipe()
@@ -250,6 +261,36 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 		rows = append(rows, row)
 	}
 	return cl, rows, nil
+}
+
+// grantAttribution is who an incoming grant can be attributed to. pin is set when a
+// pin holds the owner handle; signed says whether the key the grant is attributed to,
+// that pin's or else the one the server reports for the owner, signed it.
+type grantAttribution struct {
+	pin    *identity.Contact
+	signed bool
+}
+
+// attributeGrant checks an incoming grant's signature. A grant listed under a pinned
+// handle counts only if the pinned key signed it, never against the key the server
+// reports, since that is the key a server forging a share from the contact would
+// report. A grant from an unpinned owner is checked against the server's key, which
+// says nothing about who holds it.
+func attributeGrant(pins map[string]identity.Contact, ownerHandle string, claimedKey, sig []byte, ck crypto.ContentKey, resourceID, granteeHandle string) grantAttribution {
+	var held *identity.Contact
+	for _, p := range pins {
+		if p.Handle != ownerHandle {
+			continue
+		}
+		if crypto.VerifyGrant(p.PublicKey, sig, ck, resourceID, ownerHandle, granteeHandle) {
+			return grantAttribution{pin: &p, signed: true}
+		}
+		held = &p
+	}
+	if held != nil {
+		return grantAttribution{pin: held}
+	}
+	return grantAttribution{signed: crypto.VerifyGrant(claimedKey, sig, ck, resourceID, ownerHandle, granteeHandle)}
 }
 
 // markSharesSeen moves the profile's new-share marker past every listed row. The

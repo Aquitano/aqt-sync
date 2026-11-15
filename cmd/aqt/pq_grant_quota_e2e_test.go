@@ -94,6 +94,11 @@ func TestGrantMigrationAllowsOwnerKeyRotationOverQuota(t *testing.T) {
 			if after.StorageBytes <= quota {
 				t.Fatal("migration did not exceed the owner quota")
 			}
+			// The grant predates signed grants, so its owner shares it again before a
+			// rotation will re-wrap it.
+			if err := app.runShareWith(id, bob.Email); err != nil {
+				t.Fatalf("re-share over quota: %v", err)
+			}
 			if operation == "unshare" {
 				err = app.runPrivate(id)
 			} else {

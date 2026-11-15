@@ -27,7 +27,8 @@ recoveryKey ──HKDF──▶ recoveryUnlockKey (RUK)       (random, shown onc
                                                   ├─ HKDF ─▶ Ed25519 signing key
                                                   │            (public half registered with the
                                                   │             server; logins sign a server
-                                                  │             challenge — no secret is sent)
+                                                  │             challenge and owners sign grants
+                                                  │             — no secret is sent)
                                                   └─ HKDF ─▶ X-Wing encryption key
                                                                (ML-KEM-768 + X25519; HPKE grant
                                                                 wraps; public half published)
@@ -58,11 +59,14 @@ stale passphrase or a cached root key alone cannot re-attach after a change.
 
 `aqt passphrase rotate-root` is the compromise-recovery operation: it mints a fresh
 `RK`, re-wraps every recoverable resource and snapshot content key plus incoming
-grant, migrates the derived signing and encryption identities, and atomically
-switches the account record. The server issues a fresh token only to the initiating
-device and removes every other device; they recover by logging in again with the
-passphrase. Existing convergent objects stay readable because their per-object keys
-are sealed in their roots; future writes derive convergence from the new `RK`.
+grant, migrates the derived signing and encryption identities, re-signs the outgoing
+grants the old identity signed, and atomically switches the account record. A
+recipient who pinned the old identity key sees those grants as unsigned until they
+compare fingerprints and pin the new one. The server issues a fresh token only to the
+initiating device and removes every other device; they recover by logging in again
+with the passphrase. Existing convergent objects stay readable because their
+per-object keys are sealed in their roots; future writes derive convergence from the
+new `RK`.
 
 A typo'd first passphrase can only be undone with the [recovery key](#the-recovery-key)
 — there is nothing server-side to reset against — so `signup` on a terminal confirms
@@ -159,6 +163,22 @@ obtained it later — but they could equally have saved the plaintext. Either wa
 old **link** is dead: the root no longer opens under the old key, and the server
 stops serving the objects.
 
+A rotation re-wraps the new key for the grantees that remain, and the server says
+which those are. The client follows only a grant it signed over the key being
+replaced (see [signed grants](#incoming-shares-are-attacker-appendable)), so a server
+that lists a pinned contact on a resource never shared with them gets no wrap for
+them. A grantee revoked by an earlier rotation is skipped the same way, since that
+grant's signature covers a key the rotation replaced; the revoke itself skips the
+revoked handle by name. Pin repair applies the same rule to the resources it
+re-sends. A grant stored before grants were signed fails the check too, so it is
+never re-wrapped; its owner shares it again to sign it.
+
+One case is bounded rather than closed. A revoke that cannot rotate (the resource is
+public, or a folder that must be re-synced first) deletes the grant but leaves its
+signature valid for the current key, so a server that kept the row can list it again
+at the next `aqt unshare`, which then re-wraps to the revoked account. Both revokes
+already say that they did not rotate the key.
+
 An expiring link is a different operation from revoking one. Expiry can either
 `reclaim` (destroy the content) or `retire` (take only the link down); a retired
 link's fragment is dormant, not dead, because no key was rotated. See
@@ -184,18 +204,25 @@ noise:
   `--block` additionally refuses that account's future grants and drops the shares it
   has already sent. Blocks are listed by `aqt shares blocked` and lifted by
   `aqt shares unblock`.
-- **The sender is named where it can be.** A grant carries an opaque handle. `aqt
-  shares` reverse-resolves it against the local contact pins and prints the pinned
-  email and key fingerprint on a match, marked `verified` when the pin was checked
-  against a fingerprint. A pin is the only attribution the client vouches for.
-  Without one, it shows the email and identity-key fingerprint the server reports for
-  the grantor's account as an unverified claim (`a@example.com?`): signup does not
+- **The sender is named only when it signed.** A grant carries an opaque owner handle
+  and the owner's Ed25519 signature over the resource id, both handles, and a
+  commitment to the content key it wraps. HPKE base mode authenticates no sender, so
+  without the signature anyone holding the recipient's public enc key could wrap a key
+  of their choosing, and the server could list it under any owner. `aqt shares`
+  reverse-resolves the handle against the local contact pins and prints the pinned
+  email and key fingerprint only when that pin's key signed the grant, marked
+  `verified` when the pin was checked against a fingerprint. A pin is the only
+  attribution the client vouches for. Without one, it checks the signature against the
+  identity key the server reports for the grantor's account and shows that account's
+  email and fingerprint as an unverified claim (`a@example.com?`): signup does not
   verify emails, so open registration lets anyone hold an address that reads like
   someone else's, and the server can report anything. The fingerprint is the one to
   compare out-of-band; `aqt contacts pin <email> --fingerprint <fp>` then turns the
-  claim into a verified pin. A server that predates the claim leaves the bare handle,
-  shown as `unknown sender`. The flip side is that sharing shows your account email to
-  every account you share with.
+  claim into a verified pin. A grant whose signature does not verify is listed as
+  `unsigned`, and `pull`, `clone`, and `info` refuse to open it. The handle in a pin is
+  the server's word as well, but a pin on the wrong handle names nothing, because the
+  contact's key never signs a grant under that handle. The flip side is that sharing
+  shows your account email to every account you share with.
 
 A block is the one place a grant write distinguishes a real account from a decoy, and
 only to the account the recipient deliberately blocked.
@@ -305,7 +332,11 @@ against Grover's algorithm.
   forged binding cannot replace it. Only a first-use pin rests on the binding (already
   trust-on-first-use against the server), and so do a confirmed re-pin, which is a
   first use over again, and the one-time move of a pin made while grants were X25519. The identity key signs nothing a server can choose
-  beyond a 32-byte login challenge, which can never be a binding message. Release signing is the one
+  beyond a 32-byte login challenge, which can never be a binding message. A grant
+  signature covers a server-assigned id and handles, but under its own prefix and with
+  a content-key commitment the server never sees, so it is neither of the other two
+  messages. A forged one could put a sender's name on a file the forger chose; it
+  decrypts nothing. Release signing is the one
   signature a forger could turn into code execution; see
   [Still open](#still-open).
 
@@ -407,7 +438,8 @@ you from":
   An unverified pin may therefore be a decoy, and once its owner registers, the
   server's keys for that email stop matching it. A share on a terminal then shows
   both fingerprints and asks before re-pinning. Confirming replaces the pin and
-  re-sends every grant made against the old one; when the handle changed, it deletes
+  re-sends every grant this account signed against the old one, listing them, since
+  the server chooses which resources it says hold one; when the handle changed, it deletes
   the old rows without rotating the content key, since nobody holds a decoy's key.
   Without a terminal the share refuses, and no flag accepts the change in advance:
   the question is the out-of-band comparison, and a server presenting its own key

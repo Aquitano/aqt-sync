@@ -105,6 +105,16 @@ release each landed in.
   read transparently and upgraded on the next sync, while an unsealed manifest is
   refused. See [client data at rest](threat-model.md#client-data-at-rest).
 
+- **Signed grants.** HPKE base mode authenticates no sender, so the owner signs each
+  grant with its identity key. The signature commits to the content key rather than
+  to the wrap or the grantee's enc key: a grantee re-wraps its incoming grants when its
+  own enc key changes, and the owner's signature has to survive that. Committing to
+  the key also lets a rotation re-wrap only grants signed over the key it replaces,
+  which keeps a server from reviving a grant an earlier rotation revoked. The handle
+  stays outside the enc-key binding: a pin on a server-chosen handle names nothing,
+  because the contact's key never signs a grant under it. See
+  [incoming shares](threat-model.md#incoming-shares-are-attacker-appendable).
+
 ## Server exposure
 
 - **Account-enumeration oracle.** `GET /v1/account/salt` returns an indistinguishable

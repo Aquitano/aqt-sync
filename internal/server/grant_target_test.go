@@ -34,7 +34,8 @@ func TestGrantTargetPreconditionTreatsRealAndDecoyAlike(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		req := api.CreateGrantRequest{GranteeHandle: keys.Handle, WrappedKey: wrap, GranteeEmail: email, GranteeEncPublicKey: keys.EncPublicKey}
+		sig := make([]byte, ed25519.SignatureSize)
+		req := api.CreateGrantRequest{GranteeHandle: keys.Handle, WrappedKey: wrap, Signature: sig, GranteeEmail: email, GranteeEncPublicKey: keys.EncPublicKey}
 		if rec := h.doAt(api.ClientCapability, http.MethodPost, "/v1/resources/"+res.ID+"/grants", aliceToken, req); rec.Code != http.StatusCreated {
 			t.Fatalf("%s: matching lookup = %d %s", email, rec.Code, rec.Body)
 		}
@@ -48,8 +49,8 @@ func TestGrantTargetPreconditionTreatsRealAndDecoyAlike(t *testing.T) {
 			t.Fatalf("%s: mismatched lookup changed the grant: ok=%v err=%v", email, ok, err)
 		}
 		for _, incomplete := range []api.CreateGrantRequest{
-			{GranteeHandle: keys.Handle, WrappedKey: wrap, GranteeEmail: email},
-			{GranteeHandle: keys.Handle, WrappedKey: wrap, GranteeEncPublicKey: keys.EncPublicKey},
+			{GranteeHandle: keys.Handle, WrappedKey: wrap, Signature: sig, GranteeEmail: email},
+			{GranteeHandle: keys.Handle, WrappedKey: wrap, Signature: sig, GranteeEncPublicKey: keys.EncPublicKey},
 		} {
 			if rec := h.doAt(api.ClientCapability, http.MethodPost, "/v1/resources/"+res.ID+"/grants", aliceToken, incomplete); rec.Code != http.StatusBadRequest {
 				t.Fatalf("%s: incomplete lookup precondition = %d, want 400", email, rec.Code)
