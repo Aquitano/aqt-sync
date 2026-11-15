@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -393,6 +394,18 @@ type localApply struct {
 	dirRemovals  []string
 }
 
+// touchedPaths lists every path the apply created, replaced, or removed, plus extra.
+func (w localApply) touchedPaths(extra []string) []string {
+	paths := slices.Concat(w.localDeletes, w.dirRemovals, extra)
+	for _, e := range w.downloads {
+		paths = append(paths, e.Path)
+	}
+	for _, d := range w.dirDownloads {
+		paths = append(paths, d.Path)
+	}
+	return paths
+}
+
 // applyLocalTree brings the local tree in line with the manifest just committed. It
 // returns the work as executed: a case-only rename consumes the delete that would have
 // destroyed its target, so the summary reports what actually happened.
@@ -560,13 +573,16 @@ func (app *application) applySync(c applyCtx, actions []syncengine.Action, dirAc
 	if err != nil {
 		return err
 	}
-
-	if err := app.persistSyncState(c, st, syncedVersion); err != nil {
-		return err
-	}
 	mergedPaths := make([]string, len(landedMerges))
 	for i, resolution := range landedMerges {
 		mergedPaths[i] = resolution.path
+	}
+
+	if err := syncengine.SyncParents(c.root, work.touchedPaths(mergedPaths)); err != nil {
+		return err
+	}
+	if err := app.persistSyncState(c, st, syncedVersion); err != nil {
+		return err
 	}
 	app.summarize(files.uploads, work.downloads, work.localDeletes, mergedPaths)
 	if len(conflicts) > 0 {

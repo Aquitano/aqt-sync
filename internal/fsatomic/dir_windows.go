@@ -2,6 +2,6 @@
 
 package fsatomic
 
-// syncDir is a no-op on Windows: directory handles cannot be fsynced, and rename
+// SyncDir is a no-op on Windows: directory handles cannot be fsynced, and rename
 // durability is left to the filesystem.
-func syncDir(string) error { return nil }
+func SyncDir(string) error { return nil }

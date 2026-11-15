@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
 // safeJoin resolves dir/relPath and refuses a result that escapes dir, so a
@@ -436,6 +438,31 @@ func RenameCaseOnly(dir, fromRel, toRel string) error {
 	}
 	if err := os.Rename(from, to); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	return nil
+}
+
+// SyncParents fsyncs each directory from every path's parent up to dir, once each, so
+// the renames, creations, and removals an apply made survive power loss before the base
+// that records them is written. A directory a removal pruned is skipped, and its
+// surviving parent, which records the removal, is still synced. One whose mode denies
+// opening it is skipped too, rather than failing a pull that has already landed.
+func SyncParents(dir string, relPaths []string) error {
+	synced := map[string]bool{}
+	for _, rel := range relPaths {
+		full, err := safeJoin(dir, rel)
+		if err != nil {
+			return err
+		}
+		for parent := filepath.Dir(full); !synced[parent]; parent = filepath.Dir(parent) {
+			synced[parent] = true
+			if err := fsatomic.SyncDir(parent); err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.ENOTDIR) {
+				return err
+			}
+			if parent == dir {
+				break
+			}
+		}
 	}
 	return nil
 }
