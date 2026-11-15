@@ -59,10 +59,8 @@ const (
 
 func (r shareRow) sender() string {
 	switch r.Attribution {
-	case attributionVerified:
-		return fmt.Sprintf("%s (%s, verified)", r.FromEmail, r.Fingerprint)
-	case attributionPinned:
-		return fmt.Sprintf("%s (%s)", r.FromEmail, r.Fingerprint)
+	case attributionVerified, attributionPinned:
+		return pinnedLabel(r.FromEmail, r.Fingerprint, r.Attribution == attributionVerified)
 	case attributionClaimed:
 		return fmt.Sprintf("%s? (unverified, %s)", r.ClaimedEmail, r.ClaimedFingerprint)
 	case attributionUnsigned:
@@ -70,6 +68,15 @@ func (r shareRow) sender() string {
 	default:
 		return fmt.Sprintf("%s (unknown sender)", r.From)
 	}
+}
+
+// pinnedLabel names an account by its pin, the way every listing that vouches for one
+// prints it.
+func pinnedLabel(email, fingerprint string, verified bool) string {
+	if verified {
+		return fmt.Sprintf("%s (%s, verified)", email, fingerprint)
+	}
+	return fmt.Sprintf("%s (%s)", email, fingerprint)
 }
 
 // fetchCommand is a ready-to-run command that pulls the share, or "" for a row that
@@ -236,21 +243,7 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 			rows = append(rows, row)
 			continue
 		}
-		switch a := attributeGrant(pins, it.OwnerHandle, it.OwnerPublicKey, it.Signature, ck, it.ResourceID, prof.OwnerHandle); {
-		case a.signed && a.pin != nil:
-			row.FromEmail, row.Fingerprint = a.pin.Email, crypto.KeyFingerprint(a.pin.PublicKey)
-			row.Attribution = attributionPinned
-			if a.pin.Verified {
-				row.Attribution = attributionVerified
-			}
-		case !a.signed:
-			row.Attribution = attributionUnsigned
-		default:
-			if email := foreignText(it.OwnerEmail); isPlainEmail(email) {
-				row.ClaimedEmail, row.ClaimedFingerprint = email, crypto.KeyFingerprint(it.OwnerPublicKey)
-				row.Attribution = attributionClaimed
-			}
-		}
+		row.attribute(attributeGrant(pins, it.OwnerHandle, it.OwnerPublicKey, it.Signature, ck, it.ResourceID, prof.OwnerHandle), it.OwnerEmail, it.OwnerPublicKey)
 		meta, err := decodeMeta(it.EncryptedMeta, ck, it.ResourceID)
 		ck.Wipe()
 		row.Name = "(undecryptable metadata)"
@@ -265,17 +258,21 @@ func (app *application) collectShares() (*client.Client, []shareRow, error) {
 
 // grantAttribution is who an incoming grant can be attributed to. pin is set when a
 // pin holds the owner handle; signed says whether the key the grant is attributed to,
-// that pin's or else the one the server reports for the owner, signed it.
+// that pin's or else the one the server reports for the owner, signed it. misfiled is
+// a pin on another handle whose key signed the grant.
 type grantAttribution struct {
-	pin    *identity.Contact
-	signed bool
+	pin      *identity.Contact
+	signed   bool
+	misfiled *identity.Contact
 }
 
 // attributeGrant checks an incoming grant's signature. A grant listed under a pinned
 // handle counts only if the pinned key signed it, never against the key the server
 // reports, since that is the key a server forging a share from the contact would
 // report. A grant from an unpinned owner is checked against the server's key, which
-// says nothing about who holds it.
+// says nothing about who holds it. A pinned key that signed under a handle its pin
+// does not hold names nobody: the handle is half of what the pin vouches for, and only
+// a server misreporting handles produces one.
 func attributeGrant(pins map[string]identity.Contact, ownerHandle string, claimedKey, sig []byte, ck crypto.ContentKey, resourceID, granteeHandle string) grantAttribution {
 	var held *identity.Contact
 	for _, p := range pins {
@@ -290,7 +287,33 @@ func attributeGrant(pins map[string]identity.Contact, ownerHandle string, claime
 	if held != nil {
 		return grantAttribution{pin: held}
 	}
+	for _, p := range pins {
+		if crypto.VerifyGrant(p.PublicKey, sig, ck, resourceID, ownerHandle, granteeHandle) {
+			return grantAttribution{misfiled: &p}
+		}
+	}
 	return grantAttribution{signed: crypto.VerifyGrant(claimedKey, sig, ck, resourceID, ownerHandle, granteeHandle)}
+}
+
+// attribute names the sender of r's grant from a. When the key the server reports for
+// the owner signed it, the email the server reports beside that key is shown as its
+// claim.
+func (r *shareRow) attribute(a grantAttribution, claimedEmail string, claimedKey []byte) {
+	switch {
+	case a.signed && a.pin != nil:
+		r.FromEmail, r.Fingerprint = a.pin.Email, crypto.KeyFingerprint(a.pin.PublicKey)
+		r.Attribution = attributionPinned
+		if a.pin.Verified {
+			r.Attribution = attributionVerified
+		}
+	case !a.signed:
+		r.Attribution = attributionUnsigned
+	default:
+		if email := foreignText(claimedEmail); isPlainEmail(email) {
+			r.ClaimedEmail, r.ClaimedFingerprint = email, crypto.KeyFingerprint(claimedKey)
+			r.Attribution = attributionClaimed
+		}
+	}
 }
 
 // markSharesSeen moves the profile's new-share marker past every listed row. The

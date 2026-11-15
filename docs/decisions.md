@@ -115,6 +115,14 @@ release each landed in.
   because the contact's key never signs a grant under it. See
   [incoming shares](threat-model.md#incoming-shares-are-attacker-appendable).
 
+- **A share from an unpinned owner asks before it opens.** A grant signed by the key
+  the server reports for an owner nobody pinned is the server's word, so opening it
+  silently let a server answer a pull with a share of its own under the id of one a
+  verified contact made. Refusing it outright would make every first share unusable
+  until the recipient ran `aqt contacts pin`. So `pull`, `clone`, and `info` show the
+  claim and pin on a yes, and take `--yes`, the flag every other confirmation uses,
+  for a run without a terminal.
+
 ## Server exposure
 
 - **Account-enumeration oracle.** `GET /v1/account/salt` returns an indistinguishable

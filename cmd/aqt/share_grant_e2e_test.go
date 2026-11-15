@@ -81,6 +81,14 @@ func (app *application) asProfile(name string, fn func()) {
 	fn()
 }
 
+// asGrantee is asProfile for a recipient reading its shares with --yes, so a read
+// through a grant pins an owner it has not pinned instead of asking.
+func (app *application) asGrantee(name string, fn func()) {
+	app.pinOwner = true
+	defer func() { app.pinOwner = false }()
+	app.asProfile(name, fn)
+}
+
 // share ls fetches a resource's grants only when the server-echoed grant count
 // says there are any: a private, ungranted resource used to cost one /grants
 // round-trip per resource just to be skipped.
@@ -198,7 +206,7 @@ func TestGrantFileShareAndRevoke(t *testing.T) {
 		t.Fatalf("share --with: %v", err)
 	}
 
-	app.asProfile("bob", func() {
+	app.asGrantee("bob", func() {
 		out := captureStdout(t, func() {
 			if err := app.sharesCmd().RunE(nil, nil); err != nil {
 				t.Fatalf("shares: %v", err)
@@ -291,7 +299,7 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 
 	cloneAndCheck := func(profile string) {
 		dest := filepath.Join(t.TempDir(), "clone")
-		app.asProfile(profile, func() {
+		app.asGrantee(profile, func() {
 			if err := app.runClone("aqt://"+id, dest, false, ""); err != nil {
 				t.Fatalf("%s clone: %v", profile, err)
 			}
@@ -315,7 +323,7 @@ func TestGrantFolderCloneRevokeRewrap(t *testing.T) {
 	}
 	cloneAndCheck("bob")
 
-	app.asProfile("bob", func() {
+	app.asGrantee("bob", func() {
 		// Subpath pull through the grant.
 		dest := filepath.Join(t.TempDir(), "readme.txt")
 		if err := app.runPull("aqt://"+id+"/docs/readme.txt", dest, "", false, false); err != nil {
@@ -544,7 +552,7 @@ func answerRepin(t *testing.T, answer error) *int {
 func (app *application) pullAs(t *testing.T, profile, id string) string {
 	t.Helper()
 	var got []byte
-	app.asProfile(profile, func() {
+	app.asGrantee(profile, func() {
 		dest := filepath.Join(t.TempDir(), "out")
 		if err := app.runPull("aqt://"+id, dest, "", false, false); err != nil {
 			t.Fatalf("%s pulling %s: %v", profile, id, err)

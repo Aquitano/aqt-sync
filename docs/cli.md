@@ -33,7 +33,7 @@ accepting it and behaving identically:
 
 Every prompt has a flag that answers it ahead of time, so a scripted run neither
 blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive
-confirmation, `--git/--no-git` for whether `aqt init` syncs a git repository inside
+confirmation or for pinning the owner of a share on first use, `--git/--no-git` for whether `aqt init` syncs a git repository inside
 the folder, and `-P/--password` with a value instead of the bare form that prompts.
 
 Everyday resource arguments accept a unique name, an id, or a tracked path:
@@ -148,6 +148,14 @@ Compare the fingerprint with the sender out-of-band before acting on a share;
 `aqt contacts pin <email> --fingerprint <fp>` then makes the attribution `verified`.
 A successful listing also marks every share as seen: `aqt login` and `aqt status`
 mention shares that arrived since, on stderr.
+
+`aqt pull`, `aqt cat`, `aqt clone`, and `aqt info` work the attribution out again
+from what the server returns for the read itself, and print it on stderr as
+`aqt://<id> is shared by <sender>`. They refuse an `unsigned` grant. A `claimed` one
+opens only once its owner is pinned: on a terminal they show the claimed email,
+handle, and fingerprint and pin on yes; without one they refuse and say how to pin,
+unless `-y/--yes` pins it on first use. A claim on an email pinned to another key is
+refused either way.
 
 Anyone with an account on the server can add a row here, so the recipient can remove
 one:

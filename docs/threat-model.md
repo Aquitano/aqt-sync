@@ -188,7 +188,7 @@ link's fragment is dormant, not dead, because no key was rotated. See
 
 Registration is open by default and the handle lookup behind `aqt share --with` is
 authenticated but unrestricted, so any account on a server can put a row into any
-other account's `aqt shares` list. Three properties keep that from being worse than
+other account's `aqt shares` list. Four properties keep that from being worse than
 noise:
 
 - **The row is somebody else's text.** A grantor picks the metadata a recipient's
@@ -221,8 +221,21 @@ noise:
   claim into a verified pin. A grant whose signature does not verify is listed as
   `unsigned`, and `pull`, `clone`, and `info` refuse to open it. The handle in a pin is
   the server's word as well, but a pin on the wrong handle names nothing, because the
-  contact's key never signs a grant under that handle. The flip side is that sharing
-  shows your account email to every account you share with.
+  contact's key never signs a grant under that handle; a pinned key that signed under
+  a handle its pin does not hold names nothing either, and does not open. The flip
+  side is that sharing shows your account email to every account you share with.
+- **A share opens only from a sender you have pinned.** `pull`, `clone`, and `info`
+  print the sender of a share the way `aqt shares` does before opening it. A share
+  signed by the key the
+  server reports for an owner nobody pinned is the server's word all the way down:
+  the server can wrap a key of its own to you, sign it with a key it made up, and
+  answer a pull of a share `aqt shares` named as a verified contact's with that one
+  under the same id. So it opens only once its owner is pinned: on a terminal after
+  showing the claimed email, handle, and fingerprint, and without one only with
+  `--yes`. Either way that is a first-use pin, checked against the keys the server
+  publishes for the claimed email. A claim on an email already pinned to another key
+  is refused outright. The Git remote helper never reads through a grant: Git remotes
+  cannot be granted, and it opens only remotes the account owns.
 
 A block is the one place a grant write distinguishes a real account from a decoy, and
 only to the account the recipient deliberately blocked.

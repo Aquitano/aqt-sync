@@ -498,9 +498,11 @@ func (s *Store) grantWrappedKey(resourceID, grantee string) ([]byte, bool, error
 }
 
 // storedGrant is what a grantee's read needs from its grant row: the wrap, the
-// owner's signature over it, and the identity key the server holds for that owner.
+// owner's signature over it, and the email and identity key the server holds for
+// that owner.
 type storedGrant struct {
 	wrapped, signature, ownerPublicKey []byte
+	ownerEmail                         string
 }
 
 // grantFor returns the grant on (resource, grantee), if one exists, with what a
@@ -508,11 +510,11 @@ type storedGrant struct {
 func (s *Store) grantFor(resourceID, grantee string) (storedGrant, bool, error) {
 	var g storedGrant
 	err := s.rdb.QueryRow(
-		`SELECT g.wrapped_key, g.signature, a.public_key FROM grants g
+		`SELECT g.wrapped_key, g.signature, a.public_key, COALESCE(a.email, '') FROM grants g
 		 LEFT JOIN accounts a ON a.owner_handle = g.owner_handle
 		 WHERE g.resource_id = ? AND g.grantee_handle = ?`,
 		resourceID, grantee,
-	).Scan(&g.wrapped, &g.signature, &g.ownerPublicKey)
+	).Scan(&g.wrapped, &g.signature, &g.ownerPublicKey, &g.ownerEmail)
 	if errors.Is(err, sql.ErrNoRows) {
 		return g, false, nil
 	}

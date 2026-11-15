@@ -72,6 +72,7 @@ type resourceDownloadHeader struct {
 	GrantKey       []byte             `json:"grantKey,omitempty"`
 	GrantSig       []byte             `json:"grantSig,omitempty"`
 	Owner          string             `json:"owner,omitempty"`
+	OwnerEmail     string             `json:"ownerEmail,omitempty"`
 	OwnerPublicKey []byte             `json:"ownerPublicKey,omitempty"`
 	Version        int                `json:"version"`
 	MinClient      int                `json:"minClient,omitempty"`
@@ -140,6 +141,7 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		GrantKey:       res.GrantKey,
 		GrantSig:       res.GrantSig,
 		Owner:          res.Owner,
+		OwnerEmail:     res.OwnerEmail,
 		OwnerPublicKey: res.OwnerPublicKey,
 		Version:        res.Version,
 		MinClient:      res.MinClient,
@@ -168,6 +170,7 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 		GrantKey:       h.GrantKey,
 		GrantSig:       h.GrantSig,
 		Owner:          h.Owner,
+		OwnerEmail:     h.OwnerEmail,
 		OwnerPublicKey: h.OwnerPublicKey,
 		Version:        h.Version,
 		MinClient:      h.MinClient,

@@ -67,7 +67,7 @@ func TestGrantRoutesNeedASigningClient(t *testing.T) {
 		t.Fatalf("grantee read = %d %s", rec.Code, rec.Body)
 	}
 	aliceKey := crypto.DeriveSigningKey(aliceMK).Public().(ed25519.PublicKey)
-	if !bytes.Equal(read.GrantSig, grant.Signature) || !bytes.Equal(read.OwnerPublicKey, aliceKey) {
-		t.Fatalf("grantee read carries signature %x and owner key %x, want the stored signature and alice's identity key", read.GrantSig, read.OwnerPublicKey)
+	if !bytes.Equal(read.GrantSig, grant.Signature) || !bytes.Equal(read.OwnerPublicKey, aliceKey) || read.OwnerEmail != "alice@example.com" {
+		t.Fatalf("grantee read carries signature %x, owner key %x and email %q, want the stored signature and alice's identity key and email", read.GrantSig, read.OwnerPublicKey, read.OwnerEmail)
 	}
 }

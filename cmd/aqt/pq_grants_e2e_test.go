@@ -315,7 +315,7 @@ func TestRootRotationRetriesChangedIncomingGrant(t *testing.T) {
 		}
 	}
 	armed.Store(true)
-	app.asProfile("bob", func() {
+	app.asGrantee("bob", func() {
 		withStdin(t, bobPass+"\n")
 		if err := app.runRootKeyRotation(true); err == nil || !strings.Contains(err.Error(), "re-run") {
 			t.Fatalf("stale root rotation = %v, want a retry instruction", err)

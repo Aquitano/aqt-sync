@@ -37,8 +37,15 @@ All notable changes to this project are documented in this file.
   a key of their choosing, so the server could list its own file as
   `from <contact> (SHA256:…, verified)`. A share is now named after a pin only when
   the pinned key signed it, and `pull`, `clone` and `info` refuse a grant without a
-  valid signature. A verified pin to which the server attached the wrong handle names
-  nothing, for the same reason.
+  valid signature. They also print the sender the way `aqt shares` does, and open a
+  share signed by the key the server reports for an owner you have not pinned only
+  once you pin that owner: on a terminal after seeing the claimed email, handle, and
+  fingerprint, or with `--yes`. Before, the server could answer a pull of a verified
+  contact's share with one of its own under the same id, and it opened without a word.
+  A script that reads from a sender it has not pinned now needs `--yes`, or a pin made
+  beforehand with `aqt contacts pin`. A verified pin to which the server attached the
+  wrong handle names nothing, for the same reason, and neither does a pinned key that
+  signed under a handle its pin does not hold.
 
 ### Added
 

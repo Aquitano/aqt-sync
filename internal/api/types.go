@@ -596,11 +596,13 @@ type GetResourceResponse struct {
 	// opens it). Owner carries the resource owner's opaque handle on those reads,
 	// which the grantee needs for the wrap's info binding; a wrong value from a
 	// hostile server just fails the unwrap. GrantSig is the owner's signature over the
-	// grant, and OwnerPublicKey the identity key the server reports for the owner,
-	// which the grantee checks it against when it has not pinned the owner.
+	// grant, and OwnerEmail and OwnerPublicKey the email and identity key the server
+	// reports for the owner: the grantee checks the signature against that key when it
+	// has not pinned the owner, and shows both as the server's claim.
 	GrantKey       []byte `json:"grantKey,omitempty"`
 	GrantSig       []byte `json:"grantSig,omitempty"`
 	Owner          string `json:"owner,omitempty"`
+	OwnerEmail     string `json:"ownerEmail,omitempty"`
 	OwnerPublicKey []byte `json:"ownerPublicKey,omitempty"`
 	Version        int    `json:"version"`
 	// MinClient is the lowest client capability that can read this resource's sealed

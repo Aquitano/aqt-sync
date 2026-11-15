@@ -448,11 +448,12 @@ func (s *Store) getResourceUncounted(id, requireOwner string) (api.GetResourceRe
 	}
 	// A grantee gets the grant wrap instead, plus the owner handle its HPKE info
 	// binding needs (a wrong handle from a hostile server just fails the unwrap), and
-	// the owner's signature with the identity key to check it against.
+	// the owner's signature with the email and identity key the server holds for them.
 	if isGrantee {
 		out.GrantKey = grant.wrapped
 		out.GrantSig = grant.signature
 		out.Owner = owner
+		out.OwnerEmail = grant.ownerEmail
 		out.OwnerPublicKey = grant.ownerPublicKey
 	}
 	return out, countRead, nil

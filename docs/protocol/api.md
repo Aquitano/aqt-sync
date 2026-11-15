@@ -143,8 +143,8 @@ PUT    /v1/resources                 Replace in place (id set, owner-checked, ve
 GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth. A private id needs the owner
                                      token OR a grant to the caller; a grantee gets the grant wrap, its
-                                     signature, the owner handle, and the owner's identity key in place of
-                                     the owner's wrapped key (see grants below).
+                                     signature, the owner handle, and the owner's email and identity key in
+                                     place of the owner's wrapped key (see grants below).
                                      Anyone else gets 404, so a private id is not an existence oracle.
                                      410 Gone (code "gone") if the public link has expired, exhausted its
                                      read limit, or been reclaimed. Owner reads are never counted or expired

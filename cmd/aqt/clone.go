@@ -42,6 +42,7 @@ func (app *application) cloneCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&adopt, "adopt", false,
 		"adopt an existing non-empty directory: write tracking, reuse matching local files by hash, and reconcile differences as conflicts")
 	pw.bind(cmd, "password for a gated link")
+	app.bindPinOwner(cmd)
 	markJSONSupported(cmd)
 	markProgressSupported(cmd)
 	return cmd
@@ -90,7 +91,7 @@ func (app *application) runClone(ref, dir string, adopt bool, password string) e
 			if adopt {
 				return errors.New("--adopt binds a directory to a folder you own; a granted folder is read-only, so there is nothing to sync with")
 			}
-			ck, err := app.contentKeyWithMaster(res, "", "", prof, &mk)
+			ck, err := app.contentKeyWithMaster(cl, res, "", "", prof, &mk)
 			if err != nil {
 				return err
 			}
@@ -175,7 +176,7 @@ func (app *application) runCloneLink(id, fragment, origin, dir, password string)
 	if err != nil {
 		return err
 	}
-	ck, err := app.contentKey(res, fragment, password, prof)
+	ck, err := app.contentKey(cl, res, fragment, password, prof)
 	if err != nil {
 		return err
 	}
