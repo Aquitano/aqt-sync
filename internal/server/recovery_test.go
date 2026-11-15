@@ -156,7 +156,7 @@ func TestRotateRootKeyClearsRecoveryKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifier := []byte("recovery proof")
-	if err := s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), verifier, make([]byte, 32)); err != nil {
+	if err := s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), verifier, make([]byte, 32), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.RotateRootKey(owner, deviceID, rotateReq(nil)); err != nil {

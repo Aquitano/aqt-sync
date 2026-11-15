@@ -26,6 +26,10 @@ var ErrConflict = errors.New("conflict")
 // matches the stored version: another writer got there first.
 var ErrVersionConflict = errors.New("version conflict")
 
+// ErrRootKeyChanged is returned when a write names an identity key the account no
+// longer holds: it was built against a root key a rotation has since retired.
+var ErrRootKeyChanged = errors.New("account root key changed")
+
 // ErrIdempotencyConflict is returned when a key is reused with another payload.
 var ErrIdempotencyConflict = errors.New("idempotency key reused with a different request")
 

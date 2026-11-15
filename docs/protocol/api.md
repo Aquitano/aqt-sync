@@ -137,7 +137,10 @@ PUT    /v1/resources                 Replace in place (id set, owner-checked, ve
                                      is 400: create is POST, where an Idempotency-Key can replay it.
                                      Body: the resource envelope (see Media types above), whose header
                                      carries id?, visibility, encryptedMeta, blobNonce, minClient, and
-                                     wrappedKey? (private only) / expireSeconds?, maxReads? (public only)
+                                     wrappedKey? (private only) / expireSeconds?, maxReads? (public only).
+                                     A create may carry identityKey, the Ed25519 identity key of the root
+                                     key that sealed wrappedKey; 409 root_key_changed if a root-key
+                                     rotation has replaced it.
                                      → { id, version, expiresAt?, maxReads?, onExpiry? }  // echoes the accepted policy
 GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth. A private id needs the owner
@@ -171,9 +174,11 @@ GET    /v1/public/resources/:id/preflight  Unauthenticated, uncounted. → { id,
 # Account maintenance (owner token). None of these re-encrypt a resource:
 PUT    /v1/account/passphrase        Re-wrap the root key under a new passphrase. Bumps the auth epoch
                                      (every other device's token dies) and rotates the stored verifier.
-PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, authVerifier }. Store the
-                                     root key wrapped under the recovery key, replacing any earlier one;
-                                     authVerifier proves the current passphrase (403 otherwise) → 204.
+PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, authVerifier, identityKey? }.
+                                     Store the root key wrapped under the recovery key, replacing any
+                                     earlier one; authVerifier proves the current passphrase (403
+                                     otherwise) → 204. identityKey names the root key wrappedRoot holds;
+                                     409 root_key_changed if a root-key rotation has replaced it.
 PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root key with every re-wrapped
                                      key and migrated identity, atomically, keeping only this device.
                                      Clears the recovery wrap, which holds the old root key.
@@ -337,7 +342,7 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 `quota_exceeded`, `device_limit`, `bad_pack`, `gone`, `snapshot_anchored`,
 `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
 `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
-`account_exists`, `account_disabled`, `missing_chunks`
+`account_exists`, `account_disabled`, `root_key_changed`, `missing_chunks`
 (the refs a manifest PUT, visibility flip, or grant carries name objects the owner no
 longer stores — a prune reaped an upload that outlived the grace period; re-running
 sync re-uploads them),

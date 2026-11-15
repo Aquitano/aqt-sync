@@ -113,8 +113,8 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 
 // SetRecoveryKey stores the account's recovery wrap and verifier hash, replacing any
 // earlier pair, once authVerifier proves the current passphrase. ErrNotFound if it
-// does not.
-func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, recoveryVerifier, authVerifier []byte) error {
+// does not, ErrRootKeyChanged if identityKey is set and no longer the account's.
+func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, recoveryVerifier, authVerifier, identityKey []byte) error {
 	rootJSON, err := json.Marshal(wrappedRoot)
 	if err != nil {
 		return err
@@ -124,8 +124,8 @@ func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, reco
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var stored []byte
-	if err := tx.QueryRow(`SELECT auth_verifier FROM accounts WHERE owner_handle = ?`, owner).Scan(&stored); err != nil {
+	var stored, identity []byte
+	if err := tx.QueryRow(`SELECT auth_verifier, public_key FROM accounts WHERE owner_handle = ?`, owner).Scan(&stored, &identity); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -133,6 +133,9 @@ func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, reco
 	}
 	if !verifierMatches(authVerifier, stored) {
 		return ErrNotFound
+	}
+	if len(identityKey) > 0 && !bytes.Equal(identityKey, identity) {
+		return ErrRootKeyChanged
 	}
 	rh := sha256.Sum256(recoveryVerifier)
 	if _, err := tx.Exec(
@@ -1367,9 +1370,13 @@ func (s *Server) handleSetRecoveryKey(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "wrapped root and both verifiers are required")
 		return
 	}
-	err := s.store.SetRecoveryKey(owner, req.WrappedRoot, req.RecoveryVerifier, req.AuthVerifier)
+	err := s.store.SetRecoveryKey(owner, req.WrappedRoot, req.RecoveryVerifier, req.AuthVerifier, req.IdentityKey)
 	if errors.Is(err, ErrNotFound) {
 		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
+		return
+	}
+	if errors.Is(err, ErrRootKeyChanged) {
+		abortRootKeyChanged(c)
 		return
 	}
 	if err != nil {

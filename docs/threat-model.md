@@ -63,6 +63,10 @@ switches the account record. The server issues a fresh token only to the initiat
 device and removes every other device; they recover by logging in again with the
 passphrase. Existing convergent objects stay readable because their per-object keys
 are sealed in their roots; future writes derive convergence from the new `RK`.
+Updates and snapshots are fenced by the resource version the rotation bumps. A create
+and a recovery-key write name the identity key of the root they wrapped under instead,
+and the server refuses one that names the retired root, so neither can store a wrap
+the new `RK` cannot open.
 
 A typo'd first passphrase can only be undone with the [recovery key](#the-recovery-key)
 — there is nothing server-side to reset against — so `signup` on a terminal confirms

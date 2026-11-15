@@ -60,6 +60,10 @@ All notable changes to this project are documented in this file.
 - The account bootstrap no longer reveals by timing which emails have accounts. Each
   decoy wrote to the database, so it answered slower than a real account while
   uploads held the writer. The decoy secret is now read once at startup.
+- A resource created or a recovery key made while `rotate-root` ran could be wrapped
+  under the retired root key: the resource never opened and blocked every later
+  rotation, and the recovery key never worked. Both requests now name their root key,
+  and the server refuses a retired one with `409 root_key_changed`.
 
 ### Changed
 

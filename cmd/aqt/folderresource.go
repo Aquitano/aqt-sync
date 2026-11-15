@@ -120,8 +120,9 @@ func (app *application) createFolder(cl *client.Client, conv crypto.ConvergenceK
 	}
 	req := api.PutResourceRequest{
 		Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
-		WrappedKey: &wrapped,
-		MinClient:  api.CapabilityIDBinding, // the bind below seals root and meta id-bound (v2)
+		WrappedKey:  &wrapped,
+		IdentityKey: crypto.IdentityKey(mk),
+		MinClient:   api.CapabilityIDBinding, // the bind below seals root and meta id-bound (v2)
 	}
 	resp, err := cl.PutResource(req)
 	if err != nil {
