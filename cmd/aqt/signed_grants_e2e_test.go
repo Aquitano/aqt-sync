@@ -522,6 +522,47 @@ func TestRevokedGranteeIsNotRewrappedWhenTheServerRollsTheKeyBack(t *testing.T) 
 	}
 }
 
+// Only a public resource can lack an owner key. A server that drops it from the read a
+// revoke makes of a private one used to have the revoke delete the grant row without
+// rotating, which left bob's signature valid for the key the resource kept, so the
+// next rotation followed his grant again once the server listed it.
+func TestRevokeRefusesAPrivateResourceReportedWithoutAnOwnerKey(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var dropKey atomic.Pointer[grantRead]
+	h := app.newE2EWithProxy(t, rewriteGrantRead(&dropKey))
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	id := app.pushSecretFile(t, "notes.txt", "private, granted to bob")
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+
+	dropKey.Store(&grantRead{resourceID: id, rewrite: func(res *api.GetResourceResponse) { res.WrappedKey = nil }})
+	err := app.runShareRevoke(id, "bob@example.com", true)
+	dropKey.Store(nil)
+	if err == nil || !strings.Contains(err.Error(), "was not revoked") {
+		t.Fatalf("revoke with the owner key dropped from the read = %v, want a refusal", err)
+	}
+	cl, _, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grants, err := cl.ListGrants(id); err != nil || len(grants) != 1 {
+		t.Fatalf("grants after the refused revoke = %+v (%v), want bob's left in place", grants, err)
+	}
+	if err := app.runShareRevoke(id, "bob@example.com", true); err != nil {
+		t.Fatalf("revoke again with the owner key served: %v", err)
+	}
+	app.asProfile("bob", func() {
+		bobClient, _, err := app.authedClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := bobClient.GetResource(id); !errors.Is(err, client.ErrNotFound) {
+			t.Fatalf("bob reading the resource after the revoke = %v, want ErrNotFound", err)
+		}
+	})
+}
+
 // A folder whose tree predates a root-key rotation cannot rotate its key until it is
 // re-synced. Revoking a grant on it used to delete the row anyway and leave the grant
 // valid for the key a later rotation replaces; now it refuses and changes nothing, so

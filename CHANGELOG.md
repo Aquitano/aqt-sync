@@ -36,7 +36,9 @@ All notable changes to this project are documented in this file.
   folder awaiting a re-sync, kept the revoked grant valid for that key, so the `aqt
   unshare` it recommended next re-wrapped to the revoked account. A revoke now always
   rotates: on a public resource that also makes it private and kills its links, and a
-  folder that cannot rotate yet refuses the revoke until `aqt sync` re-seals it. Every
+  folder that cannot rotate yet refuses the revoke until `aqt sync` re-seals it. A
+  revoke on a private resource the server reports without an owner key is refused too,
+  instead of deleting the grant without rotating. Every
   rotation lists the grantees it re-wraps and the grants it leaves before asking, and
   afterwards names each grant it could not re-wrap. No later rotation repairs one of
   those; `aqt share <id> --with <email>` does. The device that revoked a grant also

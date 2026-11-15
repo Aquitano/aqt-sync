@@ -231,7 +231,7 @@ POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedK
 GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, signature?, createdAt }], nextCursor? }.
                                      Paginated (see below).
 DELETE /v1/resources/:id/grants/:grantee  Delete one grant without rotating. `aqt unshare --with` uses it
-                                     only for a resource with no owner key. Otherwise it rotates the key
+                                     only for a public resource with no owner key. Otherwise it rotates the key
                                      with PUT /v1/resources, whose header field revokeGrantee drops the
                                      grant in the same write, then re-wraps the surviving grantees.
 GET    /v1/shares                    Grantee-scoped incoming grants: { shares: [{ resourceId, ownerHandle,

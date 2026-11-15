@@ -394,7 +394,8 @@ func regrantOwned(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey
 // private: the revoked grant's signature covers the key it was made over, so a revoke
 // that left that key in place would leave the grant valid for it, and the next rotation,
 // from any device, would follow it and hand the revoked account the new key. Only a
-// resource with no owner key revokes without rotating, since nothing can ever rotate it.
+// public resource with no owner key revokes without rotating, since nothing can ever
+// rotate it.
 //
 // The rotation and the delete are one server-side write because every way of splitting
 // them fails badly. Deleting first and then failing to rotate strands the revoked account
@@ -443,6 +444,14 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 		return err
 	}
 	if res.WrappedKey == nil {
+		// Only a public resource can lack an owner key: the server refuses a private
+		// write without one. A private resource reported without one would have the
+		// revoke delete the grant row and leave its signature valid for the key the
+		// resource still has, for the next rotation to follow.
+		if res.Visibility != api.Public {
+			return fmt.Errorf("the server reports no owner key for the private resource aqt://%s, which it never stores, so %s was not revoked: "+
+				"deleting the grant without rotating the key would leave it valid for a later rotation to follow. Run the revoke again; if this persists, the server is misreporting the resource", id, email)
+		}
 		if err := confirmDestructive(fmt.Sprintf("Revoke %s's access to aqt://%s? It has no owner key, so its key cannot be rotated. [y/N] ", email, id), yes); err != nil {
 			return err
 		}
@@ -453,12 +462,10 @@ func (app *application) runShareRevoke(idArg, email string, yes bool) error {
 			return fmt.Errorf("deleting the grant for %s failed: %w", email, err)
 		}
 		if app.json {
-			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": res.Visibility != api.Public})
+			return printJSON(map[string]any{"id": id, "revoked": email, "rotated": false, "accessRemoved": false})
 		}
 		fmt.Printf("revoked %s from aqt://%s (no owner key; content key not rotated)\n", email, id)
-		if res.Visibility == api.Public {
-			fmt.Fprintln(os.Stderr, "the resource is public, so anyone with its link, them included, can still read it")
-		}
+		fmt.Fprintln(os.Stderr, "the resource is public, so anyone with its link, them included, can still read it")
 		return nil
 	}
 	keys, err := app.openResourceKeys(prof, res)

@@ -199,8 +199,9 @@ named by their pins, and the grants that will stay on the old key, with the reas
 then ask (`-y` skips the question, not the list). Revoking a grant on a public
 resource also makes it private, so its links stop working: the grantee could read it
 through a link anyway. A folder that cannot rotate until it is re-synced refuses the
-revoke and changes nothing; run `aqt sync` in it, then revoke again. Only a resource
-with no owner key revokes without rotating.
+revoke and changes nothing; run `aqt sync` in it, then revoke again. Only a public
+resource with no owner key revokes without rotating; a private resource the server
+reports without one is refused, since the server never stores one that way.
 
 After the rotation, a warning names every grant that was not re-wrapped. No later
 rotation picks one up, since its signature covers the replaced key, and `aqt share

@@ -185,8 +185,11 @@ devices, which would re-wrap the new key to the revoked account. So a revoke on 
 public resource rotates too, which makes it private and kills its links: the
 grantee could read it through a link anyway. A folder that cannot rotate until it is
 re-synced (after `aqt passphrase rotate-root`) refuses the revoke and changes nothing.
-Only a resource with no owner key revokes without rotating: no device can rotate it,
-so no rotation can follow the grant either.
+Only a public resource with no owner key revokes without rotating: no device can
+rotate it, so no rotation can follow the grant either. A private resource always has
+an owner key, since the server refuses to store one without it, so a revoke refuses
+a private resource the server reports without one rather than delete the grant and
+leave its signature valid for the key the resource still has.
 
 A rotation checks signatures against the key the server serves, so a server that rolls
 a resource back to its key from before a revoke also brings back the revoked grant's
