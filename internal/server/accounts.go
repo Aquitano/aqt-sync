@@ -152,7 +152,8 @@ func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, reco
 // every other device, and attaches a new one, all in one transaction. Dropping the
 // devices is what keeps a device cap from stranding the reset half-done, and someone
 // who lost the passphrase gains nothing from sessions they cannot unlock. ErrNotFound
-// if the account has no recovery key or the proof is wrong.
+// if the account has no recovery key or the proof is wrong, ErrAccountDisabled if an
+// operator has suspended it.
 func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto.KdfParams, wrappedRoot crypto.SealedBlob, authVerifier []byte, deviceName string) (deviceID, token string, epoch int, err error) {
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
@@ -167,10 +168,13 @@ func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto
 		return "", "", 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var stored []byte
+	var (
+		stored     []byte
+		disabledAt int64
+	)
 	if err := tx.QueryRow(
-		`SELECT recovery_verifier, auth_epoch FROM accounts WHERE owner_handle = ?`, owner,
-	).Scan(&stored, &epoch); err != nil {
+		`SELECT recovery_verifier, auth_epoch, disabled_at FROM accounts WHERE owner_handle = ?`, owner,
+	).Scan(&stored, &epoch, &disabledAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", "", 0, ErrNotFound
 		}
@@ -178,6 +182,9 @@ func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto
 	}
 	if !verifierMatches(recoveryVerifier, stored) {
 		return "", "", 0, ErrNotFound
+	}
+	if disabledAt > 0 {
+		return "", "", 0, ErrAccountDisabled
 	}
 	epoch++
 	vh := sha256.Sum256(authVerifier)
@@ -587,7 +594,8 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 // It returns the plaintext token once; only its hash is stored.
 // maxDevices > 0 caps the account's device count: the count and the insert run in one
 // transaction, so a signup's first device and a concurrent attach cannot both slip
-// past the cap. Returns ErrDeviceLimit when the cap is already reached.
+// past the cap. Returns ErrDeviceLimit when the cap is already reached, and
+// ErrAccountDisabled when an operator has suspended the account.
 func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (deviceID, token string, err error) {
 	deviceID = newID(10)
 	token = newID(32)
@@ -597,6 +605,13 @@ func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (d
 		return "", "", err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var disabledAt int64
+	if err := tx.QueryRow(`SELECT disabled_at FROM accounts WHERE owner_handle = ?`, ownerHandle).Scan(&disabledAt); err != nil {
+		return "", "", err
+	}
+	if disabledAt > 0 {
+		return "", "", ErrAccountDisabled
+	}
 	if maxDevices > 0 {
 		var count int
 		if err := tx.QueryRow(`SELECT count(*) FROM devices WHERE owner_handle = ?`, ownerHandle).Scan(&count); err != nil {
@@ -1304,6 +1319,10 @@ func (s *Server) handleAttachDevice(c *gin.Context) {
 			c.AbortWithStatusJSON(http.StatusForbidden, api.ErrorResponse{Error: "device limit reached; revoke a device before attaching another", Code: api.ErrCodeDeviceLimit, LimitKind: "devices", Current: u.Devices, Limit: int64(s.cfg.MaxDevices)})
 			return
 		}
+		if errors.Is(err, ErrAccountDisabled) {
+			abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+			return
+		}
 		if err != nil {
 			abort(c, http.StatusInternalServerError, "create device failed")
 			return
@@ -1348,6 +1367,10 @@ func (s *Server) handleRecoverAccount(c *gin.Context) {
 		deviceID, token, epoch, err := s.store.RecoverAccount(owner, req.RecoveryVerifier, req.Kdf, req.WrappedRoot, req.AuthVerifier, deviceName(req.DeviceName))
 		if err == nil {
 			c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
+			return
+		}
+		if errors.Is(err, ErrAccountDisabled) {
+			abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
 			return
 		}
 		if !errors.Is(err, ErrNotFound) {

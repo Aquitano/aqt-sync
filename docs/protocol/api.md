@@ -113,11 +113,13 @@ POST   /v1/account/recover           Reset a forgotten passphrase. Body: { email
                                      authVerifier }. Like attach, but the recovery key's verifier
                                      stands in for the passphrase's; stores the new passphrase
                                      wrap, bumps the epoch, removes every other device.
-                                     → { ownerHandle, deviceId, token }; any failure is one 401.
+                                     → { ownerHandle, deviceId, token }; a suspended account is
+                                     403 account_disabled, any other failure is one 401.
 POST   /v1/auth/challenge            Body: { email } → { challengeId, nonce }  (one-time, short-lived)
 POST   /v1/devices                   Attach device. Body: { email, challengeId, signature,
                                      authVerifier, deviceName }.
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
+                                     A suspended account is 403 account_disabled.
 GET    /v1/devices                   List the account's attached devices (owner token).
                                      Paginated (?limit=, ?cursor=)
                                      → { devices: [{ id, name }], nextCursor? }

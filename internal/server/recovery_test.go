@@ -145,6 +145,25 @@ func TestDecoyBootstrapDoesNotWaitOnTheWriter(t *testing.T) {
 	}
 }
 
+// Suspension holds against the recovery key and a passphrase login too: either would
+// otherwise reset or attach devices while an operator holds the account.
+func TestSuspendedAccountRefusesRecoveryAndAttach(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "held-recovery@example.com")
+	verifier := []byte("recovery proof")
+	if err := s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), verifier, make([]byte, 32), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAccountDisabled(owner, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.RecoverAccount(owner, verifier, cryptotest.KdfParams(t), sealedTestBlob(t, "x"), make([]byte, 32), "d"); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("recovery of a suspended account: err = %v, want ErrAccountDisabled", err)
+	}
+	if _, _, err := s.CreateDevice(owner, "d", 1, 0); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("attach to a suspended account: err = %v, want ErrAccountDisabled", err)
+	}
+}
 
 // Root-key rotation retires the root key a recovery wrap holds, so the wrap must go
 // with it rather than later reset the passphrase onto a dead root.

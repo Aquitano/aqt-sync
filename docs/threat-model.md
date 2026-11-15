@@ -96,6 +96,8 @@ over, which is why the CLI says to keep it offline and apart from the machine.
 - **It survives use and passphrase changes**, since neither changes `RK`.
   `rotate-root` does change `RK`, so it clears the wrap; the CLI says to make a new
   key afterwards.
+- **Suspension holds against it.** Recovery, like a passphrase login, re-reads the
+  operator's suspension flag in the transaction that would attach the device.
 
 ### KDF calibration
 
