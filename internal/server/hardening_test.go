@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -281,6 +282,31 @@ func TestDeviceLimit(t *testing.T) {
 	// 0 means unlimited.
 	if _, _, err := s.CreateDevice(owner, "d", 1, 0); err != nil {
 		t.Fatalf("unlimited cap rejected a device: %v", err)
+	}
+}
+
+// Every route that stores a device name refuses one longer than any hostname, before
+// it looks at credentials, so the name cannot be uncharged storage.
+func TestOversizedDeviceNameRefused(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	long := strings.Repeat("d", maxDeviceNameLen+1)
+	signup := createReq(t, "long-device@example.com", "a passphrase here")
+	signup.DeviceName = long
+	for _, tc := range []struct {
+		path string
+		body any
+	}{
+		{"/v1/account", signup},
+		{"/v1/devices", api.AttachDeviceRequest{Email: "long-device@example.com", DeviceName: long}},
+		{"/v1/account/recover", api.RecoverRequest{
+			Email: "long-device@example.com", DeviceName: long,
+			WrappedRoot: crypto.SealedBlob{Ciphertext: []byte{1}}, AuthVerifier: []byte{1},
+		}},
+	} {
+		if code := h.do(http.MethodPost, tc.path, "", tc.body, nil); code != http.StatusBadRequest {
+			t.Errorf("POST %s with a %d-byte device name = %d, want 400", tc.path, len(long), code)
+		}
 	}
 }
 

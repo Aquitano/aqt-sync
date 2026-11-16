@@ -59,6 +59,7 @@ type resourceUploadHeader struct {
 	MaxReads        int64              `json:"maxReads,omitempty"`
 	OnExpiry        OnExpiry           `json:"onExpiry,omitempty"`
 	RevokeGrantee   string             `json:"revokeGrantee,omitempty"`
+	IdentityKey     []byte             `json:"identityKey,omitempty"`
 }
 
 // resourceDownloadHeader is the JSON header of a GET /v1/resources/:id
@@ -98,6 +99,7 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		MaxReads:        req.MaxReads,
 		OnExpiry:        req.OnExpiry,
 		RevokeGrantee:   req.RevokeGrantee,
+		IdentityKey:     req.IdentityKey,
 	}, req.Blob.Ciphertext)
 }
 
@@ -123,13 +125,25 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		MaxReads:        h.MaxReads,
 		OnExpiry:        h.OnExpiry,
 		RevokeGrantee:   h.RevokeGrantee,
+		IdentityKey:     h.IdentityKey,
 	}, nil
 }
 
 // EncodeResourceDownload encodes res as a raw download body: length-prefixed
 // JSON header, then the blob ciphertext.
 func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
-	return encodeEnvelope(resourceDownloadHeader{
+	return encodeEnvelope(downloadHeader(res), res.Blob.Ciphertext)
+}
+
+// EncodeResourceDownloadHeader encodes the length-prefixed JSON header of a raw
+// download body. Followed by the blob ciphertext it is byte-identical to
+// EncodeResourceDownload, so a server can stream the ciphertext from disk.
+func EncodeResourceDownloadHeader(res GetResourceResponse) ([]byte, error) {
+	return encodeEnvelopeHeader(downloadHeader(res), 0)
+}
+
+func downloadHeader(res GetResourceResponse) resourceDownloadHeader {
+	return resourceDownloadHeader{
 		ID:            res.ID,
 		Visibility:    res.Visibility,
 		BlobNonce:     res.Blob.Nonce,
@@ -145,7 +159,7 @@ func EncodeResourceDownload(res GetResourceResponse) ([]byte, error) {
 		Reads:         res.Reads,
 		CreatedAt:     res.CreatedAt,
 		UpdatedAt:     res.UpdatedAt,
-	}, res.Blob.Ciphertext)
+	}
 }
 
 // DecodeResourceDownload reads a raw download body.
@@ -175,15 +189,23 @@ func DecodeResourceDownload(r io.Reader) (GetResourceResponse, error) {
 }
 
 func encodeEnvelope(header any, ciphertext []byte) ([]byte, error) {
+	out, err := encodeEnvelopeHeader(header, len(ciphertext))
+	if err != nil {
+		return nil, err
+	}
+	return append(out, ciphertext...), nil
+}
+
+// encodeEnvelopeHeader frames header, reserving capacity for the ciphertext that
+// follows so appending it does not copy the header again.
+func encodeEnvelopeHeader(header any, ciphertextLen int) ([]byte, error) {
 	hj, err := json.Marshal(header)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 4+len(hj)+len(ciphertext))
+	out := make([]byte, 4, 4+len(hj)+ciphertextLen)
 	binary.BigEndian.PutUint32(out, uint32(len(hj)))
-	copy(out[4:], hj)
-	copy(out[4+len(hj):], ciphertext)
-	return out, nil
+	return append(out, hj...), nil
 }
 
 func decodeEnvelope(r io.Reader, header any) ([]byte, error) {

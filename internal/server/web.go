@@ -97,7 +97,7 @@ func (s *Server) handleShareView(c *gin.Context) {
 	}
 
 	var buf bytes.Buffer
-	page := sharePage{ID: id, PullURL: shareURL(c, id), SourceURL: s.cfg.sourceURL()}
+	page := sharePage{ID: id, PullURL: s.shareURL(c, id), SourceURL: s.cfg.sourceURL()}
 	if err := shareTmpl.Execute(&buf, page); err != nil {
 		c.Data(http.StatusInternalServerError, htmlContentType, internalErrorPage)
 		return
@@ -116,12 +116,12 @@ type sharePage struct {
 // shareURL rebuilds the absolute link to this resource for the no-JS fallback.
 // With JS the page uses the exact location.href instead (it alone carries the
 // fragment), so this is only ever a best-effort display value.
-func shareURL(c *gin.Context, id string) string {
+func (s *Server) shareURL(c *gin.Context, id string) string {
 	scheme := "http"
 	if c.Request.TLS != nil {
 		scheme = "https"
 	}
-	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" {
+	if proto := c.GetHeader("X-Forwarded-Proto"); proto != "" && s.cfg.trustsPeer(c.RemoteIP()) {
 		scheme = proto
 	}
 	return scheme + "://" + c.Request.Host + "/x/" + id
