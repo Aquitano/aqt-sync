@@ -34,8 +34,13 @@ const (
 	// grant refuse a client below it: it would write a grant no recipient accepts, or
 	// show and re-wrap grants a hostile server made up.
 	CapabilitySignedGrants = 6
+	// CapabilitySequencedRoots is the first release that seals a write counter into a
+	// folder's root and refuses a root whose counter went backwards. A folder written
+	// by it declares this as its min_client: an older client would write a root with no
+	// counter, which every newer device has to read as a rollback.
+	CapabilitySequencedRoots = 7
 	// ClientCapability is the highest format this build can read.
-	ClientCapability = CapabilitySignedGrants
+	ClientCapability = CapabilitySequencedRoots
 )
 
 // CapabilityHeader carries a request's client capability. Missing or malformed

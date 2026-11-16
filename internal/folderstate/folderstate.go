@@ -59,18 +59,25 @@ type State struct {
 	// every sync, and required by LoadState: an absent pin would silently disable
 	// the guard.
 	RemoteVersion int `json:"remoteVersion,omitempty"`
+	// RemoteSeq and RemoteRoot are the sealed write counter and root hash of the last
+	// folder root this machine integrated (syncengine.TreeRoot.Seq and Root.ID). The
+	// server can report any version it likes, but it cannot seal a root, so these are
+	// what catch a server replaying an old state under a new version. Zero until the
+	// folder's first sequenced root is seen.
+	RemoteSeq  int    `json:"remoteSeq,omitempty"`
+	RemoteRoot string `json:"remoteRoot,omitempty"`
 }
 
-// RecordRemoteVersion pins the freshness guard to the version this sync observed or
-// just committed — including a lower one after an accepted rollback, so subsequent
-// syncs stop tripping the guard. Best-effort (the sync itself succeeded); the
-// caller's sync lock makes the read-modify-write race-free.
-func RecordRemoteVersion(root string, version int) {
+// RecordRemote pins the freshness guard to the version and sealed root this sync
+// observed or just committed — including lower ones after an accepted rollback, so
+// subsequent syncs stop tripping the guard. Best-effort (the sync itself succeeded);
+// the caller's sync lock makes the read-modify-write race-free.
+func RecordRemote(root string, version, seq int, rootID string) {
 	st, err := LoadState(root)
-	if err != nil || st.RemoteVersion == version {
+	if err != nil || st.RemoteVersion == version && st.RemoteSeq == seq && st.RemoteRoot == rootID {
 		return
 	}
-	st.RemoteVersion = version
+	st.RemoteVersion, st.RemoteSeq, st.RemoteRoot = version, seq, rootID
 	if err := SaveState(root, st); err != nil {
 		fmt.Fprintf(os.Stderr, "warning: recording synced version failed: %v\n", err)
 	}

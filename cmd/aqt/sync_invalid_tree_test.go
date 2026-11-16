@@ -56,7 +56,11 @@ func TestSyncRejectsAbsoluteRemotePath(t *testing.T) {
 	if err := up.Flush(); err != nil {
 		t.Fatal(err)
 	}
-	blob, err := syncengine.SealTreeRoot(syncengine.TreeRoot{Version: syncengine.TreeManifestVersion, Root: chunk}, owned.ck, res.ID)
+	current, err := openTreeRoot(res, owned.ck, owned.meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blob, err := syncengine.SealTreeRoot(syncengine.TreeRoot{Version: syncengine.TreeManifestVersion, Seq: current.Seq + 1, Root: chunk}, owned.ck, res.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

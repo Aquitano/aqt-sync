@@ -62,6 +62,7 @@ type remoteSync struct {
 	res       api.GetResourceResponse
 	ck        crypto.ContentKey
 	meta      api.Metadata
+	root      syncengine.TreeRoot
 	trustBase bool
 }
 
@@ -108,5 +109,23 @@ func (s *syncSession) openRemote(opts syncOptions) (remoteSync, error) {
 		owned.ck.Wipe()
 		return remoteSync{}, err
 	}
-	return remoteSync{res: res, ck: owned.ck, meta: owned.meta, trustBase: trustBase}, nil
+	root, err := syncengine.OpenTreeRoot(res.Blob, owned.ck, res.ID)
+	if err != nil {
+		owned.ck.Wipe()
+		return remoteSync{}, fmt.Errorf("decrypt folder root: %w", err)
+	}
+	// The version above is the server's word. The counter in the root is sealed, so a
+	// lower one, or the same one over a different tree, is an old or abandoned state
+	// whatever version came with it.
+	if root.Seq < s.st.RemoteSeq || root.Seq == s.st.RemoteSeq && root.Seq > 0 && root.Root.ID != s.st.RemoteRoot {
+		if !opts.acceptRollback {
+			owned.ck.Wipe()
+			return remoteSync{}, replayErr(root.Seq, s.st.RemoteSeq)
+		}
+		if trustBase {
+			fmt.Fprintf(os.Stderr, "accepting a replayed folder state (write %d, previously %d); reconciling from scratch\n", root.Seq, s.st.RemoteSeq)
+		}
+		trustBase = false
+	}
+	return remoteSync{res: res, ck: owned.ck, meta: owned.meta, root: root, trustBase: trustBase}, nil
 }

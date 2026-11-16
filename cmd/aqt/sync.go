@@ -130,11 +130,21 @@ var (
 	errSyncRace        = errors.New("sync kept racing concurrent updates; please run `aqt sync` again")
 )
 
-// errRollback marks a remote whose version regressed below what this machine has
-// already seen. Zero-knowledge covers content, not freshness: without this guard a
-// server restored from backup (or a hostile replay) looks like ordinary remote
-// changes and silently reverts or deletes newer local files.
+// errRollback marks a remote that regressed below what this machine has already
+// seen. Zero-knowledge covers content, not freshness: without this guard a server
+// restored from backup (or a hostile replay) looks like ordinary remote changes and
+// silently reverts or deletes newer local files. The version catches an honest
+// restore; the counter sealed in the root catches a server that replays an old root
+// and reports whatever version it likes.
 var errRollback = errors.New("refusing to apply a server rollback")
+
+func replayErr(remote, seen int) error {
+	return fmt.Errorf("%w: the server sent a folder state sealed as write %d, but this machine already synced write %d, "+
+		"and the version number it reports does not show that. The server is replaying an old state; syncing would treat "+
+		"it as remote changes and could revert or delete newer local files. Only if you know why (a restore you made "+
+		"yourself), re-run with --accept-rollback to reconcile from scratch (one-sided differences become conflicts to review)",
+		errRollback, remote, seen)
+}
 
 func rollbackErr(remote, seen int) error {
 	return fmt.Errorf("%w: the server reports version %d but this machine already synced version %d. "+
@@ -395,7 +405,7 @@ func (app *application) runSync(dir string, opts syncOptions) error {
 			root: root, cl: cl, opts: opts,
 			base: planBase, local: local, remote: remote,
 			conv: conv, ck: rs.ck, mk: sess.mk, meta: rs.res.EncryptedMeta,
-			visibility: rs.res.Visibility, version: rs.res.Version, id: sess.st.ID,
+			visibility: rs.res.Visibility, version: rs.res.Version, remoteRoot: rs.root, id: sess.st.ID,
 			mode: mode, host: copyHost, now: syncStart, pushStart: pushStart, copyMemo: copyMemo, selector: selector,
 		}, actions, dirActions)
 	}

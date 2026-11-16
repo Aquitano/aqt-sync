@@ -462,7 +462,7 @@ keychain, or re-derive the machine-bound key.
 
 ## Still open
 
-Everything above ships. These five do not, and each is a deliberate limit rather than
+Everything above ships. These seven do not, and each is a deliberate limit rather than
 an unfinished task — they are the honest answer to "what does aqt still not protect
 you from":
 
@@ -521,6 +521,21 @@ you from":
   accepts. Nothing recorded today helps that forger, and a hybrid Ed25519 + ML-DSA
   signature, with both required, closes it. It has to reach clients well before such
   a computer does, because a client only trusts the roots compiled into it.
+- **Freshness beyond a device's own memory.** A tracked folder refuses a root whose
+  sealed write counter is below the last one that device synced, so a server cannot
+  roll a device back to a state older than what it has seen. The counter is all a
+  device has to go on. One that has been offline since before a change can be kept
+  on the old state, and two devices can be shown different histories for as long as
+  the server never lets either see the other's writes. A single file fetched with
+  `aqt pull`, a share, and a Git remote keep no counter at all: the server can serve
+  any state their owner once wrote. Closing this needs a signed, hash-chained log of
+  each resource's states that every device checks the next one against.
+- **The share page is the server's code.** A link opened in a browser is decrypted
+  by JavaScript the server sends with it, and the key is in the same page's URL
+  fragment. A hostile server can send a script that reads the fragment and reports
+  it. No page the server controls can rule that out. `aqt pull` and `aqt clone` take
+  the same link and run no code from the server, so they are the way to open a link
+  from a server you do not trust.
 
 Nothing here changes an interface, which is why they are recorded as limits rather
 than blocking work.

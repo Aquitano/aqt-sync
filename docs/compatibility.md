@@ -25,6 +25,7 @@ API layer, *before* any payload is served.
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
 | `5` (post-quantum grants) | v0.11.0 | X-Wing (ML-KEM-768 + X25519) enc keys and grant wraps |
 | `6` (signed grants) | unreleased | grants carrying the owner's Ed25519 signature |
+| `7` (sequenced roots) | unreleased | folder roots carrying a sealed write counter |
 
 The release column names the first version a user could install. Root-key rotation
 appears under `v0.3.0` in the changelog, which was never tagged, and shipped in the
@@ -43,7 +44,10 @@ grant: a grant write, the owner's grant listing, `GET /v1/shares`, a grantee's
 resource read, and root-key rotation. A capability-5 client would write a grant no
 recipient accepts, or list and re-wrap grants without checking who signed them.
 Grants stored before capability 6 carry no signature; no client opens or re-wraps
-one, and its owner signs it again by sharing it again. Capability 4 is what the Git-remote
+one, and its owner signs it again by sharing it again. Capability 7 is declared by
+every folder write: an older client can read a sequenced root, but it would write
+one back without the counter, and every newer device has to treat that as a
+rollback, so the server keeps it out instead. Capability 4 is what the Git-remote
 format needs: `aqt repo create` declares
 `minClient: 4`, so a client below it receives `426 Upgrade Required` before the server
 serves or overwrites a root it cannot interpret. Capability 3 is a historical rung —
