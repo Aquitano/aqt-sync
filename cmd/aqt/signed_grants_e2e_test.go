@@ -1202,12 +1202,23 @@ func TestPinOwnerOpensAShareOnlyForTheNamedKey(t *testing.T) {
 		if err := pull(strings.TrimPrefix(fp, "SHA256:")); err != nil || !pinned() {
 			t.Fatalf("pull with --pin-owner naming mallory's key = %v (pinned: %v), want it opened and pinned", err, pinned())
 		}
+		_, prof, err := app.authedClient()
+		if err != nil {
+			t.Fatal(err)
+		}
+		pins, err := identity.LoadContacts(prof.Name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !pins["mallory@example.com"].Verified {
+			t.Fatal("--pin-owner named the fingerprint, but the pin is not verified")
+		}
 	})
 }
 
 // The TUI's child has no terminal, so a clone of a share from an unpinned owner fails.
 // The TUI then shows the claim itself and, on confirm, runs the clone again with
-// --pin-owner naming the key it showed.
+// --accept-owner naming the key it showed, which pins on first use.
 func TestTUIOffersToPinTheOwnerOfARefusedClone(t *testing.T) {
 	app := &application{ctx: context.Background()}
 	h := app.newE2E(t)
@@ -1260,7 +1271,7 @@ func TestTUIOffersToPinTheOwnerOfARefusedClone(t *testing.T) {
 				t.Fatalf("the confirmation does not show %q:\n%s", want, confirm.body)
 			}
 		}
-		if got := strings.Join(tuiRequestArgs(t, confirm.confirm), " "); got != "clone aqt://"+id+" /tmp/clone --pin-owner "+fp {
+		if got := strings.Join(tuiRequestArgs(t, confirm.confirm), " "); got != "clone aqt://"+id+" /tmp/clone --accept-owner "+fp {
 			t.Fatalf("confirming runs %q", got)
 		}
 	})

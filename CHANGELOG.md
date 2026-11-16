@@ -64,8 +64,9 @@ All notable changes to this project are documented in this file.
   own under the same id, and it opened without a word. A script that reads from a
   sender it has not pinned now needs `--pin-owner`, or a pin made beforehand with `aqt
   contacts pin`; `-y` is not accepted there, since it would pin whatever key the server
-  reports. In `aqt tui`, a clone refused for an unpinned owner shows the claim and runs
-  again with `--pin-owner` on confirm. A verified pin to which the server attached the
+  reports. A `--pin-owner` pin is verified, since the fingerprint came from you; a pin
+  made by answering the prompt is first-use. In `aqt tui`, a clone refused for an
+  unpinned owner shows the claim and pins on first use on confirm. A verified pin to which the server attached the
   wrong handle names nothing, for the same reason, and neither does a pinned key that
   signed under a handle its pin does not hold. A claim on an email already pinned is
   refused under any spelling: emails are compared lower-cased and NFKC-folded, and old

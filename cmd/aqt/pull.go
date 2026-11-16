@@ -72,9 +72,31 @@ func (app *application) catCmd() *cobra.Command {
 // bindPinOwner adds --pin-owner to a command that can read through a grant. It answers
 // the question openGrant asks before it opens a share from an owner nobody pinned, but
 // only for the identity key it names, so a script states which key it trusts. -y would
-// trust whatever key the server reports.
+// trust whatever key the server reports. The pin it makes is verified, like `aqt
+// contacts pin --fingerprint`: both take a fingerprint the user brought.
+//
+// The hidden --accept-owner is for `aqt tui`, which shows the server's claim and passes
+// back the fingerprint it showed. That fingerprint is the server's word, so the pin is
+// first-use, as it is after the same prompt on a terminal.
 func (app *application) bindPinOwner(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&app.pinOwner, "pin-owner", "", "open a share from an owner you have not pinned if their identity key has this fingerprint, pinning them on first use")
+	cmd.Flags().StringVar(&app.pinOwner, "pin-owner", "", "open a share from an owner you have not pinned if their identity key has this fingerprint, pinning them as verified")
+	cmd.Flags().StringVar(&app.acceptOwner, "accept-owner", "", "")
+	_ = cmd.Flags().MarkHidden("accept-owner")
+	cmd.MarkFlagsMutuallyExclusive("pin-owner", "accept-owner")
+}
+
+// ownerPin is the fingerprint a caller named for an unpinned owner, and whether it
+// vouches for it (--pin-owner) or only repeats what it was shown (--accept-owner).
+type ownerPin struct {
+	fingerprint string
+	verified    bool
+}
+
+func (app *application) ownerPin() ownerPin {
+	if app.pinOwner != "" {
+		return ownerPin{fingerprint: app.pinOwner, verified: true}
+	}
+	return ownerPin{fingerprint: app.acceptOwner}
 }
 
 func (app *application) runPull(ref, out, password string, toStdout, force bool) error {
@@ -192,7 +214,7 @@ func (app *application) contentKeyWithMaster(cl *client.Client, res api.GetResou
 		if owned {
 			defer mk.Wipe()
 		}
-		return openGrant(cl, res, mk, prof, app.pinOwner)
+		return openGrant(cl, res, mk, prof, app.ownerPin())
 	}
 	if res.WrappedKey == nil {
 		return crypto.ContentKey{}, errors.New("no decryption key: this looks like a public resource but the link had no #key")
@@ -216,8 +238,8 @@ func (app *application) contentKeyWithMaster(cl *client.Client, res api.GetResou
 // of their choosing, and the server can list it under any owner. A grant without a
 // signature from the key it is attributed to is refused. One signed by the key the
 // server reports for an owner nobody pinned opens only once that owner is pinned
-// (askPinOwner); pinOwner, a fingerprint, pins them without asking if it matches.
-func openGrant(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterKey, prof *identity.Profile, pinOwner string) (crypto.ContentKey, error) {
+// (askPinOwner); named, a fingerprint, pins them without asking if it matches.
+func openGrant(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterKey, prof *identity.Profile, named ownerPin) (crypto.ContentKey, error) {
 	ck, a, row, err := grantSender(res, mk, prof)
 	if err != nil {
 		return crypto.ContentKey{}, err
@@ -225,7 +247,7 @@ func openGrant(cl *client.Client, res api.GetResourceResponse, mk crypto.MasterK
 	switch {
 	case a.signed && a.pin != nil:
 	case a.signed:
-		pin, err := askPinOwner(cl, prof, res, row, pinOwner)
+		pin, err := askPinOwner(cl, prof, res, row, named)
 		if err != nil {
 			ck.Wipe()
 			return crypto.ContentKey{}, err
@@ -298,7 +320,7 @@ var confirmOwnerPin = func(prompt string) error { return confirmDestructive(prom
 // claim and its fingerprint, or up front with --pin-owner naming that fingerprint.
 // Either way it is the first-use pin a share makes. A claim on an email already pinned
 // to another account is refused.
-func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceResponse, row shareRow, pinOwner string) (identity.Contact, error) {
+func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceResponse, row shareRow, named ownerPin) (identity.Contact, error) {
 	if row.Attribution != attributionClaimed {
 		return identity.Contact{}, fmt.Errorf("%s is shared by %s, and the server names no email for that account, so it cannot be pinned and was not opened", row.Ref, row.sender())
 	}
@@ -320,10 +342,10 @@ func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceR
 	if keys.Handle != res.Owner || !bytes.Equal(keys.PublicKey, res.OwnerPublicKey) {
 		return identity.Contact{}, fmt.Errorf("the server's keys for %s do not belong to the account that signed %s, so it was not opened and nothing was pinned", email, row.Ref)
 	}
-	if pinOwner != "" {
-		if !fingerprintMatches(pinOwner, fp) {
+	if named.fingerprint != "" {
+		if !fingerprintMatches(named.fingerprint, fp) {
 			return identity.Contact{}, fmt.Errorf("%s is shared by %s, whose identity key is not the %s that --pin-owner names, so it was not opened and nothing was pinned",
-				row.Ref, row.sender(), pinOwner)
+				row.Ref, row.sender(), named.fingerprint)
 		}
 	} else {
 		switch err := confirmOwnerPin(unpinnedOwnerNotice(row) + fmt.Sprintf("Pin %s and open it? [y/N] ", displayEmail(email))); {
@@ -337,10 +359,14 @@ func askPinOwner(cl *client.Client, prof *identity.Profile, res api.GetResourceR
 			return identity.Contact{}, err
 		}
 	}
-	pin := pinFromKeys(email, keys, false)
+	pin := pinFromKeys(email, keys, named.verified)
 	pins[email] = pin
 	if err := identity.SaveContacts(prof.Name, pins); err != nil {
 		return identity.Contact{}, err
+	}
+	if named.verified {
+		fmt.Fprintf(os.Stderr, "pinned %s as verified (%s)\n", displayEmail(email), fp)
+		return pin, nil
 	}
 	fmt.Fprintf(os.Stderr, "pinned %s on first use (%s); confirm out-of-band with `aqt contacts verify %s`\n", displayEmail(email), fp, displayEmail(email))
 	return pin, nil

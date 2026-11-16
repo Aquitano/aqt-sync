@@ -165,14 +165,14 @@ opens only once its owner is pinned: on a terminal they show the claimed email,
 handle, and fingerprint and pin on yes; without one they refuse and say how to pin.
 `--pin-owner <fingerprint>` pins the owner without asking, but only if their identity
 key has that fingerprint (with or without the `SHA256:` prefix, as `aqt contacts pin
---fingerprint` takes it), and opens the share. Either way the pin is first-use, not
-verified; `aqt contacts pin <email> --fingerprint <fp>` beforehand records a verified
-one. A claim on an email pinned to another key is refused either way, comparing the
+--fingerprint` takes it), and opens the share. That pin is verified, like one from
+`aqt contacts pin <email> --fingerprint <fp>`, since both take a fingerprint you
+brought; a pin made by answering the prompt is first-use. A claim on an email pinned to another key is refused either way, comparing the
 two after the server's lower-casing and Unicode compatibility folding, so a
 differently cased or fullwidth spelling of a pinned address counts as that address.
 The prompt shows a claimed email outside ASCII escaped, with a warning. In `aqt tui`, a
-clone refused this way shows the same claim and, on confirm, runs again with
-`--pin-owner` naming the fingerprint it showed.
+clone refused this way shows the same claim and, on confirm, pins on first use like
+the prompt.
 
 Anyone with an account on the server can add a row here, so the recipient can remove
 one:

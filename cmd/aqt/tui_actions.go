@@ -73,7 +73,7 @@ func (c *tuiCtx) execPinningOwner(ref string) func(sub ...string) tea.Cmd {
 
 // pinOwnerDialogCmd checks in process whether ref is a share signed by the key the
 // server reports for an owner this account has not pinned. If so it shows that claim
-// and, on confirm, runs sub again with --pin-owner naming the fingerprint it showed, so
+// and, on confirm, runs sub again with --accept-owner naming the fingerprint it showed, so
 // the child pins only the key the user saw.
 func (c *tuiCtx) pinOwnerDialogCmd(ref string, sub []string) tea.Cmd {
 	ctx := *c
@@ -96,7 +96,7 @@ func (c *tuiCtx) pinOwnerDialogCmd(ref string, sub []string) tea.Cmd {
 		return tuiOpenDialogMsg{dialog: &tuiConfirm{
 			title:   "Pin the owner of this share?",
 			body:    unpinnedOwnerNotice(row) + "Pin them and run it again?",
-			confirm: tuiRequestExec(append(slices.Clone(sub), "--pin-owner", row.ClaimedFingerprint)...),
+			confirm: tuiRequestExec(append(slices.Clone(sub), "--accept-owner", row.ClaimedFingerprint)...),
 		}}
 	}
 }

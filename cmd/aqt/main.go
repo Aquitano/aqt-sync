@@ -65,7 +65,10 @@ type application struct {
 	quiet    bool
 	progress bool
 	pinOwner string
-	ctx      context.Context
+	// acceptOwner is --pin-owner for a caller that shows the fingerprint itself
+	// instead of being given it (see bindPinOwner).
+	acceptOwner string
+	ctx         context.Context
 }
 
 // childArgs passes the current server and profile to a child aqt command.

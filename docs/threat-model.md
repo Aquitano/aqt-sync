@@ -269,8 +269,9 @@ noise:
   answer a pull of a share `aqt shares` named as a verified contact's with that one
   under the same id. So it opens only once its owner is pinned: on a terminal after
   showing the claimed email, handle, and fingerprint, and without one only with
-  `--pin-owner` naming that fingerprint. Either way that is a first-use pin, checked
-  against the keys the server publishes for the claimed email. A claim on an email
+  `--pin-owner` naming that fingerprint. Answering the prompt makes a first-use pin;
+  `--pin-owner` makes a verified one, since the fingerprint came from the user. Both are
+  checked against the keys the server publishes for the claimed email. A claim on an email
   already pinned to another key is refused outright, comparing emails after the
   server's lower-casing and Unicode compatibility folding (NFKC), and pins stored under
   another spelling are read in that form too. Folding cannot catch a homoglyph from
