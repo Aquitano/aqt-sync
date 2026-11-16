@@ -139,6 +139,7 @@ func TestGrantRefusesHandleLongerThanMinted(t *testing.T) {
 	grant := func(grantee string) int {
 		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
 			GranteeHandle: grantee, WrappedKey: make([]byte, crypto.GrantWrapSize),
+			Signature: make([]byte, ed25519.SignatureSize),
 		}, nil)
 	}
 	if code := grant(h.handleOf("minted-handle@example.com")); code != http.StatusCreated {
