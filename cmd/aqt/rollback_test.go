@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/folderstate"
 	"github.com/aquitano/aqt-sync/internal/identity"
 	"github.com/aquitano/aqt-sync/internal/server"
@@ -80,6 +81,50 @@ func copyRegularFile(src, dst string) error {
 		return err
 	}
 	return out.Close()
+}
+
+// A hostile server does not have to report an older version to roll a folder back: it
+// can store an old sealed root again under a new version. The version guard passes
+// that, and without the counter sealed in the root the sync would read the old state
+// as remote changes and delete everything written since.
+func TestSyncRefusesAReplayedRootUnderANewVersion(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "keep.txt", "v1")
+	h.sync(origin)
+
+	st, err := folderstate.LoadState(origin)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, err := h.store.GetResource(st.ID, st.Account)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "newer.txt", "written after the replayed state")
+	h.sync(origin)
+
+	if _, version, err := h.store.PutResource(st.Account, api.ClientCapability, api.PutResourceRequest{
+		ID: st.ID, Visibility: old.Visibility, Blob: old.Blob, EncryptedMeta: old.EncryptedMeta,
+		WrappedKey: old.WrappedKey, MinClient: old.MinClient,
+	}); err != nil || version <= st.RemoteVersion {
+		t.Fatalf("replaying the old root as version %d: %v", version, err)
+	}
+
+	if err := app.runSync(origin, syncOptions{}); !errors.Is(err, errRollback) {
+		t.Fatalf("sync against a replayed root = %v, want errRollback", err)
+	}
+	if got := readTree(t, origin, "newer.txt"); got != "written after the replayed state" {
+		t.Fatalf("refused sync still touched local files: %q", got)
+	}
+
+	h.syncOpts(origin, syncOptions{acceptRollback: true, force: true})
+	h.sync(origin)
+	if got := readTree(t, origin, "newer.txt"); got != "written after the replayed state" {
+		t.Fatalf("newer.txt lost after the forced reconcile: %q", got)
+	}
 }
 
 // TestSyncRefusesServerRollback covers the freshness guard on the chunked path: a

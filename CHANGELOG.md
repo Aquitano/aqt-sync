@@ -24,8 +24,23 @@ All notable changes to this project are documented in this file.
   `aqt share resign` lists all of them and shares them again after you confirm. A
   root-key rotation names every outgoing grant, and the server answers `409` to one
   that misses a grant; running it again lists them afresh.
+- **Folder roots carry a write counter, which raises the client capability to 7.**
+  The first sync from this release marks the folder `min_client: 7`, so every device
+  that syncs it, and anyone reading it through a share or a link, needs this release
+  too; an older client is answered `426`. Upgrade every device of a folder together.
 
 ### Security
+
+- **A hostile server could roll a synced folder back and have every device delete
+  its newer files.** The rollback guard compared the resource version, which is the
+  server's own number: storing an old encrypted folder root again under a higher
+  version passed it, and the sync applied that old state as remote changes. Each
+  sync now seals a write counter into the root, and a device refuses a root whose
+  counter is below the last one it synced, or equal to it over a different tree.
+  `--accept-rollback` still reconciles from scratch when the rollback is your own.
+  A device that has never synced a newer state cannot tell, and single files and
+  Git remotes are not covered; the [threat model](docs/threat-model.md#still-open)
+  lists both.
 
 - **A hostile server could have a rotated key re-wrapped to any pinned contact.**
   `aqt unshare` and a revoke re-wrapped the new content key for every grantee the

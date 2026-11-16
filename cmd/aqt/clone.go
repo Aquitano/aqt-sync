@@ -117,7 +117,8 @@ func (app *application) runClone(ref, dir string, adopt bool, password string) e
 	// Decrypt the resource root before creating the destination, so a wrong or corrupt
 	// key fails the clone without leaving an empty directory behind. The root blob is
 	// tiny; materializeClone re-opens it to do the actual reconstruction.
-	if _, err := openTreeRoot(res, ck, meta); err != nil {
+	treeRoot, err := openTreeRoot(res, ck, meta)
+	if err != nil {
 		return err
 	}
 	if adopt {
@@ -140,7 +141,7 @@ func (app *application) runClone(ref, dir string, adopt bool, password string) e
 		if err := folderstate.SaveState(staging, folderstate.State{
 			ID: id, Server: prof.Server,
 			Profile: profileName, Account: account, Fingerprint: fingerprint,
-			RemoteVersion: res.Version,
+			RemoteVersion: res.Version, RemoteSeq: treeRoot.Seq, RemoteRoot: treeRoot.Root.ID,
 		}); err != nil {
 			return err
 		}

@@ -95,6 +95,11 @@ so a node's content address *is* its subtree Merkle hash: a moved, copied, or re
 directory dedups for free, because its node and its files' chunks are already on the
 server. The resource blob is a sealed `TreeRoot` under `AADTreeRoot`.
 
+The root also carries `seq`, a write counter: each sync seals the `seq` of the root
+it replaces plus one, and a new folder starts at 1. A key rotation re-seals the same
+tree under the new key and keeps its `seq`. A root sealed before this field existed
+reads as 0.
+
 Directories are first-class. Empty directories round-trip and directory modes
 propagate. The format is a clean break (`tree` metadata flag, v2); older folders are
 not read.
@@ -351,7 +356,12 @@ One detail is load-bearing: a rollback is classified *before* the content key is
 unwrapped and the metadata decoded, so a server whose version regressed reports that
 rather than a config typo or a keyless resource — a version regression is a
 statement about the server's integrity and outranks anything read out of the record
-it served. The format check itself routes by the server's truth: a resource in the
+it served. The version is the server's own number, though, so it only catches a
+server that was honestly restored. Once the root is open, `openRemote` compares its
+sealed `seq` and root hash with the pair `state.json` recorded at the last sync: a
+lower `seq`, or the same `seq` over a different tree, is an old or abandoned state
+whatever version came with it, and is refused the same way. `--accept-rollback`
+discards the base for both. The format check itself routes by the server's truth: a resource in the
 pre-tree legacy format is refused rather than reconciled as an empty chunked
 manifest.
 

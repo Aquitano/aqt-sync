@@ -38,6 +38,7 @@ type applyCtx struct {
 	meta       crypto.SealedBlob // the resource's existing sealed metadata, carried forward
 	visibility api.Visibility    // the resource's current visibility, carried forward (a shared folder stays shared)
 	version    int
+	remoteRoot syncengine.TreeRoot // the sealed root this pass read; its Seq is what a push builds on
 	id         string
 	mode       conflictMode     // conflictCopy preserves the remote side of each conflict as a copy
 	host       string           // sanitized hostname stamped into conflict-copy names (copy mode)
@@ -340,19 +341,20 @@ func (app *application) materializeConflictCopies(c applyCtx, actions []syncengi
 // touched, so a version conflict (another sync committed first) returns with nothing
 // half-applied on disk and the caller can re-plan cleanly. The objects these entries
 // reference were already packed and uploaded during the snapshot pass; this commits
-// only the merged manifest that roots them, and returns the version it landed as.
-func (app *application) pushMergedManifest(c applyCtx, st applyState) (int, error) {
+// only the merged manifest that roots them, and returns the version it landed as and
+// the root it sealed.
+func (app *application) pushMergedManifest(c applyCtx, st applyState) (int, syncengine.TreeRoot, error) {
 	manifest := manifestFrom(st.merged, c.version+1)
 	manifest.Dirs = dirsFrom(st.mergedDirs)
 	if err := rearmUploadedChunks(c.cl.CheckChunks, distinctChunkIDs(manifest.Entries), c.pushStart); err != nil {
-		return 0, err
+		return 0, syncengine.TreeRoot{}, err
 	}
-	resp, err := app.putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version)
+	resp, root, err := app.putFolderUpdate(c.cl, c.conv, c.id, c.visibility, manifest, c.meta, c.ck, c.mk, c.version, c.remoteRoot.Seq+1)
 	if err != nil {
-		return 0, err // client.ErrConflict on a stale version: retried by the caller
+		return 0, root, err // client.ErrConflict on a stale version: retried by the caller
 	}
 	reclaimPacks(c.root, c.cl)
-	return resp.Version, nil
+	return resp.Version, root, nil
 }
 
 // landCleanMerges writes each merged file to disk now that the root durably references
@@ -526,14 +528,14 @@ func unlockParents(root string, paths []string, dirs *writableDirs) error {
 }
 
 // persistSyncState records what this pass established: the new base manifest, and the
-// remote version it was reconciled against.
-func (app *application) persistSyncState(c applyCtx, st applyState, syncedVersion int) error {
+// remote version and sealed root it was reconciled against.
+func (app *application) persistSyncState(c applyCtx, st applyState, syncedVersion int, syncedRoot syncengine.TreeRoot) error {
 	newBaseManifest := manifestFrom(st.newBase, c.version+1)
 	newBaseManifest.Dirs = dirsFrom(st.newBaseDirs)
 	if err := folderstate.SaveBase(c.root, app.profile, newBaseManifest); err != nil {
 		return err
 	}
-	folderstate.RecordRemoteVersion(c.root, syncedVersion)
+	folderstate.RecordRemote(c.root, syncedVersion, syncedRoot.Seq, syncedRoot.Root.ID)
 	return nil
 }
 
@@ -594,13 +596,13 @@ func (app *application) applySync(c applyCtx, actions []syncengine.Action, dirAc
 		return err
 	}
 
-	syncedVersion := c.version
+	syncedVersion, syncedRoot := c.version, c.remoteRoot
 	if push && remoteChanged {
-		version, err := app.pushMergedManifest(c, st)
+		version, root, err := app.pushMergedManifest(c, st)
 		if err != nil {
 			return err
 		}
-		syncedVersion = version
+		syncedVersion, syncedRoot = version, root
 	}
 
 	landedMerges, mergeConflicts, err := landCleanMerges(c, cleanMerges, st.newBase)
@@ -629,7 +631,7 @@ func (app *application) applySync(c applyCtx, actions []syncengine.Action, dirAc
 	if err := syncengine.SyncParents(c.root, work.touchedPaths(mergedPaths)); err != nil {
 		return err
 	}
-	if err := app.persistSyncState(c, st, syncedVersion); err != nil {
+	if err := app.persistSyncState(c, st, syncedVersion, syncedRoot); err != nil {
 		return err
 	}
 	app.summarize(files.uploads, work.downloads, work.localDeletes, mergedPaths)

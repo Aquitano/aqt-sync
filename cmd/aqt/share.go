@@ -1022,7 +1022,9 @@ func rotateResource(cl *client.Client, id string, res api.GetResourceResponse, o
 		ChunkRefs:       sealed.refs,
 		ExpectedVersion: res.Version,
 		RevokeGrantee:   revoke,
-		MinClient:       api.CapabilityIDBinding, // the reseal binds root and meta to the id (v2)
+		// The reseal binds root and meta to the id (v2). It carries the root's counter
+		// over unchanged, so it must not lower a floor that keeps older writers out.
+		MinClient: max(api.CapabilityIDBinding, res.MinClient),
 	}); err != nil {
 		if errors.Is(err, client.ErrConflict) {
 			err = errors.New("resource changed while rotating its key; re-run `aqt unshare`")

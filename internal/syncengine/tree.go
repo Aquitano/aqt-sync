@@ -74,8 +74,15 @@ type TreeNode struct {
 
 // TreeRoot is the tiny resource blob for a DAG folder: a pointer at the root
 // directory node's object. It replaces ManifestRoot for v2 folders.
+//
+// Seq counts the writes that produced this root: each sync seals the remote root's
+// Seq plus one. The server's own version number is plaintext it can set to anything,
+// so Seq, which only a key holder can seal, is what a device compares against the
+// last root it saw to tell a replayed old state from a new one. Zero marks a root
+// written before roots were sequenced.
 type TreeRoot struct {
 	Version int          `json:"version"`
+	Seq     int          `json:"seq,omitempty"`
 	Root    crypto.Chunk `json:"root"` // Root.ID is the whole-tree hash
 }
 

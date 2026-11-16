@@ -102,6 +102,7 @@ func (app *application) createFolder(cl *client.Client, conv crypto.ConvergenceK
 	if err != nil {
 		return api.PutResourceResponse{}, err
 	}
+	root.Seq = 1
 	blob, err := syncengine.SealTreeRoot(root, ck, "")
 	if err != nil {
 		return api.PutResourceResponse{}, err
@@ -122,7 +123,7 @@ func (app *application) createFolder(cl *client.Client, conv crypto.ConvergenceK
 		Visibility: api.Private, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey:  &wrapped,
 		IdentityKey: crypto.IdentityKey(mk),
-		MinClient:   api.CapabilityIDBinding, // the bind below seals root and meta id-bound (v2)
+		MinClient:   api.CapabilitySequencedRoots,
 	}
 	resp, err := cl.PutResource(req)
 	if err != nil {
@@ -175,35 +176,40 @@ func rearmUploadedChunks(check func([]string) ([]string, error), ids []string, s
 // refs would otherwise cap folder size at the wire header. A public resource, and
 // a private one carrying grants this device did not know about (the server
 // refuses the refs-less write), send the full set as its readers' fetch scope.
-func (app *application) putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion int) (api.PutResourceResponse, error) {
+//
+// seq is the counter sealed into the new root: one more than the root this update
+// replaces. The root is returned so the caller can pin what it wrote.
+func (app *application) putFolderUpdate(cl *client.Client, conv crypto.ConvergenceKey, id string, vis api.Visibility, m syncengine.Manifest, meta crypto.SealedBlob, ck crypto.ContentKey, mk crypto.MasterKey, expectedVersion, seq int) (api.PutResourceResponse, syncengine.TreeRoot, error) {
 	root, refs, err := app.uploadTreeObjects(cl, conv, m)
 	if err != nil {
-		return api.PutResourceResponse{}, err
+		return api.PutResourceResponse{}, root, err
 	}
+	root.Seq = seq
 	blob, err := syncengine.SealTreeRoot(root, ck, id)
 	if err != nil {
-		return api.PutResourceResponse{}, err
+		return api.PutResourceResponse{}, root, err
 	}
 	metaBlob, err := verifiedMetaBound(meta, ck, id)
 	if err != nil {
-		return api.PutResourceResponse{}, err
+		return api.PutResourceResponse{}, root, err
 	}
 	wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
 	if err != nil {
-		return api.PutResourceResponse{}, err
+		return api.PutResourceResponse{}, root, err
 	}
 	req := api.PutResourceRequest{
 		ID: id, Visibility: vis, Blob: blob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, ChunkRefs: refs, ExpectedVersion: expectedVersion,
-		MinClient: api.CapabilityIDBinding, // TreeRoot and meta are sealed id-bound (v2)
+		MinClient: api.CapabilitySequencedRoots,
 	}
 	if vis == api.Private {
 		req.ChunkRefs = nil
 		resp, err := cl.PutResource(req)
 		if !errors.Is(err, client.ErrSharedNeedsRefs) {
-			return resp, err
+			return resp, root, err
 		}
 		req.ChunkRefs = refs
 	}
-	return cl.PutResource(req)
+	resp, err := cl.PutResource(req)
+	return resp, root, err
 }
