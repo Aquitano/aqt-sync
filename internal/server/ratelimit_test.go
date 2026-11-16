@@ -161,6 +161,8 @@ func TestClientKeyTrustsForwardedHeadersOnlyFromProxies(t *testing.T) {
 func TestPublicResourceReadIsRateLimited(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
+	now := time.Unix(0, 0)
+	h.srv.publicLimiter.now = func() time.Time { return now }
 	token, mk := h.signup("public-read-limit@example.com", "passphrase for limits")
 	put, code := h.putSized(token, mk, "", 16)
 	if code != http.StatusCreated {
