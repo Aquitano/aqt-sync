@@ -182,3 +182,69 @@ func TestPreXWingGrantStillOpens(t *testing.T) {
 		t.Fatal("pre-X-Wing grant opened under another grantee's binding")
 	}
 }
+
+// TestGrantSignatureBinding covers the owner's grant signature: it verifies under the
+// owner's identity for the exact grant it was made over, and fails for another
+// resource, owner handle, grantee handle, or content key, under another identity, and
+// when tampered with.
+func TestGrantSignatureBinding(t *testing.T) {
+	mk := testMasterKey(t)
+	owner := DeriveSigningKey(mk)
+	ownerPub := owner.Public().(ed25519.PublicKey)
+	ck, err := GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig := SignGrant(owner, ck, "res1", "owner1", "grantee1")
+	if !VerifyGrant(ownerPub, sig, ck, "res1", "owner1", "grantee1") {
+		t.Fatal("grant signature did not verify")
+	}
+	rotated, err := GenerateContentKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases := []struct {
+		name                  string
+		ck                    ContentKey
+		res, ownerH, granteeH string
+	}{
+		{"resource", ck, "res2", "owner1", "grantee1"},
+		{"owner handle", ck, "res1", "owner2", "grantee1"},
+		{"grantee handle", ck, "res1", "owner1", "grantee2"},
+		{"shifted field boundary", ck, "res1owner1", "", "grantee1"},
+		{"content key", rotated, "res1", "owner1", "grantee1"},
+	}
+	for _, c := range cases {
+		if VerifyGrant(ownerPub, sig, c.ck, c.res, c.ownerH, c.granteeH) {
+			t.Errorf("grant signature verified with a different %s", c.name)
+		}
+	}
+	other := DeriveSigningKey(testMasterKey(t)).Public().(ed25519.PublicKey)
+	if VerifyGrant(other, sig, ck, "res1", "owner1", "grantee1") {
+		t.Fatal("grant signature verified under another identity")
+	}
+	bad := append([]byte(nil), sig...)
+	bad[0] ^= 1
+	if VerifyGrant(ownerPub, bad, ck, "res1", "owner1", "grantee1") || VerifyGrant(ownerPub, nil, ck, "res1", "owner1", "grantee1") {
+		t.Fatal("a tampered or missing grant signature verified")
+	}
+	if VerifyGrant(ownerPub[:16], sig, ck, "res1", "owner1", "grantee1") {
+		t.Fatal("grant signature verified under a truncated identity key")
+	}
+}
+
+// TestGrantSignatureFormatIsPinned fixes the signed message: every grant on a server
+// carries a signature over it, so changing its layout would make each one read as
+// unsigned.
+func TestGrantSignatureFormatIsPinned(t *testing.T) {
+	var mk MasterKey
+	var ck ContentKey
+	for i := range mk {
+		mk[i] = byte(i)
+		ck[i] = byte(0xa0 + i)
+	}
+	sum := sha256.Sum256(SignGrant(DeriveSigningKey(mk), ck, "res1", "owner1", "grantee1"))
+	if got := hex.EncodeToString(sum[:]); got != "6811dbc74205df44798c7dea2f1d53d780395258a79689010651a15888c12869" {
+		t.Fatalf("grant signature over fixed inputs changed: sha256 = %s", got)
+	}
+}

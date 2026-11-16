@@ -105,6 +105,42 @@ release each landed in.
   read transparently and upgraded on the next sync, while an unsealed manifest is
   refused. See [client data at rest](threat-model.md#client-data-at-rest).
 
+- **Signed grants.** HPKE base mode authenticates no sender, so the owner signs each
+  grant with its identity key. The signature commits to the content key rather than
+  to the wrap or the grantee's enc key: a grantee re-wraps its incoming grants when its
+  own enc key changes, and the owner's signature has to survive that. Committing to
+  the key also lets a rotation re-wrap only grants signed over the key it replaces,
+  which keeps a server from reviving a grant an earlier rotation revoked. The handle
+  stays outside the enc-key binding: a pin on a server-chosen handle names nothing,
+  because the contact's key never signs a grant under it. See
+  [incoming shares](threat-model.md#incoming-shares-are-attacker-appendable).
+
+- **Every revoke rotates.** A revoked grant stops counting only once its signature
+  covers a replaced key, so a revoke that just deleted the row left it valid, and a
+  server that kept the row could have the next rotation re-wrap to the revoked account.
+  A record of revoked or authorized grantees, sealed under a key derived from the root
+  key and stored on the server, would have let a public resource keep its link and a
+  folder awaiting a re-sync drop the grant at once. But the server can serve an older
+  copy of that record as easily as it keeps a deleted row, while undoing a rotation
+  means rolling back the resource itself, and the record would need its own root-key
+  migration. The revoking device does keep a local record its own rotations never
+  follow, which holds even against a server that rolls the resource's key back, but it
+  does not reach the owner's other devices. So a revoke on a public resource rotates
+  and makes it private, a folder that
+  cannot rotate refuses the revoke, and no rotation repairs a grant an earlier one left
+  behind: each rotation names those grants, and the owner shares them again. See
+  [what revocation guarantees](threat-model.md#what-revocation-actually-guarantees).
+
+- **A share from an unpinned owner asks before it opens.** A grant signed by the key
+  the server reports for an owner nobody pinned is the server's word, so opening it
+  silently let a server answer a pull with a share of its own under the id of one a
+  verified contact made. Refusing it outright would make every first share unusable
+  until the recipient ran `aqt contacts pin`. So `pull`, `clone`, and `info` show the
+  claim and pin on a yes. A run without a terminal passes `--pin-owner <fingerprint>`
+  rather than `--yes`: everywhere else `-y` only skips a prompt, so a script that adds
+  it by habit would pin whatever key the server reports, while the fingerprint makes
+  the script state which key it trusts.
+
 ## Server exposure
 
 - **Account-enumeration oracle.** `GET /v1/account/salt` returns an indistinguishable

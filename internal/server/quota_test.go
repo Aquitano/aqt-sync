@@ -3,6 +3,7 @@
 package server
 
 import (
+	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -104,7 +105,7 @@ func TestQuotaChargesNewGrants(t *testing.T) {
 	}
 	grant := func(grantee string) int {
 		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
-			GranteeHandle: grantee, WrappedKey: make([]byte, crypto.GrantWrapSize),
+			GranteeHandle: grantee, WrappedKey: make([]byte, crypto.GrantWrapSize), Signature: make([]byte, ed25519.SignatureSize),
 		}, nil)
 	}
 	refused := false
@@ -138,6 +139,7 @@ func TestGrantRefusesHandleLongerThanMinted(t *testing.T) {
 	grant := func(grantee string) int {
 		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
 			GranteeHandle: grantee, WrappedKey: make([]byte, crypto.GrantWrapSize),
+			Signature: make([]byte, ed25519.SignatureSize),
 		}, nil)
 	}
 	if code := grant(h.handleOf("minted-handle@example.com")); code != http.StatusCreated {
@@ -162,7 +164,7 @@ func TestWriteToMissingResourceIsNotFoundBeforeQuota(t *testing.T) {
 		{http.MethodPut, missing + "/metadata", api.UpdateResourceMetadataRequest{
 			EncryptedMeta: crypto.SealedBlob{Nonce: make([]byte, 24), Ciphertext: make([]byte, 64)}, ExpectedVersion: 1,
 		}},
-		{http.MethodPost, missing + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: make([]byte, crypto.GrantWrapSize)}},
+		{http.MethodPost, missing + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: make([]byte, crypto.GrantWrapSize), Signature: make([]byte, ed25519.SignatureSize)}},
 	} {
 		var e api.ErrorResponse
 		if code := h.do(tc.method, tc.path, token, tc.body, &e); code != http.StatusNotFound || e.Code != api.ErrCodeNotFound {

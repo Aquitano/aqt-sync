@@ -27,7 +27,8 @@ recoveryKey ──HKDF──▶ recoveryUnlockKey (RUK)       (random, shown onc
                                                   ├─ HKDF ─▶ Ed25519 signing key
                                                   │            (public half registered with the
                                                   │             server; logins sign a server
-                                                  │             challenge — no secret is sent)
+                                                  │             challenge and owners sign grants
+                                                  │             — no secret is sent)
                                                   └─ HKDF ─▶ X-Wing encryption key
                                                                (ML-KEM-768 + X25519; HPKE grant
                                                                 wraps; public half published)
@@ -58,11 +59,16 @@ stale passphrase or a cached root key alone cannot re-attach after a change.
 
 `aqt passphrase rotate-root` is the compromise-recovery operation: it mints a fresh
 `RK`, re-wraps every recoverable resource and snapshot content key plus incoming
-grant, migrates the derived signing and encryption identities, and atomically
-switches the account record. The server issues a fresh token only to the initiating
-device and removes every other device; they recover by logging in again with the
-passphrase. Existing convergent objects stay readable because their per-object keys
-are sealed in their roots; future writes derive convergence from the new `RK`.
+grant, migrates the derived signing and encryption identities, re-signs the outgoing
+grants the old identity signed, and atomically switches the account record. The
+request names every outgoing grant, and the server refuses one that misses a grant
+created meanwhile, which would otherwise keep the retired identity's signature. A
+recipient who pinned the old identity key sees those grants as unsigned until they
+compare fingerprints and pin the new one. The server issues a fresh token only to the
+initiating device and removes every other device; they recover by logging in again
+with the passphrase. Existing convergent objects stay readable because their
+per-object keys are sealed in their roots; future writes derive convergence from the
+new `RK`.
 Updates and snapshots are fenced by the resource version the rotation bumps. A create
 and a recovery-key write name the identity key of the root they wrapped under instead,
 and the server refuses one that names the retired root, so neither can store a wrap
@@ -165,6 +171,51 @@ obtained it later — but they could equally have saved the plaintext. Either wa
 old **link** is dead: the root no longer opens under the old key, and the server
 stops serving the objects.
 
+A rotation re-wraps the new key for the grantees that remain, and the server says
+which those are. The client follows only a grant it signed over the key being
+replaced (see [signed grants](#incoming-shares-are-attacker-appendable)), so a server
+that lists a pinned contact on a resource never shared with them gets no wrap for
+them. A grantee revoked by an earlier rotation is skipped the same way, since that
+grant's signature covers a key the rotation replaced; the revoke itself skips the
+revoked handle by name. Pin repair applies the same rule to the resources it
+re-sends. A grant is signed to a handle, and the server assigns handles, so a pin is
+refused when the server reports for its email a handle another pin already holds;
+otherwise a rotation could re-wrap one contact's share to the other's key. A grant stored before grants were signed fails the check too, so it is
+never re-wrapped; its owner shares it again to sign it. Before it rotates, `aqt
+unshare` lists the grantees it will re-wrap, named by their pins, and the listed
+grants it will leave behind, and asks on a terminal.
+
+Every revoke rotates the key, because deleting the grant row is not what stops a
+later rotation from following it; the signature over a replaced key is. A revoke that
+only deleted the row would leave its signature valid for the current key, and a
+server that kept the row could list it at the next rotation, from any of the owner's
+devices, which would re-wrap the new key to the revoked account. So a revoke on a
+public resource rotates too, which makes it private and kills its links: the
+grantee could read it through a link anyway. A folder that cannot rotate until it is
+re-synced (after `aqt passphrase rotate-root`) refuses the revoke and changes nothing.
+Only a public resource with no owner key revokes without rotating: no device can
+rotate it, so no rotation can follow the grant either. A private resource always has
+an owner key, since the server refuses to store one without it, so a revoke refuses
+a private resource the server reports without one rather than delete the grant and
+leave its signature valid for the key the resource still has.
+
+A rotation checks signatures against the key the server serves, so a server that rolls
+a resource back to its key from before a revoke also brings back the revoked grant's
+signature over that key. The device that revoked the grant is protected against this:
+it records the resource and the grantee's handle in a local state file, and its
+rotations and pin repairs never follow that grant again, whatever key the server
+serves, until `aqt share <id> --with <email>` from that device grants it again. The
+owner's other devices hold no such record and still assume the server serves the
+resource's current key: a rotation from one of them, against a server that rolled the
+key back, re-wraps the new key for the revoked account, and nothing on those devices
+detects the rollback.
+
+The same rule means no rotation repairs a grant an earlier one did not re-wrap,
+whether its re-wrap failed, its grantee is pinned only on another device, or a lost
+response left a revoke's outcome unknown: that grant's signature covers the key the
+earlier rotation replaced. Each rotation names every such grant and why, `aqt share
+ls` marks it `(unsigned)`, and sharing it again signs it over the current key.
+
 An expiring link is a different operation from revoking one. Expiry can either
 `reclaim` (destroy the content) or `retire` (take only the link down); a retired
 link's fragment is dormant, not dead, because no key was rotated. See
@@ -174,7 +225,7 @@ link's fragment is dormant, not dead, because no key was rotated. See
 
 Registration is open by default and the handle lookup behind `aqt share --with` is
 authenticated but unrestricted, so any account on a server can put a row into any
-other account's `aqt shares` list. Three properties keep that from being worse than
+other account's `aqt shares` list. Four properties keep that from being worse than
 noise:
 
 - **The row is somebody else's text.** A grantor picks the metadata a recipient's
@@ -190,18 +241,45 @@ noise:
   `--block` additionally refuses that account's future grants and drops the shares it
   has already sent. Blocks are listed by `aqt shares blocked` and lifted by
   `aqt shares unblock`.
-- **The sender is named where it can be.** A grant carries an opaque handle. `aqt
-  shares` reverse-resolves it against the local contact pins and prints the pinned
-  email and key fingerprint on a match, marked `verified` when the pin was checked
-  against a fingerprint. A pin is the only attribution the client vouches for.
-  Without one, it shows the email and identity-key fingerprint the server reports for
-  the grantor's account as an unverified claim (`a@example.com?`): signup does not
+- **The sender is named only when it signed.** A grant carries an opaque owner handle
+  and the owner's Ed25519 signature over the resource id, both handles, and a
+  commitment to the content key it wraps. HPKE base mode authenticates no sender, so
+  without the signature anyone holding the recipient's public enc key could wrap a key
+  of their choosing, and the server could list it under any owner. `aqt shares`
+  reverse-resolves the handle against the local contact pins and prints the pinned
+  email and key fingerprint only when that pin's key signed the grant, marked
+  `verified` when the pin was checked against a fingerprint. A pin is the only
+  attribution the client vouches for. Without one, it checks the signature against the
+  identity key the server reports for the grantor's account and shows that account's
+  email and fingerprint as an unverified claim (`a@example.com?`): signup does not
   verify emails, so open registration lets anyone hold an address that reads like
   someone else's, and the server can report anything. The fingerprint is the one to
   compare out-of-band; `aqt contacts pin <email> --fingerprint <fp>` then turns the
-  claim into a verified pin. A server that predates the claim leaves the bare handle,
-  shown as `unknown sender`. The flip side is that sharing shows your account email to
-  every account you share with.
+  claim into a verified pin. A grant whose signature does not verify is listed as
+  `unsigned`, and `pull`, `clone`, and `info` refuse to open it. The handle in a pin is
+  the server's word as well, but a pin on the wrong handle names nothing, because the
+  contact's key never signs a grant under that handle; a pinned key that signed under
+  a handle its pin does not hold names nothing either, and does not open. The flip
+  side is that sharing shows your account email to every account you share with.
+- **A share opens only from a sender you have pinned.** `pull`, `clone`, and `info`
+  print the sender of a share the way `aqt shares` does before opening it. A share
+  signed by the key the
+  server reports for an owner nobody pinned is the server's word all the way down:
+  the server can wrap a key of its own to you, sign it with a key it made up, and
+  answer a pull of a share `aqt shares` named as a verified contact's with that one
+  under the same id. So it opens only once its owner is pinned: on a terminal after
+  showing the claimed email, handle, and fingerprint, and without one only with
+  `--pin-owner` naming that fingerprint. Answering the prompt makes a first-use pin;
+  `--pin-owner` makes a verified one, since the fingerprint came from the user. Both are
+  checked against the keys the server publishes for the claimed email. A claim on an email
+  already pinned to another key is refused outright, comparing emails after the
+  server's lower-casing and Unicode compatibility folding (NFKC), and pins stored under
+  another spelling are read in that form too. Folding cannot catch a homoglyph from
+  another script, such as a Cyrillic `е` (U+0435) for an `e`, so every email shown
+  to a person, claimed or pinned, that holds a character outside ASCII is quoted with
+  those characters escaped, and the pin prompt warns about it. The Git remote helper never
+  reads through a grant: Git remotes cannot be granted, and it opens only remotes the
+  account owns.
 
 A block is the one place a grant write distinguishes a real account from a decoy, and
 only to the account the recipient deliberately blocked.
@@ -311,7 +389,11 @@ against Grover's algorithm.
   forged binding cannot replace it. Only a first-use pin rests on the binding (already
   trust-on-first-use against the server), and so do a confirmed re-pin, which is a
   first use over again, and the one-time move of a pin made while grants were X25519. The identity key signs nothing a server can choose
-  beyond a 32-byte login challenge, which can never be a binding message. Release signing is the one
+  beyond a 32-byte login challenge, which can never be a binding message. A grant
+  signature covers a server-assigned id and handles, but under its own prefix and with
+  a content-key commitment the server never sees, so it is neither of the other two
+  messages. A forged one could put a sender's name on a file the forger chose; it
+  decrypts nothing. Release signing is the one
   signature a forger could turn into code execution; see
   [Still open](#still-open).
 
@@ -416,7 +498,8 @@ you from":
   An unverified pin may therefore be a decoy, and once its owner registers, the
   server's keys for that email stop matching it. A share on a terminal then shows
   both fingerprints and asks before re-pinning. Confirming replaces the pin and
-  re-sends every grant made against the old one; when the handle changed, it deletes
+  re-sends every grant this account signed against the old one, listing them, since
+  the server chooses which resources it says hold one; when the handle changed, it deletes
   the old rows without rotating the content key, since nobody holds a decoy's key.
   Without a terminal the share refuses, and no flag accepts the change in advance:
   the question is the out-of-band comparison, and a server presenting its own key

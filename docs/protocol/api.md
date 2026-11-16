@@ -27,9 +27,10 @@ below the baseline (including an omitted `0`) it is rejected `400` too.
 
 Grant wraps are a sealed format of their own. Every route that hands out, accepts,
 or re-wraps an enc key or a grant wrap (`POST /v1/account`, `GET /v1/account/keys`,
-`POST /v1/resources/:id/grants`, `GET /v1/shares`, `PUT /v1/account/enc-key`,
-`PUT /v1/account/root-key`) answers `426` below capability 5, and so does a grantee's
-`GET /v1/resources/:id`, whatever the resource's own `min_client`.
+`PUT /v1/account/enc-key`) answers `426` below capability 5. The routes that write or
+hand out a signed grant (`POST` and `GET /v1/resources/:id/grants`, `GET /v1/shares`,
+`PUT /v1/account/root-key`, and a grantee's `GET /v1/resources/:id`, whatever the
+resource's own `min_client`) answer `426` below capability 6.
 
 `GET /v1/resources` is the deliberate exception: the listing never `426`s, because
 refusing the whole list over one too-new row would hide every resource the client
@@ -147,8 +148,9 @@ PUT    /v1/resources                 Replace in place (id set, owner-checked, ve
                                      → { id, version, expiresAt?, maxReads?, onExpiry? }  // echoes the accepted policy
 GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth. A private id needs the owner
-                                     token OR a grant to the caller; a grantee gets the grant wrap and the
-                                     owner handle in place of the owner's wrapped key (see grants below).
+                                     token OR a grant to the caller; a grantee gets the grant wrap, its
+                                     signature, the owner handle, and the owner's email and identity key in
+                                     place of the owner's wrapped key (see grants below).
                                      Anyone else gets 404, so a private id is not an existence oracle.
                                      410 Gone (code "gone") if the public link has expired, exhausted its
                                      read limit, or been reclaimed. Owner reads are never counted or expired
@@ -184,7 +186,11 @@ PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, auth
                                      409 root_key_changed if a root-key rotation has replaced it.
 PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root key with every re-wrapped
                                      key and migrated identity, atomically, keeping only this device.
-                                     Clears the recovery wrap, which holds the old root key.
+                                     outgoingGrants names every grant the caller made on a live resource
+                                     with an owner key exactly once, with the signature the client listed
+                                     (409 if one is missing or changed). An entry with a signature re-signs
+                                     that grant under the new identity key; one without keeps the stored
+                                     signature. Clears the recovery wrap, which holds the old root key.
 PUT    /v1/account/enc-key           Body: { encPublicKey, encKeySig, incomingGrants }. Moves an account
                                      that still publishes a pre-X-Wing enc key onto its X-Wing key: the
                                      binding must verify against the account's current identity key, and
@@ -212,27 +218,33 @@ POST   /v1/resources/:id/auto-snapshot   Body: { enabled }. Per-resource opt-out
 # Account-to-account grants (read-only). A grant is the resource's content key
 # HPKE-wrapped (RFC 9180, X-Wing = ML-KEM-768 + X25519, HKDF-SHA256,
 # ChaCha20-Poly1305) client-side to the grantee's published 1216-byte enc key, bound via HPKE info to (resource id, owner handle, grantee
-# handle); the server stores and serves it opaquely. GET /v1/resources/:id honors
-# a grant like ownership on the READ path only (returns the grant wrap + owner
-# handle instead of the owner's wrapped key); every mutation stays owner-scoped:
+# handle), plus the owner's 64-byte Ed25519 signature over (resource id, owner handle,
+# grantee handle, SHA-256 commitment to the content key); the server stores and serves
+# both opaquely. A grant stored before signatures has none. GET /v1/resources/:id
+# honors a grant like ownership on the READ path only (returns the grant wrap, its
+# signature, the owner handle, and the owner's identity key instead of the owner's
+# wrapped key); every mutation stays owner-scoped:
 GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, encPublicKey, encKeySig }.
                                      Unknown emails (or an account with no published X-Wing enc key) get a
                                      deterministic, correctly self-signed decoy — no existence oracle.
                                      Signup registers the enc key and root-key rotation replaces it;
                                      PUT /v1/account/enc-key only moves a pre-X-Wing account onto X-Wing.
-POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs?, expectedVersion?,
-                                     granteeEmail?, granteeEncPublicKey? }; wrappedKey
-                                     is exactly 1168 bytes (X-Wing encapsulation + sealed key), and
-                                     granteeHandle at most 16 bytes (a minted handle's length), else 400. Upsert
-                                     (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
+POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, signature, chunkRefs?,
+                                     expectedVersion?, granteeEmail?, granteeEncPublicKey? }; wrappedKey
+                                     is exactly 1168 bytes (X-Wing encapsulation + sealed key), signature
+                                     exactly 64, and granteeHandle at most 16 bytes (a minted handle's
+                                     length), else 400. Upsert (rotation re-wraps and re-signs by
+                                     re-posting). chunkRefs refreshes the read scope
                                      like the visibility flip above, for the same reason. No grantee-
                                      existence check (decoy handles must be accepted indistinguishably).
-GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, createdAt }], nextCursor? }.
+GET    /v1/resources/:id/grants      Owner only: { grants: [{ granteeHandle, signature?, createdAt }], nextCursor? }.
                                      Paginated (see below).
-DELETE /v1/resources/:id/grants/:grantee  Revoke one grant. The client then rotates the content key
-                                     (private resources) and re-wraps surviving grantees.
+DELETE /v1/resources/:id/grants/:grantee  Delete one grant without rotating. `aqt unshare --with` uses it
+                                     only for a public resource with no owner key. Otherwise it rotates the key
+                                     with PUT /v1/resources, whose header field revokeGrantee drops the
+                                     grant in the same write, then re-wraps the surviving grantees.
 GET    /v1/shares                    Grantee-scoped incoming grants: { shares: [{ resourceId, ownerHandle,
-                                     wrappedKey, encryptedMeta, createdAt, ownerEmail?, ownerPublicKey? }],
+                                     wrappedKey, signature?, encryptedMeta, createdAt, ownerEmail?, ownerPublicKey? }],
                                      nextCursor? }. ownerEmail and ownerPublicKey are the grantor account's
                                      email and Ed25519 identity key: an unverified claim (emails are not
                                      verified at signup) the client shows only for grantors it has not

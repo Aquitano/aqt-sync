@@ -157,7 +157,7 @@ func TestShareWithPrunedRefsIsMissingChunks(t *testing.T) {
 		path string
 		body any
 	}{
-		{"/v1/resources/" + res.ID + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: make([]byte, crypto.GrantWrapSize), ChunkRefs: pruned}},
+		{"/v1/resources/" + res.ID + "/grants", api.CreateGrantRequest{GranteeHandle: "grantee", WrappedKey: make([]byte, crypto.GrantWrapSize), Signature: make([]byte, ed25519.SignatureSize), ChunkRefs: pruned}},
 		{"/v1/resources/" + res.ID + "/visibility", api.SetVisibilityRequest{Visibility: api.Public, ChunkRefs: pruned}},
 	} {
 		var e api.ErrorResponse

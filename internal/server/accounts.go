@@ -389,6 +389,9 @@ func (s *Store) RotateRootKey(owner, deviceID string, req api.RootKeyRotationReq
 	if err := updateIncomingGrants(tx, owner, req.IncomingGrants); err != nil {
 		return fail(err)
 	}
+	if err := resignOutgoingGrants(tx, owner, req.OutgoingGrants); err != nil {
+		return fail(err)
+	}
 	newEpoch := epoch + 1
 	newVerifier := sha256.Sum256(req.NewAuthVerifier)
 	// The recovery wrap holds the root key this rotation retires, so it goes too.
@@ -506,6 +509,56 @@ func updateIncomingGrants(tx *sql.Tx, owner string, grants []api.GrantKeyMigrati
 	}
 	_, err := tx.Exec(`DELETE FROM grants WHERE grantee_handle = ? AND EXISTS (SELECT 1 FROM resources r WHERE r.id = grants.resource_id AND r.reclaimed = 1)`, owner)
 	return err
+}
+
+// resignOutgoingGrants stores the owner's new-identity signatures on its grants. grants
+// must name every grant the owner made on a live resource with an owner key exactly
+// once, as the incoming grants must, so a grant created since the client listed them
+// fails the rotation instead of keeping a signature under the identity it retires.
+// Each must carry the signature the client listed, so a grant rewritten since then
+// fails it too instead of taking a signature over a content key it no longer carries.
+// An entry with no new signature keeps the stored one: a grant the old identity never
+// signed over the current key is not the owner's to vouch for.
+func resignOutgoingGrants(tx *sql.Tx, owner string, grants []api.GrantSignatureMigration) error {
+	seen := map[string]bool{}
+	for _, m := range grants {
+		k := m.ResourceID + "\x00" + m.GranteeHandle
+		resign := len(m.Signature) > 0
+		if m.ResourceID == "" || m.GranteeHandle == "" || seen[k] ||
+			resign && (len(m.Signature) != ed25519.SignatureSize || len(m.ExpectedSignature) == 0) {
+			return ErrVersionConflict
+		}
+		seen[k] = true
+		var current []byte
+		err := tx.QueryRow(`SELECT g.signature FROM grants g JOIN resources r ON r.id = g.resource_id
+			WHERE g.resource_id = ? AND g.owner_handle = ? AND g.grantee_handle = ? AND r.wrapped_key IS NOT NULL AND r.reclaimed = 0`,
+			m.ResourceID, owner, m.GranteeHandle).Scan(&current)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrVersionConflict
+		}
+		if err != nil {
+			return err
+		}
+		if !bytes.Equal(current, m.ExpectedSignature) {
+			return ErrVersionConflict
+		}
+		if !resign {
+			continue
+		}
+		if _, err := tx.Exec(`UPDATE grants SET signature = ? WHERE resource_id = ? AND owner_handle = ? AND grantee_handle = ?`,
+			m.Signature, m.ResourceID, owner, m.GranteeHandle); err != nil {
+			return err
+		}
+	}
+	var n int
+	if err := tx.QueryRow(`SELECT count(*) FROM grants g JOIN resources r ON r.id = g.resource_id
+		WHERE g.owner_handle = ? AND r.wrapped_key IS NOT NULL AND r.reclaimed = 0`, owner).Scan(&n); err != nil {
+		return err
+	}
+	if n != len(grants) {
+		return ErrVersionConflict
+	}
+	return nil
 }
 
 // ErrEncKeyBinding is returned when a published enc key is not signed by the

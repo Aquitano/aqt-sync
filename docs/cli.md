@@ -33,8 +33,11 @@ accepting it and behaving identically:
 
 Every prompt has a flag that answers it ahead of time, so a scripted run neither
 blocks nor silently takes a default it did not choose: `-y/--yes` for a destructive
-confirmation, `--git/--no-git` for whether `aqt init` syncs a git repository inside
-the folder, and `-P/--password` with a value instead of the bare form that prompts.
+confirmation, `--pin-owner <fingerprint>` for opening a share from an owner not yet
+pinned, `--git/--no-git` for whether `aqt init` syncs a git repository inside the
+folder, and `-P/--password` with a value instead of the bare form that prompts. `-y`
+never decides whom to trust: the commands that read through a grant do not take it,
+and `--pin-owner` names the identity key it accepts.
 
 Everyday resource arguments accept a unique name, an id, or a tracked path:
 `info`, `pull`, `cat`, `clone`, `ls <folder>`, `rm`, `mv`, `share`, and `unshare`
@@ -128,21 +131,48 @@ claimedFingerprint?, attribution, since, stale? }]`.
 `name` and `kind` are the *grantor's* plaintext, so both are stripped of control
 bytes and bounded before they are printed or returned — a sender cannot emit escape
 sequences into the recipient's terminal. `from` is the sender's opaque account handle.
-`attribution` says what names the sender:
+Every grant carries its owner's signature, and `attribution` says what names the
+sender:
 
-- `verified` or `pinned`: a local contact pin matches the handle, and `fromEmail`
-  and `fingerprint` come from it. `verified` means the pin was made against a
-  fingerprint (`aqt contacts pin --fingerprint`).
-- `claimed`: no pin matches, and `claimedEmail` and `claimedFingerprint` are what the
-  server reports for the sender's account. Emails are not verified at signup, so the
-  human output marks it `a@example.com? (unverified, SHA256:…)`.
-- `unknown`: no pin, and a server too old to report the sender; the human output says
+- `verified` or `pinned`: a local contact pin matches the handle and its identity key
+  signed the grant, and `fromEmail` and `fingerprint` come from the pin. `verified`
+  means the pin was made against a fingerprint (`aqt contacts pin --fingerprint`).
+- `claimed`: no pin matches, the identity key the server reports for the sender's
+  account signed the grant, and `claimedEmail` and `claimedFingerprint` are what the
+  server reports for it. Emails are not verified at signup, so the human output marks
+  it `a@example.com? (unverified, SHA256:…)`.
+- `unsigned`: the key the row would be attributed to did not sign it. It is a grant
+  from before grants were signed, or one the server wrote; it gets no fetch command,
+  `aqt pull` and `aqt clone` refuse it, and it opens once its owner shares it again.
+- `unknown`: the row is stale, or the server named no sender; the human output says
   `unknown sender`.
+
+Signup takes any string as an email, so one with a character outside ASCII can
+imitate an address you know, such as a Cyrillic `е` (U+0435) for an `e`. Human
+output shows such an email quoted with those characters escaped,
+`"e2\u0435@example.com"`, whether it is a claim or a pin, and `aqt shares` adds a
+warning; `--json` carries it as is.
 
 Compare the fingerprint with the sender out-of-band before acting on a share;
 `aqt contacts pin <email> --fingerprint <fp>` then makes the attribution `verified`.
 A successful listing also marks every share as seen: `aqt login` and `aqt status`
 mention shares that arrived since, on stderr.
+
+`aqt pull`, `aqt cat`, `aqt clone`, and `aqt info` work the attribution out again
+from what the server returns for the read itself, and print it on stderr as
+`aqt://<id> is shared by <sender>`. They refuse an `unsigned` grant. A `claimed` one
+opens only once its owner is pinned: on a terminal they show the claimed email,
+handle, and fingerprint and pin on yes; without one they refuse and say how to pin.
+`--pin-owner <fingerprint>` pins the owner without asking, but only if their identity
+key has that fingerprint (with or without the `SHA256:` prefix, as `aqt contacts pin
+--fingerprint` takes it), and opens the share. That pin is verified, like one from
+`aqt contacts pin <email> --fingerprint <fp>`, since both take a fingerprint you
+brought; a pin made by answering the prompt is first-use. A claim on an email pinned to another key is refused either way, comparing the
+two after the server's lower-casing and Unicode compatibility folding, so a
+differently cased or fullwidth spelling of a pinned address counts as that address.
+The prompt shows a claimed email outside ASCII escaped, with a warning. In `aqt tui`, a
+clone refused this way shows the same claim and, on confirm, pins on first use like
+the prompt.
 
 Anyone with an account on the server can add a row here, so the recipient can remove
 one:
@@ -162,8 +192,9 @@ is only trust-on-first-use. `--json` returns
 `{ email, fingerprint, encFingerprint, alreadyPinned, verified }`.
 
 A first-use pin made before the contact registered holds the server's placeholder
-key, so their grants never open. Once they have registered, either way out re-sends
-every grant made against the placeholder:
+key, so their grants never open. Once they have registered, either way out lists and
+re-sends every grant you signed against the placeholder. A grant the server lists for
+the placeholder without your signature is left alone and counted in a warning:
 
 - `aqt share <id> --with <email>` on a terminal shows both fingerprints and asks
   before re-pinning. Without a terminal it refuses rather than accept a key change
@@ -176,6 +207,44 @@ again to retry the remaining shares; completed shares remain usable.
 
 A verified pin is never replaced this way: a mismatch against it is an error until
 `aqt contacts rm <email>`.
+
+## Taking access back
+
+`aqt unshare <id>` and `aqt unshare <id> --with <email>` both rotate the content key.
+Before they do, they list on stderr the grantees the new key will be re-wrapped for,
+named by their pins, and the grants that will stay on the old key, with the reason,
+then ask (`-y` skips the question, not the list). Revoking a grant on a public
+resource also makes it private, so its links stop working: the grantee could read it
+through a link anyway. A folder that cannot rotate until it is re-synced refuses the
+revoke and changes nothing; run `aqt sync` in it, then revoke again. Only a public
+resource with no owner key revokes without rotating; a private resource the server
+reports without one is refused, since the server never stores one that way.
+
+`--dry-run` prints the same list on stdout, after a line saying what else the
+rotation does (a public resource goes private and its links stop working), and
+changes nothing. `aqt tui` runs it first when you revoke a grant or make a resource
+private, and asks over its output before running the command with `--yes`.
+
+After the rotation, a warning names every grant that was not re-wrapped. No later
+rotation picks one up, since its signature covers the replaced key, and `aqt share
+ls` marks it `(unsigned)`; `aqt share <id> --with <email>` puts its grantee back on
+the current key. If the response to a rotation is lost, the error says it may have
+gone through anyway: running bare `aqt unshare <id>` again is safe either way, and
+`aqt share ls <id>` marks `(unsigned)` the grants a committed rotation left behind.
+
+`aqt share resign` goes through every `(unsigned)` grant at once: the shares made
+before grants were signed, and the ones a rotation left behind. It lists each
+resource and the pinned contact it would share with, asks, and then shares them
+again, wrapped to the pinned keys and signed. It only runs on a terminal and takes
+no `--yes`, because the server chooses which grants it lists: a row it added looks
+the same as a share you made, and reading the list is what tells them apart. Grants
+to accounts not pinned on this device, or revoked from it, are named and left alone.
+
+The device that revokes a grant also records it locally, so its later rotations and
+pin repairs list that grantee as `revoked from this device` and never re-wrap for
+them, even if the server serves the resource's key from before the revoke. `aqt share
+<id> --with <email>` from the same device clears the record. Other devices of the
+account do not see it.
 
 ## Four questions, four commands
 

@@ -12,6 +12,68 @@ All notable changes to this project are documented in this file.
   Without a server, `signup` and `login` now ask for one on a terminal and refuse
   otherwise. `AQT_SERVER` sets one for machines and scripts without a profile;
   set it to `http://localhost:8080` for the old development default.
+- **Grants are signed, which raises the client capability to 6.** Every grant now
+  carries the owner's Ed25519 signature over the resource, both account handles, and
+  a commitment to the content key it wraps. The client checks it before naming a
+  sender, opening a share, or re-wrapping a rotated key. Grant writes, both grant
+  listings, reads through a grant, and root-key rotation answer `426` below
+  capability 6. Upgrade the server first (migration 24 adds the column), then every
+  client. Grants made before this release carry no signature: recipients see them as
+  `unsigned` and cannot open them, and a rotation never re-wraps them. `aqt share ls`
+  marks them `(unsigned)`; `aqt share <id> --with <email>` signs each one again, and
+  `aqt share resign` lists all of them and shares them again after you confirm. A
+  root-key rotation names every outgoing grant, and the server answers `409` to one
+  that misses a grant; running it again lists them afresh.
+
+### Security
+
+- **A hostile server could have a rotated key re-wrapped to any pinned contact.**
+  `aqt unshare` and a revoke re-wrapped the new content key for every grantee the
+  server listed that matched a local pin, so the server could list a contact on a
+  resource that was never shared with them, and they received its key. Pin repair
+  trusted the same listings to decide which resources to re-send. Both now follow
+  only grants this account signed over the key being replaced, and repair lists the
+  resources it re-sends. A contact is not pinned when the server reports for it an
+  account handle another pin already holds. A revoke that left the key alone, on a public resource or a
+  folder awaiting a re-sync, kept the revoked grant valid for that key, so the `aqt
+  unshare` it recommended next re-wrapped to the revoked account. A revoke now always
+  rotates: on a public resource that also makes it private and kills its links, and a
+  folder that cannot rotate yet refuses the revoke until `aqt sync` re-seals it. A
+  revoke on a private resource the server reports without an owner key is refused too,
+  instead of deleting the grant without rotating. Every rotation lists the grantees it
+  re-wraps and the grants it leaves before asking, and afterwards names each grant it
+  could not re-wrap. `aqt unshare --dry-run` prints that list, and whether the
+  resource goes private, without changing anything, and `aqt tui` shows it before it
+  asks to revoke a grant or make a resource private; its revoke dialog used to say
+  nothing about a public resource going private. No later rotation repairs one of
+  those; `aqt share <id> --with <email>` does. The device that revoked a grant also
+  records it locally and never re-wraps for it again, so a server that serves the
+  resource's key from before the revoke cannot revive the grant through that device;
+  sharing with the grantee again from it clears the record. The owner's other devices
+  still trust the server to serve the current key.
+- **A hostile server could forge a verified share.** Grant wraps use HPKE base mode,
+  which authenticates no sender, and `aqt shares` took the sender from the owner
+  handle the server reported. Anyone holding the recipient's public enc key could wrap
+  a key of their choosing, so the server could list its own file as
+  `from <contact> (SHA256:…, verified)`. A share is now named after a pin only when
+  the pinned key signed it, and `pull`, `clone` and `info` refuse a grant without a
+  valid signature. They also print the sender the way `aqt shares` does, and open a
+  share signed by the key the server reports for an owner you have not pinned only
+  once you pin that owner: on a terminal after seeing the claimed email, handle, and
+  fingerprint, or with `--pin-owner <fingerprint>` naming that owner's identity key.
+  Before, the server could answer a pull of a verified contact's share with one of its
+  own under the same id, and it opened without a word. A script that reads from a
+  sender it has not pinned now needs `--pin-owner`, or a pin made beforehand with `aqt
+  contacts pin`; `-y` is not accepted there, since it would pin whatever key the server
+  reports. A `--pin-owner` pin is verified, since the fingerprint came from you; a pin
+  made by answering the prompt is first-use. In `aqt tui`, a clone refused for an
+  unpinned owner shows the claim and pins on first use on confirm. A verified pin to which the server attached the
+  wrong handle names nothing, for the same reason, and neither does a pinned key that
+  signed under a handle its pin does not hold. A claim on an email already pinned is
+  refused under any spelling: emails are compared lower-cased and NFKC-folded, and old
+  pins stored with capitals are read that way. An email outside ASCII, which can
+  imitate a pinned address with a letter from another script, is shown quoted with
+  those characters escaped wherever a person reads it, with a warning.
 
 ### Added
 
@@ -72,8 +134,8 @@ All notable changes to this project are documented in this file.
   and re-sharing each resource by hand. Now a share on a terminal shows the pinned and
   current fingerprints and asks before re-pinning. Without a terminal it refuses with
   both fingerprints. `aqt contacts pin <email> --fingerprint <fp>` replaces the old pin
-  without asking. Either way, every earlier grant made against the placeholder is
-  re-sent to the real account and the placeholder's rows are removed. Pins made with
+  without asking. Either way, every earlier grant you signed against the placeholder
+  is re-sent to the real account and the placeholder's rows are removed. Pins made with
   `--fingerprint` are now recorded as verified, and a mismatch against a verified pin
   is still refused.
 - **`aqt-server admin accounts disable` applies from the next request.** The
@@ -137,8 +199,8 @@ All notable changes to this project are documented in this file.
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries
   the grantor account's email and identity key. The client shows them as an
   unverified claim, `a@example.com? (unverified, SHA256:…)`, because signup does not
-  verify emails. Pinned senders read as before, marked `verified` when the pin was made
-  against a fingerprint. `--json` rows gain `claimedEmail`, `claimedFingerprint`, and
+  verify emails. A share from a pinned sender is named after the pin when the pinned
+  key signed it, marked `verified` when the pin was made against a fingerprint. `--json` rows gain `claimedEmail`, `claimedFingerprint`, and
   `attribution`. Each row now ends with the exact `aqt pull` or `aqt clone` command
   that fetches it. Sharing shows your account email to the accounts you share with.
 - **`aqt login` and `aqt status` mention new incoming shares** on stderr until

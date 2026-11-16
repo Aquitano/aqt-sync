@@ -306,7 +306,8 @@ func TestGranteeRemovesAndBlocksAShare(t *testing.T) {
 		}
 		// Knowing who the sender was is what makes a block manageable; pinning them is
 		// how a handle becomes an address `aqt shares unblock` accepts.
-		if _, _, err := lookupGrantee(cl, prof, "e2e@example.com"); err != nil {
+		mk, _ := identity.LoadSession(prof.Name)
+		if _, _, err := lookupGrantee(cl, prof, mk, "e2e@example.com"); err != nil {
 			t.Fatalf("pin the sender: %v", err)
 		}
 		listed := captureStdout(t, func() {
@@ -499,7 +500,8 @@ func TestConfirmPinnedKeysReportsRotationNotSubstitution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pin, _, err := lookupGrantee(cl, prof, "bob@example.com")
+	mk, _ := identity.LoadSession(prof.Name)
+	pin, _, err := lookupGrantee(cl, prof, mk, "bob@example.com")
 	if err != nil {
 		t.Fatal(err)
 	}

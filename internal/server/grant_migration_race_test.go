@@ -162,7 +162,7 @@ func TestKeyMigrationRefusesChangedIncomingGrant(t *testing.T) {
 				// An owner that looked up Bob before the rotation must not replace his
 				// migrated grant with a new wrap to the discarded encryption key.
 				rec = h.doAt(api.ClientCapability, http.MethodPost, "/v1/resources/"+res.ID+"/grants", aliceToken, api.CreateGrantRequest{
-					GranteeHandle: bob, WrappedKey: currentWrap,
+					GranteeHandle: bob, WrappedKey: currentWrap, Signature: make([]byte, ed25519.SignatureSize),
 					GranteeEmail: "bob@example.com", GranteeEncPublicKey: beforeEnc,
 				})
 				if rec.Code != http.StatusConflict {

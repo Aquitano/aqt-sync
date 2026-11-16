@@ -8,6 +8,7 @@ import (
 	"crypto/ed25519"
 	"crypto/hpke"
 	"crypto/mlkem"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -111,6 +112,41 @@ func VerifyEncKey(identityPub ed25519.PublicKey, encPub, sig []byte) bool {
 		return false
 	}
 	return ed25519.Verify(identityPub, append([]byte(encKeyBindingPrefix), encPub...), sig)
+}
+
+// grantSigPrefix and grantKeyCommitmentPrefix domain-separate a grant signature from
+// the enc-key binding and from login challenges, the other messages the identity key
+// signs.
+const (
+	grantSigPrefix           = "aqt-grant-sig-v1\x00"
+	grantKeyCommitmentPrefix = "aqt-grant-key-commitment-v1\x00"
+)
+
+// SignGrant signs a grant as its owner: the resource, both handles, and a commitment
+// to the content key the grant carries. HPKE base mode authenticates no sender, so
+// without this anyone holding the grantee's public enc key could mint a share that
+// names any owner. The content key is committed to rather than the wrap because a
+// grantee re-wraps its incoming grants whenever its own enc key changes, and the
+// owner's signature has to survive that. Committing to the key also means a signature
+// only vouches for the key it was made over: once a rotation replaces that key, a
+// signature on a revoked grant no longer counts as a grant of the new one.
+func SignGrant(identity ed25519.PrivateKey, ck ContentKey, resourceID, ownerHandle, granteeHandle string) []byte {
+	return ed25519.Sign(identity, grantSigMessage(ck, resourceID, ownerHandle, granteeHandle))
+}
+
+// VerifyGrant checks a SignGrant signature against the identity key the caller
+// attributes the grant to.
+func VerifyGrant(ownerPub ed25519.PublicKey, sig []byte, ck ContentKey, resourceID, ownerHandle, granteeHandle string) bool {
+	if len(ownerPub) != ed25519.PublicKeySize {
+		return false
+	}
+	return ed25519.Verify(ownerPub, grantSigMessage(ck, resourceID, ownerHandle, granteeHandle), sig)
+}
+
+func grantSigMessage(ck ContentKey, resourceID, ownerHandle, granteeHandle string) []byte {
+	commitment := sha256.Sum256(append([]byte(grantKeyCommitmentPrefix), ck[:]...))
+	msg := append([]byte(grantSigPrefix), grantInfo(resourceID, ownerHandle, granteeHandle)...)
+	return append(msg, commitment[:]...)
 }
 
 // grantInfo is the HPKE info binding: a version tag plus the three context

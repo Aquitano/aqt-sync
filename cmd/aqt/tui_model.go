@@ -115,7 +115,11 @@ type tuiModel struct {
 	// execStart timestamps the running action so the completion line can report
 	// how long it took.
 	execStart time.Time
-	log       []string
+	// execThen continues the running action once it finishes, given the output
+	// collected in execOut.
+	execThen func(exit int, out []string) tea.Cmd
+	execOut  []string
+	log      []string
 	// logFollow keeps the log pinned to the bottom as new lines arrive; a manual
 	// upward scroll pauses it until the user returns to the bottom (G).
 	logFollow bool
@@ -369,6 +373,7 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Done without ever reporting Started, and a zero execStart would render
 		// the elapsed time as seconds-since-the-epoch.
 		m.execStart = time.Now()
+		m.execThen, m.execOut = msg.then, nil
 		return m, app.tuiExecCmd(m.ctx.exe, msg.sub, msg.stdin)
 
 	case tuiExecStartedMsg:
@@ -383,6 +388,9 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tuiExecOutMsg:
 		m.appendLog(msg.line)
+		if m.execThen != nil && len(m.execOut) < tuiLogMax {
+			m.execOut = append(m.execOut, msg.line)
+		}
 		m.refreshMain()
 		return m, tuiExecListen(msg.ch)
 
@@ -392,6 +400,8 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.execCmd = nil
 		canceled := m.execCanceled
 		m.execCanceled = false
+		then, out := m.execThen, m.execOut
+		m.execThen, m.execOut = nil, nil
 		elapsed := tuiStyleDim.Render(fmt.Sprintf(" (%.1fs)", time.Since(m.execStart).Seconds()))
 		var note string
 		var toast tea.Cmd
@@ -433,7 +443,11 @@ func (m *tuiModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		m.refreshMain()
-		return m, tea.Batch(toast, m.reloadPanels())
+		var next tea.Cmd
+		if then != nil && !canceled {
+			next = then(msg.exit, out)
+		}
+		return m, tea.Batch(toast, m.reloadPanels(), next)
 
 	case tuiCancelExecMsg:
 		if m.execBusy && m.execCmd != nil && m.execCmd.Process != nil {
@@ -956,7 +970,7 @@ func (m *tuiModel) resourcesActions() []tuiMenuOption {
 		opts = append(opts, tuiMenuOption{key: "c", label: "clone into a new directory…", dialog: resourceCloneDialog(*res, false)}, tuiMenuOption{key: "C", label: "clone and adopt an existing directory…", dialog: resourceCloneDialog(*res, true)})
 	}
 	if res.Visibility == string(api.Public) {
-		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", dialog: m.makePrivateDialog(*res)})
+		opts = append(opts, tuiMenuOption{key: "p", label: "make private (rotates key, old links die)", cmd: makePrivateCmd(*res)})
 	}
 	opts = append(opts,
 		tuiMenuOption{key: "x", label: "delete (keep snapshots)", dialog: m.deleteResourceDialog(*res)},
@@ -994,14 +1008,6 @@ func (m *tuiModel) shareDialog(res lsRow) tuiDialog {
 				return tuiRequestExecStdin(pw+"\n", "share", id, "--password-stdin")
 			})},
 	}}
-}
-
-func (m *tuiModel) makePrivateDialog(res lsRow) tuiDialog {
-	return &tuiConfirm{
-		title:   "Make private",
-		body:    fmt.Sprintf("Rotate %q's content key? Existing share links stop working.", res.Name),
-		confirm: tuiRequestExec("unshare", res.ID, "-y"),
-	}
 }
 
 func (m *tuiModel) deleteResourceDialog(res lsRow) tuiDialog {

@@ -230,7 +230,7 @@ func TestPrivateRotatesStreamedLink(t *testing.T) {
 		t.Fatal("pre-rotation link pull content mismatch")
 	}
 
-	if err := app.runPrivate(id); err != nil {
+	if err := app.runPrivate(id, true, false); err != nil {
 		t.Fatalf("private: %v", err)
 	}
 

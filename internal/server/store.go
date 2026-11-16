@@ -597,6 +597,11 @@ CREATE INDEX IF NOT EXISTS idx_resource_chunks_chunk ON resource_chunks(chunk_id
 	// without one.
 	`ALTER TABLE accounts ADD COLUMN recovery_wrapped_root TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE accounts ADD COLUMN recovery_verifier BLOB NOT NULL DEFAULT x'';`,
+	// 24: the owner's Ed25519 signature over each grant, which recipients and the
+	// owner check before trusting a grant row (see crypto.SignGrant). The server stores
+	// and returns it opaquely. NULL marks a grant written before grants were signed;
+	// no client trusts one until its owner shares it again.
+	`ALTER TABLE grants ADD COLUMN signature BLOB;`,
 }
 
 // migrate applies the migrations a data dir has not yet run, then validates the

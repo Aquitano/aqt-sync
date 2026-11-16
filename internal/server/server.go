@@ -292,6 +292,7 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/x/:id", s.handleShareView)
 
 	pqGrants := requireCapability(api.CapabilityPQGrants)
+	signedGrants := requireCapability(api.CapabilitySignedGrants)
 	v1 := r.Group("/v1")
 	{
 		// Read before any prompt, so a wrong URL or an invite-only server is reported
@@ -361,7 +362,7 @@ func (s *Server) Router() *gin.Engine {
 			// resource, snapshot, and grant key, so it needs the engine-wide cap.
 			authed.PUT("/account/passphrase", limitBody(maxControlBody), s.handleChangePassphrase)
 			authed.PUT("/account/recovery", limitBody(maxControlBody), s.handleSetRecoveryKey)
-			authed.PUT("/account/root-key", pqGrants, s.handleRotateRootKey)
+			authed.PUT("/account/root-key", signedGrants, s.handleRotateRootKey)
 			// Moves an account onto an X-Wing enc key; like root-key rotation, its body
 			// carries every incoming grant re-wrapped, so it takes the engine-wide cap.
 			authed.PUT("/account/enc-key", pqGrants, s.handleUpgradeEncKey)
@@ -381,12 +382,13 @@ func (s *Server) Router() *gin.Engine {
 			// read reuses the public endpoint's exact-slice framing with a grant check
 			// in place of public visibility; it shares the chunk body cap. Every route
 			// that hands out, accepts, or re-wraps an enc key or a grant wrap requires
-			// the X-Wing grants capability.
+			// the X-Wing grants capability, and every route that writes or lists grants
+			// requires the client that signs and checks them.
 			authed.GET("/account/keys", pqGrants, s.handleAccountKeys)
-			authed.POST("/resources/:id/grants", pqGrants, limitBody(maxChunkBody), s.handleCreateGrant)
-			authed.GET("/resources/:id/grants", s.handleListResourceGrants)
+			authed.POST("/resources/:id/grants", signedGrants, limitBody(maxChunkBody), s.handleCreateGrant)
+			authed.GET("/resources/:id/grants", signedGrants, s.handleListResourceGrants)
 			authed.DELETE("/resources/:id/grants/:grantee", s.handleDeleteGrant)
-			authed.GET("/shares", pqGrants, s.handleListShares)
+			authed.GET("/shares", signedGrants, s.handleListShares)
 			// The grantee side of revocation: the delete predicate is the caller's own
 			// grantee handle, and an optional block keeps the grantor from re-adding the
 			// row. Blocks live on their own path rather than under /shares/, whose :id

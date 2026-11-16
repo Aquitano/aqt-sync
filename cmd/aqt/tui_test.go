@@ -160,20 +160,14 @@ func TestTUIResourceActionsOpenDialogs(t *testing.T) {
 		t.Fatal("p on a private resource must not open a dialog")
 	}
 
-	// r2 (public): p asks for confirmation; y resolves it with a command.
+	// r2 (public): p runs the dry run whose plan the confirmation then shows.
 	m.panels[tuiPanelResources].list.move(1)
-	m.handleKey(key("p"))
-	c, ok := m.dialog.(*tuiConfirm)
-	if !ok {
-		t.Fatalf("p on a public resource should confirm, got %T", m.dialog)
-	}
-	if c.confirm == nil {
-		t.Fatal("confirm dialog carries no command")
-	}
-	_, model := m.handleKey(key("n"))
-	_ = model
+	_, cmd := m.handleKey(key("p"))
 	if m.dialog != nil {
-		t.Fatal("n must cancel the confirm")
+		t.Fatalf("p should run the dry run before confirming, got %T", m.dialog)
+	}
+	if got := strings.Join(tuiRequestArgs(t, cmd), " "); got != "unshare r2 --dry-run" {
+		t.Fatalf("p runs %q", got)
 	}
 
 	// r3 (folder): chunked folder links shipped, so share opens the same menu.

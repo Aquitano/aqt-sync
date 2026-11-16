@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"os"
@@ -112,6 +113,20 @@ func pinFromKeys(email string, keys api.AccountKeysResponse, verified bool) iden
 	}
 }
 
+// refuseSharedHandle refuses keys the server reports for email under a handle that a
+// pin for another email already holds. An account has one handle and a grant is signed
+// to a handle, so two pins on one handle would let a rotation re-wrap what one contact
+// was given to the other's key. Only a server misreporting handles produces that.
+func refuseSharedHandle(pins map[string]identity.Contact, email string, keys api.AccountKeysResponse) error {
+	for _, pin := range pins {
+		if pin.Handle == keys.Handle && pin.Email != email {
+			return fmt.Errorf("the server reports for %s the account handle you pinned for %s, and an account has only one, so nothing was pinned or shared: the server is misreporting one of them. Compare keys with `aqt contacts verify %s`",
+				displayEmail(email), displayEmail(pin.Email), pin.Email)
+		}
+	}
+	return nil
+}
+
 // lookupGrantee resolves a grant target with trust-on-first-use pinning: the first
 // lookup pins (handle, identity key, enc key) locally, and a later lookup that
 // disagrees with the pin never silently re-routes grants to whoever holds the new key.
@@ -126,14 +141,17 @@ func pinFromKeys(email string, keys api.AccountKeysResponse, verified bool) iden
 //
 // A replacement is returned unsaved, with the pinRepair that settles it: the caller
 // grants first and then calls repin, so a failed grant leaves the old pin in place and
-// the next attempt asks again.
-func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (identity.Contact, *pinRepair, error) {
+// the next attempt asks again. mk finds the grants that move with a replacement.
+func lookupGrantee(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, email string) (identity.Contact, *pinRepair, error) {
 	keys, err := fetchAccountKeys(cl, email)
 	if err != nil {
 		return identity.Contact{}, nil, err
 	}
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {
+		return identity.Contact{}, nil, err
+	}
+	if err := refuseSharedHandle(pins, email, keys); err != nil {
 		return identity.Contact{}, nil, err
 	}
 	if pin, ok := pins[email]; ok {
@@ -144,7 +162,7 @@ func lookupGrantee(cl *client.Client, prof *identity.Profile, email string) (ide
 		if pinMatches(pin, keys) {
 			return pin, nil, nil
 		}
-		repair, err := askRepin(cl, pin, keys)
+		repair, err := askRepin(cl, prof, mk, pin, keys)
 		if err != nil {
 			return identity.Contact{}, nil, err
 		}
@@ -170,7 +188,7 @@ var confirmRepin = func(prompt string) error { return confirmDestructive(prompt,
 // collects the grants that move with it. Only a person comparing fingerprints can make
 // that call — the new key is exactly what a key-substituting server would present — so
 // a run without a terminal refuses, and no flag accepts the change in advance.
-func askRepin(cl *client.Client, pin identity.Contact, keys api.AccountKeysResponse) (*pinRepair, error) {
+func askRepin(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, pin identity.Contact, keys api.AccountKeysResponse) (*pinRepair, error) {
 	email := pin.Email
 	pinnedFP, serverFP := crypto.KeyFingerprint(pin.PublicKey), crypto.KeyFingerprint(keys.PublicKey)
 	if pin.Verified {
@@ -187,7 +205,7 @@ func askRepin(cl *client.Client, pin identity.Contact, keys api.AccountKeysRespo
 			"If they registered only after your first share, compare %s with them and run `aqt contacts pin %s --fingerprint <fingerprint>`",
 			email, serverFP, pinnedFP, serverFP, email)
 	}
-	ids, err := grantedTo(cl, pin.Handle)
+	granted, err := grantedTo(cl, prof, mk, pin.Handle)
 	if err != nil {
 		return nil, err
 	}
@@ -196,8 +214,8 @@ func askRepin(cl *client.Client, pin identity.Contact, keys api.AccountKeysRespo
 		cause = "the same account now publishes new keys, most often because they rotated their account root key"
 	}
 	question := fmt.Sprintf("Re-pin %s to the server's keys? [y/N] ", email)
-	if len(ids) > 0 {
-		question = fmt.Sprintf("Re-pin %s and re-send %d earlier share(s)? [y/N] ", email, len(ids))
+	if len(granted) > 0 {
+		question = fmt.Sprintf("Re-pin %s and re-send these earlier share(s):\n%s? [y/N] ", email, granted.list())
 	}
 	prompt := fmt.Sprintf("the server's keys for %s do not match your pin:\n  pinned  %s  (%s, never verified)\n  server  %s\n%s.\ncompare %s with %s over a separate channel before accepting it.\n%s",
 		email, pinnedFP, time.Unix(pin.PinnedAt, 0).Format("2006-01-02"), serverFP, cause, serverFP, email, question)
@@ -211,37 +229,94 @@ func askRepin(cl *client.Client, pin identity.Contact, keys api.AccountKeysRespo
 	case err != nil:
 		return nil, err
 	}
-	return &pinRepair{old: pin, ids: ids}, nil
+	return &pinRepair{old: pin, granted: granted}, nil
 }
 
 // pinRepair is an unverified pin being replaced, and the caller's resources that still
 // hold a grant made against it.
 type pinRepair struct {
-	old identity.Contact
-	ids []string
+	old     identity.Contact
+	granted grantedResources
 }
 
-// grantedTo lists the caller's resources that hold a grant to handle. The listing
+// grantedResource is one of the caller's resources, by id and decrypted name.
+type grantedResource struct{ id, name string }
+
+type grantedResources []grantedResource
+
+func (rs grantedResources) list() string {
+	lines := make([]string, len(rs))
+	for i, r := range rs {
+		lines[i] = fmt.Sprintf("  aqt://%s  %q", r.id, r.name)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// grantedTo lists the caller's resources that hold a grant to handle, counting only a
+// grant this account signed over the resource's current content key and this device
+// has not revoked. The server
+// chooses which handles it lists, so a row without that signature may be one it made
+// up to have a resource re-sent to whoever holds handle; a share made before grants
+// were signed looks the same, and is left for its owner to share again. The listing
 // echoes each resource's grant count, so only granted resources cost a fetch.
-func grantedTo(cl *client.Client, handle string) ([]string, error) {
+func grantedTo(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, handle string) (grantedResources, error) {
 	items, err := cl.ListResources()
 	if err != nil {
 		return nil, err
 	}
-	var ids []string
+	revoked, err := identity.LoadRevokedGrants(prof.Name)
+	if err != nil {
+		return nil, err
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		return nil, err
+	}
+	holders := 0
+	for _, pin := range pins {
+		if pin.Handle == handle {
+			holders++
+		}
+	}
+	if holders > 1 {
+		return nil, errors.New("more than one pinned contact holds this account handle, so its grants cannot be told apart and nothing was moved; unpin the wrong one with `aqt contacts rm <email>` first")
+	}
+	self := crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey)
+	var granted grantedResources
+	unsigned := 0
 	for _, it := range items {
-		if it.GrantCount == 0 || it.Reclaimed {
+		if it.GrantCount == 0 || it.Reclaimed || it.WrappedKey == nil || slices.Contains(revoked, identity.RevokedGrant{ResourceID: it.ID, GranteeHandle: handle}) {
 			continue
 		}
 		grants, err := cl.ListGrants(it.ID)
 		if err != nil {
 			return nil, fmt.Errorf("list grants of %s: %w", it.ID, err)
 		}
-		if slices.ContainsFunc(grants, func(g api.GrantEntry) bool { return g.GranteeHandle == handle }) {
-			ids = append(ids, it.ID)
+		i := slices.IndexFunc(grants, func(g api.GrantEntry) bool { return g.GranteeHandle == handle })
+		if i < 0 {
+			continue
 		}
+		ck, err := crypto.UnwrapKey(*it.WrappedKey, [crypto.KeySize]byte(mk))
+		if err != nil {
+			return nil, fmt.Errorf("open the key of %s: %w", it.ID, err)
+		}
+		signed := crypto.VerifyGrant(self, grants[i].Signature, ck, it.ID, prof.OwnerHandle, handle)
+		meta, metaErr := decodeMeta(it.EncryptedMeta, ck, it.ID)
+		ck.Wipe()
+		if !signed {
+			unsigned++
+			continue
+		}
+		name := "(unreadable)"
+		if metaErr == nil {
+			name = meta.Name
+		}
+		granted = append(granted, grantedResource{id: it.ID, name: name})
 	}
-	return ids, nil
+	if unsigned > 0 {
+		fmt.Fprintf(os.Stderr, "warning: left %d grant(s) to the old pin alone: they carry no signature of yours, so they are either shares from before grants were signed or rows the server added; share any you made again with `aqt share <id> --with <email>`\n", unsigned)
+	}
+	return granted, nil
 }
 
 // repin settles a pin replacement: it moves every grant made against the old pin onto
@@ -254,25 +329,25 @@ func grantedTo(cl *client.Client, handle string) ([]string, error) {
 // deleted without rotating the content key: there is no reader to cut off. When it did
 // not, the new grant's upsert has already replaced the old row.
 func repin(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, r pinRepair, next identity.Contact, done string) error {
-	moved := 0
+	var moved grantedResources
 	var repairErr error
-	for _, id := range r.ids {
-		if id != done {
-			if err := regrantOwned(cl, prof, mk, id, next); err != nil {
-				repairErr = errors.Join(repairErr, fmt.Errorf("re-send aqt://%s: %w", id, err))
+	for _, g := range r.granted {
+		if g.id != done {
+			if err := regrantOwned(cl, prof, mk, g.id, next); err != nil {
+				repairErr = errors.Join(repairErr, fmt.Errorf("re-send aqt://%s: %w", g.id, err))
 				continue
 			}
 		}
 		if r.old.Handle != next.Handle {
-			if err := cl.RevokeGrant(id, r.old.Handle); err != nil && !errors.Is(err, client.ErrNotFound) {
-				repairErr = errors.Join(repairErr, fmt.Errorf("delete the old grant on aqt://%s: %w", id, err))
+			if err := cl.RevokeGrant(g.id, r.old.Handle); err != nil && !errors.Is(err, client.ErrNotFound) {
+				repairErr = errors.Join(repairErr, fmt.Errorf("delete the old grant on aqt://%s: %w", g.id, err))
 				continue
 			}
 		}
-		moved++
+		moved = append(moved, g)
 	}
-	if moved > 0 {
-		fmt.Fprintf(os.Stderr, "re-sent %d earlier share(s) to %s\n", moved, next.Email)
+	if len(moved) > 0 {
+		fmt.Fprintf(os.Stderr, "re-sent %d earlier share(s) to %s:\n%s\n", len(moved), next.Email, moved.list())
 	}
 	if repairErr != nil {
 		return fmt.Errorf("pin repair incomplete; kept the old pin for %s so re-running the command retries the remaining shares: %w", next.Email, repairErr)
@@ -285,21 +360,19 @@ func repin(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, r pin
 	return identity.SaveContacts(prof.Name, pins)
 }
 
-// replacePin is repin outside a share. The walk and the unlock run first, so a failure
+// replacePin is repin outside a share. The unlock and the walk run first, so a failure
 // in either leaves the old pin and nothing moved.
 func (app *application) replacePin(cl *client.Client, prof *identity.Profile, old, next identity.Contact) error {
-	ids, err := grantedTo(cl, old.Handle)
+	mk, err := app.unlockMaster(prof)
 	if err != nil {
 		return err
 	}
-	var mk crypto.MasterKey
-	if len(ids) > 0 {
-		if mk, err = app.unlockMaster(prof); err != nil {
-			return err
-		}
-		defer mk.Wipe()
+	defer mk.Wipe()
+	granted, err := grantedTo(cl, prof, mk, old.Handle)
+	if err != nil {
+		return err
 	}
-	return repin(cl, prof, mk, pinRepair{old: old, ids: ids}, next, "")
+	return repin(cl, prof, mk, pinRepair{old: old, granted: granted}, next, "")
 }
 
 // contactsPinCmd pins a contact's keys before any grant is made. The threat model
@@ -327,7 +400,7 @@ func (app *application) contactsPinCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			email := args[0]
+			email := api.NormalizeEmail(args[0])
 			keys, err := fetchAccountKeys(cl, email)
 			if err != nil {
 				return err
@@ -353,6 +426,9 @@ func (app *application) contactsPinCmd() *cobra.Command {
 			}
 			pins, err := identity.LoadContacts(prof.Name)
 			if err != nil {
+				return err
+			}
+			if err := refuseSharedHandle(pins, email, keys); err != nil {
 				return err
 			}
 			if pin, ok := pins[email]; ok {
@@ -481,7 +557,7 @@ func (app *application) contactsCmd() *cobra.Command {
 				if p.Verified {
 					state = "verified"
 				}
-				fmt.Printf("%s  %s  pinned %s, %s\n", e, crypto.KeyFingerprint(p.PublicKey),
+				fmt.Printf("%s  %s  pinned %s, %s\n", displayEmail(e), crypto.KeyFingerprint(p.PublicKey),
 					time.Unix(p.PinnedAt, 0).Format("2006-01-02"), state)
 			}
 			return nil
@@ -498,7 +574,7 @@ func (app *application) contactsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			email := args[0]
+			email := api.NormalizeEmail(args[0])
 			pins, err := identity.LoadContacts(prof.Name)
 			if err != nil {
 				return err
@@ -525,7 +601,7 @@ func (app *application) contactsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			email := args[0]
+			email := api.NormalizeEmail(args[0])
 			keys, err := fetchAccountKeys(cl, email)
 			if err != nil {
 				return err

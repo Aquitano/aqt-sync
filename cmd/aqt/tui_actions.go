@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -39,11 +40,11 @@ func (m *tuiModel) initDialog() tuiDialog {
 
 func (m *tuiModel) cloneDialog() tuiDialog {
 	return tuiNewInput("Clone folder", "id, aqt:// ref, or share URL", func(ref string) tea.Cmd {
-		return tuiOpenDialog(tuiCloneDestinationDialog(ref, false))
+		return tuiOpenDialog(tuiCloneDestinationDialog(ref, false, m.ctx.execPinningOwner(ref)))
 	})
 }
 
-func tuiCloneDestinationDialog(ref string, adopt bool) tuiDialog {
+func tuiCloneDestinationDialog(ref string, adopt bool, run func(sub ...string) tea.Cmd) tuiDialog {
 	title := "Clone destination"
 	if adopt {
 		title = "Adopt destination"
@@ -53,8 +54,51 @@ func tuiCloneDestinationDialog(ref string, adopt bool) tuiDialog {
 		if adopt {
 			args = append(args, "--adopt")
 		}
-		return tuiRequestExec(args...)
+		return run(args...)
 	})
+}
+
+// execPinningOwner runs an action that reads ref and, when it fails, offers to pin the
+// owner of the share it read if that is why: the child has no terminal to ask on.
+func (c *tuiCtx) execPinningOwner(ref string) func(sub ...string) tea.Cmd {
+	return func(sub ...string) tea.Cmd {
+		return tuiRequestExecThen(func(exit int, _ []string) tea.Cmd {
+			if exit == 0 {
+				return nil
+			}
+			return c.pinOwnerDialogCmd(ref, sub)
+		}, sub...)
+	}
+}
+
+// pinOwnerDialogCmd checks in process whether ref is a share signed by the key the
+// server reports for an owner this account has not pinned. If so it shows that claim
+// and, on confirm, runs sub again with --accept-owner naming the fingerprint it showed, so
+// the child pins only the key the user saw.
+func (c *tuiCtx) pinOwnerDialogCmd(ref string, sub []string) tea.Cmd {
+	ctx := *c
+	return func() tea.Msg {
+		// A link read can count against the link's read limit, and never goes
+		// through a grant.
+		id, fragment, _ := parseRef(ref)
+		if fragment != "" {
+			return nil
+		}
+		res, err := ctx.cl.GetResource(id)
+		if err != nil || res.GrantKey == nil {
+			return nil
+		}
+		ck, a, row, err := grantSender(res, ctx.mk, ctx.prof)
+		ck.Wipe()
+		if err != nil || !a.signed || a.pin != nil || row.Attribution != attributionClaimed {
+			return nil
+		}
+		return tuiOpenDialogMsg{dialog: &tuiConfirm{
+			title:   "Pin the owner of this share?",
+			body:    unpinnedOwnerNotice(row) + "Pin them and run it again?",
+			confirm: tuiRequestExec(append(slices.Clone(sub), "--accept-owner", row.ClaimedFingerprint)...),
+		}}
+	}
 }
 
 func (m *tuiModel) devicesDialog() tuiDialog {

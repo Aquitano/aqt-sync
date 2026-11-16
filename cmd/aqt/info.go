@@ -34,6 +34,7 @@ func (app *application) infoCmd() *cobra.Command {
 		},
 	}
 	pw.bind(cmd, "password for a gated link")
+	app.bindPinOwner(cmd)
 	markJSONSupported(cmd)
 	return cmd
 }
@@ -86,7 +87,7 @@ func (app *application) runInfo(ref, password string, asJSON bool) error {
 		return err
 	}
 
-	ck, err := app.contentKeyWithMaster(res, fragment, password, prof, master)
+	ck, err := app.contentKeyWithMaster(cl, res, fragment, password, prof, master)
 	if err != nil {
 		return err
 	}

@@ -4,6 +4,8 @@ package main
 
 import (
 	"fmt"
+	"slices"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -21,7 +23,7 @@ func (m *tuiModel) pullDialog(res lsRow) tuiDialog {
 }
 
 func resourceCloneDialog(res lsRow, adopt bool) tuiDialog {
-	return tuiCloneDestinationDialog("aqt://"+res.ID, adopt)
+	return tuiCloneDestinationDialog("aqt://"+res.ID, adopt, tuiRequestExec)
 }
 
 func shareExpiryDialog(res lsRow) tuiDialog {
@@ -44,14 +46,30 @@ func grantDialog(res lsRow) tuiDialog {
 
 func revokeGrantDialog(res lsRow) tuiDialog {
 	return tuiNewInput("Revoke grant", "recipient email", func(email string) tea.Cmd {
-		return func() tea.Msg {
-			return tuiOpenDialogMsg{dialog: &tuiConfirm{
-				title:   "Revoke grant",
-				body:    fmt.Sprintf("Revoke %s's access to %q?\nThe resource key is rotated for private resources.", email, res.Name),
-				confirm: tuiRequestExec("unshare", res.ID, "--with", email, "--yes"),
-			}}
-		}
+		return tuiConfirmDryRun("Revoke grant", "unshare", res.ID, "--with", email)
 	})
+}
+
+func makePrivateCmd(res lsRow) tea.Cmd {
+	return tuiConfirmDryRun("Make private", "unshare", res.ID)
+}
+
+// tuiConfirmDryRun runs sub with --dry-run, so the CLI works out what it would do, and
+// once that succeeds asks for confirmation over the plan it printed before running sub
+// with --yes. A rotation's consequences, such as a public resource going private or
+// which grantees keep access, are decided in the CLI, so the dialog shows them rather
+// than restating them.
+func tuiConfirmDryRun(title string, sub ...string) tea.Cmd {
+	return tuiRequestExecThen(func(exit int, plan []string) tea.Cmd {
+		if exit != 0 {
+			return nil
+		}
+		return tuiOpenDialog(&tuiConfirm{
+			title:   title,
+			body:    strings.Join(plan, "\n"),
+			confirm: tuiRequestExec(append(slices.Clone(sub), "--yes")...),
+		})
+	}, append(slices.Clone(sub), "--dry-run")...)
 }
 
 func autoSnapshotCmd(res lsRow) tea.Cmd {
