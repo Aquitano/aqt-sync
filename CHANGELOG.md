@@ -95,6 +95,7 @@ All notable changes to this project are documented in this file.
   sync lost one of them everywhere. Names that differ only by trailing dots or spaces
   are now refused like case collisions. A Windows device also refuses names
   containing a backslash, which it would otherwise write as nested paths.
+
 - A pull into a read-only directory no longer fails on every sync. The directory is
   writable for the pass, then gets its old mode back or the one the remote set.
 - A remote file replacing a local directory that holds ignored content (`.git/`,
