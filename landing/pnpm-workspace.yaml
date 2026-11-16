@@ -12,6 +12,17 @@ minimumReleaseAgeExclude:
   - browserslist@4.28.7
   - baseline-browser-mapping@2.11.0
   - nanoid@3.3.18
+  - typescript-eslint@8.73.0
+  - '@typescript-eslint/eslint-plugin@8.73.0'
+  - '@typescript-eslint/parser@8.73.0'
+  - '@typescript-eslint/project-service@8.73.0'
+  - '@typescript-eslint/scope-manager@8.73.0'
+  - '@typescript-eslint/tsconfig-utils@8.73.0'
+  - '@typescript-eslint/type-utils@8.73.0'
+  - '@typescript-eslint/types@8.73.0'
+  - '@typescript-eslint/typescript-estree@8.73.0'
+  - '@typescript-eslint/utils@8.73.0'
+  - '@typescript-eslint/visitor-keys@8.73.0'
 
 # Keep transitive build dependencies above their patched security floors without
 # forcing dependants on the 1.x and 5.x brace-expansion APIs onto one major line.
