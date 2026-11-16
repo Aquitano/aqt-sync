@@ -292,3 +292,24 @@ func TestSyncPullIntoDirStayingReadOnly(t *testing.T) {
 	assertAbsent(t, replica, "d/g")
 	assertDirMode(t, replica, "d", 0o555)
 }
+
+// A symlink the pull replaces with a directory must not let the unlock reach the
+// directory it points to, even when a sibling path already visited the symlink.
+func TestUnlockParentsStopsAtSymlink(t *testing.T) {
+	if !supportsPOSIXPermissions {
+		t.Skip("POSIX directory write permissions are not enforced on Windows")
+	}
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o555); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "link")); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	dirs := &writableDirs{modes: make(map[string]os.FileMode)}
+	if err := unlockParents(root, []string{"link/a", "link/sub/f"}, dirs); err != nil {
+		t.Fatal(err)
+	}
+	assertDirMode(t, outside, "sub", 0o555)
+}

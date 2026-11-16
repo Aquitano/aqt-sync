@@ -492,13 +492,19 @@ func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, 
 }
 
 // unlockParents makes every existing directory from root down to each path's parent
-// writable, recording the modes it changes in dirs.
+// writable, recording the modes it changes in dirs. It stops at the first component
+// that is not a real directory, so it never changes a mode through a symlink.
 func unlockParents(root string, paths []string, dirs *writableDirs) error {
-	seen := map[string]bool{}
+	realDir := map[string]bool{}
 	for _, p := range paths {
 		var chain []string
-		for dir := path.Dir(p); !seen[dir]; dir = path.Dir(dir) {
-			seen[dir] = true
+		for dir := path.Dir(p); ; dir = path.Dir(dir) {
+			if ok, checked := realDir[dir]; checked {
+				if !ok {
+					chain = nil
+				}
+				break
+			}
 			chain = append(chain, dir)
 			if dir == "." {
 				break
@@ -507,7 +513,8 @@ func unlockParents(root string, paths []string, dirs *writableDirs) error {
 		for i := len(chain) - 1; i >= 0; i-- {
 			full := filepath.Join(root, filepath.FromSlash(chain[i]))
 			fi, err := os.Lstat(full)
-			if err != nil || !fi.IsDir() {
+			realDir[chain[i]] = err == nil && fi.IsDir()
+			if !realDir[chain[i]] {
 				break
 			}
 			if err := dirs.writable(full, fi.Mode()); err != nil {
