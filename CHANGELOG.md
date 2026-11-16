@@ -82,6 +82,16 @@ All notable changes to this project are documented in this file.
   restarted since the last update still ran from the previous rollback file. Each
   update now moves the old binary to a fresh `.aqt-update-previous-*.old` name.
 
+- The account bootstrap no longer reveals by timing which emails have accounts. Each
+  decoy wrote to the database, so it answered slower than a real account while
+  uploads held the writer. The decoy secret is now read once at startup.
+- A suspended account can no longer be reset with its recovery key or attach a
+  device; both answer `403 account_disabled`.
+- A resource created or a recovery key made while `rotate-root` ran could be wrapped
+  under the retired root key: the resource never opened and blocked every later
+  rotation, and the recovery key never worked. Both requests now name their root key,
+  and the server refuses a retired one with `409 root_key_changed`.
+
 ### Changed
 
 - **`aqt shares` names senders you have not pinned.** `GET /v1/shares` now carries

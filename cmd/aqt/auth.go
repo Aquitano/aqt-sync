@@ -656,6 +656,7 @@ func issueRecoveryKey(cl *client.Client, rk crypto.MasterKey, uk crypto.UnlockKe
 		WrappedRoot:      wrapped,
 		RecoveryVerifier: crypto.DeriveAuthVerifier(ruk),
 		AuthVerifier:     crypto.DeriveAuthVerifier(uk),
+		IdentityKey:      crypto.IdentityKey(rk),
 	})
 	if errors.Is(err, client.ErrNotFound) {
 		return errors.New("this server does not support recovery keys; upgrade it")
