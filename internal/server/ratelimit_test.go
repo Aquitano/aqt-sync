@@ -142,6 +142,8 @@ func TestClientKeyTrustsForwardedHeadersOnlyFromProxies(t *testing.T) {
 		{"spoofed left hop", "10.0.0.5:4000", map[string]string{"X-Forwarded-For": "6.6.6.6, 203.0.113.7, 10.0.0.9"}, "203.0.113.7 http://example.com/x/id"},
 		{"untrusted peer", "198.51.100.4:4000", map[string]string{"X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https"}, "198.51.100.4 http://example.com/x/id"},
 		{"x-real-ip ignored", "10.0.0.5:4000", map[string]string{"X-Real-IP": "203.0.113.7"}, "10.0.0.5 http://example.com/x/id"},
+		{"ipv6 peer keyed by its /64", "[2001:db8:1:2:aaaa:bbbb:cccc:dddd]:4000", nil, "2001:db8:1:2::/64 http://example.com/x/id"},
+		{"proxied ipv6 client keyed by its /64", "10.0.0.5:4000", map[string]string{"X-Forwarded-For": "2001:db8:1:2::9"}, "2001:db8:1:2::/64 http://example.com/x/id"},
 	} {
 		req := httptest.NewRequest(http.MethodGet, "/audit-client", nil)
 		req.RemoteAddr = tc.peer

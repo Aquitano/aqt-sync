@@ -310,6 +310,28 @@ func TestOversizedDeviceNameRefused(t *testing.T) {
 	}
 }
 
+// Signup and the login challenge store the email before any credential is checked, so
+// both refuse one longer than an address can be.
+func TestOversizedEmailRefused(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	long := strings.Repeat("e", maxEmailLen-len("@example.com")+1) + "@example.com"
+	for _, tc := range []struct {
+		path string
+		body any
+	}{
+		{"/v1/account", createReq(t, long, "a passphrase here")},
+		{"/v1/auth/challenge", api.ChallengeRequest{Email: long}},
+	} {
+		if code := h.do(http.MethodPost, tc.path, "", tc.body, nil); code != http.StatusBadRequest {
+			t.Errorf("POST %s with a %d-byte email = %d, want 400", tc.path, len(long), code)
+		}
+	}
+	if code := h.do(http.MethodPost, "/v1/auth/challenge", "", api.ChallengeRequest{Email: long[1:]}, nil); code != http.StatusOK {
+		t.Errorf("challenge for a %d-byte email = %d, want 200", len(long)-1, code)
+	}
+}
+
 // --- 5.6: trusted-proxy config knob is accepted for every shape ---
 
 func TestTrustedProxyConfigAccepted(t *testing.T) {

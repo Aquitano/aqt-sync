@@ -42,6 +42,11 @@ var maxHandleLen = base64.RawURLEncoding.EncodedLen(handleBytes)
 // maxDeviceNameLen fits any hostname, which is what the client sends.
 const maxDeviceNameLen = 255
 
+// maxEmailLen is the longest address SMTP can deliver to (RFC 5321). Signup and the
+// login challenge store the email on an unauthenticated caller's word, so without a
+// bound each request could park a body-sized string in the database.
+const maxEmailLen = 254
+
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
 // and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
 // already taken. The new account starts at auth epoch 1. encPublicKey/encKeySig are
@@ -1117,7 +1122,7 @@ func recordIdempotency(tx *sql.Tx, owner, kind, key string, digest []byte, respo
 
 func (s *Server) handleCreateAccount(c *gin.Context) {
 	var req api.CreateAccountRequest
-	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) || !checkEmailLength(c, req.Email) {
 		return
 	}
 	if req.Email == "" || len(req.PublicKey) != ed25519.PublicKeySize {
@@ -1287,7 +1292,7 @@ func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
 
 func (s *Server) handleAuthChallenge(c *gin.Context) {
 	var req api.ChallengeRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkEmailLength(c, req.Email) {
 		return
 	}
 	if req.Email == "" {
@@ -1665,6 +1670,14 @@ func (s *Server) handleDeleteDevice(c *gin.Context) {
 func checkDeviceName(c *gin.Context, name string) bool {
 	if len(name) > maxDeviceNameLen {
 		abort(c, http.StatusBadRequest, fmt.Sprintf("deviceName exceeds %d bytes", maxDeviceNameLen))
+		return false
+	}
+	return true
+}
+
+func checkEmailLength(c *gin.Context, email string) bool {
+	if len(api.NormalizeEmail(email)) > maxEmailLen {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("email exceeds %d bytes", maxEmailLen))
 		return false
 	}
 	return true

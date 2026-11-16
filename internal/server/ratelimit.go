@@ -5,6 +5,7 @@ package server
 import (
 	"math"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -162,6 +163,13 @@ func ownerKey(c *gin.Context) string  { return c.GetString(ownerContextKey) }
 // of X-Forwarded-For (see Router). Behind a proxy the peer is the proxy itself, so
 // keying on it would put every client in one bucket; a client-supplied hop left of
 // the proxy's own entry is never read, so a spoofed header cannot mint fresh buckets.
+// An IPv6 client is keyed by its /64: a provider hands a customer at least that much,
+// so keying on the full address would give one host a fresh bucket per address.
 func clientKey(c *gin.Context) string {
-	return c.ClientIP()
+	ip := c.ClientIP()
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || addr.Unmap().Is4() {
+		return ip
+	}
+	return netip.PrefixFrom(addr, 64).Masked().String()
 }
