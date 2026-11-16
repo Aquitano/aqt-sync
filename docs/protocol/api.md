@@ -102,6 +102,7 @@ POST   /v1/account                  Create account. Body: { email, kdf, publicKe
                                      authVerifier, deviceName, encPublicKey, encKeySig, inviteToken? }
                                      encPublicKey/encKeySig are required and must self-verify (400
                                      otherwise): an account without them is not a grant target.
+                                     An email over 254 bytes is a 400, here and on the challenge.
                                      → { ownerHandle, deviceId, token }  (stores kdf + Ed25519 public key)
 GET    /v1/account/salt?email=…      → { kdf, wrappedRoot, recoveryWrappedRoot }  (needed to re-derive
                                      on a new machine; an unknown email gets an indistinguishable
