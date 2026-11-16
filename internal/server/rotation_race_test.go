@@ -5,6 +5,7 @@ package server
 import (
 	"bytes"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -142,6 +143,38 @@ func TestRotationRefusesWritesForTheRetiredRoot(t *testing.T) {
 	}
 	if err := setRecovery(rotation.PublicKey); err != nil {
 		t.Fatalf("recovery key for the current root: %v", err)
+	}
+}
+
+// The fence rides in the upload envelope header, and the key a client derives from
+// its root must be the one signup registered, or every create would be refused.
+func TestCreateFenceOverTheWire(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("fence-wire@example.com", "passphrase for the fence test")
+	other, err := crypto.GenerateMasterKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		identity []byte
+		code     int
+		errCode  string
+	}{
+		{"another root", crypto.IdentityKey(other), http.StatusConflict, api.ErrCodeRootKeyChanged},
+		{"own root", crypto.IdentityKey(mk), http.StatusCreated, ""},
+	} {
+		wrapped := wrappedTestKey(t)
+		var e api.ErrorResponse
+		code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
+			Visibility: api.Private, Blob: sealedTestBlob(t, "manifest"),
+			EncryptedMeta: sealedTestBlob(t, `{"name":"f","size":0}`),
+			WrappedKey:    &wrapped, IdentityKey: tc.identity,
+		}, &e)
+		if code != tc.code || e.Code != tc.errCode {
+			t.Errorf("%s: got %d %q, want %d %q", tc.name, code, e.Code, tc.code, tc.errCode)
+		}
 	}
 }
 
