@@ -23,7 +23,7 @@ API layer, *before* any payload is served.
 | `2` (id-binding) | v0.2.0 | resource-id-bound (v2 AAD) roots, metadata, snapshot labels |
 | `3` (root rotation) | v0.4.1 | account root-key rotation and migrated identities — nothing declares or enforces it |
 | `4` (Git remote) | v0.5.0 | sealed `gitremote` RefsRoot resources and their private-only server policy |
-| `5` (post-quantum grants) | unreleased | X-Wing (ML-KEM-768 + X25519) enc keys and grant wraps |
+| `5` (post-quantum grants) | v0.11.0 | X-Wing (ML-KEM-768 + X25519) enc keys and grant wraps |
 
 The release column names the first version a user could install. Root-key rotation
 appears under `v0.3.0` in the changelog, which was never tagged, and shipped in the

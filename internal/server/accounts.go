@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -30,6 +32,16 @@ type Account struct {
 	RecoveryWrappedRoot *crypto.SealedBlob
 }
 
+const handleBytes = 12
+
+// maxHandleLen is the length of every handle the server mints. A handle the server
+// stores on a caller's word (a grantee) is held to it, since quota charges a grant
+// row a fixed overhead rather than its handle's length.
+var maxHandleLen = base64.RawURLEncoding.EncodedLen(handleBytes)
+
+// maxDeviceNameLen fits any hostname, which is what the client sends.
+const maxDeviceNameLen = 255
+
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
 // and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
 // already taken. The new account starts at auth epoch 1. encPublicKey/encKeySig are
@@ -38,7 +50,7 @@ type Account struct {
 // a pre-grants dir carries.
 func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier, encPublicKey, encKeySig []byte) (Account, error) {
 	email = api.NormalizeEmail(email)
-	handle := newID(12)
+	handle := newID(handleBytes)
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
 		return Account{}, err
@@ -1082,7 +1094,7 @@ func recordIdempotency(tx *sql.Tx, owner, kind, key string, digest []byte, respo
 
 func (s *Server) handleCreateAccount(c *gin.Context) {
 	var req api.CreateAccountRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
 		return
 	}
 	if req.Email == "" || len(req.PublicKey) != ed25519.PublicKeySize {
@@ -1160,7 +1172,7 @@ func (s *Server) signupProvesOwnership(email string, verifier []byte) bool {
 // indistinguishable on the wire from a genuine account creation.
 func (s *Server) decoyAuthResponse() api.AuthResponse {
 	return api.AuthResponse{
-		OwnerHandle: newID(12),
+		OwnerHandle: newID(handleBytes),
 		DeviceID:    newID(10),
 		Token:       newID(32),
 		Epoch:       1,
@@ -1277,7 +1289,7 @@ func (s *Server) handleAuthChallenge(c *gin.Context) {
 
 func (s *Server) handleAttachDevice(c *gin.Context) {
 	var req api.AttachDeviceRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
 		return
 	}
 	// Consume the challenge first so a bad attempt can't be replayed against it.
@@ -1323,7 +1335,7 @@ func (s *Server) handleAttachDevice(c *gin.Context) {
 // and a verifier, here the recovery key's; every failure is the same 401.
 func (s *Server) handleRecoverAccount(c *gin.Context) {
 	var req api.RecoverRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
 		return
 	}
 	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.AuthVerifier) == 0 {
@@ -1621,6 +1633,14 @@ func (s *Server) handleDeleteDevice(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func checkDeviceName(c *gin.Context, name string) bool {
+	if len(name) > maxDeviceNameLen {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("deviceName exceeds %d bytes", maxDeviceNameLen))
+		return false
+	}
+	return true
 }
 
 func deviceName(name string) string {
