@@ -382,7 +382,9 @@ are limited separately, and so are anonymous public reads (`GET /v1/resources/:i
 without a valid token, and public object fetches). Those are keyed by client
 address: the TCP peer, or, when the peer is a trusted proxy, the right-most
 `X-Forwarded-For` hop outside the trusted list, so a header the client sets itself
-cannot mint fresh buckets. Limits are configured in [`../deploy.md`](../deploy.md).
+cannot mint fresh buckets. An IPv6 client is keyed by its /64, the smallest block a
+provider assigns, so one host cannot spread across its own addresses. Limits are
+configured in [`../deploy.md`](../deploy.md).
 
 A throttled request is answered with `429 Too Many Requests` carrying the wait twice,
 both derived from one limiter result:

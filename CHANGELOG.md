@@ -40,6 +40,10 @@ All notable changes to this project are documented in this file.
   request body, uncharged and before any credential was checked. Both now refuse one
   over 254 bytes, the longest address mail can be delivered to.
 
+- Unauthenticated rate limits keyed on the full IPv6 address, so a host with a
+  routed /64 had a fresh bucket for every address it chose, login attempts included.
+  IPv6 clients are now keyed by their /64.
+
 - **Behind a reverse proxy, one client could lock everyone out of login.** Rate
   limits keyed on the TCP peer, which is the proxy, so all clients shared one
   bucket. A peer listed in `AQT_TRUSTED_PROXIES` now has its clients keyed by the
