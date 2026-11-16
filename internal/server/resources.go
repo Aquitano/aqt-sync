@@ -1077,6 +1077,14 @@ func (s *Server) handleGetResource(c *gin.Context) {
 		abortUpgradeRequired(c, need, capability)
 		return
 	}
+	// encoding/json base64s the ciphertext inside one marshalled value, so this form
+	// cannot stream; it stays buffered, bounded by maxResourceBody and the limiter.
+	if format != resourceEnvelope {
+		if res.Blob.Ciphertext, err = readBlobFile(blob); err != nil {
+			abort(c, http.StatusInternalServerError, "fetch failed")
+			return
+		}
+	}
 	// Everything that could refuse this read has passed, so the permit is spent now.
 	// This is also what enforces exhaustion: an already-spent link answers 410 here.
 	if countRead {
@@ -1091,12 +1099,6 @@ func (s *Server) handleGetResource(c *gin.Context) {
 	}
 	if format == resourceEnvelope {
 		streamResourceDownload(c, res, blob)
-		return
-	}
-	// encoding/json base64s the ciphertext inside one marshalled value, so this form
-	// cannot stream; it stays buffered, bounded by maxResourceBody and the limiter.
-	if res.Blob.Ciphertext, err = readBlobFile(blob); err != nil {
-		abort(c, http.StatusInternalServerError, "fetch failed")
 		return
 	}
 	c.Header("Content-Type", api.ResourceJSONMediaType)
