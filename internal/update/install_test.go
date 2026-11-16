@@ -226,6 +226,23 @@ func TestApplyClearsStaleDebris(t *testing.T) {
 	}
 }
 
+// A rollback file from an earlier update that cannot be removed, such as the image
+// an un-restarted agent still runs from on Windows, does not block the next update.
+func TestApplySucceedsPastAnUndeletableRollback(t *testing.T) {
+	in := standaloneInstall(t, "old binary")
+	held := filepath.Join(in.Dir, TempPrefix+"previous.old")
+	if err := os.MkdirAll(filepath.Join(held, "in-use"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := applyFixture(t, in, "new binary", nil); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if got := mustRead(t, in.Path); got != "new binary" {
+		t.Fatalf("installed %q", got)
+	}
+}
+
 func TestApplyRefusesACorruptedDownload(t *testing.T) {
 	name, data := releaseArchive(t, "new binary")
 	good := artifactFor(name, data)

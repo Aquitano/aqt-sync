@@ -197,6 +197,7 @@ func (app *application) runRepoCreate(name string, compactAt int) error {
 	req := api.PutResourceRequest{
 		Visibility: api.Private, Blob: rootBlob, EncryptedMeta: metaBlob,
 		WrappedKey: &wrapped, MinClient: api.CapabilityGitRemote, CompactAt: compactAt,
+		IdentityKey: crypto.IdentityKey(mk),
 	}
 	resp, err := cl.PutResource(req)
 	if err != nil {

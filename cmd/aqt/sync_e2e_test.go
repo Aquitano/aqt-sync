@@ -330,6 +330,47 @@ func TestSyncConflictCopyFileDirClash(t *testing.T) {
 	assertTreeEqual(t, origin, replica)
 }
 
+// TestSyncConflictCopyDirWithIgnoredContentReplacedByFile covers a remote
+// directory->file swap where the local directory still holds ignored content. Only
+// tracked children are removed, so the file can never replace the directory; it
+// resolves as a clash that keeps the ignored content and the remote file as a copy,
+// instead of failing every sync.
+func TestSyncConflictCopyDirWithIgnoredContentReplacedByFile(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	origin := t.TempDir()
+	h.init(origin)
+	writeTree(t, origin, "d/f", "base")
+	h.sync(origin)
+	replica := t.TempDir()
+	h.clone(h.folderID(origin), replica)
+	writeTree(t, replica, "d/.git/HEAD", "ref")
+
+	if err := os.RemoveAll(filepath.Join(origin, "d")); err != nil {
+		t.Fatal(err)
+	}
+	writeTree(t, origin, "d", "origin file")
+	h.sync(origin)
+
+	h.syncOpts(replica, syncOptions{conflicts: "copy"})
+	if got := readTree(t, replica, "d/.git/HEAD"); got != "ref" {
+		t.Fatalf("ignored d/.git/HEAD = %q", got)
+	}
+	copies := globConflicts(t, replica)
+	if len(copies) != 1 || readTree(t, replica, copies[0]) != "origin file" {
+		t.Fatalf("conflict copies = %v, want one holding the remote file", copies)
+	}
+
+	h.syncOpts(replica, syncOptions{conflicts: "copy"})
+	h.syncOpts(origin, syncOptions{conflicts: "copy"})
+	if fi, err := os.Lstat(filepath.Join(origin, "d")); err != nil || !fi.IsDir() {
+		t.Fatalf("origin d is not the kept directory: %v", err)
+	}
+	if got := readTree(t, origin, copies[0]); got != "origin file" {
+		t.Fatalf("origin copy %s = %q", copies[0], got)
+	}
+}
+
 // TestSyncConflictCopyValidation covers the flag-combination guards: copy is
 // incompatible with --force and with the baseless --reconcile/--accept-rollback
 // plans.

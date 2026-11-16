@@ -96,6 +96,31 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Behind a reverse proxy, one client could lock everyone out of login.** Rate
+  limits keyed on the TCP peer, which is the proxy, so all clients shared one
+  bucket. A peer listed in `AQT_TRUSTED_PROXIES` now has its clients keyed by the
+  right-most untrusted `X-Forwarded-For` hop. The share page honors
+  `X-Forwarded-Proto` only from a trusted proxy too. nginx setups need
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  ([deploy.md](docs/deploy.md#3-reverse-proxy)).
+
+- **Public resource downloads are rate-limited and no longer buffered.**
+  `GET /v1/resources/:id` had no limiter and held each blob in memory twice, so slow
+  readers could pin about 128 MiB per request. Anonymous reads now share the public
+  read budget and token reads the device's authed budget, and the envelope form the
+  CLI reads streams from disk. The JSON form the browser share page reads is still
+  buffered.
+
+- The server stored a grantee handle of any length up to the 32 MiB grant body but
+  charged quota a fixed 128 bytes per grant, so one account could store gigabytes
+  past its quota. A grant now refuses a handle longer than the 16 bytes every handle
+  has, and signup, attach, and recover refuse a device name over 255 bytes.
+
+- The Docker image's `/data` is now owned by the `nonroot` user, so a fresh named
+  volume no longer leaves the server crash-looping on a permission error.
+- `install.ps1 -Server` decodes `checksums.txt` when GitHub serves it as bytes. It
+  previously always failed with "checksums.txt lists no entry".
+
 - `aqt signup --server http://remote-host` sent the passphrase verifier over plain
   HTTP, created the account, and then refused to store the token, leaving an account
   this device could not use. It now refuses before sending anything.
@@ -116,6 +141,55 @@ All notable changes to this project are documented in this file.
   admin command runs in a separate process that cannot clear that cache, so a
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
+
+- An `.aqtignore` saved with CRLF line endings ignored nothing, because every rule
+  kept its trailing `\r`. Rules now match as they do with LF endings.
+
+- A directory junction in a tracked folder on Windows was not treated as a link. A
+  pull could write through it outside the folder, and the next sync deleted those
+  files everywhere. Pulls now refuse to write through a junction, and a scan reports
+  it as skipped and keeps its last-synced contents. A remote delete no longer
+  removes a file or directory through a symlink or junction in its parent path either.
+
+- `notes` and `notes.` synced from Linux landed on one file on Windows, and the next
+  sync lost one of them everywhere. Names that differ only by trailing dots or spaces
+  are now refused like case collisions. A Windows device also refuses names
+  containing a backslash, which it would otherwise write as nested paths.
+- A pull into a read-only directory no longer fails on every sync. The directory is
+  writable for the pass, then gets its old mode back or the one the remote set.
+- A remote file replacing a local directory that holds ignored content (`.git/`,
+  `node_modules/`) is a file/directory conflict instead of failing every sync with
+  "directory not empty". The ignored content stays.
+- Sync fsyncs the directories it wrote to or removed from before saving the base, so
+  a power loss cannot leave a base that records changes the disk lost, which the
+  next sync would push as a revert.
+- A hostile server can no longer crash a download by locating two objects at one
+  pack offset with different lengths. The longer span is fetched on its own.
+
+- Signup and login reported a 5xx from the server or an exhausted rate limit as "does
+  not answer like an aqt server; check the URL" and exited 1. They now show the
+  server's error and its documented exit code, and keep that message for a response
+  that proves the URL is wrong.
+
+- `aqt update policy <mode> --json` printed prose. It now prints the state as JSON,
+  like `aqt update policy --json`.
+
+- A background update check could undo an `aqt update policy` change made while it
+  ran. It now re-reads the state before saving.
+
+- On Windows, an update failed with "Access denied" while an agent that had not
+  restarted since the last update still ran from the previous rollback file. Each
+  update now moves the old binary to a fresh `.aqt-update-previous-*.old` name.
+
+- The account bootstrap no longer reveals by timing which emails have accounts. Each
+  decoy wrote to the database, so it answered slower than a real account while
+  uploads held the writer. The decoy secret is now read once at startup.
+- A suspended account can no longer be reset with its recovery key or attach a
+  device; both answer `403 account_disabled`.
+- A resource created or a recovery key made while `rotate-root` ran could be wrapped
+  under the retired root key: the resource never opened and blocked every later
+  rotation, and the recovery key never worked. Both requests now name their root key,
+  and the server refuses a retired one with `409 root_key_changed`.
 
 ### Changed
 

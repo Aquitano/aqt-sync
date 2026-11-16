@@ -33,6 +33,10 @@ func TestSignupRefusesBeforeAskingForAPassphrase(t *testing.T) {
 	t.Cleanup(inviteOnly.Close)
 	notAqt := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(notAqt.Close)
+	restarting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(restarting.Close)
 
 	cases := []struct {
 		name    string
@@ -43,6 +47,7 @@ func TestSignupRefusesBeforeAskingForAPassphrase(t *testing.T) {
 		{name: "no server configured", wantErr: errNoServer},
 		{name: "plain http to a remote host", server: "http://aqt.example.com", wantErr: client.ErrInsecureScheme},
 		{name: "not an aqt server", server: notAqt.URL, want: "does not answer like an aqt server"},
+		{name: "aqt server restarting behind a proxy", server: restarting.URL, want: "server returned 503"},
 		{name: "invite-only without a token", server: inviteOnly.URL, want: "only accepts signups with an invite"},
 	}
 	for _, tc := range cases {

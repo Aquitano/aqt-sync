@@ -160,9 +160,10 @@ release each landed in.
   [deploy.md](deploy.md).
 
 - **Trusted proxies.** Gin's trust-all default was replaced with an explicit list
-  (`AQT_TRUSTED_PROXIES`, loopback by default, `none` to trust none). The rate-limit
-  bucket key stays on the TCP peer address regardless, so a spoofed forwarded header
-  cannot mint fresh buckets. See [deploy.md](deploy.md#configuration).
+  (`AQT_TRUSTED_PROXIES`, loopback by default, `none` to trust none). Rate limits
+  key on the client a trusted proxy names in `X-Forwarded-For` (the right-most
+  untrusted hop) and on the TCP peer otherwise, so a spoofed forwarded header cannot
+  mint fresh buckets. See [deploy.md](deploy.md#configuration).
 
 ## Still open
 

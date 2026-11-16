@@ -69,6 +69,10 @@ initiating device and removes every other device; they recover by logging in aga
 with the passphrase. Existing convergent objects stay readable because their
 per-object keys are sealed in their roots; future writes derive convergence from the
 new `RK`.
+Updates and snapshots are fenced by the resource version the rotation bumps. A create
+and a recovery-key write name the identity key of the root they wrapped under instead,
+and the server refuses one that names the retired root, so neither can store a wrap
+the new `RK` cannot open.
 
 A typo'd first passphrase can only be undone with the [recovery key](#the-recovery-key)
 — there is nothing server-side to reset against — so `signup` on a terminal confirms
@@ -98,6 +102,8 @@ over, which is why the CLI says to keep it offline and apart from the machine.
 - **It survives use and passphrase changes**, since neither changes `RK`.
   `rotate-root` does change `RK`, so it clears the wrap; the CLI says to make a new
   key afterwards.
+- **Suspension holds against it.** Recovery, like a passphrase login, re-reads the
+  operator's suspension flag in the transaction that would attach the device.
 
 ### KDF calibration
 
@@ -408,7 +414,10 @@ indistinguishable decoy `{kdf, wrappedRoot}` for an unknown email instead of a 4
 The decoy's Argon2id costs are drawn per-email (HKDF over the server secret) from the
 same value set a moderate calibration produces — memory ∈ {64, 128, 256 MiB},
 iterations clustered where a ~1s unlock lands on common hardware — rather than the
-fixed package default, so a decoy's parameters do not stand out.
+fixed package default, so a decoy's parameters do not stand out. The server secret
+behind every decoy is read once at startup, so a decoy is answered from memory like a
+real account is from the read pool, and a busy writer connection cannot time the two
+apart.
 
 `POST /v1/account` does not answer `409` on a duplicate email in the default *open*
 registration mode. It returns the same success shape with a decoy token that grants

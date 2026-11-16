@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -105,6 +106,15 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 		return "", 0, err
 	} else if found {
 		return prior.ID, prior.Version, nil
+	}
+	if len(req.IdentityKey) > 0 {
+		var identity []byte
+		if err := tx.QueryRow(`SELECT public_key FROM accounts WHERE owner_handle = ?`, owner).Scan(&identity); err != nil {
+			return "", 0, err
+		}
+		if !bytes.Equal(req.IdentityKey, identity) {
+			return "", 0, ErrRootKeyChanged
+		}
 	}
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
@@ -316,24 +326,40 @@ func (s *Store) CountResourceRead(id string) error {
 // request it goes on to refuse (too old a client, no acceptable representation)
 // cannot burn a link the intended recipient never received.
 func (s *Store) GetResourceUncounted(id, requireOwner string) (api.GetResourceResponse, bool, error) {
-	out, countRead, err := s.getResourceUncounted(id, requireOwner)
+	res, blob, countRead, err := s.OpenResourceUncounted(id, requireOwner)
+	if err != nil {
+		return res, false, err
+	}
+	defer func() { _ = blob.Close() }()
+	res.Blob.Ciphertext, err = readBlobFile(blob)
+	if err != nil {
+		return res, false, err
+	}
+	return res, countRead, nil
+}
+
+// OpenResourceUncounted is GetResourceUncounted with the blob left on disk: res
+// carries no ciphertext, and blob is its open file, which the caller closes. A
+// download streams from it instead of holding the whole blob in memory.
+func (s *Store) OpenResourceUncounted(id, requireOwner string) (res api.GetResourceResponse, blob *os.File, countRead bool, err error) {
 	// An update unlinks the superseded blob only after its row commits, so a read
 	// that loaded the old row can find the file already gone. The row now names the
 	// new nonce; re-read instead of failing a live resource with a transient 404.
-	if errors.Is(err, errStaleBlob) {
-		out, countRead, err = s.getResourceUncounted(id, requireOwner)
+	// Once open, the file outlives a later unlink.
+	for range 2 {
+		res, countRead, err = s.getResourceUncounted(id, requireOwner)
+		if err != nil {
+			return res, nil, false, err
+		}
+		blob, err = s.openBlob(id, res.Blob.Nonce)
+		if !errors.Is(err, ErrNotFound) {
+			return res, blob, countRead, err
+		}
 	}
-	if errors.Is(err, errStaleBlob) {
-		// Twice in a row is no longer the unlink race; surface it as the internal
-		// inconsistency it is rather than a 404 for a resource whose row exists.
-		err = fmt.Errorf("resource %s: row names a blob that does not exist", id)
-	}
-	return out, countRead, err
+	// Twice in a row is no longer the unlink race; surface it as the internal
+	// inconsistency it is rather than a 404 for a resource whose row exists.
+	return res, nil, false, fmt.Errorf("resource %s: row names a blob that does not exist", id)
 }
-
-// errStaleBlob marks a row whose blob file is missing: either the read raced an
-// update's unlink of the superseded blob (retryable) or the store is inconsistent.
-var errStaleBlob = errors.New("resource blob missing for stored nonce")
 
 func (s *Store) getResourceUncounted(id, requireOwner string) (api.GetResourceResponse, bool, error) {
 	var (
@@ -405,18 +431,11 @@ func (s *Store) getResourceUncounted(id, requireOwner string) (api.GetResourceRe
 		}
 	}
 
-	ciphertext, err := s.readBlob(id, nonce)
-	if errors.Is(err, ErrNotFound) {
-		return out, false, errStaleBlob
-	}
-	if err != nil {
-		return out, false, err
-	}
 	countRead := !isOwner && !isGrantee && maxReads.Valid
 	out = api.GetResourceResponse{
 		ID:         id,
 		Visibility: vis,
-		Blob:       crypto.SealedBlob{Nonce: nonce, Ciphertext: ciphertext},
+		Blob:       crypto.SealedBlob{Nonce: nonce},
 		Version:    version,
 		MinClient:  minClient,
 		CompactAt:  compactAt,
@@ -933,6 +952,10 @@ func (s *Server) handlePutResource(c *gin.Context) {
 		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
 		return
 	}
+	if errors.Is(err, ErrRootKeyChanged) {
+		abortRootKeyChanged(c)
+		return
+	}
 	if errors.Is(err, ErrSharedNeedsRefs) {
 		abortCode(c, http.StatusBadRequest, "a public or granted resource must carry its chunk refs (they scope what its readers may fetch); re-push with refs before sharing", api.ErrCodeSharedNeedsRefs)
 		return
@@ -1033,14 +1056,9 @@ func (s *Server) handlePublicResourcePreflight(c *gin.Context) {
 
 func (s *Server) handleGetResource(c *gin.Context) {
 	// An authenticated owner can read their private resources; anyone can read a
-	// public one. We pass the owner (empty if unauthenticated) to the store so a
-	// private id returns 404 to everyone else.
-	var owner string
-	if token, ok := bearerToken(c); ok {
-		if o, err := s.store.OwnerByToken(token); err == nil {
-			owner = o
-		}
-	}
+	// public one. We pass the owner (empty if unauthenticated, as resolved by
+	// optionalAuthLimit) to the store so a private id returns 404 to everyone else.
+	owner := c.GetString(ownerContextKey)
 	// Negotiate before the resource is touched at all: a request whose Accept we
 	// cannot satisfy must not spend one of a `--burn` link's reads.
 	format, ok := negotiateResourceResponse(c.GetHeader("Accept"))
@@ -1048,7 +1066,7 @@ func (s *Server) handleGetResource(c *gin.Context) {
 		abort(c, http.StatusNotAcceptable, "no acceptable resource representation; request version=1 JSON or envelope media type")
 		return
 	}
-	res, countRead, err := s.store.GetResourceUncounted(c.Param("id"), owner)
+	res, blob, countRead, err := s.store.OpenResourceUncounted(c.Param("id"), owner)
 	if errors.Is(err, ErrNotFound) {
 		abortNotFound(c)
 		return
@@ -1061,6 +1079,7 @@ func (s *Server) handleGetResource(c *gin.Context) {
 		abort(c, http.StatusInternalServerError, "fetch failed")
 		return
 	}
+	defer func() { _ = blob.Close() }()
 	// Gate the read on the requester's capability before any payload is written: a
 	// client too old to open the sealed format gets an actionable 426 instead of the
 	// bytes and a downstream AEAD failure. This route is public, so the check lives
@@ -1075,6 +1094,14 @@ func (s *Server) handleGetResource(c *gin.Context) {
 		abortUpgradeRequired(c, need, capability)
 		return
 	}
+	// encoding/json base64s the ciphertext inside one marshalled value, so this form
+	// cannot stream; it stays buffered, bounded by maxResourceBody and the limiter.
+	if format != resourceEnvelope {
+		if res.Blob.Ciphertext, err = readBlobFile(blob); err != nil {
+			abort(c, http.StatusInternalServerError, "fetch failed")
+			return
+		}
+	}
 	// Everything that could refuse this read has passed, so the permit is spent now.
 	// This is also what enforces exhaustion: an already-spent link answers 410 here.
 	if countRead {
@@ -1088,16 +1115,28 @@ func (s *Server) handleGetResource(c *gin.Context) {
 		}
 	}
 	if format == resourceEnvelope {
-		body, err := api.EncodeResourceDownload(res)
-		if err != nil {
-			abort(c, http.StatusInternalServerError, "encode failed")
-			return
-		}
-		c.Data(http.StatusOK, api.ResourceEnvelopeMediaType, body)
+		streamResourceDownload(c, res, blob)
 		return
 	}
 	c.Header("Content-Type", api.ResourceJSONMediaType)
 	c.JSON(http.StatusOK, res)
+}
+
+// streamResourceDownload writes the envelope header, then copies the ciphertext
+// from blob, so a slow reader pins a file descriptor rather than the whole blob.
+func streamResourceDownload(c *gin.Context, res api.GetResourceResponse, blob *os.File) {
+	info, err := blob.Stat()
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "fetch failed")
+		return
+	}
+	head, err := api.EncodeResourceDownloadHeader(res)
+	if err != nil {
+		abort(c, http.StatusInternalServerError, "encode failed")
+		return
+	}
+	c.DataFromReader(http.StatusOK, int64(len(head))+info.Size(), api.ResourceEnvelopeMediaType,
+		io.MultiReader(bytes.NewReader(head), blob), nil)
 }
 
 // decodePutResource reads a resource upload. The body is always the raw envelope

@@ -122,6 +122,10 @@ const (
 	// account. Distinct from a 401 so the client stops rather than looping through
 	// re-authentication that cannot succeed.
 	ErrCodeAccountDisabled = "account_disabled"
+	// ErrCodeRootKeyChanged accompanies a 409 when a resource create or recovery-key
+	// write was built against a root key that a root-key rotation has since retired.
+	// Retrying the same request cannot succeed; the client needs the new root key.
+	ErrCodeRootKeyChanged = "root_key_changed"
 	// ErrCodeInviteRequired accompanies a 403 when signup on an invite-mode server
 	// carries a missing or unrecognized invite token, so a client can prompt for a
 	// token instead of treating it as a terminal refusal.

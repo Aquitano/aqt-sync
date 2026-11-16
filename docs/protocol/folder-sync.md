@@ -45,7 +45,9 @@ be used to judge whether a restore is really a restore.
 - **POSIX permission bits.** A file's and a directory's `Mode().Perm()` — the low nine
   bits — ride in the manifest and are applied with `chmod` when the entry lands.
   Directory modes are applied deepest-first once the pass finishes, so a directory
-  that ends up read-only does not block writing its own children. An entry carrying no
+  that ends up read-only does not block writing its own children. A pull into a
+  directory that is read-only on disk makes it writable for the pass and then
+  restores its mode, or applies the new one the merge records. An entry carrying no
   recorded mode lands at `0600` for a file and `0700` for a directory.
 - **Symlinks, as targets.** A symlink is stored as its literal target string and
   recreated with `symlink`. It is **never** followed, so a link pointing outside the
@@ -326,13 +328,17 @@ them still receives the rest of the folder, skips the links with a named warning
 and keeps their entries in the base so the next sync reads their absence as
 inability rather than a deletion to push; a pack push from such a device carries
 them into the archive from the base for the same reason. Case-colliding paths
-(`Notes.md` and `notes.md`, or `café` spelled precomposed and decomposed, which
-APFS also resolves to one file) are refused at push time on every platform — a
-case-insensitive clone would collapse them into one file, and its next sync would
-then overwrite both remote copies with the survivor's bytes — and a pull or clone
-onto a case-insensitive filesystem refuses such a tree by name before writing
-anything. A rename that changes only case or normalization is applied there as a
-rename, not as a download plus a delete of the same file.
+(`Notes.md` and `notes.md`, `café` spelled precomposed and decomposed, which
+APFS also resolves to one file, or `notes` and `notes.`, which Windows resolves to
+one file by dropping trailing dots and spaces) are refused at push time on every
+platform — a case-insensitive clone would collapse them into one file, and its next
+sync would then overwrite both remote copies with the survivor's bytes — and a pull
+or clone onto a case-insensitive filesystem refuses such a tree by name before
+writing anything. A rename that changes only case or normalization is applied there
+as a rename, not as a download plus a delete of the same file. A directory junction is
+not followed: a scan skips it with a warning and keeps its last-synced contents,
+and a pull refuses to write through it. A Windows device also refuses a tree with a
+backslash in a name, which it would write under a different path.
 
 **One prologue.** Every sync enters through `syncSession`: it loads `state.json`
 and the last-synced base, refuses a missing base unless `--reconcile`, and acquires
@@ -464,7 +470,9 @@ A file (or symlink) on one side and a directory on the other claiming the same p
 is a conflict too, even when the two sides touched different paths (`x` against
 `x/y`). Local keeps the path; copy mode preserves a remote file as
 `<name>.conflict-<host>-<timestamp>` and a remote directory's entries under
-`<name>.conflict-<host>-<timestamp>/`.
+`<name>.conflict-<host>-<timestamp>/`. A remote file replacing a local directory that
+still holds untracked content, such as an ignored `.git/` or `node_modules/`, is the
+same conflict: that content is never deleted to make room.
 
 A directory deleted on one side while the other side adds content inside it stays,
 with the adding side's entry and mode; the rest of the delete still applies.

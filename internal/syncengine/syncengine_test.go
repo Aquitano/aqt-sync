@@ -275,6 +275,24 @@ func TestIgnoreMatching(t *testing.T) {
 	}
 }
 
+// An .aqtignore saved with CRLF line endings (the Windows editor default) must
+// match exactly like its LF twin; a rule keeping its \r never matches anything.
+func TestIgnoreCRLFLineEndings(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeFile(t, dir, ".aqtignore", []byte("*.txt\r\nbuild/\r\n!keep.txt\r\n"))
+	ig, err := LoadIgnore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ig.Match("secret.txt", false) || !ig.Match("build", true) {
+		t.Fatal("CRLF rules must match")
+	}
+	if ig.Match("keep.txt", false) {
+		t.Fatal("a CRLF negation must re-include its path")
+	}
+}
+
 // .git is ignored by default, but a root `!.git/` re-includes the directory and
 // everything under it — the override the init prompt writes when the user opts to
 // sync their git history.

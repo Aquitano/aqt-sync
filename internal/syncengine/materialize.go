@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/aquitano/aqt-sync/internal/compress"
 	"github.com/aquitano/aqt-sync/internal/crypto"
+	"github.com/aquitano/aqt-sync/internal/fsatomic"
 )
 
 // safeJoin resolves dir/relPath and refuses a result that escapes dir, so a
@@ -25,8 +27,12 @@ import (
 // root's own path, and one written there would replace the root with a symlink that
 // every later write, whose parent checks start below the root, resolves through. It
 // is purely lexical: it guards the entry's own final path, not intermediate
-// components that may be symlinks — refuseSymlinkParents covers those.
+// components that may be symlinks — refuseSymlinkParents covers those. On Windows
+// it refuses a backslash, which would otherwise split one name into nested paths.
 func safeJoin(dir, relPath string) (string, error) {
+	if filepath.Separator == '\\' && strings.ContainsRune(relPath, '\\') {
+		return "", fmt.Errorf("path %q contains a backslash, which Windows reads as a path separator", relPath)
+	}
 	full := filepath.Join(dir, filepath.FromSlash(relPath))
 	rel, err := filepath.Rel(dir, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -61,8 +67,8 @@ func refuseSymlinkParents(dir, full string) error {
 		if err != nil {
 			return err
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path %q descends through a symlink at %q", rel, cur)
+		if linkLike(fi.Mode()) {
+			return fmt.Errorf("path %q descends through a symlink or junction at %q", rel, cur)
 		}
 	}
 	return nil
@@ -283,6 +289,74 @@ func HashOnDisk(dir, relPath string) (hash string, exists, isDir bool, err error
 	}
 }
 
+// MarkUntrackedDirClashes turns a download that would replace a local directory with a
+// file into a Conflict when the directory holds anything the local manifest does not
+// track, such as ignored content (.git, node_modules). The apply removes only tracked
+// children, so the file could never land, and that content must not be deleted to make
+// room. Local keeps the directory, like any other type clash (see MarkTypeClashes), and
+// a resolving mode keeps the remote file as a conflict copy. Run it after
+// MarkTypeClashes and before KeepParents.
+func MarkUntrackedDirClashes(root string, actions, dirActions []Action, local Manifest) error {
+	files, dirs := local.ByPath(), local.DirsByPath()
+	clashed := map[string]bool{}
+	for i, a := range actions {
+		if a.Kind != Download {
+			continue
+		}
+		held, err := holdsUntracked(root, a.Path, files, dirs)
+		if err != nil {
+			return err
+		}
+		if held {
+			actions[i].Kind = Conflict
+			clashed[a.Path] = true
+		}
+	}
+	for i, a := range dirActions {
+		if a.Kind == DeleteLocal && clashed[a.Path] {
+			dirActions[i].Kind = Upload
+		}
+	}
+	return nil
+}
+
+// holdsUntracked reports whether root/rel is a real directory with an entry below it
+// that is neither a tracked file nor a tracked directory. A subtree it cannot read
+// counts as untracked, since the apply could not empty it either.
+func holdsUntracked(root, rel string, files map[string]Entry, dirs map[string]DirEntry) (bool, error) {
+	full, err := safeJoin(root, rel)
+	if err != nil {
+		return false, err
+	}
+	if fi, err := os.Lstat(full); err != nil || !fi.IsDir() {
+		return false, nil
+	}
+	held := false
+	err = filepath.WalkDir(full, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			held = true
+			return filepath.SkipAll
+		}
+		if p == full {
+			return nil
+		}
+		r, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		r = filepath.ToSlash(r)
+		if _, ok := dirs[r]; ok && d.IsDir() {
+			return nil
+		}
+		if _, ok := files[r]; ok && !d.IsDir() {
+			return nil
+		}
+		held = true
+		return filepath.SkipAll
+	})
+	return held, err
+}
+
 // MaterializeDirs creates every tracked directory under dir and then applies their
 // recorded modes. It materializes the empty tracked directories a file download does
 // not create on its own, and applies directory permission changes to the ones that
@@ -304,8 +378,8 @@ func MaterializeDirs(dir string, dirs []DirEntry) error {
 		}
 		// Unlike a file, which replaces a symlink at its path, a directory is
 		// entered: MkdirAll and the chmod in applyDirModes both follow a link here.
-		if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("directory %q is a symlink on disk", d.Path)
+		if fi, err := os.Lstat(full); err == nil && linkLike(fi.Mode()) {
+			return fmt.Errorf("directory %q is a symlink or junction on disk", d.Path)
 		}
 		if err := os.MkdirAll(full, 0o700); err != nil {
 			return err
@@ -378,6 +452,9 @@ func RemoveDir(dir, relPath string) error {
 	if err != nil {
 		return err
 	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(full)
 	if os.IsNotExist(err) {
 		return nil
@@ -440,11 +517,39 @@ func RenameCaseOnly(dir, fromRel, toRel string) error {
 	return nil
 }
 
+// SyncParents fsyncs each directory from every path's parent up to dir, once each, so
+// the renames, creations, and removals an apply made survive power loss before the base
+// that records them is written. A directory a removal pruned is skipped, and its
+// surviving parent, which records the removal, is still synced. One whose mode denies
+// opening it is skipped too, rather than failing a pull that has already landed.
+func SyncParents(dir string, relPaths []string) error {
+	synced := map[string]bool{}
+	for _, rel := range relPaths {
+		full, err := safeJoin(dir, rel)
+		if err != nil {
+			return err
+		}
+		for parent := filepath.Dir(full); !synced[parent]; parent = filepath.Dir(parent) {
+			synced[parent] = true
+			if err := fsatomic.SyncDir(parent); err != nil && !errors.Is(err, fs.ErrNotExist) && !errors.Is(err, fs.ErrPermission) && !errors.Is(err, syscall.ENOTDIR) {
+				return err
+			}
+			if parent == dir {
+				break
+			}
+		}
+	}
+	return nil
+}
+
 // RemoveFile deletes dir/relPath, pruning now-empty parent directories up to (but
 // not including) the tracked root. A missing file is not an error.
 func RemoveFile(dir, relPath string) error {
 	full, err := safeJoin(dir, relPath)
 	if err != nil {
+		return err
+	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
 		return err
 	}
 	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {

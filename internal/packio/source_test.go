@@ -3,6 +3,7 @@
 package packio
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/client"
@@ -237,6 +239,44 @@ func TestSourceAcceptsARepeatedLocation(t *testing.T) {
 	}
 	if got, err := src.Get("a"); err != nil || string(got) != strings.Repeat("A", 100) {
 		t.Fatalf("Get(a) = %q, %v", got, err)
+	}
+}
+
+// Spans from two Locate calls can share a base with different ends. Get of the
+// longer one must fetch its own range, not slice past the shorter cached span.
+func TestSourceSpansSharingABaseAcrossLocates(t *testing.T) {
+	pack := bytes.Repeat([]byte("P"), 90000)
+	locs := map[string]api.ObjectLocation{
+		"a": {ID: "a", PackID: "p1", Off: 0, Len: 10},
+		"b": {ID: "b", PackID: "p1", Off: 0, Len: 90000},
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/chunks/locate", func(w http.ResponseWriter, r *http.Request) {
+		var req api.LocateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(api.LocateResponse{Locations: []api.ObjectLocation{locs[req.IDs[0]]}})
+	})
+	mux.HandleFunc("/v1/packs/", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(pack))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	cl, err := client.New(srv.URL, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := NewEmptySource(cl)
+	for _, id := range []string{"a", "b"} {
+		if err := src.Locate([]string{id}); err != nil {
+			t.Fatal(err)
+		}
+		got, err := src.Get(id)
+		if err != nil || int64(len(got)) != locs[id].Len {
+			t.Fatalf("Get(%s) = %d bytes, %v; want %d", id, len(got), err, locs[id].Len)
+		}
 	}
 }
 

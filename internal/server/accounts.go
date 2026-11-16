@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -30,6 +32,16 @@ type Account struct {
 	RecoveryWrappedRoot *crypto.SealedBlob
 }
 
+const handleBytes = 12
+
+// maxHandleLen is the length of every handle the server mints. A handle the server
+// stores on a caller's word (a grantee) is held to it, since quota charges a grant
+// row a fixed overhead rather than its handle's length.
+var maxHandleLen = base64.RawURLEncoding.EncodedLen(handleBytes)
+
+// maxDeviceNameLen fits any hostname, which is what the client sends.
+const maxDeviceNameLen = 255
+
 // CreateAccount registers an account with its Ed25519 public key, wrapped root key,
 // and passphrase-verifier hash, and returns it. Returns ErrConflict if the email is
 // already taken. The new account starts at auth epoch 1. encPublicKey/encKeySig are
@@ -38,7 +50,7 @@ type Account struct {
 // a pre-grants dir carries.
 func (s *Store) CreateAccount(email string, kdf crypto.KdfParams, publicKey []byte, wrappedRoot crypto.SealedBlob, authVerifier, encPublicKey, encKeySig []byte) (Account, error) {
 	email = api.NormalizeEmail(email)
-	handle := newID(12)
+	handle := newID(handleBytes)
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
 		return Account{}, err
@@ -113,8 +125,8 @@ func (s *Store) AccountByEmail(email string) (Account, error) {
 
 // SetRecoveryKey stores the account's recovery wrap and verifier hash, replacing any
 // earlier pair, once authVerifier proves the current passphrase. ErrNotFound if it
-// does not.
-func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, recoveryVerifier, authVerifier []byte) error {
+// does not, ErrRootKeyChanged if identityKey is set and no longer the account's.
+func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, recoveryVerifier, authVerifier, identityKey []byte) error {
 	rootJSON, err := json.Marshal(wrappedRoot)
 	if err != nil {
 		return err
@@ -124,8 +136,8 @@ func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, reco
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var stored []byte
-	if err := tx.QueryRow(`SELECT auth_verifier FROM accounts WHERE owner_handle = ?`, owner).Scan(&stored); err != nil {
+	var stored, identity []byte
+	if err := tx.QueryRow(`SELECT auth_verifier, public_key FROM accounts WHERE owner_handle = ?`, owner).Scan(&stored, &identity); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -133,6 +145,9 @@ func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, reco
 	}
 	if !verifierMatches(authVerifier, stored) {
 		return ErrNotFound
+	}
+	if len(identityKey) > 0 && !bytes.Equal(identityKey, identity) {
+		return ErrRootKeyChanged
 	}
 	rh := sha256.Sum256(recoveryVerifier)
 	if _, err := tx.Exec(
@@ -149,7 +164,8 @@ func (s *Store) SetRecoveryKey(owner string, wrappedRoot crypto.SealedBlob, reco
 // every other device, and attaches a new one, all in one transaction. Dropping the
 // devices is what keeps a device cap from stranding the reset half-done, and someone
 // who lost the passphrase gains nothing from sessions they cannot unlock. ErrNotFound
-// if the account has no recovery key or the proof is wrong.
+// if the account has no recovery key or the proof is wrong, ErrAccountDisabled if an
+// operator has suspended it.
 func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto.KdfParams, wrappedRoot crypto.SealedBlob, authVerifier []byte, deviceName string) (deviceID, token string, epoch int, err error) {
 	kdfJSON, err := json.Marshal(kdf)
 	if err != nil {
@@ -164,10 +180,13 @@ func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto
 		return "", "", 0, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var stored []byte
+	var (
+		stored     []byte
+		disabledAt int64
+	)
 	if err := tx.QueryRow(
-		`SELECT recovery_verifier, auth_epoch FROM accounts WHERE owner_handle = ?`, owner,
-	).Scan(&stored, &epoch); err != nil {
+		`SELECT recovery_verifier, auth_epoch, disabled_at FROM accounts WHERE owner_handle = ?`, owner,
+	).Scan(&stored, &epoch, &disabledAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", "", 0, ErrNotFound
 		}
@@ -175,6 +194,9 @@ func (s *Store) RecoverAccount(owner string, recoveryVerifier []byte, kdf crypto
 	}
 	if !verifierMatches(recoveryVerifier, stored) {
 		return "", "", 0, ErrNotFound
+	}
+	if disabledAt > 0 {
+		return "", "", 0, ErrAccountDisabled
 	}
 	epoch++
 	vh := sha256.Sum256(authVerifier)
@@ -219,9 +241,14 @@ func (s *Store) AccountForAuth(email string) (ownerHandle string, publicKey, ver
 }
 
 // ServerSecret returns the persistent per-server secret used to synthesize a decoy
-// bootstrap response for unknown emails, creating it on first use. Stable across
-// restarts so the same unknown email always yields the same decoy.
-func (s *Store) ServerSecret() ([]byte, error) {
+// bootstrap response for unknown emails. Stable across restarts so the same unknown
+// email always yields the same decoy.
+func (s *Store) ServerSecret() []byte {
+	return s.decoySecret
+}
+
+// loadServerSecret reads the server secret, creating it on first open.
+func (s *Store) loadServerSecret() ([]byte, error) {
 	if _, err := s.db.Exec(
 		`INSERT OR IGNORE INTO server_meta(key, value) VALUES('bootstrap-decoy-secret', ?)`,
 		randomBytes(32),
@@ -632,7 +659,8 @@ func (s *Store) ConsumeChallenge(id, email string) ([]byte, error) {
 // It returns the plaintext token once; only its hash is stored.
 // maxDevices > 0 caps the account's device count: the count and the insert run in one
 // transaction, so a signup's first device and a concurrent attach cannot both slip
-// past the cap. Returns ErrDeviceLimit when the cap is already reached.
+// past the cap. Returns ErrDeviceLimit when the cap is already reached, and
+// ErrAccountDisabled when an operator has suspended the account.
 func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (deviceID, token string, err error) {
 	deviceID = newID(10)
 	token = newID(32)
@@ -642,6 +670,13 @@ func (s *Store) CreateDevice(ownerHandle, name string, epoch, maxDevices int) (d
 		return "", "", err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var disabledAt int64
+	if err := tx.QueryRow(`SELECT disabled_at FROM accounts WHERE owner_handle = ?`, ownerHandle).Scan(&disabledAt); err != nil {
+		return "", "", err
+	}
+	if disabledAt > 0 {
+		return "", "", ErrAccountDisabled
+	}
 	if maxDevices > 0 {
 		var count int
 		if err := tx.QueryRow(`SELECT count(*) FROM devices WHERE owner_handle = ?`, ownerHandle).Scan(&count); err != nil {
@@ -1135,7 +1170,7 @@ func recordIdempotency(tx *sql.Tx, owner, kind, key string, digest []byte, respo
 
 func (s *Server) handleCreateAccount(c *gin.Context) {
 	var req api.CreateAccountRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
 		return
 	}
 	if req.Email == "" || len(req.PublicKey) != ed25519.PublicKeySize {
@@ -1213,7 +1248,7 @@ func (s *Server) signupProvesOwnership(email string, verifier []byte) bool {
 // indistinguishable on the wire from a genuine account creation.
 func (s *Server) decoyAuthResponse() api.AuthResponse {
 	return api.AuthResponse{
-		OwnerHandle: newID(12),
+		OwnerHandle: newID(handleBytes),
 		DeviceID:    newID(10),
 		Token:       newID(32),
 		Epoch:       1,
@@ -1254,12 +1289,7 @@ func (s *Server) handleAccountSalt(c *gin.Context) {
 	}
 	recovery := acc.RecoveryWrappedRoot
 	if recovery == nil {
-		secret, err := s.store.ServerSecret()
-		if err != nil {
-			abort(c, http.StatusInternalServerError, "lookup failed")
-			return
-		}
-		recovery = s.decoyRecoveryWrap(secret, acc.Email)
+		recovery = s.decoyRecoveryWrap(s.store.ServerSecret(), acc.Email)
 	}
 	c.JSON(http.StatusOK, api.SaltResponse{Kdf: acc.Kdf, WrappedRoot: acc.WrappedRoot, RecoveryWrappedRoot: recovery})
 }
@@ -1283,10 +1313,7 @@ func (s *Server) decoyRecoveryWrap(secret []byte, email string) *crypto.SealedBl
 // identical on the wire.
 func (s *Server) decoyBootstrap(email string) (api.SaltResponse, error) {
 	email = api.NormalizeEmail(email)
-	secret, err := s.store.ServerSecret()
-	if err != nil {
-		return api.SaltResponse{}, err
-	}
+	secret := s.store.ServerSecret()
 	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	// Derive the decoy's Argon2id costs from the same value set a real moderate
 	// calibration produces, seeded deterministically per email. The package-default
@@ -1330,7 +1357,7 @@ func (s *Server) handleAuthChallenge(c *gin.Context) {
 
 func (s *Server) handleAttachDevice(c *gin.Context) {
 	var req api.AttachDeviceRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
 		return
 	}
 	// Consume the challenge first so a bad attempt can't be replayed against it.
@@ -1357,6 +1384,10 @@ func (s *Server) handleAttachDevice(c *gin.Context) {
 			c.AbortWithStatusJSON(http.StatusForbidden, api.ErrorResponse{Error: "device limit reached; revoke a device before attaching another", Code: api.ErrCodeDeviceLimit, LimitKind: "devices", Current: u.Devices, Limit: int64(s.cfg.MaxDevices)})
 			return
 		}
+		if errors.Is(err, ErrAccountDisabled) {
+			abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+			return
+		}
 		if err != nil {
 			abort(c, http.StatusInternalServerError, "create device failed")
 			return
@@ -1376,7 +1407,7 @@ func (s *Server) handleAttachDevice(c *gin.Context) {
 // and a verifier, here the recovery key's; every failure is the same 401.
 func (s *Server) handleRecoverAccount(c *gin.Context) {
 	var req api.RecoverRequest
-	if !bindJSON(c, &req) {
+	if !bindJSON(c, &req) || !checkDeviceName(c, req.DeviceName) {
 		return
 	}
 	if len(req.WrappedRoot.Ciphertext) == 0 || len(req.AuthVerifier) == 0 {
@@ -1403,6 +1434,10 @@ func (s *Server) handleRecoverAccount(c *gin.Context) {
 			c.JSON(http.StatusCreated, api.AuthResponse{OwnerHandle: owner, DeviceID: deviceID, Token: token, Epoch: epoch})
 			return
 		}
+		if errors.Is(err, ErrAccountDisabled) {
+			abortCode(c, http.StatusForbidden, ErrAccountDisabled.Error(), api.ErrCodeAccountDisabled)
+			return
+		}
 		if !errors.Is(err, ErrNotFound) {
 			abort(c, http.StatusInternalServerError, "recovery failed")
 			return
@@ -1423,9 +1458,13 @@ func (s *Server) handleSetRecoveryKey(c *gin.Context) {
 		abort(c, http.StatusBadRequest, "wrapped root and both verifiers are required")
 		return
 	}
-	err := s.store.SetRecoveryKey(owner, req.WrappedRoot, req.RecoveryVerifier, req.AuthVerifier)
+	err := s.store.SetRecoveryKey(owner, req.WrappedRoot, req.RecoveryVerifier, req.AuthVerifier, req.IdentityKey)
 	if errors.Is(err, ErrNotFound) {
 		abortCode(c, http.StatusForbidden, "current passphrase proof did not match", api.ErrCodeProofMismatch)
+		return
+	}
+	if errors.Is(err, ErrRootKeyChanged) {
+		abortRootKeyChanged(c)
 		return
 	}
 	if err != nil {
@@ -1674,6 +1713,14 @@ func (s *Server) handleDeleteDevice(c *gin.Context) {
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+func checkDeviceName(c *gin.Context, name string) bool {
+	if len(name) > maxDeviceNameLen {
+		abort(c, http.StatusBadRequest, fmt.Sprintf("deviceName exceeds %d bytes", maxDeviceNameLen))
+		return false
+	}
+	return true
 }
 
 func deviceName(name string) string {

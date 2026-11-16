@@ -125,6 +125,30 @@ func TestQuotaChargesNewGrants(t *testing.T) {
 	}
 }
 
+// Quota charges a grant row a fixed overhead, so a grantee handle longer than any
+// the server mints would be free storage and is refused.
+func TestGrantRefusesHandleLongerThanMinted(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("long-handle@example.com", "a passphrase here")
+	h.signup("minted-handle@example.com", "a passphrase here")
+	res, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("create = %d, want 201", code)
+	}
+	grant := func(grantee string) int {
+		return h.do(http.MethodPost, "/v1/resources/"+res.ID+"/grants", token, api.CreateGrantRequest{
+			GranteeHandle: grantee, WrappedKey: make([]byte, crypto.GrantWrapSize),
+		}, nil)
+	}
+	if code := grant(h.handleOf("minted-handle@example.com")); code != http.StatusCreated {
+		t.Fatalf("grant to a minted handle = %d, want 201", code)
+	}
+	if code := grant(strings.Repeat("a", maxHandleLen+1)); code != http.StatusBadRequest {
+		t.Fatalf("grant to an oversized handle = %d, want 400", code)
+	}
+}
+
 // A growth charge sizes itself from the resource it would grow. One the account does
 // not hold is not_found, as the write itself would answer, not a 507 about the quota.
 func TestWriteToMissingResourceIsNotFoundBeforeQuota(t *testing.T) {

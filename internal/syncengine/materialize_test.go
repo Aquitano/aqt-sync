@@ -108,6 +108,35 @@ func TestMaterializeDirsRefusesASymlinkAtTheDirectoryPath(t *testing.T) {
 	}
 }
 
+// A remote delete of d/x or d/sub must not reach through a local symlink (or, on
+// Windows, a junction) at d and delete what it points at outside the root.
+func TestRemoveRefusesALinkedParent(t *testing.T) {
+	t.Parallel()
+	root, outside := t.TempDir(), t.TempDir()
+	victim := filepath.Join(outside, "x")
+	if err := os.WriteFile(victim, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteSymlink(root, Entry{Path: "d", Link: outside}); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+	if err := RemoveFile(root, "d/x"); err == nil {
+		t.Error("RemoveFile accepted a path through a symlinked parent")
+	}
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("file outside the root was removed: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveDir(root, "d/sub"); err == nil {
+		t.Error("RemoveDir accepted a path through a symlinked parent")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "sub")); err != nil {
+		t.Fatalf("directory outside the root was removed: %v", err)
+	}
+}
+
 // TestRemoveDirPathBecameFile covers the dir->file type change: when a tracked directory
 // was replaced on disk by a regular file earlier in the same apply (a remote type change),
 // RemoveDir must be a no-op that leaves the replacement file intact rather than failing on

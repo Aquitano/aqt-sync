@@ -124,3 +124,60 @@ func TestRateLimitSetsRetryAfter(t *testing.T) {
 			body.RetryAfterSeconds, secs)
 	}
 }
+
+// Behind a trusted proxy each client keys its own bucket from the right-most
+// untrusted X-Forwarded-For hop; the same headers from any other peer are ignored.
+func TestClientKeyTrustsForwardedHeadersOnlyFromProxies(t *testing.T) {
+	t.Parallel()
+	h := newHarnessCfg(t, Config{}.WithTrustedProxies([]string{"10.0.0.0/8"}))
+	h.router.GET("/audit-client", func(c *gin.Context) {
+		c.String(http.StatusOK, clientKey(c)+" "+h.srv.shareURL(c, "id"))
+	})
+	for _, tc := range []struct {
+		name, peer string
+		header     map[string]string
+		want       string
+	}{
+		{"proxied client", "10.0.0.5:4000", map[string]string{"X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https"}, "203.0.113.7 https://example.com/x/id"},
+		{"spoofed left hop", "10.0.0.5:4000", map[string]string{"X-Forwarded-For": "6.6.6.6, 203.0.113.7, 10.0.0.9"}, "203.0.113.7 http://example.com/x/id"},
+		{"untrusted peer", "198.51.100.4:4000", map[string]string{"X-Forwarded-For": "203.0.113.7", "X-Forwarded-Proto": "https"}, "198.51.100.4 http://example.com/x/id"},
+		{"x-real-ip ignored", "10.0.0.5:4000", map[string]string{"X-Real-IP": "203.0.113.7"}, "10.0.0.5 http://example.com/x/id"},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/audit-client", nil)
+		req.RemoteAddr = tc.peer
+		for k, v := range tc.header {
+			req.Header.Set(k, v)
+		}
+		rec := httptest.NewRecorder()
+		h.router.ServeHTTP(rec, req)
+		if got := rec.Body.String(); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The public resource read draws anonymous callers from the per-client public
+// bucket; an owner's token read at the same address uses its device's bucket.
+func TestPublicResourceReadIsRateLimited(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	now := time.Unix(0, 0)
+	h.srv.publicLimiter.now = func() time.Time { return now }
+	token, mk := h.signup("public-read-limit@example.com", "passphrase for limits")
+	put, code := h.putSized(token, mk, "", 16)
+	if code != http.StatusCreated {
+		t.Fatalf("put = %d, want 201", code)
+	}
+
+	for i := range publicObjectsBurst {
+		if got := h.get("/v1/resources/" + put.ID); got.Code == http.StatusTooManyRequests {
+			t.Fatalf("anonymous read %d throttled inside the burst", i)
+		}
+	}
+	if got := h.get("/v1/resources/" + put.ID); got.Code != http.StatusTooManyRequests {
+		t.Fatalf("anonymous read past the burst = %d, want 429", got.Code)
+	}
+	if got := h.getCap(put.ID, token, ""); got.Code != http.StatusOK {
+		t.Fatalf("owner read after anonymous burst = %d, want 200", got.Code)
+	}
+}

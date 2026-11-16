@@ -3,7 +3,9 @@
 package server
 
 import (
+	"bytes"
 	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/aquitano/aqt-sync/internal/api"
@@ -96,6 +98,83 @@ func TestRotationLosesToCommittedWrite(t *testing.T) {
 	}))
 	if !errors.Is(err, ErrVersionConflict) {
 		t.Fatalf("rotation over a newer write: err = %v, want ErrVersionConflict", err)
+	}
+}
+
+// A create has no version for rotation to bump, and a recovery-key write passes a
+// verifier rotation leaves unchanged, so both name the identity key of the root they
+// wrapped. One built before a rotation committed must not store a wrap of the
+// retired root: a create would be unreadable and abort every later rotation.
+func TestRotationRefusesWritesForTheRetiredRoot(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "rotate-identity@example.com")
+	deviceID, _, err := s.CreateDevice(owner, "laptop", 1, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retired := make([]byte, 32)
+	rotation := rotateReq(nil)
+	rotation.PublicKey = bytes.Repeat([]byte{1}, 32)
+	if _, _, err := s.RotateRootKey(owner, deviceID, rotation); err != nil {
+		t.Fatalf("rotation: %v", err)
+	}
+
+	create := func(identity []byte) error {
+		wrapped := wrappedTestKey(t)
+		_, _, err := s.PutResource(owner, api.CapabilityIDBinding, api.PutResourceRequest{
+			Visibility: api.Private, Blob: sealedTestBlob(t, "manifest"),
+			EncryptedMeta: sealedTestBlob(t, `{"name":"folder","size":0}`),
+			WrappedKey:    &wrapped, IdentityKey: identity,
+		})
+		return err
+	}
+	if err := create(retired); !errors.Is(err, ErrRootKeyChanged) {
+		t.Fatalf("create under the retired root: err = %v, want ErrRootKeyChanged", err)
+	}
+	if err := create(rotation.PublicKey); err != nil {
+		t.Fatalf("create under the current root: %v", err)
+	}
+
+	setRecovery := func(identity []byte) error {
+		return s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), []byte("recovery proof"), make([]byte, 32), identity)
+	}
+	if err := setRecovery(retired); !errors.Is(err, ErrRootKeyChanged) {
+		t.Fatalf("recovery key for the retired root: err = %v, want ErrRootKeyChanged", err)
+	}
+	if err := setRecovery(rotation.PublicKey); err != nil {
+		t.Fatalf("recovery key for the current root: %v", err)
+	}
+}
+
+// The fence rides in the upload envelope header, and the key a client derives from
+// its root must be the one signup registered, or every create would be refused.
+func TestCreateFenceOverTheWire(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("fence-wire@example.com", "passphrase for the fence test")
+	other, err := crypto.GenerateMasterKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name     string
+		identity []byte
+		code     int
+		errCode  string
+	}{
+		{"another root", crypto.IdentityKey(other), http.StatusConflict, api.ErrCodeRootKeyChanged},
+		{"own root", crypto.IdentityKey(mk), http.StatusCreated, ""},
+	} {
+		wrapped := wrappedTestKey(t)
+		var e api.ErrorResponse
+		code := h.do(http.MethodPost, "/v1/resources", token, api.PutResourceRequest{
+			Visibility: api.Private, Blob: sealedTestBlob(t, "manifest"),
+			EncryptedMeta: sealedTestBlob(t, `{"name":"f","size":0}`),
+			WrappedKey:    &wrapped, IdentityKey: tc.identity,
+		}, &e)
+		if code != tc.code || e.Code != tc.errCode {
+			t.Errorf("%s: got %d %q, want %d %q", tc.name, code, e.Code, tc.code, tc.errCode)
+		}
 	}
 }
 
