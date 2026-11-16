@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"sort"
 	"strings"
@@ -73,13 +74,20 @@ func warnSkipped(skipped []syncengine.SkippedPath) {
 }
 
 // refuseCaseCollisions fails an operation whose manifest holds paths that differ
-// only by case or Unicode normalization. Materializing them on a case-insensitive
-// filesystem (the macOS and Windows defaults) collapses them into one file, last
-// writer wins, and the next sync uploads the survivor's bytes under both names — so
-// the collision destroys both copies on the server, silently. Push refuses
-// regardless of the local filesystem: creating such a tree remotely arms the same
-// trap for every other device.
+// only by case, Unicode normalization, or trailing dots and spaces. Materializing
+// them on a case-insensitive filesystem (the macOS and Windows defaults) collapses
+// them into one file, last writer wins, and the next sync uploads the survivor's
+// bytes under both names — so the collision destroys both copies on the server,
+// silently. Push refuses regardless of the local filesystem: creating such a tree
+// remotely arms the same trap for every other device. On Windows it also refuses
+// paths containing a backslash, which would land under a different path.
 func refuseCaseCollisions(entries []syncengine.Entry, dirs []syncengine.DirEntry) error {
+	if runtime.GOOS == "windows" {
+		if bad := syncengine.BackslashPaths(entries, dirs); len(bad) > 0 {
+			return fmt.Errorf("refusing to sync %d path(s) containing a backslash (first: %s): Windows reads it as a path separator and would write each under a different path; rename them on another device",
+				len(bad), bad[0])
+		}
+	}
 	groups := syncengine.CaseCollisions(entries, dirs)
 	if len(groups) == 0 {
 		return nil
@@ -93,7 +101,7 @@ func refuseCaseCollisions(entries []syncengine.Entry, dirs []syncengine.DirEntry
 	if rest := len(groups) - show; rest > 0 {
 		suffix = fmt.Sprintf(" and %d more", rest)
 	}
-	return fmt.Errorf("refusing to sync case-colliding paths (%s%s): a case-insensitive filesystem would collapse each group (names differing only by case or Unicode normalization) into one file and the next sync would destroy the others; rename or .aqtignore all but one of each",
+	return fmt.Errorf("refusing to sync case-colliding paths (%s%s): a case-insensitive filesystem would collapse each group (names differing only by case or Unicode normalization, or on Windows by trailing dots and spaces) into one file and the next sync would destroy the others; rename or .aqtignore all but one of each",
 		strings.Join(names, "; "), suffix)
 }
 

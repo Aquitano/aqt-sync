@@ -170,7 +170,7 @@ func relativeTo(scopeDir, relPath string) (string, bool) {
 func compileRules(lines []string) []ignoreRule {
 	var rules []ignoreRule
 	for _, line := range lines {
-		if r, ok := compileRule(line); ok {
+		if r, ok := compileRule(strings.TrimSuffix(line, "\r")); ok {
 			rules = append(rules, r)
 		}
 	}

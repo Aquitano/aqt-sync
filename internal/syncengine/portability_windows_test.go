@@ -5,7 +5,9 @@
 package syncengine
 
 import (
+	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -66,5 +68,51 @@ func TestWindowsScanCarriesBaseModes(t *testing.T) {
 		if d.Mode != 0o750 {
 			t.Errorf("dir %s mode = %o, want the base's 750 carried forward", d.Path, d.Mode)
 		}
+	}
+}
+
+// A junction inside the tracked tree points outside it. The scan must keep base
+// content under it instead of reading it as deleted, and a pull must refuse to
+// write through it.
+func TestJunctionIsNeitherFollowedNorDeleted(t *testing.T) {
+	t.Parallel()
+	dir, outside := t.TempDir(), t.TempDir()
+	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(dir, "j"), outside).CombinedOutput(); err != nil {
+		t.Fatalf("mklink /J: %v: %s", err, out)
+	}
+
+	base := Manifest{Entries: []Entry{{Path: "j/x", Hash: "h"}}}
+	got, err := ScanReusing(dir, &base, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Skipped) != 1 || got.Skipped[0].Path != "j" || !errors.Is(got.Skipped[0].Err, errReparsePoint) {
+		t.Fatalf("skipped = %v, want just the junction", got.Skipped)
+	}
+	if _, ok := got.ByPath()["j/x"]; !ok {
+		t.Fatal("base content under a junction must not read as deleted")
+	}
+
+	if _, err := WriteFile(dir, Entry{Path: "j/y"}, []byte("y")); err == nil {
+		t.Fatal("a write through a junction must be refused")
+	}
+	if err := MaterializeDirs(dir, []DirEntry{{Path: "j/sub"}}); err == nil {
+		t.Fatal("a directory through a junction must be refused")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "y")); !os.IsNotExist(err) {
+		t.Fatalf("file landed outside the tracked root: %v", err)
+	}
+}
+
+// A backslash is a separator on Windows: a\b must be refused, not written as b
+// inside a new directory a.
+func TestSafeJoinRefusesBackslash(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := WriteFile(dir, Entry{Path: `a\b`}, []byte("x")); err == nil {
+		t.Fatal("a backslash name must be refused")
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "a")); !os.IsNotExist(err) {
+		t.Fatalf("a backslash name was split into a path: %v", err)
 	}
 }

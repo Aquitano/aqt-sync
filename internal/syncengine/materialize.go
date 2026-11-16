@@ -27,8 +27,12 @@ import (
 // root's own path, and one written there would replace the root with a symlink that
 // every later write, whose parent checks start below the root, resolves through. It
 // is purely lexical: it guards the entry's own final path, not intermediate
-// components that may be symlinks — refuseSymlinkParents covers those.
+// components that may be symlinks — refuseSymlinkParents covers those. On Windows
+// it refuses a backslash, which would otherwise split one name into nested paths.
 func safeJoin(dir, relPath string) (string, error) {
+	if filepath.Separator == '\\' && strings.ContainsRune(relPath, '\\') {
+		return "", fmt.Errorf("path %q contains a backslash, which Windows reads as a path separator", relPath)
+	}
 	full := filepath.Join(dir, filepath.FromSlash(relPath))
 	rel, err := filepath.Rel(dir, full)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
@@ -63,8 +67,8 @@ func refuseSymlinkParents(dir, full string) error {
 		if err != nil {
 			return err
 		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("path %q descends through a symlink at %q", rel, cur)
+		if linkLike(fi.Mode()) {
+			return fmt.Errorf("path %q descends through a symlink or junction at %q", rel, cur)
 		}
 	}
 	return nil
@@ -374,8 +378,8 @@ func MaterializeDirs(dir string, dirs []DirEntry) error {
 		}
 		// Unlike a file, which replaces a symlink at its path, a directory is
 		// entered: MkdirAll and the chmod in applyDirModes both follow a link here.
-		if fi, err := os.Lstat(full); err == nil && fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("directory %q is a symlink on disk", d.Path)
+		if fi, err := os.Lstat(full); err == nil && linkLike(fi.Mode()) {
+			return fmt.Errorf("directory %q is a symlink or junction on disk", d.Path)
 		}
 		if err := os.MkdirAll(full, 0o700); err != nil {
 			return err
@@ -446,6 +450,9 @@ func EnsureDirs(dir string, dirs []DirEntry) error {
 func RemoveDir(dir, relPath string) error {
 	full, err := safeJoin(dir, relPath)
 	if err != nil {
+		return err
+	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
 		return err
 	}
 	entries, err := os.ReadDir(full)
@@ -540,6 +547,9 @@ func SyncParents(dir string, relPaths []string) error {
 func RemoveFile(dir, relPath string) error {
 	full, err := safeJoin(dir, relPath)
 	if err != nil {
+		return err
+	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
 		return err
 	}
 	if err := os.Remove(full); err != nil && !os.IsNotExist(err) {

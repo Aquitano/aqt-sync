@@ -118,7 +118,8 @@ func (s *skipList) tolerate(rel, path string, err error) error {
 // as it descends (skipping ignored directories, whose .aqtignore is therefore never
 // consulted), so nested rules apply to their subtree. Symlinks are read with
 // Readlink — never followed — so a link into an ignored or out-of-tree location is
-// captured as its target.
+// captured as its target. A junction or other reparse point (see linkLike) is
+// neither followed nor dropped: it is recorded as skipped, so its base content stays.
 //
 // A path the walk cannot read is passed to skips rather than aborting the tree; only
 // the tracked root itself is fatal, since there would be no tree left to describe.
@@ -180,6 +181,10 @@ func walkFiles(dir string, skips *skipList, fn func(fileNode) error, onDir func(
 				return skips.tolerate(rel, path, err)
 			}
 			return fn(fileNode{rel: rel, path: path, info: info, symlink: true, target: target})
+		}
+		if linkLike(d.Type()) {
+			skips.paths = append(skips.paths, SkippedPath{Path: rel, Err: errReparsePoint})
+			return nil
 		}
 		if !d.Type().IsRegular() {
 			return nil

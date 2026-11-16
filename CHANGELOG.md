@@ -82,6 +82,20 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- An `.aqtignore` saved with CRLF line endings ignored nothing, because every rule
+  kept its trailing `\r`. Rules now match as they do with LF endings.
+
+- A directory junction in a tracked folder on Windows was not treated as a link. A
+  pull could write through it outside the folder, and the next sync deleted those
+  files everywhere. Pulls now refuse to write through a junction, and a scan reports
+  it as skipped and keeps its last-synced contents. A remote delete no longer
+  removes a file or directory through a symlink or junction in its parent path either.
+
+- `notes` and `notes.` synced from Linux landed on one file on Windows, and the next
+  sync lost one of them everywhere. Names that differ only by trailing dots or spaces
+  are now refused like case collisions. A Windows device also refuses names
+  containing a backslash, which it would otherwise write as nested paths.
+
 - A pull into a read-only directory no longer fails on every sync. The directory is
   writable for the pass, then gets its old mode back or the one the remote set.
 - A remote file replacing a local directory that holds ignored content (`.git/`,
