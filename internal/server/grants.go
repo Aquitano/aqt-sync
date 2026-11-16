@@ -553,12 +553,7 @@ func (s *Server) handleAccountKeys(c *gin.Context) {
 	}
 	keys, err := s.store.AccountKeysByEmail(email)
 	if errors.Is(err, ErrNotFound) {
-		decoy, derr := s.decoyAccountKeys(email)
-		if derr != nil {
-			abort(c, http.StatusInternalServerError, "lookup failed")
-			return
-		}
-		c.JSON(http.StatusOK, decoy)
+		c.JSON(http.StatusOK, s.decoyAccountKeys(email))
 		return
 	}
 	if err != nil {
@@ -571,11 +566,8 @@ func (s *Server) handleAccountKeys(c *gin.Context) {
 // decoyAccountKeys synthesizes a valid, deterministic keyset for an unknown email:
 // both keypairs are derived from the server secret (so repeated lookups agree) and
 // the enc key is genuinely self-signed, exactly as a real account's would be.
-func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error) {
-	secret, err := s.store.ServerSecret()
-	if err != nil {
-		return api.AccountKeysResponse{}, err
-	}
+func (s *Server) decoyAccountKeys(email string) api.AccountKeysResponse {
+	secret := s.store.ServerSecret()
 	stream := func(label string, n int) []byte { return s.decoyStream(secret, email, label, n) }
 	identity := ed25519.NewKeyFromSeed(stream("aqt-decoy-ed25519", ed25519.SeedSize))
 	encPub := crypto.DeriveEncKeyFromSeed(stream("aqt-decoy-xwing", crypto.KeySize)).Public()
@@ -584,7 +576,7 @@ func (s *Server) decoyAccountKeys(email string) (api.AccountKeysResponse, error)
 		PublicKey:    identity.Public().(ed25519.PublicKey),
 		EncPublicKey: encPub,
 		EncKeySig:    crypto.SignEncKey(identity, encPub),
-	}, nil
+	}
 }
 
 // handleCreateGrant stores a client-sealed grant on a resource the caller owns
@@ -617,12 +609,7 @@ func (s *Server) handleCreateGrant(c *gin.Context) {
 			abort(c, http.StatusBadRequest, "granteeEmail and an X-Wing granteeEncPublicKey must be supplied together")
 			return
 		}
-		decoy, err := s.decoyAccountKeys(email)
-		if err != nil {
-			abort(c, http.StatusInternalServerError, "grant target lookup failed")
-			return
-		}
-		target = &grantTarget{email: email, encPublicKey: req.GranteeEncPublicKey, decoy: decoy}
+		target = &grantTarget{email: email, encPublicKey: req.GranteeEncPublicKey, decoy: s.decoyAccountKeys(email)}
 	}
 	defer s.accountLimits.lock(owner)()
 	stored, err := s.store.GrantStoredBytes(owner, c.Param("id"), req.GranteeHandle)

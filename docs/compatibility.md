@@ -201,6 +201,15 @@ ask for `retire`, so its `aqt share <folder> --expire` still reclaims the folder
 link fires, and the server cannot second-guess it: resource metadata is sealed, so it
 cannot tell a folder from an ephemeral paste.
 
+## Root-key fence on creates (no capability bump)
+
+A resource create and `PUT /v1/account/recovery` carry `identityKey`, the identity key
+of the root key their wrap was sealed under, and the server answers
+`409 root_key_changed` when a root-key rotation has replaced it. Nothing sealed
+changes, so `api.ClientCapability` is not bumped. A server that predates the field
+ignores it, and a client that predates it sends none and is not fenced: its create
+can still land a wrap of the retired root if it races `rotate-root`.
+
 ## Rollout rules
 
 - **Upgrade the server first, then every client, in one pass.** Migrations are

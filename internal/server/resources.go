@@ -106,6 +106,15 @@ func (s *Store) createResource(owner string, req api.PutResourceRequest, metaJSO
 	} else if found {
 		return prior.ID, prior.Version, nil
 	}
+	if len(req.IdentityKey) > 0 {
+		var identity []byte
+		if err := tx.QueryRow(`SELECT public_key FROM accounts WHERE owner_handle = ?`, owner).Scan(&identity); err != nil {
+			return "", 0, err
+		}
+		if !bytes.Equal(req.IdentityKey, identity) {
+			return "", 0, ErrRootKeyChanged
+		}
+	}
 	now := time.Now().Unix()
 	if _, err := tx.Exec(
 		`INSERT INTO resources(id, owner_handle, visibility, encrypted_meta, wrapped_key, blob_nonce, blob_size, version, min_client, expires_at, max_reads, on_expiry, created_at, updated_at, compact_at)
@@ -927,6 +936,10 @@ func (s *Server) handlePutResource(c *gin.Context) {
 	}
 	if errors.Is(err, ErrIdempotencyConflict) {
 		abortCode(c, http.StatusConflict, "Idempotency-Key was already used for another request", api.ErrCodeIdempotencyConflict)
+		return
+	}
+	if errors.Is(err, ErrRootKeyChanged) {
+		abortRootKeyChanged(c)
 		return
 	}
 	if errors.Is(err, ErrSharedNeedsRefs) {

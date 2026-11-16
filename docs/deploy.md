@@ -381,7 +381,8 @@ re-login loop that cannot succeed. Nothing is deleted and no key is destroyed, s
 `enable` restores access with the account's existing device tokens.
 
 A running server reads the flag on every authenticated request, so the suspension
-applies from the next request even though `admin` is a separate process.
+applies from the next request even though `admin` is a separate process. Attaching
+a device and recovery-key resets read the flag too, so they are refused at once.
 
 ### Deleting an account
 

@@ -159,6 +159,7 @@ func (app *application) runPush(path string, opts pushOptions) error {
 		return err
 	}
 	wrapped, err := crypto.WrapKey(ck, [crypto.KeySize]byte(mk))
+	req.IdentityKey = crypto.IdentityKey(mk)
 	mk.Wipe()
 	if err != nil {
 		return err
@@ -278,6 +279,7 @@ func (app *application) runPushStream(cl *client.Client, prof *identity.Profile,
 		Blob:          blob,
 		EncryptedMeta: metaBlob,
 		WrappedKey:    &wrapped,
+		IdentityKey:   crypto.IdentityKey(mk),
 		ChunkRefs:     refs,
 		MinClient:     api.CapabilityIDBinding, // the bind below seals the FileRoot and meta id-bound (v2)
 		ExpireSeconds: expireSeconds,
