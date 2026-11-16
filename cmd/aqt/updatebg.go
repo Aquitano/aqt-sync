@@ -67,7 +67,7 @@ func (app *application) maybeBackgroundUpdate(cmd *cobra.Command) {
 		if checkErr == nil && res.AvailableVersion != "" {
 			st.RaiseCeiling(update.ChannelStable, res.AvailableVersion)
 		}
-		if checkErr == nil && res.Status == update.StatusUpdateAvailable {
+		if checkErr == nil && res.Status == update.StatusUpdateAvailable && st.Policy != update.PolicyOff {
 			notify(st, res)
 		}
 	})
