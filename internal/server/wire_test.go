@@ -363,3 +363,39 @@ func TestResourceWriteRefusals(t *testing.T) {
 		t.Fatalf("undeclared min_client = %d, want 400", rec.Code)
 	}
 }
+
+// The envelope download streams the blob from disk; its bytes must match the
+// buffered encoding exactly, and it advertises the full length up front.
+func TestStreamedResourceDownloadMatchesBufferedEncoding(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	token, mk := h.signup("streamed-download@example.com", "passphrase for streaming")
+	put, code := h.putSized(token, mk, "", 1<<20)
+	if code != http.StatusCreated {
+		t.Fatalf("put = %d, want 201", code)
+	}
+	owner, err := h.store.OwnerByToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := h.store.GetResource(put.ID, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := api.EncodeResourceDownload(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rec := h.raw(http.MethodGet, "/v1/resources/"+put.ID, token,
+		map[string]string{"Accept": api.ResourceEnvelopeMediaType}, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get = %d, want 200", rec.Code)
+	}
+	if !bytes.Equal(rec.Body.Bytes(), want) {
+		t.Fatalf("streamed body (%d bytes) differs from buffered encoding (%d bytes)", rec.Body.Len(), len(want))
+	}
+	if got := rec.Header().Get("Content-Length"); got != fmt.Sprint(len(want)) {
+		t.Fatalf("Content-Length = %q, want %d", got, len(want))
+	}
+}

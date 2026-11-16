@@ -377,9 +377,11 @@ carry internal detail. `426` additionally carries `minClient`.
 The authenticated group is rate-limited per device token (a coarse token bucket with
 a generous burst, so a large sync or clone is unaffected), with a second, far tighter
 limiter on the expensive `POST /v1/gc` keyed per owner. Unauthenticated auth routes
-are limited separately. The bucket key is the TCP peer address regardless of any
-`X-Forwarded-*` header, so a spoofed header cannot mint fresh buckets. Limits are
-configured in [`../deploy.md`](../deploy.md).
+are limited separately, and so are anonymous public reads (`GET /v1/resources/:id`
+without a valid token, and public object fetches). Those are keyed by client
+address: the TCP peer, or, when the peer is a trusted proxy, the right-most
+`X-Forwarded-For` hop outside the trusted list, so a header the client sets itself
+cannot mint fresh buckets. Limits are configured in [`../deploy.md`](../deploy.md).
 
 A throttled request is answered with `429 Too Many Requests` carrying the wait twice,
 both derived from one limiter result:

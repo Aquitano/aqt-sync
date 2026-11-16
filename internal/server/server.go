@@ -15,6 +15,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -61,7 +62,8 @@ type Config struct {
 	MaxSnapshots int
 	MaxObjects   int
 	// TrustedProxies is passed to gin.SetTrustedProxies, but only when set through
-	// WithTrustedProxies: the CIDRs/hosts whose X-Forwarded-* headers are believed.
+	// WithTrustedProxies: the CIDRs/hosts whose X-Forwarded-* headers are believed,
+	// both for the share-page scheme and for the client address rate limits key on.
 	// Left unset (the zero value), gin's own default — which trusts every proxy —
 	// applies, so the binary always sets it; an explicit empty slice trusts none
 	// (RemoteAddr is used verbatim).
@@ -134,6 +136,32 @@ func (c Config) WithTrustedProxies(proxies []string) Config {
 	return c
 }
 
+// trustsPeer reports whether a request from remoteIP may set X-Forwarded-*, by
+// the same rule gin.SetTrustedProxies applies to X-Forwarded-For (gin does not
+// expose its own check).
+func (c Config) trustsPeer(remoteIP string) bool {
+	if !c.trustedProxiesSet {
+		return true
+	}
+	ip, err := netip.ParseAddr(remoteIP)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, proxy := range c.TrustedProxies {
+		if addr, err := netip.ParseAddr(proxy); err == nil {
+			if addr.Unmap() == ip {
+				return true
+			}
+			continue
+		}
+		if prefix, err := netip.ParsePrefix(proxy); err == nil && prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // inviteAccepted reports whether token matches a configured invite secret, in
 // constant time over the whole list so timing does not leak which (or how many)
 // tokens exist.
@@ -150,12 +178,12 @@ func (c Config) inviteAccepted(token string) bool {
 type Server struct {
 	store *Store
 	cfg   Config
-	// Four limiters with four keys: unauth routes by peer address (no identity yet),
-	// authed routes by device id (tokens are the identity; a NAT'd office must not
-	// share a bucket), GC by owner (its planning cost scales with the owner's whole
-	// object table, so it gets a far smaller budget), and the public object-read by
-	// peer address but far looser than unauth (a bulk download would trip the 1-rps
-	// brute-force bucket).
+	// Four limiters with four keys: unauth routes by client address (no identity
+	// yet), authed routes by device id (tokens are the identity; a NAT'd office must
+	// not share a bucket), GC by owner (its planning cost scales with the owner's
+	// whole object table, so it gets a far smaller budget), and the anonymous public
+	// reads by client address but far looser than unauth (a bulk download would trip
+	// the 1-rps brute-force bucket).
 	limiter       *ipRateLimiter
 	authLimiter   *ipRateLimiter
 	gcLimiter     *ipRateLimiter
@@ -228,8 +256,10 @@ func (s *Server) Router() *gin.Engine {
 	// Trust only the configured reverse proxies for X-Forwarded-*. Without a call to
 	// SetTrustedProxies gin trusts every proxy, so an attacker could spoof
 	// X-Forwarded-Proto/For; the aqt-server binary always sets a list (loopback when
-	// AQT_TRUSTED_PROXIES is unset). The rate-limit bucket key deliberately stays on the
-	// TCP peer regardless. An explicit empty list trusts none.
+	// AQT_TRUSTED_PROXIES is unset). An explicit empty list trusts none. Only
+	// X-Forwarded-For names the client: X-Real-IP is not appended hop by hop, so a
+	// proxy that passes the client's copy through would let it pick its own bucket.
+	r.RemoteIPHeaders = []string{"X-Forwarded-For"}
 	if s.cfg.trustedProxiesSet {
 		if err := r.SetTrustedProxies(s.cfg.TrustedProxies); err != nil {
 			log.Printf("trusted proxies: %v", err)
@@ -281,8 +311,9 @@ func (s *Server) Router() *gin.Engine {
 		}
 
 		// Public resource reads need no auth; the id is unguessable and the
-		// decrypt key lives only in the caller's URL fragment.
-		v1.GET("/resources/:id", s.handleGetResource)
+		// decrypt key lives only in the caller's URL fragment. An owner or grantee
+		// reads private ones on the same route, under their device's authed budget.
+		v1.GET("/resources/:id", s.optionalAuthLimit, s.handleGetResource)
 		v1.GET("/public/resources/:id/preflight", s.handlePublicResourcePreflight)
 
 		// Public object read for a streamed (large) share: a link holder has the
@@ -438,6 +469,26 @@ func (s *Server) authMiddleware(c *gin.Context) {
 	}
 	c.Set(ownerContextKey, owner)
 	c.Set(deviceContextKey, deviceID)
+	c.Next()
+}
+
+// optionalAuthLimit rate-limits a route that serves anonymous and authenticated
+// callers alike. A token that resolves sets the owner and device like
+// authMiddleware and draws on that device's authed bucket; anything else, a bad
+// token included, is anonymous and draws on the client address's public bucket.
+func (s *Server) optionalAuthLimit(c *gin.Context) {
+	limiter, key := s.publicLimiter, clientKey(c)
+	if token, ok := bearerToken(c); ok {
+		if owner, deviceID, err := s.store.AuthByToken(token); err == nil {
+			c.Set(ownerContextKey, owner)
+			c.Set(deviceContextKey, deviceID)
+			limiter, key = s.authLimiter, deviceID
+		}
+	}
+	if ok, wait := limiter.reserve(key); !ok {
+		abortRateLimited(c, wait)
+		return
+	}
 	c.Next()
 }
 

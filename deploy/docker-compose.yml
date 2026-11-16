@@ -14,7 +14,9 @@ services:
       AQT_INVITE_TOKENS: ${AQT_INVITE_TOKENS:?set AQT_INVITE_TOKENS in deploy/.env}
       AQT_QUOTA_BYTES: ${AQT_QUOTA_BYTES:?set AQT_QUOTA_BYTES in deploy/.env}
       AQT_MAX_DEVICES: ${AQT_MAX_DEVICES:?set AQT_MAX_DEVICES in deploy/.env}
-      # Trust the compose network so the share-page URL honors X-Forwarded-Proto.
+      # Trust the compose network so rate limits key on each client's address
+      # (from Caddy's X-Forwarded-For) rather than putting every client in the
+      # caddy container's bucket, and the share-page URL honors X-Forwarded-Proto.
       # Adjust to your network's subnet (docker network inspect <net> to find it).
       AQT_TRUSTED_PROXIES: 172.16.0.0/12
     volumes:

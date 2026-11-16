@@ -36,6 +36,21 @@ All notable changes to this project are documented in this file.
 
 ### Fixed
 
+- **Behind a reverse proxy, one client could lock everyone out of login.** Rate
+  limits keyed on the TCP peer, which is the proxy, so all clients shared one
+  bucket. A peer listed in `AQT_TRUSTED_PROXIES` now has its clients keyed by the
+  right-most untrusted `X-Forwarded-For` hop. The share page honors
+  `X-Forwarded-Proto` only from a trusted proxy too. nginx setups need
+  `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`
+  ([deploy.md](docs/deploy.md#3-reverse-proxy)).
+
+- **Public resource downloads are rate-limited and no longer buffered.**
+  `GET /v1/resources/:id` had no limiter and held each blob in memory twice, so slow
+  readers could pin about 128 MiB per request. Anonymous reads now share the public
+  read budget and token reads the device's authed budget, and the envelope form the
+  CLI reads streams from disk. The JSON form the browser share page reads is still
+  buffered.
+
 - The server stored a grantee handle of any length up to the 32 MiB grant body but
   charged quota a fixed 128 bytes per grant, so one account could store gigabytes
   past its quota. A grant now refuses a handle longer than the 16 bytes every handle
