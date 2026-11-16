@@ -741,6 +741,10 @@ func abortNotFound(c *gin.Context) {
 	abortCode(c, http.StatusNotFound, "not found", api.ErrCodeNotFound)
 }
 
+func abortRootKeyChanged(c *gin.Context) {
+	abortCode(c, http.StatusConflict, "the account root key was rotated after this request was built", api.ErrCodeRootKeyChanged)
+}
+
 // requestCapability fails closed for a caller that announces nothing — a bare curl
 // of a public link, or any tool that is not aqt. Reading absent or malformed values
 // as baseline gates such a request at the format boundary, before any encrypted

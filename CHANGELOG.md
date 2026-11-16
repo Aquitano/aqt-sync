@@ -51,6 +51,16 @@ All notable changes to this project are documented in this file.
   CLI reads streams from disk. The JSON form the browser share page reads is still
   buffered.
 
+- The server stored a grantee handle of any length up to the 32 MiB grant body but
+  charged quota a fixed 128 bytes per grant, so one account could store gigabytes
+  past its quota. A grant now refuses a handle longer than the 16 bytes every handle
+  has, and signup, attach, and recover refuse a device name over 255 bytes.
+
+- The Docker image's `/data` is now owned by the `nonroot` user, so a fresh named
+  volume no longer leaves the server crash-looping on a permission error.
+- `install.ps1 -Server` decodes `checksums.txt` when GitHub serves it as bytes. It
+  previously always failed with "checksums.txt lists no entry".
+
 - `aqt signup --server http://remote-host` sent the passphrase verifier over plain
   HTTP, created the account, and then refused to store the token, leaving an account
   this device could not use. It now refuses before sending anything.
@@ -71,6 +81,31 @@ All notable changes to this project are documented in this file.
   admin command runs in a separate process that cannot clear that cache, so a
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
+
+- Signup and login reported a 5xx from the server or an exhausted rate limit as "does
+  not answer like an aqt server; check the URL" and exited 1. They now show the
+  server's error and its documented exit code, and keep that message for a response
+  that proves the URL is wrong.
+
+- `aqt update policy <mode> --json` printed prose. It now prints the state as JSON,
+  like `aqt update policy --json`.
+
+- A background update check could undo an `aqt update policy` change made while it
+  ran. It now re-reads the state before saving.
+
+- On Windows, an update failed with "Access denied" while an agent that had not
+  restarted since the last update still ran from the previous rollback file. Each
+  update now moves the old binary to a fresh `.aqt-update-previous-*.old` name.
+
+- The account bootstrap no longer reveals by timing which emails have accounts. Each
+  decoy wrote to the database, so it answered slower than a real account while
+  uploads held the writer. The decoy secret is now read once at startup.
+- A suspended account can no longer be reset with its recovery key or attach a
+  device; both answer `403 account_disabled`.
+- A resource created or a recovery key made while `rotate-root` ran could be wrapped
+  under the retired root key: the resource never opened and blocked every later
+  rotation, and the recovery key never worked. Both requests now name their root key,
+  and the server refuses a retired one with `409 root_key_changed`.
 
 ### Changed
 

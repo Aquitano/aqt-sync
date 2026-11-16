@@ -30,6 +30,10 @@ import (
 // ErrNotFound maps a 404 so callers can distinguish "no such account/resource".
 var ErrNotFound = errors.New("not found")
 
+// ErrRootKeyChanged maps the root_key_changed code: the request was built against a
+// root key that a root-key rotation has since retired.
+var ErrRootKeyChanged = errors.New("the account root key was rotated while this ran; re-run the command (after `aqt login` if this device was signed out)")
+
 // ErrUnauthorized maps a 401 so login can distinguish a revoked local device
 // from a transient network failure without creating a duplicate attachment.
 var ErrUnauthorized = errors.New("unauthorized")
@@ -55,7 +59,7 @@ func mutationOutcome(operation string, err error) error {
 	}
 	// ErrRateLimited belongs here: the limiter middleware aborts before the handler
 	// runs, so a 429 means the mutation definitively did not happen.
-	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) || errors.Is(err, ErrSenderBlocked) || errors.Is(err, ErrRateLimited) {
+	if errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnauthorized) || errors.Is(err, ErrConflict) || errors.Is(err, ErrGone) || errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrDeviceLimit) || errors.Is(err, ErrSenderBlocked) || errors.Is(err, ErrRateLimited) || errors.Is(err, ErrRootKeyChanged) {
 		return err
 	}
 	var upgrade *UpgradeRequiredError
@@ -1166,6 +1170,8 @@ func statusError(status int, path string, body []byte) error {
 		return ErrRateLimited
 	case api.ErrCodeAccountExists:
 		return ErrConflict
+	case api.ErrCodeRootKeyChanged:
+		return ErrRootKeyChanged
 	}
 
 	switch status {

@@ -59,6 +59,7 @@ type resourceUploadHeader struct {
 	MaxReads        int64              `json:"maxReads,omitempty"`
 	OnExpiry        OnExpiry           `json:"onExpiry,omitempty"`
 	RevokeGrantee   string             `json:"revokeGrantee,omitempty"`
+	IdentityKey     []byte             `json:"identityKey,omitempty"`
 }
 
 // resourceDownloadHeader is the JSON header of a GET /v1/resources/:id
@@ -98,6 +99,7 @@ func EncodeResourceUpload(req PutResourceRequest) ([]byte, error) {
 		MaxReads:        req.MaxReads,
 		OnExpiry:        req.OnExpiry,
 		RevokeGrantee:   req.RevokeGrantee,
+		IdentityKey:     req.IdentityKey,
 	}, req.Blob.Ciphertext)
 }
 
@@ -123,6 +125,7 @@ func DecodeResourceUpload(r io.Reader) (PutResourceRequest, error) {
 		MaxReads:        h.MaxReads,
 		OnExpiry:        h.OnExpiry,
 		RevokeGrantee:   h.RevokeGrantee,
+		IdentityKey:     h.IdentityKey,
 	}, nil
 }
 

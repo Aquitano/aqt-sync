@@ -236,6 +236,10 @@ type RecoveryKeyRequest struct {
 	WrappedRoot      crypto.SealedBlob `json:"wrappedRoot"`
 	RecoveryVerifier []byte            `json:"recoveryVerifier"`
 	AuthVerifier     []byte            `json:"authVerifier"`
+	// IdentityKey is the Ed25519 identity key of the root key WrappedRoot holds. A
+	// root-key rotation keeps the passphrase verifier, so this is what lets the server
+	// refuse a wrap of the root key the rotation retired. Omitted by older clients.
+	IdentityKey []byte `json:"identityKey,omitempty"`
 }
 
 // RecoverRequest attaches a device with the recovery key in place of the passphrase
@@ -409,6 +413,11 @@ type PutResourceRequest struct {
 	// grant, so the next rotation re-wraps the new key to the account that was revoked.
 	// Ignored on a create (a new resource has no grants). Empty means revoke nobody.
 	RevokeGrantee string `json:"revokeGrantee,omitempty"`
+	// IdentityKey is the Ed25519 identity key of the root key that wrapped WrappedKey.
+	// A create carries no version for a root-key rotation to bump, so the server
+	// checks this against the account's current identity instead. Omitted by older
+	// clients and ignored on an update, whose ExpectedVersion already fences rotation.
+	IdentityKey []byte `json:"identityKey,omitempty"`
 }
 
 // OnExpiry selects what a server does with a resource once its link's lifecycle

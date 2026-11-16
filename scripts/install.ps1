@@ -100,6 +100,9 @@ try {
             # exact tag, so a release published mid-install cannot be consulted here.
             $sumsUrl = ($serverUrl -replace ([regex]::Escape($serverName) + '$'), 'checksums.txt')
             $sums = (Invoke-WebRequest -Uri $sumsUrl -UseBasicParsing).Content
+            # GitHub serves release assets as application/octet-stream, which
+            # Invoke-WebRequest returns as bytes rather than text.
+            if ($sums -is [byte[]]) { $sums = [System.Text.Encoding]::UTF8.GetString($sums) }
         } catch {
             throw "could not read checksums.txt; refusing to install an unverified $serverName"
         }
