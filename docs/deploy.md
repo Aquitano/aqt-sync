@@ -83,7 +83,7 @@ default: open registration, no quotas, loopback-only proxy trust, plain HTTP.
 | `AQT_MAX_DEVICES` | `0` | Per-account device cap. `0` = unlimited. |
 | `AQT_AUTH_RATE` | `0` | Authenticated requests/sec per device token. `0` = default (50). |
 | `AQT_AUTH_BURST` | `0` | Authenticated burst per device token, a whole number. `0` = default (500). |
-| `AQT_TRUSTED_PROXIES` | loopback | Comma-separated proxy CIDRs/hosts whose `X-Forwarded-*` is trusted. `none` trusts none. |
+| `AQT_TRUSTED_PROXIES` | loopback | Comma-separated proxy IP addresses or CIDRs whose `X-Forwarded-*` is trusted. `none` trusts none. |
 | `AQT_SNAPSHOT_INTERVAL` | `24h` | Scheduled snapshot cadence. `0` disables. |
 | `AQT_SNAPSHOT_KEEP` | `30` | Scheduled snapshots retained per resource. `0` keeps all. Anchored snapshots (`aqt checkpoint`) are exempt and never pruned. |
 | `AQT_GC_INTERVAL` | `6h` | Cadence of the scheduled maintenance pass: it fires due link lifecycle policies, and tidies packs after client prunes. It never decides on its own that an object is garbage. See [Reclaiming storage](#reclaiming-storage). `0` disables the pass, link expiry included. |
@@ -109,7 +109,10 @@ Notes:
   is ignored), and the share-page URL honors `X-Forwarded-Proto`. If the proxy is
   not trusted, every client behind it shares one rate-limit bucket, and one busy
   client can lock everyone out of login. The proxy must set `X-Forwarded-For`;
-  `X-Real-IP` is not read.
+  `X-Real-IP` is not read. A forwarder on the same host that passes TCP through
+  without rewriting HTTP (an SSH or stunnel tunnel, HAProxy in `mode tcp`) leaves
+  the client's own `X-Forwarded-For` in place, so set `AQT_TRUSTED_PROXIES=none`
+  there, or any client could pick its own bucket.
 - <a id="source-offer"></a>**Source offer.** aqt is AGPL-3.0-or-later. The share page
   links to the upstream repository, which is accurate for a stock release. If you run
   a patched build that anyone else can reach, publish that build's source and point
