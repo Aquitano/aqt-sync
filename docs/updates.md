@@ -174,8 +174,8 @@ holds nothing usable:
 3. Run the extracted file and require it to report the version the manifest promised.
    This happens **before** the installed binary is touched, so a download that
    verified but does not run changes nothing.
-4. Rename the current binary aside to `.aqt-update-previous.old`, then rename the new
-   file into place.
+4. Rename the current binary aside to `.aqt-update-previous-*.old`, a fresh name each
+   run, then rename the new file into place.
 5. Run the installed binary and check its version again. If that fails, the previous
    binary is renamed back.
 
@@ -193,7 +193,7 @@ A file named `.aqt-update-*` in the install directory is update debris:
 
 - `.aqt-update-*.part` — a download that did not finish.
 - `.aqt-update-*.new` — an extracted binary that was never installed.
-- `.aqt-update-previous.old` — the binary that was just replaced.
+- `.aqt-update-previous-*.old` — the binary that was just replaced.
 
 All three are safe to delete. Every `aqt update` that actually installs clears them
 first, which is the only way the last one can go on Windows: the file is this
@@ -205,7 +205,7 @@ install, or until you delete them by hand.
 If an update is interrupted, the installed binary is whichever of the two the last
 completed rename left in place — never a partial file, because the new binary is
 written and flushed under a temporary name before any rename happens. To recover by
-hand, move `.aqt-update-previous.old` back over the installed path.
+hand, move the newest `.aqt-update-previous-*.old` back over the installed path.
 
 ## Update policy
 

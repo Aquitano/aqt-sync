@@ -113,17 +113,20 @@ POST   /v1/account/recover           Reset a forgotten passphrase. Body: { email
                                      authVerifier }. Like attach, but the recovery key's verifier
                                      stands in for the passphrase's; stores the new passphrase
                                      wrap, bumps the epoch, removes every other device.
-                                     → { ownerHandle, deviceId, token }; any failure is one 401.
+                                     → { ownerHandle, deviceId, token }; a suspended account is
+                                     403 account_disabled, any other failure is one 401.
 POST   /v1/auth/challenge            Body: { email } → { challengeId, nonce }  (one-time, short-lived)
 POST   /v1/devices                   Attach device. Body: { email, challengeId, signature,
                                      authVerifier, deviceName }.
                                      Server verifies the Ed25519 signature over the nonce — no secret sent. → { deviceId, token }
+                                     A suspended account is 403 account_disabled.
 GET    /v1/devices                   List the account's attached devices (owner token).
                                      Paginated (?limit=, ?cursor=)
                                      → { devices: [{ id, name }], nextCursor? }
                                      The server never marks a device; `current` is a client-side
                                      annotation the CLI adds for its own device. Names are
-                                     client-supplied labels, not secrets.
+                                     client-supplied labels, not secrets, of at most 255 bytes:
+                                     signup, attach, and recover answer a longer one with 400.
 DELETE /v1/devices/:id               Revoke a device.
 DELETE /v1/account                   Erase the account and everything under it. Body: { authVerifier }
                                      — the passphrase proof, so a device token alone cannot destroy an
@@ -137,7 +140,10 @@ PUT    /v1/resources                 Replace in place (id set, owner-checked, ve
                                      is 400: create is POST, where an Idempotency-Key can replay it.
                                      Body: the resource envelope (see Media types above), whose header
                                      carries id?, visibility, encryptedMeta, blobNonce, minClient, and
-                                     wrappedKey? (private only) / expireSeconds?, maxReads? (public only)
+                                     wrappedKey? (private only) / expireSeconds?, maxReads? (public only).
+                                     A create may carry identityKey, the Ed25519 identity key of the root
+                                     key that sealed wrappedKey; 409 root_key_changed if a root-key
+                                     rotation has replaced it.
                                      → { id, version, expiresAt?, maxReads?, onExpiry? }  // echoes the accepted policy
 GET    /v1/resources/:id             → { blob, encryptedMeta, visibility, wrappedKey?, version }
                                      Public ids are fetchable without auth. A private id needs the owner
@@ -171,9 +177,11 @@ GET    /v1/public/resources/:id/preflight  Unauthenticated, uncounted. → { id,
 # Account maintenance (owner token). None of these re-encrypt a resource:
 PUT    /v1/account/passphrase        Re-wrap the root key under a new passphrase. Bumps the auth epoch
                                      (every other device's token dies) and rotates the stored verifier.
-PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, authVerifier }. Store the
-                                     root key wrapped under the recovery key, replacing any earlier one;
-                                     authVerifier proves the current passphrase (403 otherwise) → 204.
+PUT    /v1/account/recovery          Body: { wrappedRoot, recoveryVerifier, authVerifier, identityKey? }.
+                                     Store the root key wrapped under the recovery key, replacing any
+                                     earlier one; authVerifier proves the current passphrase (403
+                                     otherwise) → 204. identityKey names the root key wrappedRoot holds;
+                                     409 root_key_changed if a root-key rotation has replaced it.
 PUT    /v1/account/root-key          Compromise recovery: swap in a fresh root key with every re-wrapped
                                      key and migrated identity, atomically, keeping only this device.
                                      Clears the recovery wrap, which holds the old root key.
@@ -214,7 +222,8 @@ GET    /v1/account/keys?email=...    Grant-target lookup: { handle, publicKey, e
                                      PUT /v1/account/enc-key only moves a pre-X-Wing account onto X-Wing.
 POST   /v1/resources/:id/grants      Owner only. Body: { granteeHandle, wrappedKey, chunkRefs?, expectedVersion?,
                                      granteeEmail?, granteeEncPublicKey? }; wrappedKey
-                                     is exactly 1168 bytes (X-Wing encapsulation + sealed key), else 400. Upsert
+                                     is exactly 1168 bytes (X-Wing encapsulation + sealed key), and
+                                     granteeHandle at most 16 bytes (a minted handle's length), else 400. Upsert
                                      (rotation re-wraps by re-posting). chunkRefs refreshes the read scope
                                      like the visibility flip above, for the same reason. No grantee-
                                      existence check (decoy handles must be accepted indistinguishably).
@@ -337,7 +346,7 @@ status — `upgrade_required`, `version_conflict`, `idempotency_conflict`,
 `quota_exceeded`, `device_limit`, `bad_pack`, `gone`, `snapshot_anchored`,
 `not_found`, `too_many_ids`, `grant_limit`, `sender_blocked`, `block_limit`,
 `invalid_policy`, `invalid_cursor`, `invalid_limit`, `rate_limited`,
-`account_exists`, `account_disabled`, `missing_chunks`
+`account_exists`, `account_disabled`, `root_key_changed`, `missing_chunks`
 (the refs a manifest PUT, visibility flip, or grant carries name objects the owner no
 longer stores — a prune reaped an upload that outlived the grace period; re-running
 sync re-uploads them),
@@ -368,9 +377,11 @@ carry internal detail. `426` additionally carries `minClient`.
 The authenticated group is rate-limited per device token (a coarse token bucket with
 a generous burst, so a large sync or clone is unaffected), with a second, far tighter
 limiter on the expensive `POST /v1/gc` keyed per owner. Unauthenticated auth routes
-are limited separately. The bucket key is the TCP peer address regardless of any
-`X-Forwarded-*` header, so a spoofed header cannot mint fresh buckets. Limits are
-configured in [`../deploy.md`](../deploy.md).
+are limited separately, and so are anonymous public reads (`GET /v1/resources/:id`
+without a valid token, and public object fetches). Those are keyed by client
+address: the TCP peer, or, when the peer is a trusted proxy, the right-most
+`X-Forwarded-For` hop outside the trusted list, so a header the client sets itself
+cannot mint fresh buckets. Limits are configured in [`../deploy.md`](../deploy.md).
 
 A throttled request is answered with `429 Too Many Requests` carrying the wait twice,
 both derived from one limiter result:

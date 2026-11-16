@@ -45,7 +45,9 @@ be used to judge whether a restore is really a restore.
 - **POSIX permission bits.** A file's and a directory's `Mode().Perm()` — the low nine
   bits — ride in the manifest and are applied with `chmod` when the entry lands.
   Directory modes are applied deepest-first once the pass finishes, so a directory
-  that ends up read-only does not block writing its own children. An entry carrying no
+  that ends up read-only does not block writing its own children. A pull into a
+  directory that is read-only on disk makes it writable for the pass and then
+  restores its mode, or applies the new one the merge records. An entry carrying no
   recorded mode lands at `0600` for a file and `0700` for a directory.
 - **Symlinks, as targets.** A symlink is stored as its literal target string and
   recreated with `symlink`. It is **never** followed, so a link pointing outside the
@@ -468,7 +470,9 @@ A file (or symlink) on one side and a directory on the other claiming the same p
 is a conflict too, even when the two sides touched different paths (`x` against
 `x/y`). Local keeps the path; copy mode preserves a remote file as
 `<name>.conflict-<host>-<timestamp>` and a remote directory's entries under
-`<name>.conflict-<host>-<timestamp>/`.
+`<name>.conflict-<host>-<timestamp>/`. A remote file replacing a local directory that
+still holds untracked content, such as an ignored `.git/` or `node_modules/`, is the
+same conflict: that content is never deleted to make room.
 
 A directory deleted on one side while the other side adds content inside it stays,
 with the adding side's entry and mode; the rest of the delete still applies.

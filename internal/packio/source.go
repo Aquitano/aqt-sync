@@ -46,7 +46,7 @@ type Source struct {
 	objSpan map[string]packSpan
 	// spans records each pack's assigned spans so a later Locate (a caller walking a
 	// tree level by level) reuses a span that already contains an object instead
-	// of cutting a new one — the cache key is pack+span base, so reuse is what lets
+	// of cutting a new one — the cache key is pack+span range, so reuse is what lets
 	// a level-2 node inside a level-1 window come from the LRU, not the network.
 	spans map[string][]packSpan
 	mu    sync.Mutex // guards cache
@@ -215,11 +215,13 @@ func (s *Source) Get(id string) ([]byte, error) {
 // fetchSpan returns one span's bytes, fetching it at most once even under the
 // concurrent download pool: the LRU is consulted under mu, and singleflight collapses
 // concurrent misses of the same span into a single GetPackRange. The cache key is the
-// pack plus the span base because a pack can hold several spans. The returned bytes are
-// never mutated after the fetch, so a later eviction cannot disturb a caller still
-// slicing its object out of them.
+// pack plus the span's whole range: a pack can hold several spans, and a hostile
+// locate across two Locate calls can give two spans one base but different ends, so
+// keying on the base alone would serve a shorter span's bytes to Get. The returned
+// bytes are never mutated after the fetch, so a later eviction cannot disturb a
+// caller still slicing its object out of them.
 func (s *Source) fetchSpan(packID string, span packSpan) ([]byte, error) {
-	key := fmt.Sprintf("%s@%d", packID, span.base)
+	key := fmt.Sprintf("%s@%d-%d", packID, span.base, span.end)
 	s.mu.Lock()
 	data, ok := s.cache.Get(key)
 	s.mu.Unlock()

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,26 @@ func (s *Store) readBlob(id string, nonce []byte) ([]byte, error) {
 		return nil, ErrNotFound
 	}
 	return b, err
+}
+
+func (s *Store) openBlob(id string, nonce []byte) (*os.File, error) {
+	f, err := os.Open(s.blobPath(id, nonce))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrNotFound
+	}
+	return f, err
+}
+
+func readBlobFile(f *os.File) ([]byte, error) {
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	buf := make([]byte, info.Size())
+	if _, err := io.ReadFull(f, buf); err != nil {
+		return nil, err
+	}
+	return buf, nil
 }
 
 // packPath fans out content-addressed packs by their id prefix to keep any one

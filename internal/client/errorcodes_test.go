@@ -28,6 +28,7 @@ func TestErrorCodesMapToSentinels(t *testing.T) {
 		{"resource too large", http.StatusBadRequest, api.ErrCodeResourceTooLarge, ErrResourceTooLarge},
 		{"quota", http.StatusInsufficientStorage, api.ErrCodeQuotaExceeded, ErrQuotaExceeded},
 		{"version conflict", http.StatusConflict, api.ErrCodeVersionConflict, ErrConflict},
+		{"root key changed", http.StatusConflict, api.ErrCodeRootKeyChanged, ErrRootKeyChanged},
 		{"gone", http.StatusGone, api.ErrCodeGone, ErrGone},
 		{"not found", http.StatusNotFound, api.ErrCodeNotFound, ErrNotFound},
 	}

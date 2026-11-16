@@ -124,9 +124,16 @@ func Apply(ctx context.Context, opts ApplyOptions) (ApplyResult, error) {
 		return res, fmt.Errorf("%w before installing: %w", ErrVerifyFailed, err)
 	}
 
-	rollback := filepath.Join(in.Dir, TempPrefix+"previous.old")
-	_ = os.Remove(rollback)
+	// Unique per run: an agent that has not restarted since the last update still
+	// runs from that run's rollback file, and Windows will not replace it.
+	reserved, err := os.CreateTemp(in.Dir, TempPrefix+"previous-*.old")
+	if err != nil {
+		return res, err
+	}
+	rollback := reserved.Name()
+	_ = reserved.Close()
 	if err := os.Rename(in.Path, rollback); err != nil {
+		_ = os.Remove(rollback)
 		return res, fmt.Errorf("moving the current binary aside: %w", err)
 	}
 	if err := os.Rename(stagedPath, in.Path); err != nil {

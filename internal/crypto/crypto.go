@@ -246,6 +246,12 @@ func DeriveSigningKey(mk MasterKey) ed25519.PrivateKey {
 	return ed25519.NewKeyFromSeed(derive(mk[:], nil, "aqt-auth-ed25519-v1"))
 }
 
+// IdentityKey is the public half of DeriveSigningKey: the account identity the server
+// stores for this root key.
+func IdentityKey(mk MasterKey) ed25519.PublicKey {
+	return DeriveSigningKey(mk).Public().(ed25519.PublicKey)
+}
+
 // derive is HKDF-SHA256 with label as the info string, yielding a KeySize-byte
 // key or seed. Every key in the hierarchy comes from here, so the labels are a wire
 // contract: changing one changes every value derived under it. It panics rather than

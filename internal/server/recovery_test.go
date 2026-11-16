@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/aquitano/aqt-sync/internal/api"
 	"github.com/aquitano/aqt-sync/internal/crypto"
@@ -113,6 +114,57 @@ func TestRecoveryWrapDecoys(t *testing.T) {
 	}
 }
 
+// A real account is served from the read pool, so a decoy must not wait on the
+// writer connection either: with the writer held busy, the difference in latency
+// would say which emails have accounts.
+func TestDecoyBootstrapDoesNotWaitOnTheWriter(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.signup("no-recovery@example.com", "passphrase")
+	tx, err := h.store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	codes := make(chan int, 2)
+	go func() {
+		for _, email := range []string{"no-recovery@example.com", "nobody@example.com"} {
+			codes <- h.do(http.MethodGet, "/v1/account/salt?email="+email, "", nil, nil)
+		}
+	}()
+	for range 2 {
+		select {
+		case code := <-codes:
+			if code != http.StatusOK {
+				t.Fatalf("bootstrap: status %d", code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("a decoy bootstrap waited on the writer connection")
+		}
+	}
+}
+
+// Suspension holds against the recovery key and a passphrase login too: either would
+// otherwise reset or attach devices while an operator holds the account.
+func TestSuspendedAccountRefusesRecoveryAndAttach(t *testing.T) {
+	s := newStore(t)
+	owner := s.mustAccount(t, "held-recovery@example.com")
+	verifier := []byte("recovery proof")
+	if err := s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), verifier, make([]byte, 32), nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetAccountDisabled(owner, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := s.RecoverAccount(owner, verifier, cryptotest.KdfParams(t), sealedTestBlob(t, "x"), make([]byte, 32), "d"); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("recovery of a suspended account: err = %v, want ErrAccountDisabled", err)
+	}
+	if _, _, err := s.CreateDevice(owner, "d", 1, 0); !errors.Is(err, ErrAccountDisabled) {
+		t.Fatalf("attach to a suspended account: err = %v, want ErrAccountDisabled", err)
+	}
+}
+
 // Root-key rotation retires the root key a recovery wrap holds, so the wrap must go
 // with it rather than later reset the passphrase onto a dead root.
 func TestRotateRootKeyClearsRecoveryKey(t *testing.T) {
@@ -123,7 +175,7 @@ func TestRotateRootKeyClearsRecoveryKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	verifier := []byte("recovery proof")
-	if err := s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), verifier, make([]byte, 32)); err != nil {
+	if err := s.SetRecoveryKey(owner, sealedTestBlob(t, "recovery wrap"), verifier, make([]byte, 32), nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := s.RotateRootKey(owner, deviceID, rotateReq(nil)); err != nil {

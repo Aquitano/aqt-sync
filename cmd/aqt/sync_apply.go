@@ -5,8 +5,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -393,10 +396,31 @@ type localApply struct {
 	dirRemovals  []string
 }
 
+// touchedPaths lists every path the apply created, replaced, or removed, plus extra.
+func (w localApply) touchedPaths(extra []string) []string {
+	paths := slices.Concat(w.localDeletes, w.dirRemovals, extra)
+	for _, e := range w.downloads {
+		paths = append(paths, e.Path)
+	}
+	for _, d := range w.dirDownloads {
+		paths = append(paths, d.Path)
+	}
+	return paths
+}
+
 // applyLocalTree brings the local tree in line with the manifest just committed. It
 // returns the work as executed: a case-only rename consumes the delete that would have
 // destroyed its target, so the summary reports what actually happened.
-func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, foldFS bool) (localApply, error) {
+func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, foldFS bool) (_ localApply, err error) {
+	// A directory whose mode denies write still has to take this pull's writes and
+	// removals, so every existing parent on the way is writable until the end, then
+	// gets its mode back unless the merge records a new one.
+	unlocked := &writableDirs{modes: make(map[string]fs.FileMode)}
+	defer func() { err = errors.Join(err, unlocked.restore()) }()
+	if err := unlockParents(c.root, w.touchedPaths(nil), unlocked); err != nil {
+		return w, err
+	}
+
 	// A case-only rename arrives as an add+delete pair whose two paths resolve to
 	// the same physical file on a case-folding filesystem: the download lands on the
 	// very file the late delete then destroys, and the next sync pushes that loss
@@ -444,11 +468,8 @@ func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, 
 		}
 	}
 
-	// Directories last: create/chmod after files land (so a directory exists and gets
-	// its mode), and remove emptied directories after file deletes.
-	if err := syncengine.MaterializeDirs(c.root, w.dirDownloads); err != nil {
-		return w, err
-	}
+	// Directories last: remove emptied directories after file deletes, and set modes
+	// after every other write (so a directory exists and gets its mode).
 	if err := removeDirs(c.root, lateDirs); err != nil {
 		return w, err
 	}
@@ -461,7 +482,47 @@ func (app *application) applyLocalTree(c applyCtx, st applyState, w localApply, 
 			return w, err
 		}
 	}
+	if err := syncengine.MaterializeDirs(c.root, w.dirDownloads); err != nil {
+		return w, err
+	}
+	for _, d := range w.dirDownloads {
+		unlocked.keep(filepath.Join(c.root, filepath.FromSlash(d.Path)))
+	}
 	return w, nil
+}
+
+// unlockParents makes every existing directory from root down to each path's parent
+// writable, recording the modes it changes in dirs. It stops at the first component
+// that is not a real directory, so it never changes a mode through a symlink.
+func unlockParents(root string, paths []string, dirs *writableDirs) error {
+	realDir := map[string]bool{}
+	for _, p := range paths {
+		var chain []string
+		for dir := path.Dir(p); ; dir = path.Dir(dir) {
+			if ok, checked := realDir[dir]; checked {
+				if !ok {
+					chain = nil
+				}
+				break
+			}
+			chain = append(chain, dir)
+			if dir == "." {
+				break
+			}
+		}
+		for i := len(chain) - 1; i >= 0; i-- {
+			full := filepath.Join(root, filepath.FromSlash(chain[i]))
+			fi, err := os.Lstat(full)
+			realDir[chain[i]] = err == nil && fi.IsDir()
+			if !realDir[chain[i]] {
+				break
+			}
+			if err := dirs.writable(full, fi.Mode()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // persistSyncState records what this pass established: the new base manifest, and the
@@ -560,13 +621,16 @@ func (app *application) applySync(c applyCtx, actions []syncengine.Action, dirAc
 	if err != nil {
 		return err
 	}
-
-	if err := app.persistSyncState(c, st, syncedVersion); err != nil {
-		return err
-	}
 	mergedPaths := make([]string, len(landedMerges))
 	for i, resolution := range landedMerges {
 		mergedPaths[i] = resolution.path
+	}
+
+	if err := syncengine.SyncParents(c.root, work.touchedPaths(mergedPaths)); err != nil {
+		return err
+	}
+	if err := app.persistSyncState(c, st, syncedVersion); err != nil {
+		return err
 	}
 	app.summarize(files.uploads, work.downloads, work.localDeletes, mergedPaths)
 	if len(conflicts) > 0 {
