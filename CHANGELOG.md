@@ -92,6 +92,7 @@ All notable changes to this project are documented in this file.
   next sync would push as a revert.
 - A hostile server can no longer crash a download by locating two objects at one
   pack offset with different lengths. The longer span is fetched on its own.
+
 - Signup and login reported a 5xx from the server or an exhausted rate limit as "does
   not answer like an aqt server; check the URL" and exited 1. They now show the
   server's error and its documented exit code, and keep that message for a response
