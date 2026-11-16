@@ -20,7 +20,8 @@ All notable changes to this project are documented in this file.
   capability 6. Upgrade the server first (migration 24 adds the column), then every
   client. Grants made before this release carry no signature: recipients see them as
   `unsigned` and cannot open them, and a rotation never re-wraps them. `aqt share ls`
-  marks them `(unsigned)`; `aqt share <id> --with <email>` signs each one again. A
+  marks them `(unsigned)`; `aqt share <id> --with <email>` signs each one again, and
+  `aqt share resign` lists all of them and shares them again after you confirm. A
   root-key rotation names every outgoing grant, and the server answers `409` to one
   that misses a grant; running it again lists them afresh.
 

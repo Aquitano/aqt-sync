@@ -232,6 +232,14 @@ the current key. If the response to a rotation is lost, the error says it may ha
 gone through anyway: running bare `aqt unshare <id>` again is safe either way, and
 `aqt share ls <id>` marks `(unsigned)` the grants a committed rotation left behind.
 
+`aqt share resign` goes through every `(unsigned)` grant at once: the shares made
+before grants were signed, and the ones a rotation left behind. It lists each
+resource and the pinned contact it would share with, asks, and then shares them
+again, wrapped to the pinned keys and signed. It only runs on a terminal and takes
+no `--yes`, because the server chooses which grants it lists: a row it added looks
+the same as a share you made, and reading the list is what tells them apart. Grants
+to accounts not pinned on this device, or revoked from it, are named and left alone.
+
 The device that revokes a grant also records it locally, so its later rotations and
 pin repairs list that grantee as `revoked from this device` and never re-wrap for
 them, even if the server serves the resource's key from before the revoke. `aqt share

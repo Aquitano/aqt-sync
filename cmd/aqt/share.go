@@ -62,6 +62,7 @@ func (app *application) shareCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&burn, "burn", false, "burn after reading (shorthand for --max-reads 1)")
 	cmd.Flags().StringVar(&with, "with", "", "grant read-only access to a specific account by email (no public link)")
 	cmd.AddCommand(app.shareLsCmd())
+	cmd.AddCommand(app.shareResignCmd())
 	markJSONSupported(cmd)
 	markQuietSupported(cmd)
 	return cmd
@@ -208,7 +209,7 @@ func (app *application) runShareList(ref string) error {
 	}
 	if anyUnsigned {
 		fmt.Fprintln(os.Stderr, "an (unsigned) grantee holds no grant you signed for the current key: a share from before grants were signed, one left on an older key, or a row the server added. "+
-			"It does not open for them; if you meant to share it, run `aqt share <id> --with <email>` again")
+			"It does not open for them; if you meant to share it, run `aqt share <id> --with <email>` again, or `aqt share resign` to go through all of them")
 	}
 	return nil
 }

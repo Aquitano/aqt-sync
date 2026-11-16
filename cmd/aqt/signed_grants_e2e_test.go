@@ -180,6 +180,68 @@ func TestPinRefusesAHandleAnotherContactHolds(t *testing.T) {
 	}
 }
 
+// A share made before grants were signed carries no signature and opens for nobody.
+// `aqt share resign` shares every such grant again in one go, but only after a person
+// has read the list, since the server chooses what is on it.
+func TestShareResignSharesUnsignedGrantsAgainAfterAsking(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	h := app.newE2E(t)
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	id := app.pushSecretFile(t, "old.txt", "shared long ago")
+	if err := app.runShareWith(id, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+	_, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bob := pins["bob@example.com"].Handle
+	if err := h.store.PutGrant(prof.OwnerHandle, id, bob, make([]byte, crypto.GrantWrapSize), nil); err != nil {
+		t.Fatal(err)
+	}
+	bobPull := func() (err error) {
+		app.asGrantee("bob", func() {
+			err = app.runPull("aqt://"+id, filepath.Join(t.TempDir(), "out"), "", false, false)
+		})
+		return err
+	}
+	if err := bobPull(); err == nil {
+		t.Fatal("bob opened a grant with no signature")
+	}
+
+	if err := app.runShareResign(); err == nil || !strings.Contains(err.Error(), "terminal") {
+		t.Fatalf("resign without a terminal = %v, want a refusal", err)
+	}
+	if err := bobPull(); err == nil {
+		t.Fatal("resign without a terminal shared the grant again")
+	}
+
+	var asked string
+	orig := confirmResign
+	confirmResign = func(prompt string) error {
+		asked = prompt
+		return nil
+	}
+	t.Cleanup(func() { confirmResign = orig })
+	captureStdout(t, func() {
+		if err := app.runShareResign(); err != nil {
+			t.Fatalf("resign: %v", err)
+		}
+	})
+	for _, want := range []string{id, "old.txt", "bob@example.com"} {
+		if !strings.Contains(asked, want) {
+			t.Fatalf("the question does not show %q:\n%s", want, asked)
+		}
+	}
+	if got := app.pullAs(t, "bob", id); got != "shared long ago" {
+		t.Fatalf("bob pulled %q after the resign", got)
+	}
+}
+
 // Pin repair re-sends what was granted against a placeholder pin, and the server
 // chooses which resources list that placeholder. It lists it on a resource that was
 // never shared: repair must neither offer nor send that one.
