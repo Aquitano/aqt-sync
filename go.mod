@@ -2,7 +2,7 @@ module github.com/aquitano/aqt-sync
 
 go 1.26.0
 
-toolchain go1.26.6
+toolchain go1.26.11
 
 require (
 	github.com/atotto/clipboard v0.1.4
