@@ -5,6 +5,7 @@ package main
 import (
 	"bytes"
 	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -157,6 +158,8 @@ func (app *application) connectAccountServer() (accountServer, error) {
 		return accountServer{}, err
 	}
 	info, err := cl.ServerInfo()
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
 	switch {
 	case err == nil && info.Service == api.ServerInfoService:
 		if info.Capability > api.ClientCapability {
@@ -166,8 +169,10 @@ func (app *application) connectAccountServer() (accountServer, error) {
 		return accountServer{}, fmt.Errorf("cannot reach %s: %w", server, err)
 	case errors.Is(err, client.ErrNotFound) && cl.Live():
 		// A server that predates /v1/info: nothing to learn up front.
-	default:
+	case err == nil, errors.Is(err, client.ErrNotFound), errors.As(err, &syntaxErr), errors.As(err, &typeErr):
 		return accountServer{}, fmt.Errorf("%s does not answer like an aqt server; check the URL", server)
+	default:
+		return accountServer{}, fmt.Errorf("contacting %s: %w", server, err)
 	}
 	return accountServer{url: server, cl: cl, info: info}, nil
 }

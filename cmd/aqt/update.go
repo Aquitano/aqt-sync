@@ -339,6 +339,13 @@ changes the exit status of the command that triggered it.`,
 			if err := store.SetPolicy(p); err != nil {
 				return err
 			}
+			if app.json {
+				st, err := store.Load()
+				if err != nil {
+					return err
+				}
+				return printJSON(st)
+			}
 			if !app.quiet {
 				fmt.Printf("update policy: %s\n", p)
 			}

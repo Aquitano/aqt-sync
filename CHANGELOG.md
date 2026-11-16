@@ -67,6 +67,21 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- Signup and login reported a 5xx from the server or an exhausted rate limit as "does
+  not answer like an aqt server; check the URL" and exited 1. They now show the
+  server's error and its documented exit code, and keep that message for a response
+  that proves the URL is wrong.
+
+- `aqt update policy <mode> --json` printed prose. It now prints the state as JSON,
+  like `aqt update policy --json`.
+
+- A background update check could undo an `aqt update policy` change made while it
+  ran. It now re-reads the state before saving.
+
+- On Windows, an update failed with "Access denied" while an agent that had not
+  restarted since the last update still ran from the previous rollback file. Each
+  update now moves the old binary to a fresh `.aqt-update-previous-*.old` name.
+
 - The account bootstrap no longer reveals by timing which emails have accounts. Each
   decoy wrote to the database, so it answered slower than a real account while
   uploads held the writer. The decoy secret is now read once at startup.
