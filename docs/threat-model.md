@@ -172,7 +172,9 @@ that lists a pinned contact on a resource never shared with them gets no wrap fo
 them. A grantee revoked by an earlier rotation is skipped the same way, since that
 grant's signature covers a key the rotation replaced; the revoke itself skips the
 revoked handle by name. Pin repair applies the same rule to the resources it
-re-sends. A grant stored before grants were signed fails the check too, so it is
+re-sends. A grant is signed to a handle, and the server assigns handles, so a pin is
+refused when the server reports for its email a handle another pin already holds;
+otherwise a rotation could re-wrap one contact's share to the other's key. A grant stored before grants were signed fails the check too, so it is
 never re-wrapped; its owner shares it again to sign it. Before it rotates, `aqt
 unshare` lists the grantees it will re-wrap, named by their pins, and the listed
 grants it will leave behind, and asks on a terminal.

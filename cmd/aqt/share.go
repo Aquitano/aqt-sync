@@ -862,13 +862,24 @@ func planRewrap(cl *client.Client, prof *identity.Profile, id string, old *resou
 		return rewrapPlan{}, fmt.Errorf("load the grants this device revoked: %w", err)
 	}
 	byHandle := make(map[string]identity.Contact, len(pins))
+	shared := map[string]bool{}
 	for _, c := range pins {
+		if _, ok := byHandle[c.Handle]; ok {
+			shared[c.Handle] = true
+		}
 		byHandle[c.Handle] = c
 	}
 	self := crypto.DeriveSigningKey(old.mk).Public().(ed25519.PublicKey)
 	var plan rewrapPlan
 	for _, g := range grants {
 		if g.GranteeHandle == exclude {
+			continue
+		}
+		// A grant is signed to a handle, so one that two pins hold does not say which
+		// contact it was made for. refuseSharedHandle keeps new pins from sharing one;
+		// this covers a contacts file written before it did.
+		if shared[g.GranteeHandle] {
+			plan.left = append(plan.left, unfollowedGrant{foreignText(g.GranteeHandle), "more than one pinned contact holds this account handle; unpin the wrong one with `aqt contacts rm <email>`"})
 			continue
 		}
 		pin, pinned := byHandle[g.GranteeHandle]

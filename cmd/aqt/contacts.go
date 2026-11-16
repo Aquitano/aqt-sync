@@ -113,6 +113,20 @@ func pinFromKeys(email string, keys api.AccountKeysResponse, verified bool) iden
 	}
 }
 
+// refuseSharedHandle refuses keys the server reports for email under a handle that a
+// pin for another email already holds. An account has one handle and a grant is signed
+// to a handle, so two pins on one handle would let a rotation re-wrap what one contact
+// was given to the other's key. Only a server misreporting handles produces that.
+func refuseSharedHandle(pins map[string]identity.Contact, email string, keys api.AccountKeysResponse) error {
+	for _, pin := range pins {
+		if pin.Handle == keys.Handle && pin.Email != email {
+			return fmt.Errorf("the server reports for %s the account handle you pinned for %s, and an account has only one, so nothing was pinned or shared: the server is misreporting one of them. Compare keys with `aqt contacts verify %s`",
+				displayEmail(email), displayEmail(pin.Email), pin.Email)
+		}
+	}
+	return nil
+}
+
 // lookupGrantee resolves a grant target with trust-on-first-use pinning: the first
 // lookup pins (handle, identity key, enc key) locally, and a later lookup that
 // disagrees with the pin never silently re-routes grants to whoever holds the new key.
@@ -135,6 +149,9 @@ func lookupGrantee(cl *client.Client, prof *identity.Profile, mk crypto.MasterKe
 	}
 	pins, err := identity.LoadContacts(prof.Name)
 	if err != nil {
+		return identity.Contact{}, nil, err
+	}
+	if err := refuseSharedHandle(pins, email, keys); err != nil {
 		return identity.Contact{}, nil, err
 	}
 	if pin, ok := pins[email]; ok {
@@ -250,6 +267,19 @@ func grantedTo(cl *client.Client, prof *identity.Profile, mk crypto.MasterKey, h
 	revoked, err := identity.LoadRevokedGrants(prof.Name)
 	if err != nil {
 		return nil, err
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		return nil, err
+	}
+	holders := 0
+	for _, pin := range pins {
+		if pin.Handle == handle {
+			holders++
+		}
+	}
+	if holders > 1 {
+		return nil, errors.New("more than one pinned contact holds this account handle, so its grants cannot be told apart and nothing was moved; unpin the wrong one with `aqt contacts rm <email>` first")
 	}
 	self := crypto.DeriveSigningKey(mk).Public().(ed25519.PublicKey)
 	var granted grantedResources
@@ -396,6 +426,9 @@ func (app *application) contactsPinCmd() *cobra.Command {
 			}
 			pins, err := identity.LoadContacts(prof.Name)
 			if err != nil {
+				return err
+			}
+			if err := refuseSharedHandle(pins, email, keys); err != nil {
 				return err
 			}
 			if pin, ok := pins[email]; ok {

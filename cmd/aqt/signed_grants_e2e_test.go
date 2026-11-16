@@ -121,6 +121,65 @@ func TestRotationDoesNotRewrapAGranteeTheServerAdded(t *testing.T) {
 	}
 }
 
+// A grant is signed to a handle, and the server assigns handles. Here it reports
+// bob's handle for eve, a real account with her own keys: pinning her under it would
+// let a rotation of what bob was given be re-wrapped to her key instead. She is not
+// pinned, nothing is shared with her, and bob's share still follows its rotation.
+func TestPinRefusesAHandleAnotherContactHolds(t *testing.T) {
+	app := &application{ctx: context.Background()}
+	var bobHandle atomic.Pointer[string]
+	h := app.newE2EWithProxy(t, func(w http.ResponseWriter, r *http.Request, pass http.HandlerFunc) {
+		handle := bobHandle.Load()
+		if handle == nil || r.URL.Path != "/v1/account/keys" || r.URL.Query().Get("email") != "eve@example.com" {
+			pass(w, r)
+			return
+		}
+		rec := httptest.NewRecorder()
+		r.Header.Del("Accept-Encoding")
+		pass(rec, r)
+		var body api.AccountKeysResponse
+		if json.Unmarshal(rec.Body.Bytes(), &body) != nil {
+			copyRecorded(w, rec)
+			return
+		}
+		body.Handle = *handle
+		replaceRecorded(w, rec, body)
+	})
+	grantSignup(t, h, "bob@example.com", "bob", "bob horse battery staple")
+	grantSignup(t, h, "eve@example.com", "eve", "eve horse battery staple")
+	shared := app.pushSecretFile(t, "shared.txt", "for bob")
+	other := app.pushSecretFile(t, "other.txt", "for eve")
+	if err := app.runShareWith(shared, "bob@example.com"); err != nil {
+		t.Fatalf("share --with bob: %v", err)
+	}
+	_, prof, err := app.authedClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pins, err := identity.LoadContacts(prof.Name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle := pins["bob@example.com"].Handle
+	bobHandle.Store(&handle)
+
+	if err := app.runShareWith(other, "eve@example.com"); err == nil || !strings.Contains(err.Error(), "bob@example.com") {
+		t.Fatalf("share --with eve under bob's handle = %v, want a refusal naming bob", err)
+	}
+	if pins, err = identity.LoadContacts(prof.Name); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := pins["eve@example.com"]; ok {
+		t.Fatal("eve was pinned under bob's handle")
+	}
+	if err := app.runPrivate(shared, true, false); err != nil {
+		t.Fatalf("rotate the shared resource: %v", err)
+	}
+	if got := app.pullAs(t, "bob", shared); got != "for bob" {
+		t.Fatalf("bob's share after its rotation pulled %q", got)
+	}
+}
+
 // Pin repair re-sends what was granted against a placeholder pin, and the server
 // chooses which resources list that placeholder. It lists it on a resource that was
 // never shared: repair must neither offer nor send that one.

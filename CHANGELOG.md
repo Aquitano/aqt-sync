@@ -32,7 +32,8 @@ All notable changes to this project are documented in this file.
   resource that was never shared with them, and they received its key. Pin repair
   trusted the same listings to decide which resources to re-send. Both now follow
   only grants this account signed over the key being replaced, and repair lists the
-  resources it re-sends. A revoke that left the key alone, on a public resource or a
+  resources it re-sends. A contact is not pinned when the server reports for it an
+  account handle another pin already holds. A revoke that left the key alone, on a public resource or a
   folder awaiting a re-sync, kept the revoked grant valid for that key, so the `aqt
   unshare` it recommended next re-wrapped to the revoked account. A revoke now always
   rotates: on a public resource that also makes it private and kills its links, and a
