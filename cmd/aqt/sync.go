@@ -363,6 +363,9 @@ func (app *application) runSync(dir string, opts syncOptions) error {
 			actions = syncengine.Plan(local, base, remote)
 			dirActions = syncengine.PlanDirs(local, base, remote)
 			syncengine.MarkTypeClashes(actions, dirActions, local)
+			if err := syncengine.MarkUntrackedDirClashes(root, actions, dirActions, local); err != nil {
+				return err
+			}
 			syncengine.KeepParents(actions, dirActions, local)
 		} else {
 			actions = syncengine.PlanReconcile(local, remote)

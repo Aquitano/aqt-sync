@@ -82,6 +82,17 @@ All notable changes to this project are documented in this file.
   suspended account kept syncing until the entry expired. The server now reads the
   flag with the token on every request, so `enable` and `delete` are immediate too.
 
+- A pull into a read-only directory no longer fails on every sync. The directory is
+  writable for the pass, then gets its old mode back or the one the remote set.
+- A remote file replacing a local directory that holds ignored content (`.git/`,
+  `node_modules/`) is a file/directory conflict instead of failing every sync with
+  "directory not empty". The ignored content stays.
+- Sync fsyncs the directories it wrote to or removed from before saving the base, so
+  a power loss cannot leave a base that records changes the disk lost, which the
+  next sync would push as a revert.
+- A hostile server can no longer crash a download by locating two objects at one
+  pack offset with different lengths. The longer span is fetched on its own.
+
 - Signup and login reported a 5xx from the server or an exhausted rate limit as "does
   not answer like an aqt server; check the URL" and exited 1. They now show the
   server's error and its documented exit code, and keep that message for a response
