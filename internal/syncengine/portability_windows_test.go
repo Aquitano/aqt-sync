@@ -78,7 +78,7 @@ func TestJunctionIsNeitherFollowedNorDeleted(t *testing.T) {
 	t.Parallel()
 	dir, outside := t.TempDir(), t.TempDir()
 	if out, err := exec.Command("cmd", "/c", "mklink", "/J", filepath.Join(dir, "j"), outside).CombinedOutput(); err != nil {
-		t.Skipf("mklink /J: %v: %s", err, out)
+		t.Fatalf("mklink /J: %v: %s", err, out)
 	}
 
 	base := Manifest{Entries: []Entry{{Path: "j/x", Hash: "h"}}}
