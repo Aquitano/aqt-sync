@@ -98,7 +98,7 @@ const workflow = [
   {
     verb: "Recover",
     title: "Prove the restore works.",
-    body: "Clone on a clean machine or restore a checkpoint beside the folder. Add --in-place to roll the folder back.",
+    body: "Clone on a clean machine or restore a checkpoint into a separate directory. Add --in-place to roll the folder back.",
     command: "aqt restore pre-release --out ~/check",
     output: 'restored "vault" (version 12) into ~/check',
   },
