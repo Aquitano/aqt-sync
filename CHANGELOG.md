@@ -64,7 +64,7 @@ All notable changes to this project are documented in this file.
   pull could write through it outside the folder, and the next sync deleted those
   files everywhere. Pulls now refuse to write through a junction, and a scan reports
   it as skipped and keeps its last-synced contents. A remote delete no longer
-  removes a file through a symlink or junction in its parent path either.
+  removes a file or directory through a symlink or junction in its parent path either.
 
 - `notes` and `notes.` synced from Linux landed on one file on Windows, and the next
   sync lost one of them everywhere. Names that differ only by trailing dots or spaces

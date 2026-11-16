@@ -382,6 +382,9 @@ func RemoveDir(dir, relPath string) error {
 	if err != nil {
 		return err
 	}
+	if err := refuseSymlinkParents(dir, full); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(full)
 	if os.IsNotExist(err) {
 		return nil

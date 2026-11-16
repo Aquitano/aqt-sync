@@ -108,9 +108,9 @@ func TestMaterializeDirsRefusesASymlinkAtTheDirectoryPath(t *testing.T) {
 	}
 }
 
-// A remote delete of d/x must not reach through a local symlink (or, on Windows, a
-// junction) at d and delete the file it points at outside the root.
-func TestRemoveFileRefusesALinkedParent(t *testing.T) {
+// A remote delete of d/x or d/sub must not reach through a local symlink (or, on
+// Windows, a junction) at d and delete what it points at outside the root.
+func TestRemoveRefusesALinkedParent(t *testing.T) {
 	t.Parallel()
 	root, outside := t.TempDir(), t.TempDir()
 	victim := filepath.Join(outside, "x")
@@ -125,6 +125,15 @@ func TestRemoveFileRefusesALinkedParent(t *testing.T) {
 	}
 	if _, err := os.Stat(victim); err != nil {
 		t.Fatalf("file outside the root was removed: %v", err)
+	}
+	if err := os.Mkdir(filepath.Join(outside, "sub"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveDir(root, "d/sub"); err == nil {
+		t.Error("RemoveDir accepted a path through a symlinked parent")
+	}
+	if _, err := os.Stat(filepath.Join(outside, "sub")); err != nil {
+		t.Fatalf("directory outside the root was removed: %v", err)
 	}
 }
 
